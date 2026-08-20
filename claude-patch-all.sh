@@ -180,6 +180,24 @@ def _same_env_helper(d):
         return False
     return bool(re.search(re.escape(m.group(1)) + rb'\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)', d))
 
+def _judge_catch_scope(d):
+    # Путь отказа судьи исполняется только при поломке, поэтому опечатка в нём
+    # живёт незамеченной: имя __pdir читалось из соседнего блока и падало
+    # ReferenceError'ом ДО записи в журнал — диспатч получал "__pdir is not
+    # defined", журнал не получал ничего. Проверка структурная: каждое имя,
+    # которое читает catch, обязано быть объявлено ВЫШЕ try.
+    m = re.search(rb'let __t0=Date\.now\(\),(.{0,400}?)__jdir=', d, re.S)
+    if not m:
+        return False
+    declared = set(re.findall(rb'(__\w+)\s*=', m.group(1))) | {b'__jdir', b'__cut'}
+    c = re.search(rb'\}\}catch\(__e\)\{if\(__e&&__e\.__ccJudgeBlock\)throw __e;(.{0,1400}?)\}\}', d, re.S)
+    if not c:
+        return False
+    body = c.group(1)
+    local = set(re.findall(rb'let (__\w+)', body)) | {b'__e', b'__jlog', b'__ccJudgeBlock'}
+    used = set(re.findall(rb'(__\w+)', body))
+    return not (used - declared - local)
+
 checks = {
     'routing (claude-* -> subscription)': b'baseURL:/^claude/i.test(' in d,
     'agent model schema relaxed':         b'.enum(["sonnet","opus","haiku","fable"])' not in d,
@@ -457,6 +475,35 @@ checks = {
                                           and bool(re.search(
                                               rb'__ctd=\(\)=>\{let __r=0;.{0,80}__ot\[__k\]!==null', d))
                                           and bool(re.search(rb'\(__cd=__ctd\(\)\)\?', d)),
+    # путь отказа читает только имена, объявленные выше try (см. хелпер)
+    'judge fail-open path stays in scope': _judge_catch_scope(d),
+    # отказ канала при fail_closed = ОТМЕНА, а не пропуск: повтор на короткой
+    # ленте не был обёрнут, его падение писалось как штатный skip и вызов шёл
+    'judge cancels when it cannot decide': bool(re.search(
+                                              rb'if\(__ask\)\{__jarm=__en&&__cfg\.fail_closed===!0;', d))
+                                          # повтор обёрнут так же, как ступень
+                                          and bool(re.search(
+                                              rb'try\{__raw=await __call\(__cut\(Number\('
+                                              rb'__cfg\.retry_context_chars\?\?8000\)\)', d))
+                                          # обязательство снимается ПОСЛЕДНИМ
+                                          and bool(re.search(
+                                              rb'__er\.__ccJudgeBlock=!0;throw __er\}__jarm=!1;\}\}catch', d))
+                                          and bool(re.search(
+                                              rb'outcome:__jarm\?"block_no_verdict":"skip"', d))
+                                          and bool(re.search(
+                                              rb'if\(__jarm\)\{let __e2=new Error', d))
+                                          # запись журнала не уводит управление мимо решений
+                                          and bool(re.search(
+                                              rb'try\{await __jlog\(\{http:__jst,outcome:__bl\?', d))
+                                          and bool(re.search(
+                                              rb'verdict:__clip\(__v,400\)\|\|null\}\)\}catch\{\}', d)),
+    # всякое усечение в журнале и записи объявляется, как и подрезка ленты
+    'judge declares every truncation': len(re.findall(
+                                              rb'__clip\(', d)) >= 6
+                                          and len(re.findall(rb'__v\.slice\(0,400\)', d)) == 0
+                                          and len(re.findall(rb'\.resp=__t2?\.slice\(0,800\)', d)) == 0
+                                          # до первой попытки попыток НОЛЬ
+                                          and bool(re.search(rb'__jtry=0,__jerr1=null', d)),
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
     # человека: иначе закрепление сохраняет его навсегда как санкцию
     'judge does not read command output as the human': bool(re.search(

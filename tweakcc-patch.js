@@ -1166,7 +1166,23 @@ step('22 judge consulted before a subagent dispatch', () => {
     // the "switched off at both ends" failure. Declared OUTSIDE the try so
     // the catch can still record why a consultation was skipped.
     'let __t0=Date.now(),__jfs=null,__jrec=!0,__jgz=!1,__jreq=null,__jres=null,__jst=null,' +
-    '__jtry=1,__jerr1=null,__jm=null,__jurl=null,__jatt=[],' +
+    // __jtry=0, а не 1: до первой попытки попыток НОЛЬ. Единица заявляла
+    // попытку там, где бросило ДО лестницы.
+    // __pdir объявлен ЗДЕСЬ, а не внутри try: catch — соседний блок, и
+    // let из try в нём не виден. Измерено на живом вызове: путь пропуска
+    // падал с ReferenceError ДО записи в журнал, диспатч получал
+    // "__pdir is not defined", а журнал не получал ничего.
+    // __jarm: судейство обязано вынести решение. Взводится, когда вызов
+    // не отфильтрован и включены enforce+fail_closed; снимается, когда
+    // решение вынесено. Если управление уходит в catch со взведённым
+    // флагом — это молчаливый пропуск, и он отменяется.
+    '__jtry=0,__jerr1=null,__jm=null,__jurl=null,__jatt=[],__pdir=null,__jarm=!1,' +
+    // Всякое усечение в журнале и записи объявляется — той же конвенцией,
+    // что и подрезка ленты: обрыв вердикта посреди слова читается как
+    // полный вердикт, а обрезанный ответ упавшей попытки — как весь её след.
+    '__clip=(__s,__k)=>{let __x=String(__s??"");return __x.length<=__k?__x:'+
+      '__x.slice(0,__k)+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+'+
+      '(__x.length-__k)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432]"},' +
     '__jdir=process.env.CLAUDE_JUDGE_DIR||((process.env.HOME||".")+"/.claude/judge");' +
     // The journal line is an INDEX, not evidence: its verdict is clipped and
     // the material the judge actually saw is nowhere in it, so neither
@@ -1259,7 +1275,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // appended, a full `prompt.md`/`body.json` replaces). An explicit
       // CLAUDE_JUDGE_DIR turns layering off: a probe must get exactly what it
       // was handed.
-      'let __pdir=null;' +
+      '__pdir=null;' +
       'if(!process.env.CLAUDE_JUDGE_DIR)try{let __p=process.cwd();' +
         'for(let __i=0;__i<24;__i++){let __c=__p+"/.claude/judge";' +
           'let __has=await Promise.all([__c+"/config.json",__c+"/prompt.md",' +
@@ -1284,7 +1300,11 @@ step('22 judge consulted before a subagent dispatch', () => {
           'if(!(__mt(__f.classes_judge,__cl)||__mt(__f.agents_judge,__ag)))' +
             '__by=__cl?"not_in_judge_list":"no_class_marker"}' +
         'if(__by){__ask=!1;await __jlog({outcome:"filtered",by:__by,cls:__cl||null})}}' +
-      'if(__ask){' +
+      // enforce/fail_closed вычисляются ДО консультации: обязательство
+      // вынести решение должно быть известно и на пути отказа, где ни
+      // вердикта, ни __cfg уже не прочитать.
+      'let __en=process.env.CLAUDE_JUDGE==="enforce"||__cfg.enforce===!0;' +
+      'if(__ask){__jarm=__en&&__cfg.fail_closed===!0;' +
       // The transcript is handed over as a JSON ARRAY, not as labelled lines.
       // A text prefix cannot carry trust: content and label share one
       // namespace, so any line inside a tool output, a file, a web page or a
@@ -1459,12 +1479,16 @@ step('22 judge consulted before a subagent dispatch', () => {
           'timeout_ms:__ms,max_tokens:__e.max_tokens||__cfg.max_tokens||null,' +
           'effort:__e.effort||null};__jatt.push(__a);' +
         'let __ac=new AbortController(),__to=setTimeout(()=>__ac.abort(),__ms);' +
+        // Ответ и статус гасятся в НАЧАЛЕ попытки: запрос писался каждой
+        // попыткой, а ответ только удачной, и запись склеивала запрос
+        // последней попытки с ответом ранней, молча.
+        '__jres=null;__jst=null;' +
         'try{' +
           'if(__http){let __b=__mkb(__cx,__e);__jreq=__b;' +
             'if(process.env.CLAUDE_JUDGE_DEBUG)try{await __fs.writeFile(__dir+"/last-request.json",__b)}catch{}' +
             'let __r=await fetch(__purl,{method:"POST",signal:__ac.signal,' +
               'headers:{"content-type":"application/json"},body:__b});' +
-            'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.resp=__t.slice(0,800);' +
+            'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.resp=__clip(__t,800);' +
             '__a.ms=Date.now()-__s0;__a.http=__r.status;' +
             'if(!__r.ok)throw new Error("HTTP "+__r.status);return __t}' +
           // Усилие едет полем options, а не полем тела: тело здесь не наше, его
@@ -1483,7 +1507,7 @@ step('22 judge consulted before a subagent dispatch', () => {
               'maxOutputTokensOverride:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
               'effortValue:__e.effort||void 0,agentId:$4?.agentId,agentContext:$4?.agentContext,' +
               'getToolPermissionContext:async()=>$4?.getAppState?.()?.toolPermissionContext}});' +
-          'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__t2.slice(0,800);' +
+          'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__clip(__t2,800);' +
           '__a.ms=Date.now()-__s0;' +
           '__jst=__r2?.isApiErrorMessage?"api_error":200;__a.http=__jst;' +
           // Текст ошибки пула ОБЯЗАН доехать до журнала: без него в ledger висит
@@ -1538,7 +1562,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           // the judge stops at the first model that answers with nothing.
           '__errs.push(__jm+": empty verdict")}' +
         'catch(__ce){__raw=null;__errs.push(__jm+": "+String(__ce?.name||"Error")+": "+' +
-          'String(__ce?.message??__ce).slice(0,80))}}' +
+          '__clip(__ce?.message??__ce,80))}}' +
       // The automatic last rung: the same ladder step the config could have
       // spelled out — last model, short tail — kept so that a ladder written
       // without one still survives an oversized transcript. `retry_context_chars: 0`
@@ -1546,8 +1570,14 @@ step('22 judge consulted before a subagent dispatch', () => {
       'if(!__v&&Number(__cfg.retry_context_chars??8000)>0){' +
         'let __e=__mdls[__mdls.length-1];' +
         '__jtry=__mdls.length+1;__jm=__e.model;__jerr1=__errs.join(" | ")||null;' +
-        '__raw=await __call(__cut(Number(__cfg.retry_context_chars??8000)),' +
-          'Number(__e.timeout_ms||__tmo),__e);__v=__pv(__raw)}' +
+        // Повтор обёрнут так же, как ступень: без обёртки его падение
+        // уходило во внешний catch, тот писал "skip" и НЕ отменял вызов —
+        // молчаливый пропуск ровно там, ради чего заведён fail_closed.
+        'try{__raw=await __call(__cut(Number(__cfg.retry_context_chars??8000)),' +
+          'Number(__e.timeout_ms||__tmo),__e);__v=__pv(__raw);' +
+          'if(!__v)__errs.push(__jm+": empty verdict")}' +
+        'catch(__ce){__raw=null;__errs.push(__jm+": "+String(__ce?.name||"Error")+": "+' +
+          '__clip(__ce?.message??__ce,80))}}' +
       '__jerr1=__errs.join(" | ")||null;' +
       'if(process.env.CLAUDE_JUDGE_DEBUG){console.error("[Judge] "+__v.slice(0,300));' +
         'try{await __fs.writeFile(__dir+"/last-verdict.txt",__v)}catch{}}' +
@@ -1560,18 +1590,19 @@ step('22 judge consulted before a subagent dispatch', () => {
       // surfaces to the model as an error tool_result, which is exactly
       // "stop, and here is what is wrong" — and it couples to no minified name.
       'let __bl=/^(?:BLOCK|STOP|DENY):\\s*([\\s\\S]+)$/m.exec(__v);' +
-      'let __en=process.env.CLAUDE_JUDGE==="enforce"||__cfg.enforce===!0;' +
       // Отмена по исчерпанию лестницы — дефект КАНАЛА, отмена по вердикту —
       // дефект СУЖДЕНИЯ, и лечатся они разным. Пока обе писались как "empty"
       // (то же слово, что у пропущенного вызова при fail_closed:false), снаружи
       // они были неотличимы ни друг от друга, ни от пропуска.
       'let __fc=!__v&&__en&&__cfg.fail_closed===!0;' +
-      'await __jlog({http:__jst,outcome:__bl?(__en?"block":"block_not_enforced"):' +
+      // Журнал не смеет увести управление мимо решений ниже: сбой записи
+      // при готовом BLOCK ушёл бы во внешний catch и стал бы пропуском.
+      'try{await __jlog({http:__jst,outcome:__bl?(__en?"block":"block_not_enforced"):' +
         '(/^\\s*WARN:/.test(__v)?"warn":__v?"ok":(__fc?"block_no_verdict":"empty")),' +
         'en:__en?(process.env.CLAUDE_JUDGE==="enforce"?"env":"config"):null,' +
         '...(__uw.length?{uw:__uw.slice(0,5)}:{}),' +
         'tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
-        'verdict:__v.slice(0,400)||null});' +
+        'verdict:__clip(__v,400)||null})}catch{}' +
       // Принцип юзера (2026-08-20): «лучше ложная отмена, чем молчаливый
       // пропуск». Провал ВСЕЙ лестницы — это и есть молчаливый пропуск: судья
       // не сказал ничего, а вызов ушёл. При `fail_closed` он вместо этого
@@ -1589,9 +1620,18 @@ step('22 judge consulted before a subagent dispatch', () => {
         // it is ASCII on the wire and correct in the running string.
         'let __er=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d \\u0441\\u0443\\u0434\\u044c\\u0451\\u0439 \\u0432\\u044b\\u0437\\u043e\\u0432\\u043e\\u0432 (\\u044d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438 hooks/routing-table.toml). \\u041f\\u0440\\u0438\\u0447\\u0438\\u043d\\u0430: "+__bl[1].trim());' +
         '__er.__ccJudgeBlock=!0;throw __er}' +
+      // Решение вынесено — обязательство снято. Снимается ПОСЛЕДНИМ: всё,
+      // что бросит раньше, обязано отменить вызов, а не пропустить его.
+      '__jarm=!1;' +
     '}}catch(__e){if(__e&&__e.__ccJudgeBlock)throw __e;' +
-      'await __jlog({outcome:"skip",tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
-        'reason:String(__e?.name||"Error")+": "+String(__e?.message??__e).slice(0,200)});' +
+      'let __rs=String(__e?.name||"Error")+": "+__clip(__e?.message??__e,200);' +
+      'try{await __jlog({outcome:__jarm?"block_no_verdict":"skip",tries:__jtry,jm:__jm,' +
+        'cfg:__pdir||null,err1:__jerr1,reason:__rs})}catch{}' +
+      // Отказ судьи при взведённом обязательстве — не пропуск, а отмена:
+      // сюда приходит и падение до лестницы (конфиг, тело, подрезка), где
+      // вердикта нет и быть не может.
+      'if(__jarm){let __e2=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0441\\u043c\\u043e\\u0433 \\u0432\\u044b\\u043d\\u0435\\u0441\\u0442\\u0438 \\u0440\\u0435\\u0448\\u0435\\u043d\\u0438\\u0435 ("+__rs+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435.");' +
+        '__e2.__ccJudgeBlock=!0;throw __e2}' +
       'if(process.env.CLAUDE_JUDGE_DEBUG)console.error("[Judge] skipped: "+(__e?.message??__e));}}';
   js = js.replace(
     rx,
