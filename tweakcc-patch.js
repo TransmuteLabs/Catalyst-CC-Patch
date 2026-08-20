@@ -1177,6 +1177,11 @@ step('22 judge consulted before a subagent dispatch', () => {
     // решение вынесено. Если управление уходит в catch со взведённым
     // флагом — это молчаливый пропуск, и он отменяется.
     '__jtry=0,__jerr1=null,__jm=null,__jurl=null,__jatt=[],__pdir=null,__jarm=!1,' +
+    // Любой catch{} без следа превращает поломку в тихую деградацию: битый
+    // конфиг молча снимал enforce и fail_closed, а журнал показывал штатную
+    // работу. Деградации собираются и попадают в журнал полем deg; те, что
+    // задевают САМО СУЖДЕНИЕ, копятся отдельно и отменяют вызов.
+    '__deg=[],__degb=[],' +
     // Всякое усечение в журнале и записи объявляется — той же конвенцией,
     // что и подрезка ленты: обрыв вердикта посреди слова читается как
     // полный вердикт, а обрезанный ответ упавшей попытки — как весь её след.
@@ -1276,15 +1281,34 @@ step('22 judge consulted before a subagent dispatch', () => {
       // CLAUDE_JUDGE_DIR turns layering off: a probe must get exactly what it
       // was handed.
       '__pdir=null;' +
+      // Отсутствие слоя и НЕЧИТАЕМЫЙ слой — разные события: первое значит
+      // "правил нет", второе "правила есть, но я их не прочёл". Пока оба
+      // давали одно и то же (access().catch(()=>!1)), проектные правила
+      // исчезали молча, а обход ехал выше и подхватывал ЧУЖОЙ слой.
       'if(!process.env.CLAUDE_JUDGE_DIR)try{let __p=process.cwd();' +
         'for(let __i=0;__i<24;__i++){let __c=__p+"/.claude/judge";' +
           'let __has=await Promise.all([__c+"/config.json",__c+"/prompt.md",' +
             '__c+"/prompt.extra.md",__c+"/body.json"].map((__f)=>' +
-            '__fs.access(__f).then(()=>!0).catch(()=>!1)));' +
-          'if(__has.some(Boolean)){if(__c!==__dir)__pdir=__c;break}' +
+            '__fs.access(__f).then(()=>1).catch((__er)=>__er?.code==="ENOENT"?0:2)));' +
+          'if(__has.some((__x)=>__x===2)){__deg.push("layer-unreadable:"+__c);' +
+            '__degb.push("layer-unreadable:"+__c);if(__c!==__dir)__pdir=__c;break}' +
+          'if(__has.some((__x)=>__x===1)){if(__c!==__dir)__pdir=__c;break}' +
           'let __up=__p.replace(/\\/[^\\/]*$/,"");if(!__up||__up===__p)break;__p=__up}}catch{}' +
-      'let __cfg={};try{__cfg=JSON.parse(await __fs.readFile(__dir+"/config.json","utf8"))}catch{}' +
-      'if(__pdir)try{__cfg={...__cfg,...JSON.parse(await __fs.readFile(__pdir+"/config.json","utf8"))}}catch{}' +
+      // Читалка объявляет исход: null — файла нет, !1 — файл есть, но не
+      // прочитан или не разобран. Молчаливый разбор превращал битый конфиг
+      // в пустой объект, а с ним терялись enforce, fail_closed, лестница и
+      // max_tokens — судья выглядел работающим и пропускал всё подряд.
+      'let __rdj=async(__f)=>{try{return await __fs.readFile(__f,"utf8")}' +
+        'catch(__er){if(__er?.code!=="ENOENT"){__deg.push("unreadable:"+__f);' +
+          '__degb.push("unreadable:"+__f)}return null}};' +
+      'let __ldj=async(__f)=>{let __x=await __rdj(__f);if(__x===null)return null;' +
+        'try{return JSON.parse(__x)}catch(__pe){__deg.push("unparsed:"+__f+": "+' +
+          '__clip(__pe?.message??__pe,60));__degb.push("unparsed:"+__f);return !1}};' +
+      'let __cfg={},__cfgbad=!1;' +
+      'let __c0=await __ldj(__dir+"/config.json");' +
+      'if(__c0===!1)__cfgbad=!0;else if(__c0)__cfg=__c0;' +
+      'if(__pdir){let __c1=await __ldj(__pdir+"/config.json");' +
+        'if(__c1===!1)__cfgbad=!0;else if(__c1)__cfg={...__cfg,...__c1}}' +
       'if(__cfg.record===!1)__jrec=!1;' +
       'if(__cfg.record_gzip===!0)__jgz=!0;' +
       'let __ask=!0;' +
@@ -1303,8 +1327,12 @@ step('22 judge consulted before a subagent dispatch', () => {
       // enforce/fail_closed вычисляются ДО консультации: обязательство
       // вынести решение должно быть известно и на пути отказа, где ни
       // вердикта, ни __cfg уже не прочитать.
-      'let __en=process.env.CLAUDE_JUDGE==="enforce"||__cfg.enforce===!0;' +
-      'if(__ask){__jarm=__en&&__cfg.fail_closed===!0;' +
+      // Непонятый конфиг = enforce и fail_closed НЕИЗВЕСТНЫ. Считать их
+      // выключенными значит выключать гейт одним битым файлом, поэтому
+      // здесь они считаются включёнными: ложная отмена дешевле пропуска.
+      'let __en=process.env.CLAUDE_JUDGE==="enforce"||__cfg.enforce===!0||__cfgbad;' +
+      'let __fcl=__cfgbad||__cfg.fail_closed===!0;' +
+      'if(__ask){__jarm=__en&&__fcl;' +
       // The transcript is handed over as a JSON ARRAY, not as labelled lines.
       // A text prefix cannot carry trust: content and label share one
       // namespace, so any line inside a tool output, a file, a web page or a
@@ -1429,12 +1457,25 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __disp=JSON.stringify($3).slice(0,Number(__cfg.dispatch_chars||4000));' +
       'let __emb=(__s)=>JSON.stringify(String(__s)).slice(1,-1);' +
       'let __sys=process.env.CLAUDE_JUDGE_PROMPT;' +
-      'if(!__sys&&__pdir)try{__sys=await __fs.readFile(__pdir+"/prompt.md","utf8")}catch{}' +
-      'if(!__sys)try{__sys=await __fs.readFile(__dir+"/prompt.md","utf8")}catch{}' +
-      'if(__pdir)try{let __ex=await __fs.readFile(__pdir+"/prompt.extra.md","utf8");' +
-        'if(__ex.trim())__sys=(__sys||"")+"\\n\\n=== \\u041f\\u0420\\u0410\\u0412\\u0418\\u041b\\u0410 ' +
-          '\\u042d\\u0422\\u041e\\u0413\\u041e \\u041f\\u0420\\u041e\\u0415\\u041a\\u0422\\u0410 ===\\n"+__ex}catch{}' +
-      'if(!__sys)__sys="You judge model routing for one about-to-run subagent dispatch. Answer with ONE line: OK:<why> or SWAP:<model>:<why> or WARN:<why>.";' +
+      'if(!__sys&&__pdir)__sys=await __rdj(__pdir+"/prompt.md");' +
+      'if(!__sys)__sys=await __rdj(__dir+"/prompt.md");' +
+      // Дописка проекта читается той же читалкой: её немое исчезновение —
+      // ровно тот случай, что и немое исчезновение проектного конфига.
+      'if(__pdir){let __ex=await __rdj(__pdir+"/prompt.extra.md");' +
+        'if(__ex&&__ex.trim())__sys=(__sys||"")+"\\n\\n=== \\u041f\\u0420\\u0410\\u0412\\u0418\\u041b\\u0410 ' +
+          '\\u042d\\u0422\\u041e\\u0413\\u041e \\u041f\\u0420\\u041e\\u0415\\u041a\\u0422\\u0410 ===\\n"+__ex}' +
+      // Запасной промпт обязан уметь ОТМЕНЯТЬ: в прежнем слова BLOCK не было
+      // вовсе, а единственный не-OK исход, который он предлагал (SWAP),
+      // записывался как ok и пропускал вызов. Гейт был формально жив и
+      // содержательно выключен, а журнал полон "ok".
+      'if(!__sys){__deg.push("prompt-missing");__degb.push("prompt-missing");' +
+        '__sys="You judge one about-to-run subagent dispatch. You do NOT rewrite it: "+' +
+        '"you either let it run or CANCEL it and say why. Answer with ONE line, "+' +
+        '"the verdict FIRST: OK:<why> or WARN:<why> or BLOCK:<what is wrong and what "+' +
+        '"to do instead>. BLOCK cancels the dispatch. Your own prompt file is "+' +
+        '"missing, so judge on the general rule: a dispatch must name its model and "+' +
+        '"class, the class must match what the brief actually does, and an expensive "+' +
+        '"model on closed mechanical work is a reason to BLOCK."}' +
       // A chain, not a single model: the judge shares its channel with the very
       // fleet it judges, so when the fleet is busy the judge is the one that
       // times out — and a silent fail-open is indistinguishable from blanket
@@ -1449,8 +1490,12 @@ step('22 judge consulted before a subagent dispatch', () => {
         '.map((__x)=>typeof __x==="string"?{model:__x}:__x).filter((__x)=>__x&&__x.model);' +
       'if(!__mdls.length)__mdls=[{model:"glm-5.3"}];' +
       'let __tplr=null;' +
-      'if(__pdir)try{__tplr=await __fs.readFile(__pdir+"/body.json","utf8")}catch{}' +
-      'if(!__tplr)try{__tplr=await __fs.readFile(__dir+"/body.json","utf8")}catch{}' +
+      'if(__pdir)__tplr=await __rdj(__pdir+"/body.json");' +
+      'if(!__tplr)__tplr=await __rdj(__dir+"/body.json");' +
+      // Битый шаблон тела на исход не влияет (встроенное тело работает), но
+      // положивший свой шаблон обязан узнать, что тот не применён.
+      'if(__tplr){try{JSON.parse(__tplr.replace(/\\{\\{[A-Z]+\\}\\}/g,"x"))}' +
+        'catch(__be){__deg.push("unparsed-body:"+__clip(__be?.message??__be,60));__tplr=null}}' +
       'let __mkb=(__cx,__e)=>{let __mdl=__e.model;try{if(!__tplr)throw new Error("no template");' +
         'let __tpl=__tplr.replace(/\\{\\{PROMPT\\}\\}/g,__emb(__sys)).replace(/\\{\\{MODEL\\}\\}/g,__emb(__mdl))' +
           '.replace(/\\{\\{CONTEXT\\}\\}/g,__emb(__cx)).replace(/\\{\\{DISPATCH\\}\\}/g,__emb(__disp));' +
@@ -1550,7 +1595,18 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __rr=[__mm.reasoning,__mm.reasoning_content,__bl?__bl.filter((__b)=>' +
           '__b?.type==="thinking").map((__b)=>__b.thinking).join("\\n"):""]' +
           '.filter(Boolean).join("\\n");' +
-        'return (((String(__rr).match(__rx)||[]).pop())||__ct).trim()};' +
+        // Ответ без строки вердикта — НЕ вердикт. Прежде сюда падал сырой
+        // текст модели, и любой ответ мимо словаря (например SWAP: из старого
+        // запасного промпта) записывался как ok и пропускал вызов.
+        'return ((String(__rr).match(__rx)||[]).pop()||"").trim()};' +
+        // Поломка настроек или промпта — это не «работай по умолчанию», а
+        // «я не знаю, по каким правилам судить». Под enforce такой вызов
+        // отменяется с названием файла, а не пропускается молча.
+        'if(__degb.length&&__en){' +
+          'try{await __jlog({outcome:"block_degraded",tries:__jtry,jm:null,' +
+            'cfg:__pdir||null,deg:__deg.slice(0,5)})}catch{}' +
+          'let __e3=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u043d\\u0430\\u0441\\u0442\\u0440\\u043e\\u0439\\u043a\\u0438 \\u0441\\u0443\\u0434\\u044c\\u0438 \\u0441\\u043b\\u043e\\u043c\\u0430\\u043d\\u044b ("+__degb.slice(0,3).join("; ")+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443: \\u043f\\u043e\\u043a\\u0430 \\u0444\\u0430\\u0439\\u043b \\u043d\\u0435 \\u043f\\u043e\\u0447\\u0438\\u043d\\u0435\\u043d, \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0437\\u043d\\u0430\\u0435\\u0442, \\u043f\\u043e \\u043a\\u0430\\u043a\\u0438\\u043c \\u043f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430\\u043c \\u0441\\u0443\\u0434\\u0438\\u0442\\u044c.");' +
+          '__e3.__ccJudgeBlock=!0;throw __e3}' +
       'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
         'try{__jtry=__i+1;__jm=__e.model;' +
@@ -1594,13 +1650,14 @@ step('22 judge consulted before a subagent dispatch', () => {
       // дефект СУЖДЕНИЯ, и лечатся они разным. Пока обе писались как "empty"
       // (то же слово, что у пропущенного вызова при fail_closed:false), снаружи
       // они были неотличимы ни друг от друга, ни от пропуска.
-      'let __fc=!__v&&__en&&__cfg.fail_closed===!0;' +
+      'let __fc=!__v&&__en&&__fcl;' +
       // Журнал не смеет увести управление мимо решений ниже: сбой записи
       // при готовом BLOCK ушёл бы во внешний catch и стал бы пропуском.
       'try{await __jlog({http:__jst,outcome:__bl?(__en?"block":"block_not_enforced"):' +
         '(/^\\s*WARN:/.test(__v)?"warn":__v?"ok":(__fc?"block_no_verdict":"empty")),' +
         'en:__en?(process.env.CLAUDE_JUDGE==="enforce"?"env":"config"):null,' +
         '...(__uw.length?{uw:__uw.slice(0,5)}:{}),' +
+        '...(__deg.length?{deg:__deg.slice(0,5)}:{}),' +
         'tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
         'verdict:__clip(__v,400)||null})}catch{}' +
       // Принцип юзера (2026-08-20): «лучше ложная отмена, чем молчаливый

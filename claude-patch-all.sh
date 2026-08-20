@@ -373,10 +373,12 @@ checks = {
     # about what the project is — the nearest .claude/judge above cwd layers over
     # the global one
     'judge takes a project layer': bool(re.search(
-                                              rb'if\(__has\.some\(Boolean\)\)\{if\(__c!==__dir\)'
+                                              rb'if\(__has\.some\(\(__x\)=>__x===1\)\)\{if\(__c!==__dir\)'
                                               rb'__pdir=__c;break\}', d))
                                   and bool(re.search(
-                                              rb'if\(__pdir\)try\{__cfg=\{\.\.\.__cfg,\.\.\.JSON\.parse\(', d)),
+                                              rb'if\(__pdir\)\{let __c1=await __ldj\(__pdir\+"/config\.json"\);'
+                                              rb'if\(__c1===!1\)__cfgbad=!0;else if\(__c1\)'
+                                              rb'__cfg=\{\.\.\.__cfg,\.\.\.__c1\}\}', d)),
     'judge context is structured, not prefixed': bool(re.search(
                                               rb'return\{src:__role,text:__bt\}\}\)\.filter\(Boolean\)', d))
                                           and bool(re.search(
@@ -406,7 +408,9 @@ checks = {
                                               rb'effortValue:__e\.effort\|\|void 0', d)),
     # провал всей лестницы при fail_closed = отмена, а не молчаливый пропуск
     'judge can fail closed': bool(re.search(
-                                              rb'__fc=!__v&&__en&&__cfg\.fail_closed===!0', d))
+                                              rb'__fc=!__v&&__en&&__fcl', d))
+                                          and bool(re.search(
+                                              rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
                                           and bool(re.search(rb'if\(__fc\)\{let __e0=', d)),
     # отмена по каналу и отмена по вердикту — разные дефекты, разные имена
     'judge names a fail-closed cancellation': bool(re.search(
@@ -480,7 +484,7 @@ checks = {
     # отказ канала при fail_closed = ОТМЕНА, а не пропуск: повтор на короткой
     # ленте не был обёрнут, его падение писалось как штатный skip и вызов шёл
     'judge cancels when it cannot decide': bool(re.search(
-                                              rb'if\(__ask\)\{__jarm=__en&&__cfg\.fail_closed===!0;', d))
+                                              rb'if\(__ask\)\{__jarm=__en&&__fcl;', d))
                                           # повтор обёрнут так же, как ступень
                                           and bool(re.search(
                                               rb'try\{__raw=await __call\(__cut\(Number\('
@@ -504,6 +508,41 @@ checks = {
                                           and len(re.findall(rb'\.resp=__t2?\.slice\(0,800\)', d)) == 0
                                           # до первой попытки попыток НОЛЬ
                                           and bool(re.search(rb'__jtry=0,__jerr1=null', d)),
+    # битый конфиг молча снимал enforce и fail_closed: судья выглядел
+    # работающим и пропускал всё, включая собственный вердикт BLOCK
+    'judge tells a broken config from a missing one': bool(re.search(
+                                              rb'let __ldj=async\(__f\)=>\{let __x=await __rdj\(__f\)', d))
+                                          and bool(re.search(
+                                              rb'if\(__c0===!1\)__cfgbad=!0;else if\(__c0\)__cfg=__c0', d))
+                                          # неизвестные enforce/fail_closed считаются ВКЛЮЧЁННЫМИ
+                                          and bool(re.search(
+                                              rb'__cfg\.enforce===!0\|\|__cfgbad', d))
+                                          and bool(re.search(
+                                              rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
+                                          # нечитаемый слой отличается от отсутствующего
+                                          and bool(re.search(
+                                              rb'__er\?\.code==="ENOENT"\?0:2', d))
+                                          and bool(re.search(
+                                              rb'__deg\.push\("layer-unreadable:"', d)),
+    # поломка правил — не «работай по умолчанию», а отмена с названием файла
+    'judge cancels when its rules are broken': bool(re.search(
+                                              rb'if\(__degb\.length&&__en\)\{', d))
+                                          and bool(re.search(
+                                              rb'outcome:"block_degraded"', d))
+                                          and bool(re.search(
+                                              rb'\.\.\.\(__deg\.length\?\{deg:__deg\.slice\(0,5\)\}:\{\}\)', d))
+                                          and bool(re.search(
+                                              rb'__e3\.__ccJudgeBlock=!0;throw __e3', d)),
+    # запасной промпт обязан уметь отменять, иначе гейт формально жив и
+    # содержательно выключен: в прежнем слова BLOCK не было вовсе
+    'fallback prompt can cancel': b'BLOCK cancels the dispatch' in d
+                                          and b'SWAP:<model>:<why>' not in d
+                                          and bool(re.search(
+                                              rb'__deg\.push\("prompt-missing"\)', d)),
+    # ответ мимо словаря — не вердикт: прежде он записывался как ok
+    'an unrecognised answer is not a verdict': bool(re.search(
+                                              rb'return \(\(String\(__rr\)\.match\(__rx\)\|\|\[\]\)\.pop\(\)\|\|""\)\.trim\(\)', d))
+                                          and len(re.findall(rb'\.pop\(\)\)\|\|__ct\)\.trim\(\)', d)) == 0,
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
     # человека: иначе закрепление сохраняет его навсегда как санкцию
     'judge does not read command output as the human': bool(re.search(
