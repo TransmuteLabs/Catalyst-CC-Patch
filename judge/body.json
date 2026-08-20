@@ -1,0 +1,16 @@
+{
+  "model": "{{MODEL}}",
+  "max_tokens": 1200,
+  "temperature": 0,
+  "messages": [
+    {
+      "role": "system",
+      "content": "{{PROMPT}}"
+    },
+    {
+      "role": "user",
+      "content": "=== ИСТОРИЯ СЕССИИ ===\n{{CONTEXT}}\n\n=== ДИСПАТЧ ===\n{{DISPATCH}}"
+    }
+  ],
+  "reasoning_effort": "low"
+}

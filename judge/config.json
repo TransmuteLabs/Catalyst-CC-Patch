@@ -1,0 +1,19 @@
+{
+  "max_tokens": 3000,
+  "timeout_ms": 60000,
+  "enforce": false,
+  "context_chars": 60000,
+  "dispatch_chars": 4000,
+  "models": [
+    {
+      "model": "deepseek-v4-flash",
+      "effort": "high"
+    },
+    {
+      "model": "glm-5.3",
+      "effort": "max",
+      "context_chars": 8000
+    }
+  ],
+  "retry_context_chars": 8000
+}

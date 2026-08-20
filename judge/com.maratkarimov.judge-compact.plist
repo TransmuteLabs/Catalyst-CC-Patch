@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maratkarimov.judge-compact</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/maratkarimov/.claude/judge/compact.py</string>
+        <string>--older-than-hours</string>
+        <string>24</string>
+    </array>
+    <!-- 04:07, а не 04:00: круглые минуты — общее место для всей машины.
+         Пропущенный из-за сна запуск launchd отрабатывает после пробуждения,
+         поэтому суточный проход не теряется. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>4</integer>
+            <key>Minute</key><integer>7</integer>
+        </dict>
+    </array>
+    <!-- Запуск при загрузке НЕ нужен: проход сжимает записи старше суток,
+         запускать его на каждый вход в систему смысла нет, а лог он засоряет. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/maratkarimov</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/maratkarimov/Library/Logs/judge-compact.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/maratkarimov/Library/Logs/judge-compact.log</string>
+</dict>
+</plist>
