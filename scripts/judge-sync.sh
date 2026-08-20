@@ -10,7 +10,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOMEDIR="${CLAUDE_JUDGE_DIR:-$HOME/.claude/judge}"
-FILES=(config.json prompt.md body.json README.md replay.py compact.py validate.py)
+FILES=(config.json prompt.md body.json README.md replay.py compact.py validate.py
+       channel.py adjudicate.py)
 # У plist другой дом: его читает launchd из ~/Library/LaunchAgents, а не судья
 # из ~/.claude/judge. Сравнивать его с несуществующим файлом в доме судьи —
 # вечное «расходится» на пустом месте.

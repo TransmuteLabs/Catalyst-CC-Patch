@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""Прогнать записанное судейство заново.
-
-Запись содержит тело запроса ровно в том виде, в каком оно ушло в канал, так
-что повтор — это тот же запрос ещё раз. Смысл повтора в подмене: другая модель
-на том же входе, другая редакция инструкции судьи на том же входе. Сравнивать
-вердикты имеет смысл только при неизменной ленте — она в записи и лежит.
-
-  replay.py <файл|каталог> [--model M] [--prompt FILE] [--url U] [--limit N]
-
-Без подмен повтор проверяет воспроизводимость самого канала.
-"""
-import argparse, glob, gzip, json, os, re, sys, urllib.request
+import argparse
+import glob
+import gzip
+import json
+import os
+import re
+import sys
 
 VERDICT = re.compile(r'^\s*(?:OK|BLOCK|STOP|DENY|WARN):.*$', re.M)
 
@@ -21,90 +16,142 @@ def load(path):
         return json.load(fh)
 
 
+def _verdict_in_text(text):
+    matches = VERDICT.findall(str(text or ''))
+    return (matches[0] if matches else str(text or '')).strip()
+
+
 def verdict_of(raw):
-    """Те же правила разбора, что и в самом судье: первая строка вердикта в
-    content — это решение; у рассуждающей модели без content берётся ПОСЛЕДНЯЯ
-    в рассуждении, чтобы отрепетированный по дороге вердикт не перебил вывод."""
+    """Первая строка content/result — решение; без content берётся последняя
+    строка вердикта из reasoning, чтобы промежуточный вариант не перебил вывод."""
     try:
-        j = json.loads(raw)
+        data = json.loads(raw)
     except Exception:
-        return ''
-    m = (j.get('choices') or [{}])[0].get('message') or {}
-    c = VERDICT.findall(str(m.get('content') or ''))
-    if c:
-        return c[0].strip()
-    rr = '\n'.join(x for x in (m.get('reasoning'), m.get('reasoning_content')) if x)
-    r = VERDICT.findall(rr)
-    return (r[-1] if r else str(m.get('content') or '')).strip()
+        return _verdict_in_text(raw)
+    if isinstance(data, dict) and 'result' in data:
+        return _verdict_in_text(data.get('result'))
+    message = ((data.get('choices') or [{}])[0].get('message') or {}) \
+        if isinstance(data, dict) else {}
+    content = message.get('content')
+    if isinstance(content, list):
+        content = ''.join(
+            item.get('text', '') for item in content
+            if isinstance(item, dict) and isinstance(item.get('text'), str))
+    matches = VERDICT.findall(str(content or ''))
+    if matches:
+        return matches[0].strip()
+    reasoning = '\n'.join(
+        value for value in (message.get('reasoning'), message.get('reasoning_content')) if value)
+    matches = VERDICT.findall(reasoning)
+    return (matches[-1] if matches else str(content or '')).strip()
 
 
-# Канал отбивает запрос без узнаваемого агента: с UA питоновского urllib
-# приходит 403 со страницей-заглушкой периметра, с агентом клиента — 200
-# (измерено 2026-08-20). Сам судья ходит из бинаря и своего агента не теряет,
-# а повтор снаружи обязан представиться так же, иначе воспроизводимость мнимая.
+# Канал отклоняет urllib User-Agent заглушкой периметра; внешний повтор обязан
+# представляться тем же узнаваемым агентом, что и клиент.
 UA = 'claude-cli/2.1.237 (external, cli)'
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import channel
 
-def post(url, body, timeout, ua=UA):
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(),
-        headers={'content-type': 'application/json', 'user-agent': ua}, method='POST')
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode('utf-8', 'replace')
+DEFAULT_BASE_URL = 'http://127.0.0.1:8317'
+
+
+def _message_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return ''.join(
+            item.get('text', '') for item in value
+            if isinstance(item, dict) and isinstance(item.get('text'), str))
+    return str(value or '')
+
+
+def request_texts(request):
+    systems = []
+    users = []
+    for message in request.get('messages') or []:
+        role = message.get('role')
+        if role == 'system':
+            systems.append(_message_text(message.get('content')))
+        elif role == 'user':
+            users.append(_message_text(message.get('content')))
+    return '\n\n'.join(systems), '\n\n'.join(users)
+
+
+def normalize_url(value):
+    value = value.rstrip('/')
+    if value.endswith('/v1/chat/completions'):
+        return value
+    if value.endswith('/v1'):
+        return value + '/chat/completions'
+    return value + '/v1/chat/completions'
+
+
+def resolve_url(cli_url, record):
+    if cli_url:
+        return normalize_url(cli_url)
+    recorded = str(record.get('url') or '')
+    if recorded.startswith(('http://', 'https://')):
+        return normalize_url(recorded)
+    configured = os.environ.get('ANTHROPIC_BASE_URL') or DEFAULT_BASE_URL
+    return normalize_url(configured)
 
 
 def replay(rec, args):
     body = dict(rec['request'])
-    if args.model:
-        body['model'] = args.model
-    if args.effort:
-        body['reasoning_effort'] = args.effort
+    model = args.model or str(body.get('model') or rec.get('model') or '')
+    effort = args.effort or body.get('effort') or body.get('reasoning_effort')
+    system, user = request_texts(body)
     if args.prompt:
-        sysmsg = open(args.prompt, encoding='utf-8').read()
-        body['messages'] = [
-            dict(m, content=sysmsg) if m.get('role') == 'system' else m
-            for m in body['messages']]
-    url = args.url or rec.get('url')
-    if not url:
-        sys.exit('в записи нет адреса канала — укажи --url')
-    return verdict_of(post(url, body, args.timeout, args.user_agent))
+        with open(args.prompt, encoding='utf-8') as fh:
+            system = fh.read()
+    sent = channel.send(
+        system, user, model,
+        effort=effort,
+        max_tokens=body.get('max_tokens'),
+        channel=args.channel,
+        url=resolve_url(args.url, rec),
+        timeout=args.timeout,
+        body_template=body,
+    )
+    return sent, verdict_of(sent['raw']) if not sent['error'] else ''
 
 
-def klass(v):
-    m = re.match(r'\s*(OK|WARN|BLOCK|STOP|DENY)', v or '')
-    return m.group(1) if m else 'EMPTY'
+def klass(verdict):
+    match = re.match(r'\s*(OK|WARN|BLOCK|STOP|DENY)', verdict or '')
+    return match.group(1) if match else 'EMPTY'
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('target')
-    p.add_argument('--model'); p.add_argument('--prompt'); p.add_argument('--url')
-    # усилие задаётся явно в командной строке: канал прокси требует, чтобы оно
-    # было видно в самом вызове, а не пряталось в теле записи
-    p.add_argument('--effort', default='high')
-    p.add_argument('--user-agent', default=UA)
-    p.add_argument('--limit', type=int, default=0)
-    p.add_argument('--timeout', type=float, default=120)
-    a = p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('target')
+    parser.add_argument('--model')
+    parser.add_argument('--prompt')
+    parser.add_argument('--url')
+    parser.add_argument('--effort', default='high')
+    parser.add_argument('--channel', choices=('pool', 'http', 'auto'), default='auto')
+    parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--timeout', type=float, default=120)
+    args = parser.parse_args()
 
-    files = sorted(glob.glob(os.path.join(a.target, '*.json*'))) \
-        if os.path.isdir(a.target) else [a.target]
-    if a.limit:
-        files = files[-a.limit:]
+    files = sorted(glob.glob(os.path.join(args.target, '*.json*'))) \
+        if os.path.isdir(args.target) else [args.target]
+    if args.limit:
+        files = files[-args.limit:]
 
     same = diff = failed = 0
-    for f in files:
-        rec = load(f)
-        was = rec.get('verdict') or ''
-        try:
-            now = replay(rec, a)
-        except Exception as e:
+    for path in files:
+        record = load(path)
+        was = record.get('verdict') or ''
+        sent, now = replay(record, args)
+        if sent['error']:
             failed += 1
-            print(f'{os.path.basename(f)}  ОШИБКА ПОВТОРА: {e}')
+            print(f'{os.path.basename(path)}  ОШИБКА ПОВТОРА: {sent["error"]}  via={sent["via"]}')
             continue
         changed = klass(was) != klass(now)
         same, diff = (same, diff + 1) if changed else (same + 1, diff)
-        print(f'{os.path.basename(f)}  {klass(was)} -> {klass(now)}'
+        print(f'{os.path.basename(path)}  {klass(was)} -> {klass(now)}  via={sent["via"]}'
               f'{"  ИЗМЕНИЛОСЬ" if changed else ""}')
         if changed or len(files) == 1:
             print(f'   было:  {was[:300]}')

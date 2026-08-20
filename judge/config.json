@@ -1,7 +1,7 @@
 {
   "max_tokens": 3000,
   "timeout_ms": 60000,
-  "enforce": false,
+  "enforce": true,
   "context_chars": 60000,
   "dispatch_chars": 4000,
   "models": [
@@ -13,7 +13,12 @@
       "model": "glm-5.3",
       "effort": "max",
       "context_chars": 8000
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "context_chars": 12000
     }
   ],
-  "retry_context_chars": 8000
+  "retry_context_chars": 8000,
+  "fail_closed": true
 }

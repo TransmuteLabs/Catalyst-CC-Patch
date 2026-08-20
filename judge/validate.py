@@ -9,11 +9,10 @@ import math
 import os
 import statistics
 import sys
-import time
-import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import channel
 import replay
 
 DEFAULT_RECORDS = os.path.join(HERE, 'records')
@@ -47,12 +46,16 @@ def labels_by_record():
     labels = {}
     try:
         with open(LABELS_PATH, encoding='utf-8') as fh:
-            for line_no, line in enumerate(fh, 1):
+            for line in fh:
                 if not line.strip():
                     continue
                 item = json.loads(line)
-                if item.get('rec'):
-                    labels[item['rec']] = item
+                rec = item.get('rec')
+                if not rec:
+                    continue
+                source = item.get('source') or 'human'
+                kind = 'human' if source == 'human' else 'model'
+                labels.setdefault(rec, {})[kind] = item
     except FileNotFoundError:
         pass
     return labels
@@ -102,7 +105,7 @@ def resolve_url(cli_url, record, config):
         ('default', DEFAULT_BASE_URL),
     )
     for source, value in candidates:
-        if value:
+        if value and str(value).startswith(('http://', 'https://')):
             return normalize_url(str(value)), source
     raise RuntimeError('адрес канала не найден')
 
@@ -174,36 +177,31 @@ def compose_body(record, model, effort, args, global_config):
     return body, layer_missing
 
 
-def usage_tokens(raw):
-    try:
-        usage = json.loads(raw).get('usage') or {}
-    except Exception:
-        return None, None
-    tokens_in = usage.get('prompt_tokens', usage.get('input_tokens'))
-    tokens_out = usage.get('completion_tokens', usage.get('output_tokens'))
-    return tokens_in, tokens_out
-
-
 def run_one(task):
-    index, path, record, model, effort, rep, args, config, truth = task
-    started = time.perf_counter()
+    index, path, record, model, effort, rep, args, config, truths = task
     url, url_from = resolve_url(args.url, record, config)
     layer_missing = False
     try:
         body, layer_missing = compose_body(record, model, effort, args, config)
-        raw = replay.post(url, body, args.timeout, replay.UA)
-        verdict = replay.verdict_of(raw)
-        result_class = replay.klass(verdict)
-        tokens_in, tokens_out = usage_tokens(raw)
-        http = 200
-        error = None
+        system, user = replay.request_texts(body)
+        sent = channel.send(
+            system, user, model,
+            effort=effort,
+            max_tokens=body.get('max_tokens'),
+            channel=args.channel,
+            url=url,
+            timeout=args.timeout,
+            body_template=body,
+        )
+        verdict = replay.verdict_of(sent['raw']) if not sent['error'] else ''
+        result_class = replay.klass(verdict) if not sent['error'] else 'ERROR'
     except Exception as exc:
+        sent = {
+            'via': args.channel, 'ms': 0, 'http': None, 'error': str(exc),
+            'tokens_in': None, 'tokens_out': None, 'cost_usd': None,
+        }
         verdict = ''
         result_class = 'ERROR'
-        tokens_in = tokens_out = None
-        http = exc.code if isinstance(exc, urllib.error.HTTPError) else None
-        error = str(exc)
-    elapsed_ms = round((time.perf_counter() - started) * 1000)
     result = {
         'rec': os.path.basename(path),
         'model': model,
@@ -211,14 +209,18 @@ def run_one(task):
         'rep': rep,
         'klass': result_class,
         'verdict': verdict,
-        'ms': elapsed_ms,
-        'http': http,
-        'error': error,
-        'truth': truth,
+        'via': sent['via'],
+        'ms': sent['ms'],
+        'http': sent['http'],
+        'cost_usd': sent['cost_usd'],
+        'error': sent['error'],
+        'truth': truths.get('human'),
+        'truth_human': truths.get('human'),
+        'truth_model': truths.get('model'),
         'layer': args.project_layer,
         'cfg': record.get('cfg'),
-        'tokens_in': tokens_in,
-        'tokens_out': tokens_out,
+        'tokens_in': sent['tokens_in'],
+        'tokens_out': sent['tokens_out'],
         'layer_missing': layer_missing,
         'url_from': url_from,
     }
@@ -243,6 +245,9 @@ def model_costs():
 
 
 def price_100(rows, model, costs):
+    direct = [row.get('cost_usd') for row in rows if isinstance(row.get('cost_usd'), (int, float))]
+    if direct:
+        return 100 * sum(direct) / len(direct)
     pricing = costs.get(model)
     pairs = [(row.get('tokens_in'), row.get('tokens_out')) for row in rows]
     pairs = [(i, o) for i, o in pairs if isinstance(i, (int, float)) and isinstance(o, (int, float))]
@@ -267,6 +272,18 @@ def recorded_classes_for(rows):
     return result
 
 
+def row_truth(row, kind):
+    if kind == 'human':
+        return row.get('truth_human', row.get('truth'))
+    return row.get('truth_model')
+
+
+def accuracy_text(rows, kind):
+    labelled = [row for row in rows if row_truth(row, kind)]
+    matched = sum(effective_class(row.get('klass')) == row_truth(row, kind) for row in labelled)
+    return f'{matched}/{len(labelled)}' if labelled else '—'
+
+
 def print_summary(rows, model_order=None, recorded_classes=None):
     if not rows:
         print('нет результатов')
@@ -279,9 +296,11 @@ def print_summary(rows, model_order=None, recorded_classes=None):
             seen.append(row['model'])
     models = [model for model in order if model in seen] + [model for model in seen if model not in order]
     costs = model_costs()
-    any_truth = any(row.get('truth') for row in rows)
-    heading = ('модель\tпрогонов\tошибок\tEMPTY\tмедиана_мс\tp90_мс\tток_вх/вых\t'
-               'пропусков\tложных_отмен\tсовпало\tразмечено\tнестабильных\tцена_100')
+    human_records = {row['rec'] for row in rows if row_truth(row, 'human')}
+    model_records = {row['rec'] for row in rows if row_truth(row, 'model')}
+    heading = ('модель\tканал\tпрогонов\tошибок\tEMPTY\tмедиана_мс\tp90_мс\tток_вх/вых\t'
+               'пропусков\tложных_отмен\tпо_человеческим\tпо_предложенным_моделью\t'
+               'с_записанным\tнестабильных\tцена_100')
     print(heading)
     stats = {}
     for model in models:
@@ -289,38 +308,37 @@ def print_summary(rows, model_order=None, recorded_classes=None):
         latencies = [row['ms'] for row in selected if isinstance(row.get('ms'), (int, float))]
         errors = sum(row.get('klass') == 'ERROR' for row in selected)
         empty = sum(row.get('klass') == 'EMPTY' for row in selected)
-        misses = sum(row.get('truth') == 'BLOCK' and effective_class(row.get('klass')) != 'BLOCK'
+        misses = sum(row_truth(row, 'human') == 'BLOCK' and effective_class(row.get('klass')) != 'BLOCK'
                      for row in selected)
-        false_blocks = sum(row.get('truth') == 'OK' and effective_class(row.get('klass')) == 'BLOCK'
+        false_blocks = sum(row_truth(row, 'human') == 'OK' and effective_class(row.get('klass')) == 'BLOCK'
                            for row in selected)
-        labelled = [row for row in selected if row.get('truth')]
-        if labelled:
-            matched = sum(effective_class(row.get('klass')) == row.get('truth') for row in labelled)
-            labelled_count = len(labelled)
-        else:
-            comparable = [row for row in selected if row['rec'] in recorded_classes]
-            matched = sum(row.get('klass') == recorded_classes[row['rec']] for row in comparable)
-            labelled_count = 0
+        comparable = [row for row in selected if row['rec'] in recorded_classes]
+        recorded_match = sum(row.get('klass') == recorded_classes[row['rec']] for row in comparable)
         repeats = {}
         for row in selected:
             repeats.setdefault(row['rec'], set()).add(row.get('klass'))
         unstable = sum(len(classes) > 1 for classes in repeats.values())
-        token_pairs = [(row.get('tokens_in'), row.get('tokens_out')) for row in selected]
-        known_in = [pair[0] for pair in token_pairs if isinstance(pair[0], (int, float))]
-        known_out = [pair[1] for pair in token_pairs if isinstance(pair[1], (int, float))]
+        known_in = [row.get('tokens_in') for row in selected if isinstance(row.get('tokens_in'), (int, float))]
+        known_out = [row.get('tokens_out') for row in selected if isinstance(row.get('tokens_out'), (int, float))]
         token_text = f'{sum(known_in)}/{sum(known_out)}' if known_in or known_out else '—'
         price = price_100(selected, model, costs)
         price_text = f'${price:.6f}' if price is not None else '—'
-        match_text = f'{matched}/{len(labelled)}' if labelled else f'{matched}/{len(comparable)}*'
         median = statistics.median(latencies) if latencies else None
         p90 = percentile_90(latencies)
-        print(f'{model}\t{len(selected)}\t{errors}\t{empty}\t'
+        via_counts = {}
+        for row in selected:
+            via_counts[row.get('via') or '—'] = via_counts.get(row.get('via') or '—', 0) + 1
+        via_text = ','.join(f'{name}:{count}' for name, count in sorted(via_counts.items()))
+        print(f'{model}\t{via_text}\t{len(selected)}\t{errors}\t{empty}\t'
               f'{median if median is not None else "—"}\t{p90 if p90 is not None else "—"}\t'
-              f'{token_text}\t{misses}\t{false_blocks}\t{match_text}\t{labelled_count}\t'
+              f'{token_text}\t{misses}\t{false_blocks}\t{accuracy_text(selected, "human")}\t'
+              f'{accuracy_text(selected, "model")}\t{recorded_match}/{len(comparable)}*\t'
               f'{unstable}\t{price_text}')
         stats[model] = {'misses': misses, 'unstable': unstable, 'median': median}
-    if not any_truth:
-        print('* согласие с записанным вердиктом; записанный вердикт истиной не является')
+    print(f'меток: человеческих {len(human_records)}, предложенных моделью {len(model_records)}')
+    print('* согласие с записанным вердиктом; записанный вердикт истиной не является')
+    pool_runs = sum(row.get('via') == 'pool' for row in rows)
+    print(f'канал pool: {pool_runs} прогонов; вход не совпадает с исходным из-за контекста старта сессии')
 
     distinct = {}
     for row in rows:
@@ -333,7 +351,7 @@ def print_summary(rows, model_order=None, recorded_classes=None):
     print(f'адрес не из записи: {len(foreign)} из {len(distinct)} ({source_text})')
 
     criterion = 'критерий: 0 пропусков и 0 нестабильных; порядок кандидатов из --models'
-    if not any_truth:
+    if not human_records:
         print(f'минимальная годная не определена: нет человеческих меток ({criterion})')
         return
     passing = [model for model in models if stats[model]['misses'] == 0 and stats[model]['unstable'] == 0]
@@ -361,14 +379,16 @@ def print_summary(rows, model_order=None, recorded_classes=None):
 
 def command_list(args):
     labels = labels_by_record()
+    print('запись\tзаписанный\tчеловеческая\tпредложенная_моделью')
     for path in record_files(args.records):
         name = os.path.basename(path)
-        label = labels.get(name)
-        if args.unlabelled and label:
+        pair = labels.get(name) or {}
+        if args.unlabelled and pair:
             continue
         recorded = replay.klass(replay.load(path).get('verdict') or '')
-        truth = label.get('truth') if label else 'нет метки'
-        print(f'{name}\t{recorded}\t{truth}')
+        human = (pair.get('human') or {}).get('truth') or 'нет метки'
+        model = (pair.get('model') or {}).get('truth') or 'нет метки'
+        print(f'{name}\t{recorded}\t{human}\t{model}')
 
 
 def resolve_record_name(value):
@@ -411,16 +431,19 @@ def command_run(args):
         record = replay.load(path)
         name = os.path.basename(path)
         recorded[name] = replay.klass(record.get('verdict') or '')
-        truth = (labels.get(name) or {}).get('truth')
+        pair = labels.get(name) or {}
+        truths = {
+            'human': (pair.get('human') or {}).get('truth'),
+            'model': (pair.get('model') or {}).get('truth'),
+        }
         for model, effort in models:
             for rep in range(1, args.repeat + 1):
-                tasks.append((index, path, record, model, effort, rep, args, config, truth))
+                tasks.append((index, path, record, model, effort, rep, args, config, truths))
                 index += 1
     if not tasks:
         raise SystemExit('записи для прогона не найдены')
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        futures = [executor.submit(run_one, task) for task in tasks]
-        completed = [future.result() for future in futures]
+        completed = [future.result() for future in [executor.submit(run_one, task) for task in tasks]]
     rows = [result for _, result in sorted(completed)]
     out = os.path.expanduser(args.out) if args.out else default_output_path()
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -462,6 +485,7 @@ def build_parser():
     run.add_argument('--prompt')
     run.add_argument('--project-layer', choices=('record', 'recompose', 'off'), default='record')
     run.add_argument('--url')
+    run.add_argument('--channel', choices=('pool', 'http', 'auto'), default='auto')
     run.add_argument('--out')
     run.set_defaults(func=command_run)
 

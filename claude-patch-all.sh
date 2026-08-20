@@ -386,6 +386,9 @@ checks = {
                                               rb'querySource:"hook_prompt",toolChoice:void 0', d))
                                           and bool(re.search(
                                               rb'effortValue:__e\.effort\|\|void 0', d)),
+    # провал всей лестницы при fail_closed = отмена, а не молчаливый пропуск
+    'judge can fail closed': bool(re.search(
+                                              rb'if\(!__v&&__en&&__cfg\.fail_closed===!0\)', d)),
     # ported from tweakcc, whose own patch set cannot apply on this build
     # a bare 'var X=500' matches six unrelated constants in the PRISTINE binary,
     # so the check has to reach the debounce site first and then assert on the
