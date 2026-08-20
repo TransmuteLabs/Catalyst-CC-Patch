@@ -389,6 +389,10 @@ checks = {
     # провал всей лестницы при fail_closed = отмена, а не молчаливый пропуск
     'judge can fail closed': bool(re.search(
                                               rb'if\(!__v&&__en&&__cfg\.fail_closed===!0\)', d)),
+    # отказ ступени обязан нести причину и свой ответ, иначе разбирать нечем
+    'judge keeps the reason of a failed rung': bool(re.search(
+                                              rb'api error from the pool: ', d))
+                                          and len(re.findall(rb'__a\.resp=', d)) == 2,
     # ported from tweakcc, whose own patch set cannot apply on this build
     # a bare 'var X=500' matches six unrelated constants in the PRISTINE binary,
     # so the check has to reach the debounce site first and then assert on the

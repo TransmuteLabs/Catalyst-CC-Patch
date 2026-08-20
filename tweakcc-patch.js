@@ -1331,7 +1331,8 @@ step('22 judge consulted before a subagent dispatch', () => {
             'if(process.env.CLAUDE_JUDGE_DEBUG)try{await __fs.writeFile(__dir+"/last-request.json",__b)}catch{}' +
             'let __r=await fetch(__purl,{method:"POST",signal:__ac.signal,' +
               'headers:{"content-type":"application/json"},body:__b});' +
-            'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.ms=Date.now()-__s0;__a.http=__r.status;' +
+            'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.resp=__t.slice(0,800);' +
+            '__a.ms=Date.now()-__s0;__a.http=__r.status;' +
             'if(!__r.ok)throw new Error("HTTP "+__r.status);return __t}' +
           // Усилие едет полем options, а не полем тела: тело здесь не наше, его
           // собирает клиент. Ограничение вывода — maxOutputTokensOverride, оно
@@ -1349,9 +1350,17 @@ step('22 judge consulted before a subagent dispatch', () => {
               'maxOutputTokensOverride:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
               'effortValue:__e.effort||void 0,agentId:$4?.agentId,agentContext:$4?.agentContext,' +
               'getToolPermissionContext:async()=>$4?.getAppState?.()?.toolPermissionContext}});' +
-          'let __t2=JSON.stringify(__r2);__jres=__t2;__a.ms=Date.now()-__s0;' +
+          'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__t2.slice(0,800);' +
+          '__a.ms=Date.now()-__s0;' +
           '__jst=__r2?.isApiErrorMessage?"api_error":200;__a.http=__jst;' +
-          'if(__r2?.isApiErrorMessage)throw new Error("api error from the pool");' +
+          // Текст ошибки пула ОБЯЗАН доехать до журнала: без него в ledger висит
+          // «api error from the pool» без причины, а причина (лимит темпа, отказ
+          // апстрима, неизвестная модель) требует разного лечения. Реальный
+          // случай: три отказа подряд на одной ступени, и разобрать их было нечем.
+          'if(__r2?.isApiErrorMessage){let __et="";' +
+            'try{__et=(__r2.message?.content||[]).filter((__b)=>__b?.type==="text")' +
+              '.map((__b)=>__b.text).join(" ").slice(0,300)}catch{}' +
+            'throw new Error("api error from the pool: "+(__et||"(\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430)"))}' +
           'return __t2}' +
         'catch(__xe){__a.ms=Date.now()-__s0;' +
           '__a.error=String(__xe?.name||"Error")+": "+String(__xe?.message??__xe).slice(0,120);throw __xe}' +
