@@ -440,6 +440,23 @@ checks = {
                                           and len(re.findall(rb'__s=JSON\.stringify\(__a\)', d)) == 0
                                           and bool(re.search(rb'__mt=\(\)=>"\[\\u043b', d))
                                           and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
+    # числа в маркере и в самой записи обязаны называть ФАКТ, а не число
+    # вызовов: счёт вызовов __fit давал 39 подрезок против 4 живых, а счёт
+    # от прошлого среза — «вырезано 123» там, где вырезано 200000
+    'judge counts trimmed records honestly': bool(re.search(
+                                              rb'let __ot=new Array\(__a\.length\)\.fill\(null\)', d))
+                                          # подрезка всегда идёт от ИСХОДНОГО текста
+                                          and bool(re.search(
+                                              rb"let __t=__ot\[__i\]!==null\?__ot\[__i\]:String\(__a\[__i\]\.text\)", d))
+                                          and bool(re.search(
+                                              rb'__ot\[__i\]=__t;__a\[__i\]=__nx', d))
+                                          # массив исходников переносится через ОБА уплотнения
+                                          and len(re.findall(rb'__ot=__ot\.filter\(', d)) == 2
+                                          # счётчик вызовов удалён из кода целиком
+                                          and len(re.findall(rb'__c2', d)) == 0
+                                          and bool(re.search(
+                                              rb'__ctd=\(\)=>\{let __r=0;.{0,80}__ot\[__k\]!==null', d))
+                                          and bool(re.search(rb'\(__cd=__ctd\(\)\)\?', d)),
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
     # человека: иначе закрепление сохраняет его навсегда как санкцию
     'judge does not read command output as the human': bool(re.search(

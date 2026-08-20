@@ -8,7 +8,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VER="${1:-2.1.237}"
+# Версия берётся у УСТАНОВЛЕННОГО образа, а не из умолчания в скрипте:
+# зашитое умолчание отстало на версию и молча клеило на комплект чужой
+# ярлык — ровно тот класс, что и лживое число в маркере ленты.
+VER="${1:-}"
+if [ -z "$VER" ]; then
+  VER="$(ls -1 "$HOME/.local/share/claude/versions" 2>/dev/null \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+fi
+[ -n "$VER" ] || { echo "не удалось определить версию; передайте её первым доводом" >&2; exit 1; }
 STAMP="$(date +%Y%m%d)"
 NAME="claude-patch-kit-$VER"
 OUT="$ROOT/dist/$NAME-$STAMP.tar.gz"
