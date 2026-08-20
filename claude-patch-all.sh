@@ -398,13 +398,20 @@ checks = {
                                               rb'__pr=\(__x\)=>__x&&\(__x\.src==="user"\|\|'
                                               rb'__x\.src==="compaction-summary"\)', d))
                                           and bool(re.search(
-                                              rb'if\(__pr\(__a\[__k\]\)\)\{__k\+\+;continue\}__del\(__k,!1\)', d))
+                                              rb'if\(__pr\(__a\[__k\]\)\)\{__k\+\+;continue\}'
+                                              rb'if\(__tot-__w\[__k\]>=__b\)', d))
                                           # доля считается на КЛАСС (поштучный потолок резюме давал
                                           # 64% ленты), носитель режется по тексту, а не выбрасывается
                                           and bool(re.search(
                                               rb'__cap\(__iss,__sb\);__cap\(__isu,__pb\)', d))
                                           and bool(re.search(
                                               rb'__dp\?"; \\u0412\\u042b\\u0422\\u0415\\u0421', d)),
+    # последняя незакреплённая запись укорачивается под зазор, а не
+    # выбрасывается: иначе лента обнуляется, а судья судит вслепую
+    'judge fills the budget instead of emptying the tape': bool(re.search(
+                                              rb'if\(__tot-__w\[__k\]>=__b\)\{__del\(__k,!1\);continue\}', d))
+                                          and bool(re.search(
+                                              rb'if\(__L>120\)\{__tr\(__k,Math\.max\(80,__L-\(__tot-__b\)-88\)\)', d)),
     # подрезка обязана быть ЛИНЕЙНОЙ: повторная сериализация всего массива на
     # каждое удаление давала 8.3 с локального счёта при пороге ступени 25 с
     'judge trims without re-serialising': bool(re.search(
