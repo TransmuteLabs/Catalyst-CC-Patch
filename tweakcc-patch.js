@@ -1428,8 +1428,13 @@ step('22 judge consulted before a subagent dispatch', () => {
       // "stop, and here is what is wrong" — and it couples to no minified name.
       'let __bl=/^(?:BLOCK|STOP|DENY):\\s*([\\s\\S]+)$/m.exec(__v);' +
       'let __en=process.env.CLAUDE_JUDGE==="enforce"||__cfg.enforce===!0;' +
+      // Отмена по исчерпанию лестницы — дефект КАНАЛА, отмена по вердикту —
+      // дефект СУЖДЕНИЯ, и лечатся они разным. Пока обе писались как "empty"
+      // (то же слово, что у пропущенного вызова при fail_closed:false), снаружи
+      // они были неотличимы ни друг от друга, ни от пропуска.
+      'let __fc=!__v&&__en&&__cfg.fail_closed===!0;' +
       'await __jlog({http:__jst,outcome:__bl?(__en?"block":"block_not_enforced"):' +
-        '(/^\\s*WARN:/.test(__v)?"warn":__v?"ok":"empty"),' +
+        '(/^\\s*WARN:/.test(__v)?"warn":__v?"ok":(__fc?"block_no_verdict":"empty")),' +
         'en:__en?(process.env.CLAUDE_JUDGE==="enforce"?"env":"config"):null,' +
         'tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
         'verdict:__v.slice(0,400)||null});' +
@@ -1440,7 +1445,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // ступень по подписке лежит только вместе с самим клиентом, так что
       // полный провал означает, что сессии и так нечем работать. Выключается
       // одним ключом конфига, без пересборки бинарника.
-      'if(!__v&&__en&&__cfg.fail_closed===!0){' +
+      'if(__fc){' +
         'let __e0=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u043f\\u043e\\u043b\\u0443\\u0447\\u0438\\u043b \\u0432\\u0435\\u0440\\u0434\\u0438\\u043a\\u0442 \\u043d\\u0438 \\u043d\\u0430 \\u043e\\u0434\\u043d\\u043e\\u0439 \\u0441\\u0442\\u0443\\u043f\\u0435\\u043d\\u0438 (' + '"+String(__jerr1||"").slice(0,200)+"' + '). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435, \\u043a\\u043e\\u0433\\u0434\\u0430 \\u043a\\u0430\\u043d\\u0430\\u043b \\u043e\\u0436\\u0438\\u0432\\u0451\\u0442.");' +
         '__e0.__ccJudgeBlock=!0;throw __e0}' +
       'if(__bl&&__en){' +

@@ -388,7 +388,11 @@ checks = {
                                               rb'effortValue:__e\.effort\|\|void 0', d)),
     # провал всей лестницы при fail_closed = отмена, а не молчаливый пропуск
     'judge can fail closed': bool(re.search(
-                                              rb'if\(!__v&&__en&&__cfg\.fail_closed===!0\)', d)),
+                                              rb'__fc=!__v&&__en&&__cfg\.fail_closed===!0', d))
+                                          and bool(re.search(rb'if\(__fc\)\{let __e0=', d)),
+    # отмена по каналу и отмена по вердикту — разные дефекты, разные имена
+    'judge names a fail-closed cancellation': bool(re.search(
+                                              rb'__fc\?"block_no_verdict":"empty"', d)),
     # отказ ступени обязан нести причину и свой ответ, иначе разбирать нечем
     'judge keeps the reason of a failed rung': bool(re.search(
                                               rb'api error from the pool: ', d))
