@@ -7,7 +7,8 @@
   "models": [
     {
       "model": "deepseek-v4-flash",
-      "effort": "high"
+      "effort": "high",
+      "timeout_ms": 25000
     },
     {
       "model": "glm-5.3",

@@ -1266,10 +1266,27 @@ step('22 judge consulted before a subagent dispatch', () => {
       // As a JSON value the same text is escaped into `text` and can never
       // become a sibling `src` key. Trimming drops whole oldest entries —
       // slicing the serialised string would hand over broken JSON.
-      'let __cut=(__n)=>{let __a=__arr.slice(),__s=JSON.stringify(__a);' +
-        'while(__a.length>1&&__s.length>__n){__a.shift();__s=JSON.stringify(__a)}' +
-        'if(__s.length>__n&&__a.length===1){__a=[{src:__a[0].src,' +
-          'text:String(__a[0].text).slice(-Math.max(0,__n-100))}];__s=JSON.stringify(__a)}' +
+      // Подрезка по FIFO выбрасывала указания ЧЕЛОВЕКА первыми: они самые
+      // старые в ленте. Измерено стендом 2026-08-21 — через ~70 ходов запрет,
+      // напечатанный юзером, ушёл из ленты целиком (0 записей src=user из 177),
+      // и судья судил так, будто человек не говорил ничего. Их доля ничтожна
+      // (10 записей из 150), так что закрепление почти ничего не стоит по
+      // бюджету и меняет смысл целиком. Прочее вытесняется с головы, как
+      // раньше; реплики человека режутся только если одних их не вместить.
+      'let __cut=(__n)=>{let __a=__arr.slice(),__s=JSON.stringify(__a),__d=0;' +
+        'let __b=Math.max(200,__n-140);' +
+        'while(__s.length>__b){let __i=-1;' +
+          'for(let __k=0;__k<__a.length;__k++){if(__a[__k]&&__a[__k].src!=="user"){__i=__k;break}}' +
+          'if(__i<0||__a.length<=1)break;__a.splice(__i,1);__d++;__s=JSON.stringify(__a)}' +
+        'while(__a.length>1&&__s.length>__b){__a.shift();__d++;__s=JSON.stringify(__a)}' +
+        'if(__s.length>__b&&__a.length===1){__a=[{src:__a[0].src,' +
+          'text:String(__a[0].text).slice(-Math.max(0,__b-100))}];__s=JSON.stringify(__a)}' +
+        // Пропуск объявляется явно: иначе уцелевшие записи читаются как соседние,
+        // и линза КОНЦЕНТРАЦИЯ судит по склейке, которой в ходе не было. Текст
+        // экранирован — tweakcc перепаковывает бандл БАЙТАМИ, и литеральная
+        // кириллица возвращается двойной кодировкой (измерено 2026-08-20).
+        'if(__d>0){__a.unshift({src:"injected",text:"[\\u043b\\u0435\\u043d\\u0442\\u0430 \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u0430: \\u0432\\u044b\\u0442\\u0435\\u0441\\u043d\\u0435\\u043d\\u043e "+__d+" \\u0437\\u0430\\u043f\\u0438\\u0441\\u0435\\u0439; \\u0440\\u0435\\u043f\\u043b\\u0438\\u043a\\u0438 \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0430 \\u0441\\u043e\\u0445\\u0440\\u0430\\u043d\\u0435\\u043d\\u044b]"});' +
+          '__s=JSON.stringify(__a)}' +
         'return __s};' +
       'let __max=Number(__cfg.context_chars||60000);' +
       'let __ctx=__cut(__max);' +

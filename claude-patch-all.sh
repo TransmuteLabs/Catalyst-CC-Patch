@@ -363,7 +363,7 @@ checks = {
                                               rb'return\{src:__role,text:__bt\}\}\)\.filter\(Boolean\)', d))
                                           and bool(re.search(
                                               rb'let __cut=\(__n\)=>\{let __a=__arr\.slice\(\),'
-                                              rb'__s=JSON\.stringify\(__a\);', d)),
+                                              rb'__s=JSON\.stringify\(__a\),__d=0;', d)),
     # the main loop is told the RULE, not the judge: a cancelled dispatch was
     # once read as the routing gate firing and blindly retried
     'dispatch-cancellation rule reaches the main loop': bool(re.search(
@@ -393,6 +393,10 @@ checks = {
     # отмена по каналу и отмена по вердикту — разные дефекты, разные имена
     'judge names a fail-closed cancellation': bool(re.search(
                                               rb'__fc\?"block_no_verdict":"empty"', d)),
+    # подрезка ленты не смеет выбрасывать напечатанное человеком раньше прочего
+    'judge keeps the human turns when trimming': bool(re.search(
+                                              rb'__a\[__k\]\.src!=="user"', d))
+                                          and bool(re.search(rb'src:"injected",text:"\[\\u043b', d)),
     # отказ ступени обязан нести причину и свой ответ, иначе разбирать нечем
     'judge keeps the reason of a failed rung': bool(re.search(
                                               rb'api error from the pool: ', d))
@@ -450,7 +454,14 @@ fi
 # Config backups: keep only the 3 most recent.
 if [[ $DO_UPDATE -eq 1 ]]; then
   VERSIONS_DIR="$(dirname "$BIN")"
+  # Список сохраняемого строится по НАСТОЯЩЕМУ имени версии, а не по имени
+  # мишени: при сборке в staging (--target X.staging) basename дал бы
+  # "2.1.237.staging", и уборка снесла бы живой 2.1.237 вместе с его чистым
+  # .orig — всё, кроме промежуточного файла. Уцелел бы только тот бинарник,
+  # который в этот момент исполняет живая сессия.
   CURRENT_VER="$(basename "$BIN")"
+  CURRENT_VER="${CURRENT_VER%.staging}"
+  CURRENT_VER="${CURRENT_VER%.orig}"
   echo
   echo "==> Cleaning up previous versions"
   # A version a live session is still executing is kept: unlinking a running
