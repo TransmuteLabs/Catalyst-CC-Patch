@@ -1379,9 +1379,11 @@ step('22 judge consulted before a subagent dispatch', () => {
           'for(let __g=0;__g<20000&&__tot+__mc>__n&&__a.length>0;__g++){' +
             'let __i=__long(()=>!0);if(__i<0)break;' +
             'if(__w[__i]>120&&__fit(__i,Math.max(60,__w[__i]-(__tot+__mc-__n))))continue;' +
-            'if(__cnt(()=>!0)<=1&&!__fit(0,Math.max(24,__n-__mc-4)))break;' +
+            'let __h4=__head();' +
+            'if(__cnt(()=>!0)<=1&&(__h4<0||!__fit(__h4,Math.max(24,__n-__mc-4))))break;' +
             'let __h3=__head();if(__h3<0||__cnt(()=>!0)<=1)break;__del(__h3,__pr(__a[__h3]))}' +
           '__a=__a.filter((__x,__k)=>__al(__k));' +
+          '__w=__a.map(__cs);__dd=new Array(__a.length).fill(!1);' +
           '__a.unshift({src:"injected",text:__mt()})}' +
         'return JSON.stringify(__a)};' +
       'let __max=Number(__cfg.context_chars||60000);' +
