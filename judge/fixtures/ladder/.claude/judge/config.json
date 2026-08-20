@@ -1,0 +1,9 @@
+{
+  "models": [
+    {"model": "totally-unknown-model-9x", "timeout_ms": 20000},
+    {"model": "deepseek-v4-flash", "effort": "high"}
+  ],
+  "timeout_ms": 60000,
+  "max_tokens": 3000,
+  "enforce": false
+}
