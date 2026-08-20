@@ -362,8 +362,8 @@ checks = {
     'judge context is structured, not prefixed': bool(re.search(
                                               rb'return\{src:__role,text:__bt\}\}\)\.filter\(Boolean\)', d))
                                           and bool(re.search(
-                                              rb'let __cut=\(__n\)=>\{let __a=__arr\.slice\(\),'
-                                              rb'__s=JSON\.stringify\(__a\),__d=0;', d)),
+                                              rb'let __cut=\(__n\)=>\{let __b=Math\.max\(200,__n-180\),'
+                                              rb'__pb=Math\.floor\(__b\*0\.35\),__sb=Math\.floor\(__b\*0\.3\);', d)),
     # the main loop is told the RULE, not the judge: a cancelled dispatch was
     # once read as the routing gate firing and blindly retried
     'dispatch-cancellation rule reaches the main loop': bool(re.search(
@@ -398,13 +398,20 @@ checks = {
                                               rb'__pr=\(__x\)=>__x&&\(__x\.src==="user"\|\|'
                                               rb'__x\.src==="compaction-summary"\)', d))
                                           and bool(re.search(
-                                              rb'if\(!__pr\(__a\[__k\]\)\)\{__i=__k;break\}', d))
-                                          # носитель распоряжений режется по тексту, а не выбрасывается,
-                                          # и последний рубеж больше не сносит закреплённое безусловно
+                                              rb'if\(__pr\(__a\[__k\]\)\)\{__k\+\+;continue\}__del\(__k,!1\)', d))
+                                          # доля считается на КЛАСС (поштучный потолок резюме давал
+                                          # 64% ленты), носитель режется по тексту, а не выбрасывается
                                           and bool(re.search(
-                                              rb'__a\[__i\]=__tr\(__a\[__i\],Math\.max\(200,__ln-__ov-80\)\)', d))
+                                              rb'__cap\(__iss,__sb\);__cap\(__isu,__pb\)', d))
                                           and bool(re.search(
-                                              rb'__dp\?"; \\u0412\\u042b\\u0422\\u0415\\u0421', d))
+                                              rb'__dp\?"; \\u0412\\u042b\\u0422\\u0415\\u0421', d)),
+    # подрезка обязана быть ЛИНЕЙНОЙ: повторная сериализация всего массива на
+    # каждое удаление давала 8.3 с локального счёта при пороге ступени 25 с
+    'judge trims without re-serialising': bool(re.search(
+                                              rb'__cs=\(__x\)=>JSON\.stringify\(__x\)\.length\+1', d))
+                                          and bool(re.search(
+                                              rb'__del=\(__i,__p\)=>\{__tot-=__w\[__i\]', d))
+                                          and len(re.findall(rb'__s=JSON\.stringify\(__a\)', d)) == 0
                                           and bool(re.search(rb'src:"injected",text:"\[\\u043b', d))
                                           and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
