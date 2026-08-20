@@ -1132,6 +1132,23 @@ step('22 judge consulted before a subagent dispatch', () => {
   );
   const m = js.match(rx);
   if (!m) fail('tool dispatch call site not found');
+  // Судья едет НА СОБСТВЕННОМ одиночном запросе клиента
+  // (queryModelWithoutStreaming), а не на своём HTTP-вызове: эта функция идёт
+  // через ту же фабрику клиента, что и любой другой запрос, поэтому пул
+  // моделей и обе его полосы — клиентские. `claude-*` остаётся на подписочной
+  // полосе (патч 1), всё остальное уходит в прокси. Свой HTTP-путь увёл бы
+  // claude-модели на api.anthropic.com по цене API — другой договор и другой
+  // счёт. Имя находится структурно по сигнатуре, а не по минифицированному
+  // написанию: оно меняется от сборки к сборке.
+  const qrx = new RegExp(
+    `async function (${ID})\\(\\{messages:${ID},systemPrompt:${ID},thinkingConfig:${ID},` +
+      `tools:${ID},signal:${ID},options:${ID}\\}\\)`,
+  );
+  const qm = js.match(qrx);
+  if (!qm) fail('single-shot query engine not found');
+  // Минифицированное имя может содержать `$`, а строка замены трактует `$` как
+  // ссылку на группу — экранируем прежде, чем вклеивать в замену.
+  const QM = qm[1].replace(/\$/g, '$$$$');
   // Everything the operator tunes lives in files read ON EVERY CALL, not in the
   // binary: a judge whose wording can only change by re-patching cannot be
   // iterated on. body.json is a full request template with {{CONTEXT}} and
@@ -1295,18 +1312,47 @@ step('22 judge consulted before a subagent dispatch', () => {
         'return JSON.stringify({model:__mdl,max_tokens:Number(__e.max_tokens||__cfg.max_tokens||300),' +
           'messages:[{role:"system",content:__sys},' +
           '{role:"user",content:"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== DISPATCH ===\\n"+__disp}]})}};' +
-      'let __url=(()=>{let __u=process.env.CLAUDE_JUDGE_URL||__cfg.url||process.env.ANTHROPIC_BASE_URL||"http://127.0.0.1:8317";__u=String(__u).replace(/\\/+$/,"");return /\\/v1$/.test(__u)?__u+"/chat/completions":__u+"/v1/chat/completions"})();' +
-      '__jurl=__url;' +
+      'let __pool=typeof ' + QM + '==="function"?' + QM + ':null;' +
+      'let __purl=(()=>{let __u=process.env.CLAUDE_JUDGE_URL||__cfg.url||process.env.ANTHROPIC_BASE_URL||"http://127.0.0.1:8317";__u=String(__u).replace(/\\/+$/,"");return /\\/v1$/.test(__u)?__u+"/chat/completions":__u+"/v1/chat/completions"})();' +
+      // Пул — путь по умолчанию. Сырой HTTP остаётся ТОЛЬКО как явно названный
+      // адрес (проба стенда бьёт в свой приёмник) или как страховка, если
+      // связывания с пулом в этой сборке не нашлось: судья, потерявший канал,
+      // обязан деградировать, а не молчать.
+      'let __http=!!(process.env.CLAUDE_JUDGE_URL||__cfg.url||__cfg.raw_http===!0)||!__pool;' +
+      '__jurl=__http?__purl:"pool";' +
       'let __tmo=Number(process.env.CLAUDE_JUDGE_TIMEOUT_MS||__cfg.timeout_ms||8000);' +
-      'let __call=async(__cx,__ms,__e)=>{let __b=__mkb(__cx,__e);__jreq=__b;' +
-        'let __s0=Date.now(),__a={model:__e.model,ctx_chars:__cx.length,timeout_ms:__ms,' +
-          'max_tokens:__e.max_tokens||__cfg.max_tokens||null};__jatt.push(__a);' +
+      'let __call=async(__cx,__ms,__e)=>{' +
+        'let __s0=Date.now(),__a={model:__e.model,via:__http?"http":"pool",ctx_chars:__cx.length,' +
+          'timeout_ms:__ms,max_tokens:__e.max_tokens||__cfg.max_tokens||null,' +
+          'effort:__e.effort||null};__jatt.push(__a);' +
         'let __ac=new AbortController(),__to=setTimeout(()=>__ac.abort(),__ms);' +
-        'if(process.env.CLAUDE_JUDGE_DEBUG)try{await __fs.writeFile(__dir+"/last-request.json",__b)}catch{}' +
-        'try{let __r=await fetch(__url,{method:"POST",signal:__ac.signal,' +
-          'headers:{"content-type":"application/json"},body:__b});' +
-          'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.ms=Date.now()-__s0;__a.http=__r.status;' +
-          'if(!__r.ok)throw new Error("HTTP "+__r.status);return __t}' +
+        'try{' +
+          'if(__http){let __b=__mkb(__cx,__e);__jreq=__b;' +
+            'if(process.env.CLAUDE_JUDGE_DEBUG)try{await __fs.writeFile(__dir+"/last-request.json",__b)}catch{}' +
+            'let __r=await fetch(__purl,{method:"POST",signal:__ac.signal,' +
+              'headers:{"content-type":"application/json"},body:__b});' +
+            'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.ms=Date.now()-__s0;__a.http=__r.status;' +
+            'if(!__r.ok)throw new Error("HTTP "+__r.status);return __t}' +
+          // Усилие едет полем options, а не полем тела: тело здесь не наше, его
+          // собирает клиент. Ограничение вывода — maxOutputTokensOverride, оно
+          // же единственный дом бюджета на этом пути.
+          'let __ut="=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== DISPATCH ===\\n"+__disp;' +
+          '__jreq=JSON.stringify({via:"pool",model:__e.model,effort:__e.effort||null,' +
+            'max_tokens:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
+            'messages:[{role:"system",content:__sys},{role:"user",content:__ut}]});' +
+          'let __r2=await __pool({messages:[{type:"user",message:{role:"user",content:__ut},' +
+              'uuid:(globalThis.crypto?.randomUUID?.()||String(Date.now())),' +
+              'timestamp:new Date().toISOString()}],' +
+            'systemPrompt:[__sys],thinkingConfig:{type:"disabled"},tools:[],signal:__ac.signal,' +
+            'options:{model:__e.model,isNonInteractiveSession:!0,hasAppendSystemPrompt:!1,' +
+              'agents:[],mcpTools:[],querySource:"hook_prompt",toolChoice:void 0,' +
+              'maxOutputTokensOverride:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
+              'effortValue:__e.effort||void 0,agentId:$4?.agentId,agentContext:$4?.agentContext,' +
+              'getToolPermissionContext:async()=>$4?.getAppState?.()?.toolPermissionContext}});' +
+          'let __t2=JSON.stringify(__r2);__jres=__t2;__a.ms=Date.now()-__s0;' +
+          '__jst=__r2?.isApiErrorMessage?"api_error":200;__a.http=__jst;' +
+          'if(__r2?.isApiErrorMessage)throw new Error("api error from the pool");' +
+          'return __t2}' +
         'catch(__xe){__a.ms=Date.now()-__s0;' +
           '__a.error=String(__xe?.name||"Error")+": "+String(__xe?.message??__xe).slice(0,120);throw __xe}' +
         'finally{clearTimeout(__to)}};' +
@@ -1323,12 +1369,22 @@ step('22 judge consulted before a subagent dispatch', () => {
       // dispatch then sailed through, because silence reads as consent. A
       // reasoning-only reply keeps the old rule (take the LAST such line) so a
       // verdict merely rehearsed mid-thought cannot outrank the conclusion.
+      // Две формы ответа, потому что канала два: у прокси это choices[].message,
+      // у пула — AssistantMessage с массивом блоков. Разбор один, чтобы правило
+      // «вердикт первой строкой» не разошлось между каналами.
       'let __pv=(__r0)=>{let __j;try{__j=JSON.parse(__r0)}catch{__j=null}' +
         'let __mm=__j?.choices?.[0]?.message||{};' +
         'let __rx=/^\\s*(?:OK|BLOCK|STOP|DENY|WARN):.*$/gm;' +
-        'let __c1=(String(__mm.content??"").match(__rx)||[])[0];if(__c1)return __c1.trim();' +
-        'let __rr=[__mm.reasoning,__mm.reasoning_content].filter(Boolean).join("\\n");' +
-        'return (((String(__rr).match(__rx)||[]).pop())||String(__mm.content??"")).trim()};' +
+        'let __bl=Array.isArray(__j?.message?.content)?__j.message.content:' +
+          '(Array.isArray(__j?.content)?__j.content:null);' +
+        'let __ct=String(__mm.content??"");' +
+        'if(!__ct&&__bl)__ct=__bl.filter((__b)=>__b?.type==="text")' +
+          '.map((__b)=>__b.text).join("\\n");' +
+        'let __c1=(__ct.match(__rx)||[])[0];if(__c1)return __c1.trim();' +
+        'let __rr=[__mm.reasoning,__mm.reasoning_content,__bl?__bl.filter((__b)=>' +
+          '__b?.type==="thinking").map((__b)=>__b.thinking).join("\\n"):""]' +
+          '.filter(Boolean).join("\\n");' +
+        'return (((String(__rr).match(__rx)||[]).pop())||__ct).trim()};' +
       'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
         'try{__jtry=__i+1;__jm=__e.model;' +

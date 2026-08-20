@@ -378,6 +378,14 @@ checks = {
                                               rb'response:__jres\}', d))
                                           and bool(re.search(
                                               rb'__jatt\.push\(__a\)', d)),
+    # судья обязан ехать на пуле моделей клиента, а не на своём HTTP-вызове:
+    # свой путь увёл бы claude-модели на api.anthropic.com по цене API
+    'judge rides the client model pool': bool(re.search(
+                                              rb'via:__http\?"http":"pool"', d))
+                                          and bool(re.search(
+                                              rb'querySource:"hook_prompt",toolChoice:void 0', d))
+                                          and bool(re.search(
+                                              rb'effortValue:__e\.effort\|\|void 0', d)),
     # ported from tweakcc, whose own patch set cannot apply on this build
     # a bare 'var X=500' matches six unrelated constants in the PRISTINE binary,
     # so the check has to reach the debounce site first and then assert on the
