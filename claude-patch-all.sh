@@ -398,7 +398,7 @@ checks = {
                                               rb'__pr=\(__x\)=>__x&&\(__x\.src==="user"\|\|'
                                               rb'__x\.src==="compaction-summary"\)', d))
                                           and bool(re.search(
-                                              rb'if\(__pr\(__a\[__k\]\)\)\{__k\+\+;continue\}'
+                                              rb'if\(!__al\(__k\)\|\|__pr\(__a\[__k\]\)\)continue;'
                                               rb'if\(__tot-__w\[__k\]>=__b\)', d))
                                           # доля считается на КЛАСС (поштучный потолок резюме давал
                                           # 64% ленты), носитель режется по тексту, а не выбрасывается
@@ -411,7 +411,8 @@ checks = {
     'judge fills the budget instead of emptying the tape': bool(re.search(
                                               rb'if\(__tot-__w\[__k\]>=__b\)\{__del\(__k,!1\);continue\}', d))
                                           and bool(re.search(
-                                              rb'if\(__w\[__k\]>120\)\{__fit\(__k,__w\[__k\]-\(__tot-__b\)\)', d)),
+                                              rb'if\(__w\[__k\]>120\)__fit\(__k,__w\[__k\]-\(__tot-__b\)\);'
+                                              rb'else __del\(__k,!1\)', d)),
     # пороги подрезки и цена маркера считаются в ДЛИНЕ JSON: текстовые пороги
     # промахивались на экранировании в обе стороны (переполнение и недобор)
     'judge measures trimming in JSON length': bool(re.search(
@@ -425,7 +426,10 @@ checks = {
     'judge trims without re-serialising': bool(re.search(
                                               rb'__cs=\(__x\)=>JSON\.stringify\(__x\)\.length\+1', d))
                                           and bool(re.search(
-                                              rb'__del=\(__i,__p\)=>\{__tot-=__w\[__i\]', d))
+                                              rb'__del=\(__i,__p\)=>\{if\(__dd\[__i\]\)return 0;__dd\[__i\]=!0', d))
+                                          # удаление помечает, а не вырезает: splice на каждое
+                                          # удаление давал 5-10 с на марафонской ленте
+                                          and len(re.findall(rb'__a\.splice\(', d)) == 0
                                           and len(re.findall(rb'__s=JSON\.stringify\(__a\)', d)) == 0
                                           and bool(re.search(rb'__mt=\(\)=>"\[\\u043b', d))
                                           and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
