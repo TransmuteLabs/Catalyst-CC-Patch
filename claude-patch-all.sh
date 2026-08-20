@@ -396,7 +396,14 @@ checks = {
     # подрезка ленты не смеет выбрасывать напечатанное человеком раньше прочего
     'judge keeps the human turns when trimming': bool(re.search(
                                               rb'__a\[__k\]\.src!=="user"', d))
-                                          and bool(re.search(rb'src:"injected",text:"\[\\u043b', d)),
+                                          and bool(re.search(rb'src:"injected",text:"\[\\u043b', d))
+                                          and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
+    # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
+    # человека: иначе закрепление сохраняет его навсегда как санкцию
+    'judge does not read command output as the human': bool(re.search(
+                                              rb'__bt\.includes\("<local-command-stdout"\)', d))
+                                          and bool(re.search(
+                                              rb'\?"user-command":', d)),
     # отказ ступени обязан нести причину и свой ответ, иначе разбирать нечем
     'judge keeps the reason of a failed rung': bool(re.search(
                                               rb'api error from the pool: ', d))

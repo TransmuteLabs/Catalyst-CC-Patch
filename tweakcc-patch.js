@@ -1218,7 +1218,17 @@ step('22 judge consulted before a subagent dispatch', () => {
         // apart) and only falls back to sniffing wrapper markers.
         'let __role=__m.role||__M.type||"?";' +
         'if(__role==="user")__role=(__M?.toolUseResult!==void 0||__c.some((__x)=>__x?.type==="tool_result"))' +
-          '?"tool-output":((__M?.isMeta||__M?.isVisibleInTranscriptOnly||' +
+          // Вывод локальной команды приходит под ролью "user" — это ОТВЕТ
+          // ПРОГРАММЫ на действие человека, а не его слова. Измерено стендом
+          // 2026-08-21: блоки <local-command-stdout> оседали в единственном
+          // происхождении, которому судья даёт вес санкции, и после
+          // закрепления оседали НАВСЕГДА. Сам вызов команды — действие
+          // человека, но не указание судье, поэтому у него своя метка.
+          '?"tool-output":(__bt.includes("<local-command-stdout")||' +
+            '__bt.includes("<local-command-stderr"))?"tool-output":' +
+            '(__bt.includes("<command-name>")||__bt.includes("<command-message>")||' +
+            '__bt.includes("<command-args>"))?"user-command":' +
+          '((__M?.isMeta||__M?.isVisibleInTranscriptOnly||' +
             '__bt.includes("<system-reminder")||__bt.includes("<task-notification")||' +
             '__bt.includes("<cross-session-message")||__bt.includes("[SYSTEM NOTIFICATION")||' +
             '__bt.includes("[Request interrupted by user"))?"injected":"user");' +
@@ -1275,6 +1285,17 @@ step('22 judge consulted before a subagent dispatch', () => {
       // раньше; реплики человека режутся только если одних их не вместить.
       'let __cut=(__n)=>{let __a=__arr.slice(),__s=JSON.stringify(__a),__d=0;' +
         'let __b=Math.max(200,__n-140);' +
+        // Закрепление без потолка делает мусор ВЕЧНЫМ: односложные реплики
+        // копятся монотонно и занимают место, которое уже нечем освободить
+        // (стенд намерил 21% короткой ленты). Поэтому закреплённое ограничено
+        // долей ленты, и внутри неё вытесняется по старшинству — свежие слова
+        // человека важнее давних.
+        'let __pb=Math.floor(__b*0.35);' +
+        'while(__a.filter((__x)=>__x&&__x.src==="user").length>1&&' +
+          'JSON.stringify(__a.filter((__x)=>__x&&__x.src==="user")).length>__pb){' +
+          'let __j=__a.findIndex((__x)=>__x&&__x.src==="user");' +
+          'if(__j<0)break;__a.splice(__j,1);__d++}' +
+        '__s=JSON.stringify(__a);' +
         'while(__s.length>__b){let __i=-1;' +
           'for(let __k=0;__k<__a.length;__k++){if(__a[__k]&&__a[__k].src!=="user"){__i=__k;break}}' +
           'if(__i<0||__a.length<=1)break;__a.splice(__i,1);__d++;__s=JSON.stringify(__a)}' +
