@@ -1206,6 +1206,12 @@ step('22 judge consulted before a subagent dispatch', () => {
       // dispatch was waved through because the main loop had written "this is
       // a sanctioned probe" a second earlier. Only a turn that is neither a
       // tool result nor an injected block keeps the "user" label.
+      // Три дефекта подряд (вывод локальной команды, аргументы слэш-команды,
+      // резюме компакции) были одним и тем же классом: Claude Code кладёт под
+      // роль "user" всё новые виды записей, и каждый находился ПО ИНЦИДЕНТУ.
+      // Поэтому неизвестная обёртка, уцелевшая в классе "user", попадает в
+      // журнал полем uw — класс становится измеримым, а не сюрпризом.
+      'let __uw=[];' +
       'let __arr=[...($4.messages||[]),...__t].map((__M)=>{let __m=__M?.message;if(!__m)return null;' +
         'let __c=Array.isArray(__m.content)?__m.content:[{type:"text",text:String(__m.content??"")}];' +
         'let __bt=__c.map((__b)=>__b?.type==="text"?__b.text:' +
@@ -1224,14 +1230,25 @@ step('22 judge consulted before a subagent dispatch', () => {
           // происхождении, которому судья даёт вес санкции, и после
           // закрепления оседали НАВСЕГДА. Сам вызов команды — действие
           // человека, но не указание судье, поэтому у него своя метка.
-          '?"tool-output":(__bt.includes("<local-command-stdout")||' +
+          '?"tool-output":__M?.isCompactSummary?"compaction-summary":' +
+          '(__bt.includes("<local-command-stdout")||' +
             '__bt.includes("<local-command-stderr"))?"tool-output":' +
-            '(__bt.includes("<command-name>")||__bt.includes("<command-message>")||' +
+          // <command-args> несёт СОБСТВЕННЫЕ слова человека («веди полосу
+          // lane-16, без агентов и без скриптов»), а не имя команды. Измерено
+          // стендом 2026-08-21 по стенограммам проекта: 24 непустых блока, все
+          // — распоряжения. Значит запись с непустыми аргументами это речь
+          // человека со всеми правами санкции; голый вызов вроде /model —
+          // действие человека, но не указание судье.
+          '(/<command-args>\\s*[^\\s<]/.test(__bt))?"user":' +
+          '(__bt.includes("<command-name>")||__bt.includes("<command-message>")||' +
             '__bt.includes("<command-args>"))?"user-command":' +
           '((__M?.isMeta||__M?.isVisibleInTranscriptOnly||' +
             '__bt.includes("<system-reminder")||__bt.includes("<task-notification")||' +
             '__bt.includes("<cross-session-message")||__bt.includes("[SYSTEM NOTIFICATION")||' +
             '__bt.includes("[Request interrupted by user"))?"injected":"user");' +
+        'if(__role==="user"){let __wm=/^\\s*<([a-z][a-z0-9-]*)/i.exec(__bt);' +
+          'if(__wm&&["command-name","command-message","command-args"].indexOf(__wm[1].toLowerCase())<0' +
+            '&&__uw.indexOf(__wm[1])<0)__uw.push(__wm[1])}' +
         'return{src:__role,text:__bt}}).filter(Boolean);' +
       'let __fs=await import("node:fs/promises");__jfs=__fs;' +
       'let __dir=process.env.CLAUDE_JUDGE_DIR||((process.env.HOME||".")+"/.claude/judge");' +
@@ -1290,23 +1307,34 @@ step('22 judge consulted before a subagent dispatch', () => {
         // (стенд намерил 21% короткой ленты). Поэтому закреплённое ограничено
         // долей ленты, и внутри неё вытесняется по старшинству — свежие слова
         // человека важнее давних.
-        'let __pb=Math.floor(__b*0.35);' +
+        // Закрепление без потолка делает мусор ВЕЧНЫМ, поэтому у закреплённого
+        // своя доля ленты, и внутри доли вытесняется давнее. Резюме компакции
+        // закрепляется ОТДЕЛЬНО и подрезается по тексту, а не выбрасывается:
+        // после компакции оно единственный носитель стоячих распоряжений
+        // человека (измерено стендом 2026-08-21 — после компакции в ленте
+        // судьи не остаётся НИ ОДНОЙ записи src=user, а действующий запрет
+        // живёт только внутри резюме).
+        'let __pb=Math.floor(__b*0.35),__sb=Math.floor(__b*0.3);' +
+        'let __pr=(__x)=>__x&&(__x.src==="user"||__x.src==="compaction-summary");' +
+        '__a=__a.map((__x)=>__x&&__x.src==="compaction-summary"&&String(__x.text).length>__sb' +
+          '?{src:__x.src,text:String(__x.text).slice(0,__sb)+" [\\u0440\\u0435\\u0437\\u044e\\u043c\\u0435 \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e]"}:__x);' +
         'while(__a.filter((__x)=>__x&&__x.src==="user").length>1&&' +
           'JSON.stringify(__a.filter((__x)=>__x&&__x.src==="user")).length>__pb){' +
           'let __j=__a.findIndex((__x)=>__x&&__x.src==="user");' +
           'if(__j<0)break;__a.splice(__j,1);__d++}' +
         '__s=JSON.stringify(__a);' +
         'while(__s.length>__b){let __i=-1;' +
-          'for(let __k=0;__k<__a.length;__k++){if(__a[__k]&&__a[__k].src!=="user"){__i=__k;break}}' +
+          'for(let __k=0;__k<__a.length;__k++){if(!__pr(__a[__k])){__i=__k;break}}' +
           'if(__i<0||__a.length<=1)break;__a.splice(__i,1);__d++;__s=JSON.stringify(__a)}' +
         'while(__a.length>1&&__s.length>__b){__a.shift();__d++;__s=JSON.stringify(__a)}' +
         'if(__s.length>__b&&__a.length===1){__a=[{src:__a[0].src,' +
           'text:String(__a[0].text).slice(-Math.max(0,__b-100))}];__s=JSON.stringify(__a)}' +
-        // Пропуск объявляется явно: иначе уцелевшие записи читаются как соседние,
-        // и линза КОНЦЕНТРАЦИЯ судит по склейке, которой в ходе не было. Текст
-        // экранирован — tweakcc перепаковывает бандл БАЙТАМИ, и литеральная
-        // кириллица возвращается двойной кодировкой (измерено 2026-08-20).
-        'if(__d>0){__a.unshift({src:"injected",text:"[\\u043b\\u0435\\u043d\\u0442\\u0430 \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u0430: \\u0432\\u044b\\u0442\\u0435\\u0441\\u043d\\u0435\\u043d\\u043e "+__d+" \\u0437\\u0430\\u043f\\u0438\\u0441\\u0435\\u0439; \\u0440\\u0435\\u043f\\u043b\\u0438\\u043a\\u0438 \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0430 \\u0441\\u043e\\u0445\\u0440\\u0430\\u043d\\u0435\\u043d\\u044b]"});' +
+        // Маркер обязан говорить, что именно уцелело: прежний текст «реплики
+        // человека сохранены» звучал успокаивающе ровно там, где сохранять
+        // было нечего — после компакции их в ленте ноль (находка стенда).
+        'if(__d>0){let __ku=__a.filter((__x)=>__x&&__x.src==="user").length,' +
+          '__ks=__a.filter((__x)=>__x&&__x.src==="compaction-summary").length;' +
+          '__a.unshift({src:"injected",text:"[\\u043b\\u0435\\u043d\\u0442\\u0430 \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u0430: \\u0432\\u044b\\u0442\\u0435\\u0441\\u043d\\u0435\\u043d\\u043e "+__d+" \\u0437\\u0430\\u043f\\u0438\\u0441\\u0435\\u0439; \\u0437\\u0430\\u043a\\u0440\\u0435\\u043f\\u043b\\u0435\\u043d\\u043e \\u0440\\u0435\\u043f\\u043b\\u0438\\u043a \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0430: "+__ku+", \\u0440\\u0435\\u0437\\u044e\\u043c\\u0435 \\u043a\\u043e\\u043c\\u043f\\u0430\\u043a\\u0446\\u0438\\u0438: "+__ks+"]"});' +
           '__s=JSON.stringify(__a)}' +
         'return __s};' +
       'let __max=Number(__cfg.context_chars||60000);' +
@@ -1474,6 +1502,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'await __jlog({http:__jst,outcome:__bl?(__en?"block":"block_not_enforced"):' +
         '(/^\\s*WARN:/.test(__v)?"warn":__v?"ok":(__fc?"block_no_verdict":"empty")),' +
         'en:__en?(process.env.CLAUDE_JUDGE==="enforce"?"env":"config"):null,' +
+        '...(__uw.length?{uw:__uw.slice(0,5)}:{}),' +
         'tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
         'verdict:__v.slice(0,400)||null});' +
       // Принцип юзера (2026-08-20): «лучше ложная отмена, чем молчаливый

@@ -395,7 +395,10 @@ checks = {
                                               rb'__fc\?"block_no_verdict":"empty"', d)),
     # подрезка ленты не смеет выбрасывать напечатанное человеком раньше прочего
     'judge keeps the human turns when trimming': bool(re.search(
-                                              rb'__a\[__k\]\.src!=="user"', d))
+                                              rb'__pr=\(__x\)=>__x&&\(__x\.src==="user"\|\|'
+                                              rb'__x\.src==="compaction-summary"\)', d))
+                                          and bool(re.search(
+                                              rb'if\(!__pr\(__a\[__k\]\)\)\{__i=__k;break\}', d))
                                           and bool(re.search(rb'src:"injected",text:"\[\\u043b', d))
                                           and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
@@ -403,7 +406,23 @@ checks = {
     'judge does not read command output as the human': bool(re.search(
                                               rb'__bt\.includes\("<local-command-stdout"\)', d))
                                           and bool(re.search(
-                                              rb'\?"user-command":', d)),
+                                              rb'\?"user-command":', d))
+                                          and bool(re.search(
+                                              rb'<command-args>\\s\*\[\^\\s<\]/\.test\(__bt\)\)\?"user"', d)),
+    # неизвестная обёртка под ролью user обязана быть ВИДНА в журнале:
+    # три дефекта подряд были одним классом, найденным по инциденту
+    'judge reports unknown user-role wrappers': bool(re.search(
+                                              rb'\{uw:__uw\.slice\(0,5\)\}', d))
+                                          and bool(re.search(
+                                              rb'"command-name","command-message","command-args"', d)),
+    # после компакции резюме — ЕДИНСТВЕННЫЙ носитель стоячих распоряжений;
+    # оно закрепляется своей долей и подрезается по тексту, а не выбрасывается
+    'judge pins the compaction summary': bool(re.search(
+                                              rb'__M\?\.isCompactSummary\?"compaction-summary"', d))
+                                          and bool(re.search(
+                                              rb'__x\.src==="compaction-summary"\)', d))
+                                          and bool(re.search(
+                                              rb'__sb=Math\.floor\(__b\*0\.3\)', d)),
     # отказ ступени обязан нести причину и свой ответ, иначе разбирать нечем
     'judge keeps the reason of a failed rung': bool(re.search(
                                               rb'api error from the pool: ', d))
