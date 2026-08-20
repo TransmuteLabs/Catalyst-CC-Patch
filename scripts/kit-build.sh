@@ -28,7 +28,8 @@ cp "$ROOT/README.md"                        "$STAGE/README.md"
 cp "$ROOT/docs/judge-architecture.md"       "$STAGE/docs/judge-architecture.md"
 cp "$ROOT/docs/judge-patch-spec.md"         "$STAGE/docs/judge-patch-spec.md"
 cp "$ROOT/tools/listener.py"                "$STAGE/tools/listener.py"
-for f in config.json prompt.md body.json README.md replay.py compact.py validate.py; do
+for f in config.json prompt.md body.json README.md replay.py compact.py validate.py \
+         channel.py adjudicate.py; do
   cp "$JUDGE/$f" "$STAGE/judge/$f"
 done
 PLIST="$ROOT/judge/com.maratkarimov.judge-compact.plist"
