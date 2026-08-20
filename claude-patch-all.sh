@@ -362,7 +362,7 @@ checks = {
     'judge context is structured, not prefixed': bool(re.search(
                                               rb'return\{src:__role,text:__bt\}\}\)\.filter\(Boolean\)', d))
                                           and bool(re.search(
-                                              rb'let __cut=\(__n\)=>\{let __b=Math\.max\(200,__n-180\),'
+                                              rb'let __cut=\(__n\)=>\{let __b=Math\.max\(60,__n\),'
                                               rb'__pb=Math\.floor\(__b\*0\.35\),__sb=Math\.floor\(__b\*0\.3\);', d)),
     # the main loop is told the RULE, not the judge: a cancelled dispatch was
     # once read as the routing gate firing and blindly retried
@@ -411,7 +411,15 @@ checks = {
     'judge fills the budget instead of emptying the tape': bool(re.search(
                                               rb'if\(__tot-__w\[__k\]>=__b\)\{__del\(__k,!1\);continue\}', d))
                                           and bool(re.search(
-                                              rb'if\(__L>120\)\{__tr\(__k,Math\.max\(80,__L-\(__tot-__b\)-88\)\)', d)),
+                                              rb'if\(__w\[__k\]>120\)\{__fit\(__k,__w\[__k\]-\(__tot-__b\)\)', d)),
+    # пороги подрезки и цена маркера считаются в ДЛИНЕ JSON: текстовые пороги
+    # промахивались на экранировании в обе стороны (переполнение и недобор)
+    'judge measures trimming in JSON length': bool(re.search(
+                                              rb'let __fit=\(__i,__tc\)=>\{if\(__w\[__i\]<=__tc\)return 0;', d))
+                                          and bool(re.search(
+                                              rb'__lim=Math\.max\(8,Math\.floor\(__lim\*__tc/__c\*0\.9\)\)', d))
+                                          and bool(re.search(
+                                              rb'__tot\+__mc>__n', d)),
     # подрезка обязана быть ЛИНЕЙНОЙ: повторная сериализация всего массива на
     # каждое удаление давала 8.3 с локального счёта при пороге ступени 25 с
     'judge trims without re-serialising': bool(re.search(
@@ -419,7 +427,7 @@ checks = {
                                           and bool(re.search(
                                               rb'__del=\(__i,__p\)=>\{__tot-=__w\[__i\]', d))
                                           and len(re.findall(rb'__s=JSON\.stringify\(__a\)', d)) == 0
-                                          and bool(re.search(rb'src:"injected",text:"\[\\u043b', d))
+                                          and bool(re.search(rb'__mt=\(\)=>"\[\\u043b', d))
                                           and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
     # человека: иначе закрепление сохраняет его навсегда как санкцию
