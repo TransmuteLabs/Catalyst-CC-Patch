@@ -399,6 +399,12 @@ checks = {
                                               rb'__x\.src==="compaction-summary"\)', d))
                                           and bool(re.search(
                                               rb'if\(!__pr\(__a\[__k\]\)\)\{__i=__k;break\}', d))
+                                          # носитель распоряжений режется по тексту, а не выбрасывается,
+                                          # и последний рубеж больше не сносит закреплённое безусловно
+                                          and bool(re.search(
+                                              rb'__a\[__i\]=__tr\(__a\[__i\],Math\.max\(200,__ln-__ov-80\)\)', d))
+                                          and bool(re.search(
+                                              rb'__dp\?"; \\u0412\\u042b\\u0422\\u0415\\u0421', d))
                                           and bool(re.search(rb'src:"injected",text:"\[\\u043b', d))
                                           and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку

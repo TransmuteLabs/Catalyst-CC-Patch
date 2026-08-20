@@ -13,7 +13,7 @@
     {
       "model": "glm-5.3",
       "effort": "max",
-      "context_chars": 8000
+      "context_chars": 24000
     },
     {
       "model": "claude-haiku-4-5-20251001",
