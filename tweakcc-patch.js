@@ -1182,6 +1182,11 @@ step('22 judge consulted before a subagent dispatch', () => {
     // работу. Деградации собираются и попадают в журнал полем deg; те, что
     // задевают САМО СУЖДЕНИЕ, копятся отдельно и отменяют вызов.
     '__deg=[],__degb=[],' +
+    // Список деградаций режется с объявлением: молча отброшенная шестая
+    // строка означает, что человек чинит пять файлов, перезапускает и
+    // получает отмену снова.
+    '__dcut=(__l,__k)=>__l.length<=__k?__l:__l.slice(0,__k).concat('+
+      '"[\\u043f\\u043e\\u043a\\u0430\\u0437\\u0430\\u043d\\u044b \\u043d\\u0435 \\u0432\\u0441\\u0435: \\u0435\\u0449\\u0451 "+(__l.length-__k)+"]"),' +
     // Всякое усечение в журнале и записи объявляется — той же конвенцией,
     // что и подрезка ленты: обрыв вердикта посреди слова читается как
     // полный вердикт, а обрезанный ответ упавшей попытки — как весь её след.
@@ -1214,8 +1219,14 @@ step('22 judge consulted before a subagent dispatch', () => {
         'ms:Date.now()-__t0,sw:process.env.CLAUDE_JUDGE||null,...__o};' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +
+      // На свежей установке каталога судьи ещё нет, а отмен там больше всего:
+      // дописка без mkdir теряла в журнале ровно те строки, по которым человек
+      // и должен понять, что чинить (в stderr они уходили, в журнал — нет).
       'try{if(!__jfs)throw new Error("fs unavailable");' +
-        'await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}' +
+        'try{await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}' +
+        'catch(__ae){if(__ae?.code!=="ENOENT")throw __ae;' +
+          'await __jfs.mkdir(__jdir,{recursive:!0});' +
+          'await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}}' +
       'catch(__we){try{console.error("[Judge] journal write failed: "+' +
         '(__we?.message??__we)+" | "+__r)}catch{}}};' +
     'try{' +
@@ -1285,25 +1296,50 @@ step('22 judge consulted before a subagent dispatch', () => {
       // "правил нет", второе "правила есть, но я их не прочёл". Пока оба
       // давали одно и то же (access().catch(()=>!1)), проектные правила
       // исчезали молча, а обход ехал выше и подхватывал ЧУЖОЙ слой.
+      // Различать надо не ENOENT против всего прочего, а "пути нет" против
+      // "путь есть, доступа нет". Обычный файл по имени .claude у предка
+      // даёт ENOTDIR, петля ссылок — ELOOP; оба значат "такого каталога
+      // нет" и к "слой есть, но я его не прочёл" отношения не имеют, а
+      // отменяли ВСЁ поддерево при исправном судье. Незнакомый код не
+      // отменяет ничего, но и не исчезает: он называется в журнале.
+      'let __pcode=(__er)=>{let __c=String(__er?.code||"");' +
+        'return __c==="EACCES"||__c==="EPERM"?2:' +
+        '(__c==="ENOENT"||__c==="ENOTDIR"||__c==="ELOOP"||__c==="ENAMETOOLONG"?0:3)};' +
       'if(!process.env.CLAUDE_JUDGE_DIR)try{let __p=process.cwd();' +
         'for(let __i=0;__i<24;__i++){let __c=__p+"/.claude/judge";' +
           'let __has=await Promise.all([__c+"/config.json",__c+"/prompt.md",' +
             '__c+"/prompt.extra.md",__c+"/body.json"].map((__f)=>' +
-            '__fs.access(__f).then(()=>1).catch((__er)=>__er?.code==="ENOENT"?0:2)));' +
-          'if(__has.some((__x)=>__x===2)){__deg.push("layer-unreadable:"+__c);' +
-            '__degb.push("layer-unreadable:"+__c);if(__c!==__dir)__pdir=__c;break}' +
-          'if(__has.some((__x)=>__x===1)){if(__c!==__dir)__pdir=__c;break}' +
+            '__fs.access(__f).then(()=>({c:1})).catch((__er)=>' +
+              '({c:__pcode(__er),e:String(__er?.code||"ERR")}))));' +
+          'let __no=__has.find((__x)=>__x.c===2),__un=__has.find((__x)=>__x.c===3);' +
+          'if(__no){__deg.push("layer-unreadable:"+__c+" ("+__no.e+")");' +
+            '__degb.push("layer-unreadable:"+__c+" ("+__no.e+")");' +
+            'if(__c!==__dir)__pdir=__c;break}' +
+          'if(__un)__deg.push("layer-unknown:"+__c+" ("+__un.e+")");' +
+          'if(__has.some((__x)=>__x.c===1)){if(__c!==__dir)__pdir=__c;break}' +
           'let __up=__p.replace(/\\/[^\\/]*$/,"");if(!__up||__up===__p)break;__p=__up}}catch{}' +
       // Читалка объявляет исход: null — файла нет, !1 — файл есть, но не
       // прочитан или не разобран. Молчаливый разбор превращал битый конфиг
       // в пустой объект, а с ним терялись enforce, fail_closed, лестница и
       // max_tokens — судья выглядел работающим и пропускал всё подряд.
       'let __rdj=async(__f)=>{try{return await __fs.readFile(__f,"utf8")}' +
-        'catch(__er){if(__er?.code!=="ENOENT"){__deg.push("unreadable:"+__f);' +
-          '__degb.push("unreadable:"+__f)}return null}};' +
+        'catch(__er){let __k=__pcode(__er);' +
+          'if(__k===2){__deg.push("unreadable:"+__f+" ("+String(__er?.code)+")");' +
+            '__degb.push("unreadable:"+__f+" ("+String(__er?.code)+")")}' +
+          'else if(__k===3)__deg.push("unread-unknown:"+__f+" ("+' +
+            'String(__er?.code||__er?.message)+")");' +
+          'return null}};' +
+      // BOM невидим, а JSON.parse его не принимает: человек получал отмену
+      // с сообщением, где сломавший символ не виден, и выйти из неё чтением
+      // было нельзя. Пустой файл называется пустым, а не "неожиданным
+      // концом ввода": это обычное промежуточное состояние записи, и
+      // человек должен узнать причину с первого взгляда.
       'let __ldj=async(__f)=>{let __x=await __rdj(__f);if(__x===null)return null;' +
+        'if(__x.charCodeAt(0)===65279)__x=__x.slice(1);' +
+        'if(!__x.trim()){__deg.push("empty:"+__f);__degb.push("empty:"+__f);return !1}' +
         'try{return JSON.parse(__x)}catch(__pe){__deg.push("unparsed:"+__f+": "+' +
-          '__clip(__pe?.message??__pe,60));__degb.push("unparsed:"+__f);return !1}};' +
+          '__clip(__pe?.message??__pe,60));' +
+          '__degb.push("unparsed:"+__f+": "+__clip(__pe?.message??__pe,60));return !1}};' +
       'let __cfg={},__cfgbad=!1;' +
       'let __c0=await __ldj(__dir+"/config.json");' +
       'if(__c0===!1)__cfgbad=!0;else if(__c0)__cfg=__c0;' +
@@ -1468,7 +1504,12 @@ step('22 judge consulted before a subagent dispatch', () => {
       // вовсе, а единственный не-OK исход, который он предлагал (SWAP),
       // записывался как ok и пропускал вызов. Гейт был формально жив и
       // содержательно выключен, а журнал полон "ok".
-      'if(!__sys){__deg.push("prompt-missing");__degb.push("prompt-missing");' +
+      // Метка называет путь, как и все остальные: на свежей установке это
+      // ЕДИНСТВЕННЫЙ отказ, который человек увидит, и из "prompt-missing"
+      // без пути не следует, что создать надо ~/.claude/judge/prompt.md.
+      'if(!__sys){let __pmm="prompt-missing:"+__dir+"/prompt.md"+' +
+        '(__pdir?" | "+__pdir+"/prompt.md":"");' +
+        '__deg.push(__pmm);__degb.push(__pmm);' +
         '__sys="You judge one about-to-run subagent dispatch. You do NOT rewrite it: "+' +
         '"you either let it run or CANCEL it and say why. Answer with ONE line, "+' +
         '"the verdict FIRST: OK:<why> or WARN:<why> or BLOCK:<what is wrong and what "+' +
@@ -1604,8 +1645,8 @@ step('22 judge consulted before a subagent dispatch', () => {
         // отменяется с названием файла, а не пропускается молча.
         'if(__degb.length&&__en){' +
           'try{await __jlog({outcome:"block_degraded",tries:__jtry,jm:null,' +
-            'cfg:__pdir||null,deg:__deg.slice(0,5)})}catch{}' +
-          'let __e3=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u043d\\u0430\\u0441\\u0442\\u0440\\u043e\\u0439\\u043a\\u0438 \\u0441\\u0443\\u0434\\u044c\\u0438 \\u0441\\u043b\\u043e\\u043c\\u0430\\u043d\\u044b ("+__degb.slice(0,3).join("; ")+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443: \\u043f\\u043e\\u043a\\u0430 \\u0444\\u0430\\u0439\\u043b \\u043d\\u0435 \\u043f\\u043e\\u0447\\u0438\\u043d\\u0435\\u043d, \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0437\\u043d\\u0430\\u0435\\u0442, \\u043f\\u043e \\u043a\\u0430\\u043a\\u0438\\u043c \\u043f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430\\u043c \\u0441\\u0443\\u0434\\u0438\\u0442\\u044c.");' +
+            'cfg:__pdir||null,deg:__dcut(__deg,5)})}catch{}' +
+          'let __e3=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u043d\\u0430\\u0441\\u0442\\u0440\\u043e\\u0439\\u043a\\u0438 \\u0441\\u0443\\u0434\\u044c\\u0438 \\u0441\\u043b\\u043e\\u043c\\u0430\\u043d\\u044b ("+__dcut(__degb,3).join("; ")+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443: \\u043f\\u043e\\u043a\\u0430 \\u0444\\u0430\\u0439\\u043b \\u043d\\u0435 \\u043f\\u043e\\u0447\\u0438\\u043d\\u0435\\u043d, \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0437\\u043d\\u0430\\u0435\\u0442, \\u043f\\u043e \\u043a\\u0430\\u043a\\u0438\\u043c \\u043f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430\\u043c \\u0441\\u0443\\u0434\\u0438\\u0442\\u044c.");' +
           '__e3.__ccJudgeBlock=!0;throw __e3}' +
       'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
@@ -1657,7 +1698,7 @@ step('22 judge consulted before a subagent dispatch', () => {
         '(/^\\s*WARN:/.test(__v)?"warn":__v?"ok":(__fc?"block_no_verdict":"empty")),' +
         'en:__en?(process.env.CLAUDE_JUDGE==="enforce"?"env":"config"):null,' +
         '...(__uw.length?{uw:__uw.slice(0,5)}:{}),' +
-        '...(__deg.length?{deg:__deg.slice(0,5)}:{}),' +
+        '...(__deg.length?{deg:__dcut(__deg,5)}:{}),' +
         'tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
         'verdict:__clip(__v,400)||null})}catch{}' +
       // Принцип юзера (2026-08-20): «лучше ложная отмена, чем молчаливый

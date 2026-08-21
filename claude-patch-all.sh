@@ -186,7 +186,7 @@ def _judge_catch_scope(d):
     # ReferenceError'ом ДО записи в журнал — диспатч получал "__pdir is not
     # defined", журнал не получал ничего. Проверка структурная: каждое имя,
     # которое читает catch, обязано быть объявлено ВЫШЕ try.
-    m = re.search(rb'let __t0=Date\.now\(\),(.{0,400}?)__jdir=', d, re.S)
+    m = re.search(rb'let __t0=Date\.now\(\),(.{0,900}?)__jdir=', d, re.S)
     if not m:
         return False
     declared = set(re.findall(rb'(__\w+)\s*=', m.group(1))) | {b'__jdir', b'__cut'}
@@ -373,7 +373,7 @@ checks = {
     # about what the project is — the nearest .claude/judge above cwd layers over
     # the global one
     'judge takes a project layer': bool(re.search(
-                                              rb'if\(__has\.some\(\(__x\)=>__x===1\)\)\{if\(__c!==__dir\)'
+                                              rb'if\(__has\.some\(\(__x\)=>__x\.c===1\)\)\{if\(__c!==__dir\)'
                                               rb'__pdir=__c;break\}', d))
                                   and bool(re.search(
                                               rb'if\(__pdir\)\{let __c1=await __ldj\(__pdir\+"/config\.json"\);'
@@ -520,17 +520,27 @@ checks = {
                                           and bool(re.search(
                                               rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
                                           # нечитаемый слой отличается от отсутствующего
+                                          # "пути нет" (ENOENT/ENOTDIR/ELOOP) против
+                                          # "путь есть, доступа нет" (EACCES/EPERM)
                                           and bool(re.search(
-                                              rb'__er\?\.code==="ENOENT"\?0:2', d))
+                                              rb'__c==="EACCES"\|\|__c==="EPERM"\?2:', d))
                                           and bool(re.search(
-                                              rb'__deg\.push\("layer-unreadable:"', d)),
+                                              rb'__c==="ENOENT"\|\|__c==="ENOTDIR"\|\|'
+                                              rb'__c==="ELOOP"\|\|__c==="ENAMETOOLONG"\?0:3', d))
+                                          and bool(re.search(
+                                              rb'__deg\.push\("layer-unreadable:"', d))
+                                          # BOM невидим, а разбор его не принимает
+                                          and bool(re.search(
+                                              rb'if\(__x\.charCodeAt\(0\)===65279\)__x=__x\.slice\(1\)', d))
+                                          and bool(re.search(
+                                              rb'__deg\.push\("empty:"\+__f\)', d)),
     # поломка правил — не «работай по умолчанию», а отмена с названием файла
     'judge cancels when its rules are broken': bool(re.search(
                                               rb'if\(__degb\.length&&__en\)\{', d))
                                           and bool(re.search(
                                               rb'outcome:"block_degraded"', d))
                                           and bool(re.search(
-                                              rb'\.\.\.\(__deg\.length\?\{deg:__deg\.slice\(0,5\)\}:\{\}\)', d))
+                                              rb'\.\.\.\(__deg\.length\?\{deg:__dcut\(__deg,5\)\}:\{\}\)', d))
                                           and bool(re.search(
                                               rb'__e3\.__ccJudgeBlock=!0;throw __e3', d)),
     # запасной промпт обязан уметь отменять, иначе гейт формально жив и
@@ -538,11 +548,26 @@ checks = {
     'fallback prompt can cancel': b'BLOCK cancels the dispatch' in d
                                           and b'SWAP:<model>:<why>' not in d
                                           and bool(re.search(
-                                              rb'__deg\.push\("prompt-missing"\)', d)),
+                                              rb'let __pmm="prompt-missing:"\+__dir', d)),
     # ответ мимо словаря — не вердикт: прежде он записывался как ok
     'an unrecognised answer is not a verdict': bool(re.search(
                                               rb'return \(\(String\(__rr\)\.match\(__rx\)\|\|\[\]\)\.pop\(\)\|\|""\)\.trim\(\)', d))
                                           and len(re.findall(rb'\.pop\(\)\)\|\|__ct\)\.trim\(\)', d)) == 0,
+    # из отмены обязан быть выход: какой файл чинить и не отброшено ли
+    # молча ещё несколько таких же
+    'a cancelled dispatch names the file to fix': bool(re.search(
+                                              rb'"prompt-missing:"\+__dir\+"/prompt\.md"', d))
+                                          # списки деградаций режутся с объявлением
+                                          and bool(re.search(
+                                              rb'__dcut=\(__l,__k\)=>__l\.length<=__k\?__l:'
+                                              rb'__l\.slice\(0,__k\)\.concat\(', d))
+                                          and len(re.findall(rb'__deg\.slice\(0,5\)', d)) == 0
+                                          and len(re.findall(rb'__degb\.slice\(0,3\)', d)) == 0
+                                          and bool(re.search(rb'deg:__dcut\(__deg,5\)', d))
+                                          # на свежей установке журнал заводит свой каталог
+                                          and bool(re.search(
+                                              rb'catch\(__ae\)\{if\(__ae\?\.code!=="ENOENT"\)throw __ae;'
+                                              rb'await __jfs\.mkdir\(__jdir,\{recursive:!0\}\)', d)),
     # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
     # человека: иначе закрепление сохраняет его навсегда как санкцию
     'judge does not read command output as the human': bool(re.search(
