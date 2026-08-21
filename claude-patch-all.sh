@@ -166,9 +166,10 @@ fi
 
 # --- 5. verify ---------------------------------------------------------------
 echo "==> Verifying"
-python3 - "$BIN" <<'PY'
+python3 - "$BIN" "$OUR_PATCH" <<'PY'
 import re, sys
 d = open(sys.argv[1], 'rb').read()
+src = open(sys.argv[2], encoding='utf-8').read()
 ID = rb'[A-Za-z_$][\w$]*'
 
 def _same_env_helper(d):
@@ -198,8 +199,51 @@ def _judge_catch_scope(d):
     used = set(re.findall(rb'(__\w+)', body))
     return not (used - declared - local)
 
+def _captured_names(src):
+    # Имена, снятые с захвата регуляркой, и всё, что из них собрано.
+    n = set(re.findall(r'const (\w+) = [^;\n]*\[\d+\]', src))
+    for _ in range(3):
+        for m in re.finditer(r'const (\w+) =\s*(`[^`]*`)', src):
+            if any(g in n for g in re.findall(r'\$\{(\w+)\}', m.group(2))):
+                n.add(m.group(1))
+    return n
+
+def _escaped_interpolations(src):
+    # Минифицированное имя может содержать `$`: в 2.1.239 матчер сессии зовётся
+    # `$jS`. В ИСХОДНИКЕ регулярки `$` — якорь конца строки, поэтому имя,
+    # вклеенное голым, не совпадает НИКОГДА, и локатор падает не потому, что
+    # сборка изменилась, а потому что минификатор выбрал другую букву. В строке
+    # ЗАМЕНЫ тот же `$` читается как ссылка на группу и подставляет чужой
+    # захват — уже молча. Проверяется КЛАСС: ни одно захваченное имя не стоит в
+    # шаблоне или замене без rxEsc/repEsc. На источнике до фикса ловится 12 мест.
+    names, lines, bad = _captured_names(src), src.split('\n'), []
+    for i, ln in enumerate(lines):
+        hits = [x for x in names if '${%s}' % x in ln]
+        if not hits:
+            continue
+        for j in range(i, max(-1, i - 6), -1):
+            t = lines[j]
+            if 'applied.push(' in t or 'fail(' in t:
+                break
+            if 'new RegExp(' in t or 'js.replace(' in t:
+                bad += hits
+                break
+    return not bad
+
+def _judge_both_shapes(src):
+    # 2.1.239 увёл вызов инструмента за адаптер: `e.call(w,ctx,…)` стал
+    # `hii(e).execute(w,ctx,…)`, где `hii(e) = e.executor ?? {execute:…}`.
+    # Локатор судьи обязан держать ОБЕ формы и цепляться за сам инструмент, а
+    # не за обёртку: `.name` есть у инструмента, у адаптера его нет.
+    i = src.find("step('22 judge consulted")
+    j = src.find("step('23", i)
+    blk = src[i:j] if i >= 0 and j > i else ''
+    return (r'\\.call|' in blk) and (r'\\)\\.execute' in blk) and ('m[2] ?? m[3]' in blk)
+
 checks = {
     'routing (claude-* -> subscription)': b'baseURL:/^claude/i.test(' in d,
+    'captured names are escaped into patterns': _escaped_interpolations(src),
+    'judge anchors both tool-call shapes':      _judge_both_shapes(src),
     'agent model schema relaxed':         b'.enum(["sonnet","opus","haiku","fable"])' not in d,
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
     'subagent model badge':               not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d),

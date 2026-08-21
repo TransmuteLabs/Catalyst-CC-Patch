@@ -28,6 +28,17 @@ const fail = msg => {
 const applied = [];
 const failures = [];
 
+// Минифицированное имя может содержать `$`: в 2.1.239 сессионный матчер
+// зовётся `$jS`. В ИСХОДНИКЕ регулярки `$` — якорь конца строки, и имя,
+// вклеенное без экранирования, не совпадает НИКОГДА: локатор падает не потому,
+// что сборка изменилась, а потому что минификатор выбрал другую букву. В СТРОКЕ
+// ЗАМЕНЫ `$` — ссылка на группу, и то же имя молча превратится в чужой захват.
+// Всякое ЗАХВАЧЕННОЕ имя проходит через rxEsc перед вклейкой в шаблон и через
+// repEsc перед вклейкой в замену. Групповые ссылки ($1, $2 …), которые мы
+// пишем сами, не экранируются — они и должны остаться ссылками.
+const rxEsc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const repEsc = s => String(s).replace(/\$/g, '$$$$');
+
 // Each patch is run in isolation and its failure RECORDED rather than thrown,
 // so one run reports EVERY broken locator instead of only the first. That
 // matters because a new Claude Code release can break several at once, and each
@@ -493,7 +504,7 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   const forkMatch = js.match(new RegExp(`is_fork:(${ID}),`));
   if (!forkMatch) fail('fork flag not found (is_fork telemetry)');
   const fork = forkMatch[1];
-  const dropped = `${fork}\\?void 0:(${ID})`;
+  const dropped = `${rxEsc(fork)}\\?void 0:(${ID})`;
 
   // resolve site: getAgentModel(<defModel>(<agent>,<main>),<main>,<override>,...)
   const resolveRx = new RegExp(`(=${ID}\\(${ID}\\(${ID},(${ID})\\),\\2,)${dropped},`);
@@ -521,7 +532,7 @@ step('12 dispatch may choose model and effort (forks included)', () => {
     `dispatch_class:${str}().optional().describe(` +
     `"Optional routing class for this dispatch. Not used by Claude Code itself; ` +
     `it is read by the PreToolUse routing gate when one is configured.")`;
-  js = js.replace(bgField, `${newFields}$1$2`);
+  js = js.replace(bgField, `${repEsc(newFields)}$1$2`);
 
   // (c) destructure effort in the tool's call handler, alongside the rest
   const callRx = new RegExp(`(async call\\(\\{prompt:${ID},subagent_type:${ID},[^}]{0,400}?)(\\},${ID},)`);
@@ -597,7 +608,7 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
   if (!exportMatch) fail('isCoordinatorMode export not found');
   const isCoordinator = exportMatch[1];
 
-  const aliasRx = new RegExp(`function ${isCoordinator}\\(\\)\\{return (${ID})\\(\\)\\}`);
+  const aliasRx = new RegExp(`function ${rxEsc(isCoordinator)}\\(\\)\\{return (${ID})\\(\\)\\}`);
   const aliasMatch = js.match(aliasRx);
   if (!aliasMatch) fail(`coordinator predicate ${isCoordinator}() is not a plain alias`);
   const gate = aliasMatch[1];
@@ -612,7 +623,7 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
   //     behave the same in the running binary, so this reuses the helper the
   //     product itself trusts rather than a re-derivation of it.)
   const gateRx = new RegExp(
-    `(function ${gate}\\(\\)\\{if\\(!(${ID})\\(process\\.env\\.CLAUDE_CODE_COORDINATOR_MODE\\)\\)return!1;` +
+    `(function ${rxEsc(gate)}\\(\\)\\{if\\(!(${ID})\\(process\\.env\\.CLAUDE_CODE_COORDINATOR_MODE\\)\\)return!1;` +
       `if\\(${ID}\\(\\)&&!${ID}\\(\\)&&!${ID}\\.CLAUDE_CODE_REMOTE)(\\)return!1;return!0\\})`,
   );
   const gateMatch = js.match(gateRx);
@@ -620,7 +631,7 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
   const envTruthy = gateMatch[2];
   js = js.replace(
     gateRx,
-    `$1&&!${envTruthy}(process.env.CLAUDE_CODE_COORDINATOR_INTERACTIVE)$3`,
+    `$1&&!${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_INTERACTIVE)$3`,
   );
 
   // (b) stop the mode from disabling fork.
@@ -710,15 +721,15 @@ step('14 environment overrides a resumed session mode', () => {
   // read of the predicate and the "coordinator" comparison identify the
   // function even if the wording of the warnings changes.
   const matcherRx = new RegExp(
-    `(function ${matcher}\\((${ID})\\)\\{if\\(!\\2\\)return;)` +
-      `(let ${ID}=${isCoordinator}\\(\\),${ID}=\\2==="coordinator";)`,
+    `(function ${rxEsc(matcher)}\\((${ID})\\)\\{if\\(!\\2\\)return;)` +
+      `(let ${ID}=${rxEsc(isCoordinator)}\\(\\),${ID}=\\2==="coordinator";)`,
   );
   if (!matcherRx.test(js)) {
     fail(`resume mode matcher ${matcher}() does not have the expected shape`);
   }
   js = js.replace(
     matcherRx,
-    `$1if(${envTruthy}(process.env.CLAUDE_CODE_COORDINATOR_FORCE))return;$3`,
+    `$1if(${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_FORCE))return;$3`,
   );
 
   applied.push(
@@ -978,7 +989,7 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   );
   const mWait = js.match(rxWait);
   if (!mWait) fail('streaming retry wait not found');
-  js = js.replace(rxWait, `if($1=null,!$2)await $3(${backoff}($4),$5);continue $6}`);
+  js = js.replace(rxWait, `if($1=null,!$2)await $3(${repEsc(backoff)}($4),$5);continue $6}`);
 
   // 3. The connection-retry cap taken from the max-retries setting:
   //    `let <cap>=<maxRetries>();if(<isConn>&&<stop>===null&&<n><<cap>){`
@@ -1126,12 +1137,25 @@ step('21 current turn reachable at tool dispatch', () => {
 step('22 judge consulted before a subagent dispatch', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   // se=await e.call(E,{...n,toolUseId:t,userModified:X.userModified??!1},o,i,p)
+  // Форма вызова инструмента сменилась в 2.1.239: прямой `e.call(w,ctx,…)`
+  // уехал за адаптер `hii(e).execute(w,ctx,…)`, где
+  // `hii(e) = e.executor ?? {execute:(…)=>e.call(…)}`. Держатся ОБЕ формы:
+  // сборки с прямым вызовом ещё в ходу, и локатор, знающий только новую,
+  // сломался бы на них ровно так же.
+  //
+  // Судья цепляется за САМ инструмент, а не за адаптер: `.name` есть у `e`,
+  // у обёртки его нет. В прямой форме имя инструмента ловится группой 2, в
+  // адаптерной — группой 3; дальше обе сводятся к одному имени, и номера групп
+  // наружу не торчат.
   const rx = new RegExp(
-    `(${ID})=await (${ID})\\.call\\((${ID}),\\{\\.\\.\\.(${ID}),toolUseId:(${ID}),` +
+    `(${ID})=await (?:(${ID})\\.call|${ID}\\((${ID})\\)\\.execute)` +
+      `\\((${ID}),\\{\\.\\.\\.(${ID}),toolUseId:(${ID}),` +
       `userModified:(${ID})\\.userModified\\?\\?!1\\},(${ID}),(${ID}),(${ID})\\)`,
   );
   const m = js.match(rx);
   if (!m) fail('tool dispatch call site not found');
+  const TOOL = m[2] ?? m[3];
+  const SLOT = { $1: m[1], $2: TOOL, $3: m[4], $4: m[5], $5: m[6], $6: m[7] };
   // Судья едет НА СОБСТВЕННОМ одиночном запросе клиента
   // (queryModelWithoutStreaming), а не на своём HTTP-вызове: эта функция идёт
   // через ту же фабрику клиента, что и любой другой запрос, поэтому пул
@@ -1148,7 +1172,7 @@ step('22 judge consulted before a subagent dispatch', () => {
   if (!qm) fail('single-shot query engine not found');
   // Минифицированное имя может содержать `$`, а строка замены трактует `$` как
   // ссылку на группу — экранируем прежде, чем вклеивать в замену.
-  const QM = qm[1].replace(/\$/g, '$$$$');
+  const QM = repEsc(qm[1]);
   // Everything the operator tunes lives in files read ON EVERY CALL, not in the
   // binary: a judge whose wording can only change by re-patching cannot be
   // iterated on. body.json is a full request template with {{CONTEXT}} and
@@ -1731,11 +1755,19 @@ step('22 judge consulted before a subagent dispatch', () => {
       'if(__jarm){let __e2=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0441\\u043c\\u043e\\u0433 \\u0432\\u044b\\u043d\\u0435\\u0441\\u0442\\u0438 \\u0440\\u0435\\u0448\\u0435\\u043d\\u0438\\u0435 ("+__rs+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435.");' +
         '__e2.__ccJudgeBlock=!0;throw __e2}' +
       'if(process.env.CLAUDE_JUDGE_DEBUG)console.error("[Judge] skipped: "+(__e?.message??__e));}}';
-  js = js.replace(
-    rx,
-    `${judge}$1=await $2.call($3,{...$4,toolUseId:$5,userModified:$6.userModified??!1},$7,$8,$9)`,
+  // Вклейка по СМЕЩЕНИЮ, а не через String.replace: номера групп разъезжаются
+  // между двумя формами вызова, а строка замены ещё и читает `$` как ссылку.
+  // Срез по m.index не трактует ничего, а сам вызов возвращается на место
+  // дословно (m[0]) — переписывать его нам незачем.
+  const judgeResolved = judge.replace(/\$([1-9])/g, (t, d) => {
+    const v = SLOT['$' + d];
+    if (!v) fail(`judge body references ${t}, which this call shape does not bind`);
+    return v;
+  });
+  js = js.slice(0, m.index) + judgeResolved + m[0] + js.slice(m.index + m[0].length);
+  applied.push(
+    `judge: consulted before dispatch (tool '${TOOL}', input '${m[4]}', context '${m[5]}')`,
   );
-  applied.push(`judge: consulted before dispatch (tool '${m[2]}', input '${m[3]}', context '${m[4]}')`);
 });
 
 // ---------------------------------------------------------------------------
@@ -1760,9 +1792,9 @@ step('23 statusline update throttle', () => {
   const m = js.match(site);
   if (!m) fail('statusline debounce call site not found');
   const constName = m[5];
-  const decl = new RegExp(`var ${constName}=300\\b`);
+  const decl = new RegExp(`var ${rxEsc(constName)}=300\\b`);
   if (!decl.test(js)) fail(`statusline throttle constant '${constName}' is not the expected 300`);
-  js = js.replace(decl, `var ${constName}=${THROTTLE_MS}`);
+  js = js.replace(decl, `var ${repEsc(constName)}=${THROTTLE_MS}`);
   applied.push(`statusline throttle 300 -> ${THROTTLE_MS}ms (constant '${constName}')`);
 });
 
