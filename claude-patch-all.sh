@@ -190,7 +190,13 @@ def _judge_catch_scope(d):
     m = re.search(rb'let __t0=Date\.now\(\),(.{0,900}?)__jdir=', d, re.S)
     if not m:
         return False
+    # __o — параметр самой функции ядра, а не объявление внутри тела: он в
+    # области видимости всегда, и требовать его объявления значило бы требовать
+    # невозможного. Берётся из сигнатуры, а не вписывается константой.
+    sig = re.search(rb'globalThis\.__ccProbe\?\?=async function\((__\w+)\)', d)
     declared = set(re.findall(rb'(__\w+)\s*=', m.group(1))) | {b'__jdir', b'__cut'}
+    if sig:
+        declared |= {sig.group(1)}
     c = re.search(rb'\}\}catch\(__e\)\{if\(__e&&__e\.__ccJudgeBlock\)throw __e;(.{0,1400}?)\}\}', d, re.S)
     if not c:
         return False
@@ -389,7 +395,105 @@ checks = {
     'judge consulted before dispatch': bool(re.search(
                                               rb'if\(process\.env\.CLAUDE_JUDGE&&\(' + ID + rb'\.name==="Agent"'
                                               rb'\|\|' + ID + rb'\.name==="Task"\)&&' + ID +
-                                              rb'\?\.agentContext\?\.agentType==="main"\)\{', d)),
+                                              rb'\?\.agentContext\?\.agentType==="main"\)'
+                                              rb'await globalThis\.__ccProbe\(\{', d)),
+    # Ядро объявляется ОДИН раз и обоими потребителями зовётся по имени: два
+    # определения разошлись бы правками, а разошедшееся ядро — это ровно то,
+    # ради чего копия с исключениями и была отвергнута.
+    'probe core defined once': bool(re.search(
+                                              rb'globalThis\.__ccProbe\?\?=async function\(__o\)\{', d)),
+    # Словарь вердикта задаёт ВЫЗЫВАЮЩИЙ: у судьи и наблюдателя он разный, и
+    # зашитый в ядро словарь молча судил бы наблюдателя судейскими словами.
+    'probe verdict vocabulary comes from the caller': bool(re.search(
+                                              rb'let __rx=new RegExp\("\^\\\\s\*\(\?:"\+__o\.rx\+"\):\.\*\$","gm"\)', d))
+                                          and bool(re.search(
+                                              rb'rx:"OK\|BLOCK\|STOP\|DENY\|WARN",act:"BLOCK\|STOP\|DENY"', d)),
+    # Регулярка, собранная из СТРОКИ, требует двойного слэша: одинарный тихо
+    # вырождает класс (`"\s"` в строке JS — это буква s, `"[\s\S]"` — это [sS]),
+    # и словарь вердикта перестаёт совпадать, оставаясь синтаксически верным.
+    # Измерено стендом: BLOCK записывался как ok, и судья не отменял ничего.
+    'probe verdict classes survive string escaping': bool(re.search(
+                                              rb'new RegExp\("\^\(\?:"\+__o\.act\+"\):\\\\s\*'
+                                              rb'\(\[\\\\s\\\\S\]\+\)\$","m"\)', d))
+                                          and not re.search(
+                                              rb'new RegExp\("\^\(\?:"\+__o\.act\+"\):\\s\*\(\[\\s\\S\]\+\)', d),
+    # Наблюдатель — второй потребитель ТОГО ЖЕ ядра. Отдельное определение
+    # здесь означало бы, что разбор на ядро не состоялся.
+    'watcher rides the same core': bool(re.search(
+                                              rb'if\(process\.env\.CLAUDE_IDLE&&' + ID +
+                                              rb'\?\.agentContext\?\.agentType==="main"\)'
+                                              rb'await globalThis\.__ccProbe\(\{'
+                                              rb'tag:"\[Watch\]",dirName:"idle-watch",arm:!1,'
+                                              rb'label:"FLEET",rx:"SILENT\|NUDGE",act:"NUDGE",', d)),
+    # Реакция наблюдателя — вкладка в ход, а не отмена вызова. Бросок здесь
+    # ронял бы работающий инструмент ради напоминания; `arm:!1` вдобавок
+    # запирает путь отказа, по которому судья отменяет вызов.
+    'watcher nudges through the notification queue': bool(re.search(
+                                              rb'onAct:\(__r\)=>\{try\{' + ID +
+                                              rb'\(\{value:"\[fleet-idle\] "\+__r\+"[^"]*",'
+                                              rb'mode:"task-notification",agentId:' + ID +
+                                              rb'\(\),priority:"later"\}\)\}catch\{\}\}', d))
+                                          and bool(re.search(
+                                              rb'onNoVerdict:\(\)=>\{\},onBroken:\(\)=>\{\},'
+                                              rb'onFail:\(\)=>\{\}\}\)', d)),
+    # Счёт флота ведётся на КАЖДОМ вызове инструмента: считать только там, где
+    # зовут наблюдателя, значит никогда не увидеть уже запущенных субагентов.
+    # Список ограничен сверху — иначе он растёт всю сессию.
+    'watcher counts every dispatch': bool(re.search(
+                                              rb'globalThis\.__ccFleet\?\?=\[\];if\(' + ID +
+                                              rb'\.name==="Agent"\|\|' + ID + rb'\.name==="Task"\)\{'
+                                              rb'globalThis\.__ccFleet\.push\(Date\.now\(\)\);', d))
+                                          and bool(re.search(
+                                              rb'if\(globalThis\.__ccFleet\.length>256\)', d)),
+    # Дешёвый счёт стоит ПЕРЕД моделью: занятый флот, ненабранное окно и период
+    # покоя отсекают консультацию бесплатно. Без этого наблюдатель стал бы
+    # постоянной статьёй расхода на каждом вызове инструмента.
+    'watcher spends nothing before the cheap count': bool(re.search(
+                                              rb'if\(__ask&&__o\.gate\)\{let __g=null;', d))
+                                          # три отказа счёта; точный миг каждого проверяется
+                                          # отдельно ниже
+                                          and bool(re.search(rb'return "fleet-busy:"\+__n\}', d))
+                                          and bool(re.search(rb'return "window-not-filled"\}', d))
+                                          and bool(re.search(rb'return "cooldown"\}', d)),
+    # Пробу зовут на каждом вызове инструмента, поэтому отсев обязан стоять
+    # ДО чтения настроек: обход дерева вверх стоит десятки обращений к файловой
+    # системе, а журналируемый отказ утопил бы журнал человека.
+    'probe skips before touching the disk': bool(re.search(
+                                              rb'globalThis\.__ccProbe\?\?=async function\(__o\)\{'
+                                              rb'if\(__o\.pre\)\{let __pr=null;try\{__pr=__o\.pre\(\)\}'
+                                              rb'catch\{__pr=null\}if\(__pr\)return\}', d)),
+    # Отсев должен знать МИГ, а не интервал опроса: каждый отказ дешёвого счёта
+    # называет время, раньше которого он не может смениться.
+    'watcher names the next possible moment': bool(re.search(
+                                              rb'pre:\(\)=>\{let __s=globalThis\.__ccWatch;'
+                                              rb'return __s&&__s\.nextAt>Date\.now\(\)\?"not-yet":null\}', d))
+                                          and bool(re.search(
+                                              rb'if\(__n>=__th\)\{__s\.nextAt=__f\[__n-__th\]\+__w;', d))
+                                          and bool(re.search(
+                                              rb'__s\.nextAt=__s\.start\+__w;', d))
+                                          and bool(re.search(
+                                              rb'__s\.nextAt=__s\.last\+__cd;', d))
+                                          and bool(re.search(
+                                              rb'__s\.last=__now;__s\.nextAt=__now\+__cd;return null', d)),
+    # Отказ дешёвого счёта попадает в журнал с ПРИЧИНОЙ: иначе «не звали» и
+    # «позвали и промолчал» неразличимы, а это два разных исхода.
+    'watcher journals why it stayed cheap': bool(re.search(
+                                              rb'await __jlog\(\{outcome:"filtered",by:String\(__g\),'
+                                              rb'cls:null\}\)', d)),
+    # Слово исхода в журнале — класс, названный моделью, а не судейское
+    # «block»: словарь приходит от вызывающего, и зашитое слово писало бы
+    # молчание наблюдателя теми же знаками, что настоящую отмену судьи.
+    'outcome word comes from the verdict class': bool(re.search(
+                                              # регулярка-ЛИТЕРАЛ: один слэш, в отличие от
+                                              # собранной из строки словарной выше
+                                              rb'let __ocw=String\(\(/\^\\s\*\(\[A-Za-z\]\+\):/'
+                                              rb'\.exec\(__v\|\|""\)\|\|\[\]\)\[1\]\|\|"ok"\)'
+                                              rb'\.toLowerCase\(\);', d))
+                                          and bool(re.search(
+                                              rb'outcome:__bl\?\(__en\?__ocw:__ocw\+"_not_enforced"\):'
+                                              rb'\(__v\?__ocw:', d))
+                                          and not re.search(
+                                              rb'outcome:__bl\?\(__en\?"block"', d),
     # a WARN never reaches the model and a fail-open skip leaves no trace,
     # so both are only observable through the append-only journal
     'judge journals every consultation': bool(re.search(
@@ -398,10 +502,13 @@ checks = {
     # consultation cost — without both, `block` and `block_not_enforced` are
     # separable only by guessing at the environment of a past run
     'judge journal records cost and switch': bool(re.search(
-                                              rb'ms:Date\.now\(\)-__t0,sw:process\.env\.CLAUDE_JUDGE\|\|null', d))
+                                              rb'ms:Date\.now\(\)-__t0,sw:__o\.sw\|\|null', d))
                                           and bool(re.search(
-                                              rb'en:__en\?\(process\.env\.CLAUDE_JUDGE==="enforce"\?'
-                                              rb'"env":"config"\):null', d)),
+                                              rb'en:__en\?\(__o\.sw==="enforce"\?'
+                                              rb'"env":"config"\):null', d))
+                                          # переключателем судьи остаётся именно env: ядро его не знает
+                                          and bool(re.search(
+                                              rb'sw:process\.env\.CLAUDE_JUDGE,', d)),
     # the journal line clips the verdict and holds none of the material the
     # judge saw, so the request/response pair is kept beside it per consultation
     # a text prefix cannot carry provenance — content shares its namespace and
@@ -472,7 +579,12 @@ checks = {
                                               rb'__fc=!__v&&__en&&__fcl', d))
                                           and bool(re.search(
                                               rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
-                                          and bool(re.search(rb'if\(__fc\)\{let __e0=', d)),
+                                          and bool(re.search(rb'if\(__fc\)await __o\.onNoVerdict\(', d))
+                                          # ...и реакция судьи на неё обязана быть броском, иначе
+                                          # fail_closed превращается в fail-open одной правкой вызова
+                                          and bool(re.search(
+                                              rb'onNoVerdict:\(__r\)=>\{let __e=new Error\([\s\S]{0,4000}?'
+                                              rb'__e\.__ccJudgeBlock=!0;throw __e\}', d)),
     # отмена по каналу и отмена по вердикту — разные дефекты, разные имена
     'judge names a fail-closed cancellation': bool(re.search(
                                               rb'__fc\?"block_no_verdict":"empty"', d)),
@@ -545,18 +657,18 @@ checks = {
     # отказ канала при fail_closed = ОТМЕНА, а не пропуск: повтор на короткой
     # ленте не был обёрнут, его падение писалось как штатный skip и вызов шёл
     'judge cancels when it cannot decide': bool(re.search(
-                                              rb'if\(__ask\)\{__jarm=__en&&__fcl;', d))
+                                              rb'if\(__ask\)\{__jarm=!!__o\.arm&&__en&&__fcl;', d))
                                           # повтор обёрнут так же, как ступень
                                           and bool(re.search(
                                               rb'try\{__raw=await __call\(__cut\(Number\('
                                               rb'__cfg\.retry_context_chars\?\?8000\)\)', d))
                                           # обязательство снимается ПОСЛЕДНИМ
                                           and bool(re.search(
-                                              rb'__er\.__ccJudgeBlock=!0;throw __er\}__jarm=!1;\}\}catch', d))
+                                              rb'await __o\.onAct\(__bl\[1\]\.trim\(\)\);__jarm=!1;\}\}catch', d))
                                           and bool(re.search(
                                               rb'outcome:__jarm\?"block_no_verdict":"skip"', d))
                                           and bool(re.search(
-                                              rb'if\(__jarm\)\{let __e2=new Error', d))
+                                              rb'if\(__jarm\)await __o\.onFail\(__rs\);', d))
                                           # запись журнала не уводит управление мимо решений
                                           and bool(re.search(
                                               rb'try\{await __jlog\(\{http:__jst,outcome:__bl\?', d))
@@ -599,11 +711,17 @@ checks = {
     'judge cancels when its rules are broken': bool(re.search(
                                               rb'if\(__degb\.length&&__en\)\{', d))
                                           and bool(re.search(
-                                              rb'outcome:"block_degraded"', d))
+                                              rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\)\)', d))
+                                          and bool(re.search(
+                                              rb'outcome:__o\.arm\?"block_degraded":"skip_degraded"', d))
+                                          # проба, которая не отменяет вызов, не платит за консультацию
+                                          # по правилам, которых у неё нет
+                                          and bool(re.search(
+                                              rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\)\);return\}', d))
                                           and bool(re.search(
                                               rb'\.\.\.\(__deg\.length\?\{deg:__dcut\(__deg,5\)\}:\{\}\)', d))
                                           and bool(re.search(
-                                              rb'__e3\.__ccJudgeBlock=!0;throw __e3', d)),
+                                              rb'onBroken:\(__r\)=>\{let __e=new Error[\s\S]{0,4000}?__e\.__ccJudgeBlock=!0;throw __e\}', d)),
     # запасной промпт обязан уметь отменять, иначе гейт формально жив и
     # содержательно выключен: в прежнем слова BLOCK не было вовсе
     'fallback prompt can cancel': b'BLOCK cancels the dispatch' in d

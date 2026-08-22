@@ -1180,8 +1180,16 @@ step('22 judge consulted before a subagent dispatch', () => {
   // editable; prompt.md is the shorthand when only the instruction changes.
   // Substituted text goes through JSON.stringify minus its outer quotes, so a
   // quote or newline in the transcript cannot break the template's JSON.
-  const judge =
-    'if(process.env.CLAUDE_JUDGE&&($2.name==="Agent"||$2.name==="Task")&&$4?.agentContext?.agentType==="main"){' +
+  const core =
+    '/*__ccProbe0*/globalThis.__ccProbe??=async function(__o){' +
+    // Отсев ДО всякого ввода-вывода. Пробу, которую зовут на каждом вызове
+    // инструмента, «дешёвый счёт после чтения настроек» разоряет дважды:
+    // обход дерева вверх стоит до 96 обращений к файловой системе на вызов, а
+    // отказ пишется строкой в журнал — тот самый, который читает человек.
+    // Предикат работает только по памяти и НЕ пишет ничего: пропущенный проход
+    // это не исход консультации, а её отсутствие. Бросок предиката ведёт к
+    // полному проходу, а не к пропуску: сбой отсева не должен ослеплять пробу.
+    'if(__o.pre){let __pr=null;try{__pr=__o.pre()}catch{__pr=null}if(__pr)return}' +
     // Every consultation is journaled, not just the ones run with debug on:
     // a WARN has no channel to the model (the dispatch proceeds, and the
     // tool_result the model later sees comes from the agent itself), and a
@@ -1217,14 +1225,14 @@ step('22 judge consulted before a subagent dispatch', () => {
     '__clip=(__s,__k)=>{let __x=String(__s??"");return __x.length<=__k?__x:'+
       '__x.slice(0,__k)+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+'+
       '(__x.length-__k)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432]"},' +
-    '__jdir=process.env.CLAUDE_JUDGE_DIR||((process.env.HOME||".")+"/.claude/judge");' +
+    '__jdir=__o.dirEnv||((process.env.HOME||".")+"/.claude/"+__o.dirName);' +
     // The journal line is an INDEX, not evidence: its verdict is clipped and
     // the material the judge actually saw is nowhere in it, so neither
     // "did it judge correctly" nor "train a smaller model on these" can be
     // answered from it. The full request/response pair is written beside it,
     // one file per consultation, and the journal line carries its name.
     'let __jsave=async(__ts,__base)=>{if(!__jrec||!__jreq||!__jfs)return null;' +
-      'let __n=__ts.replace(/[:.]/g,"-")+"-"+String($5).slice(-8)+".json"+(__jgz?".gz":"");' +
+      'let __n=__ts.replace(/[:.]/g,"-")+"-"+String(__o.key).slice(-8)+".json"+(__jgz?".gz":"");' +
       'try{await __jfs.mkdir(__jdir+"/records",{recursive:!0});' +
         'let __rq;try{__rq=JSON.parse(__jreq)}catch{__rq=__jreq}' +
         'let __data=JSON.stringify({...__base,http:__jst,url:__jurl,pid:process.pid,' +
@@ -1233,14 +1241,14 @@ step('22 judge consulted before a subagent dispatch', () => {
         'if(__jgz){try{let __z=await import("node:zlib");__out=__z.gzipSync(Buffer.from(__data))}' +
           'catch{__n=__n.replace(/\\.gz$/,"")}}' +
         'await __jfs.writeFile(__jdir+"/records/"+__n,__out);return __n}' +
-      'catch(__re){try{console.error("[Judge] record write failed: "+(__re?.message??__re))}catch{}return null}};' +
+      'catch(__re){try{console.error(__o.tag+" record write failed: "+(__re?.message??__re))}catch{}return null}};' +
     // `ms` and `sw` exist because both were unobservable before: a `block`
     // line and a `block_not_enforced` line differ only by a state the record
     // never held, and the latency tax — the feature's whole running cost —
     // was measurable only by watching a session with a stopwatch.
-    'let __jlog=async(__o)=>{let __ts=new Date().toISOString();' +
-      'let __base={t:__ts,tool:$2.name,agent:$3?.subagent_type,model:$3?.model,' +
-        'ms:Date.now()-__t0,sw:process.env.CLAUDE_JUDGE||null,...__o};' +
+    'let __jlog=async(__oc)=>{let __ts=new Date().toISOString();' +
+      'let __base={t:__ts,tool:__o.tool.name,agent:__o.input?.subagent_type,model:__o.input?.model,' +
+        'ms:Date.now()-__t0,sw:__o.sw||null,...__oc};' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +
       // На свежей установке каталога судьи ещё нет, а отмен там больше всего:
@@ -1251,10 +1259,10 @@ step('22 judge consulted before a subagent dispatch', () => {
         'catch(__ae){if(__ae?.code!=="ENOENT")throw __ae;' +
           'await __jfs.mkdir(__jdir,{recursive:!0});' +
           'await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}}' +
-      'catch(__we){try{console.error("[Judge] journal write failed: "+' +
+      'catch(__we){try{console.error(__o.tag+" journal write failed: "+' +
         '(__we?.message??__we)+" | "+__r)}catch{}}};' +
     'try{' +
-      'let __t=globalThis.__ccJudgeTurn?.get($5)||[];globalThis.__ccJudgeTurn?.delete($5);' +
+      'let __t=globalThis.__ccJudgeTurn?.get(__o.key)||[];globalThis.__ccJudgeTurn?.delete(__o.key);' +
       // Provenance, not just role. Claude Code files tool results, injected
       // reminders, task notifications and peer messages under the SAME "user"
       // role as something the human typed, so a judge shown bare role labels
@@ -1267,47 +1275,8 @@ step('22 judge consulted before a subagent dispatch', () => {
       // роль "user" всё новые виды записей, и каждый находился ПО ИНЦИДЕНТУ.
       // Поэтому неизвестная обёртка, уцелевшая в классе "user", попадает в
       // журнал полем uw — класс становится измеримым, а не сюрпризом.
-      'let __uw=[];' +
-      'let __arr=[...($4.messages||[]),...__t].map((__M)=>{let __m=__M?.message;if(!__m)return null;' +
-        'let __c=Array.isArray(__m.content)?__m.content:[{type:"text",text:String(__m.content??"")}];' +
-        'let __bt=__c.map((__b)=>__b?.type==="text"?__b.text:' +
-        '__b?.type==="thinking"?"[thinking] "+__b.thinking:' +
-        '__b?.type==="tool_use"?"[tool "+__b.name+"] "+JSON.stringify(__b.input).slice(0,400):' +
-        '__b?.type==="tool_result"?"[result] "+String(typeof __b.content==="string"?__b.content:JSON.stringify(__b.content)).slice(0,300):' +
-        '"["+__b?.type+"]").join("\\n");if(!__bt)return null;' +
-        // Provenance comes from the ENVELOPE first (isMeta / toolUseResult are
-        // what Claude Code itself uses to tell synthetic and tool messages
-        // apart) and only falls back to sniffing wrapper markers.
-        'let __role=__m.role||__M.type||"?";' +
-        'if(__role==="user")__role=(__M?.toolUseResult!==void 0||__c.some((__x)=>__x?.type==="tool_result"))' +
-          // Вывод локальной команды приходит под ролью "user" — это ОТВЕТ
-          // ПРОГРАММЫ на действие человека, а не его слова. Измерено стендом
-          // 2026-08-21: блоки <local-command-stdout> оседали в единственном
-          // происхождении, которому судья даёт вес санкции, и после
-          // закрепления оседали НАВСЕГДА. Сам вызов команды — действие
-          // человека, но не указание судье, поэтому у него своя метка.
-          '?"tool-output":__M?.isCompactSummary?"compaction-summary":' +
-          '(__bt.includes("<local-command-stdout")||' +
-            '__bt.includes("<local-command-stderr"))?"tool-output":' +
-          // <command-args> несёт СОБСТВЕННЫЕ слова человека («веди полосу
-          // lane-16, без агентов и без скриптов»), а не имя команды. Измерено
-          // стендом 2026-08-21 по стенограммам проекта: 24 непустых блока, все
-          // — распоряжения. Значит запись с непустыми аргументами это речь
-          // человека со всеми правами санкции; голый вызов вроде /model —
-          // действие человека, но не указание судье.
-          '(/<command-args>\\s*[^\\s<]/.test(__bt))?"user":' +
-          '(__bt.includes("<command-name>")||__bt.includes("<command-message>")||' +
-            '__bt.includes("<command-args>"))?"user-command":' +
-          '((__M?.isMeta||__M?.isVisibleInTranscriptOnly||' +
-            '__bt.includes("<system-reminder")||__bt.includes("<task-notification")||' +
-            '__bt.includes("<cross-session-message")||__bt.includes("[SYSTEM NOTIFICATION")||' +
-            '__bt.includes("[Request interrupted by user"))?"injected":"user");' +
-        'if(__role==="user"){let __wm=/^\\s*<([a-z][a-z0-9-]*)/i.exec(__bt);' +
-          'if(__wm&&["command-name","command-message","command-args"].indexOf(__wm[1].toLowerCase())<0' +
-            '&&__uw.indexOf(__wm[1])<0)__uw.push(__wm[1])}' +
-        'return{src:__role,text:__bt}}).filter(Boolean);' +
       'let __fs=await import("node:fs/promises");__jfs=__fs;' +
-      'let __dir=process.env.CLAUDE_JUDGE_DIR||((process.env.HOME||".")+"/.claude/judge");' +
+      'let __dir=__o.dirEnv||((process.env.HOME||".")+"/.claude/"+__o.dirName);' +
       // The judge stays project-agnostic on purpose: it rules on the event, the
       // logic and the rules, not on what a project is about. What a project MAY
       // do is restate the rules for itself — a nearest `.claude/judge` above the
@@ -1329,8 +1298,8 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __pcode=(__er)=>{let __c=String(__er?.code||"");' +
         'return __c==="EACCES"||__c==="EPERM"?2:' +
         '(__c==="ENOENT"||__c==="ENOTDIR"||__c==="ELOOP"||__c==="ENAMETOOLONG"?0:3)};' +
-      'if(!process.env.CLAUDE_JUDGE_DIR)try{let __p=process.cwd();' +
-        'for(let __i=0;__i<24;__i++){let __c=__p+"/.claude/judge";' +
+      'if(!__o.dirEnv)try{let __p=process.cwd();' +
+        'for(let __i=0;__i<24;__i++){let __c=__p+"/.claude/"+__o.dirName;' +
           'let __has=await Promise.all([__c+"/config.json",__c+"/prompt.md",' +
             '__c+"/prompt.extra.md",__c+"/body.json"].map((__f)=>' +
             '__fs.access(__f).then(()=>({c:1})).catch((__er)=>' +
@@ -1372,9 +1341,9 @@ step('22 judge consulted before a subagent dispatch', () => {
       'if(__cfg.record===!1)__jrec=!1;' +
       'if(__cfg.record_gzip===!0)__jgz=!0;' +
       'let __ask=!0;' +
-      'if(__cfg.filter){let __f=__cfg.filter,__pm=String($3?.prompt??""),' +
+      'if(__cfg.filter){let __f=__cfg.filter,__pm=String(__o.input?.prompt??""),' +
         '__cl=(/\\[dispatch-class:([\\w-]+)\\]/.exec(__pm)||[])[1]||"",' +
-        '__ag=String($3?.subagent_type??""),' +
+        '__ag=String(__o.input?.subagent_type??""),' +
         '__mt=(__l,__s)=>Array.isArray(__l)&&__l.length>0&&__l.some((__r)=>{try{return new RegExp(__r).test(__s)}catch{return !1}});' +
         'let __by=null;' +
         'if(__mt(__f.classes_skip,__cl))__by="classes_skip";' +
@@ -1384,15 +1353,66 @@ step('22 judge consulted before a subagent dispatch', () => {
           'if(!(__mt(__f.classes_judge,__cl)||__mt(__f.agents_judge,__ag)))' +
             '__by=__cl?"not_in_judge_list":"no_class_marker"}' +
         'if(__by){__ask=!1;await __jlog({outcome:"filtered",by:__by,cls:__cl||null})}}' +
+      // Собственный дешёвый счёт пробы: получает УЖЕ прочитанные настройки и
+      // возвращает причину не звать модель. Судья его не задаёт — у него
+      // консультация безусловна; наблюдателю без него консультация стала бы
+      // постоянной статьёй расхода на каждом вызове инструмента.
+      'if(__ask&&__o.gate){let __g=null;try{__g=await __o.gate(__cfg)}catch(__ge){' +
+        '__g="gate-failed:"+String(__ge?.message??__ge)}' +
+        'if(__g){__ask=!1;await __jlog({outcome:"filtered",by:String(__g),cls:null})}}' +
+      // Лента строится ПОСЛЕ фильтра и дешёвого счёта, а не до них: наблюдатель
+      // зовётся на каждом вызове инструмента, и разбор всей истории ради
+      // немедленного отказа был бы платой за работу, которая не нужна. Снятие
+      // снимка хода осталось выше — иначе отфильтрованный вызов оставлял бы
+      // запись в таблице ходов навсегда.
+      'let __uw=[];' +
+      'let __arr=[...(__o.ctx.messages||[]),...__t].map((__M)=>{let __m=__M?.message;if(!__m)return null;' +
+        'let __c=Array.isArray(__m.content)?__m.content:[{type:"text",text:String(__m.content??"")}];' +
+        'let __bt=__c.map((__b)=>__b?.type==="text"?__b.text:' +
+        '__b?.type==="thinking"?"[thinking] "+__b.thinking:' +
+        '__b?.type==="tool_use"?"[tool "+__b.name+"] "+JSON.stringify(__b.input).slice(0,400):' +
+        '__b?.type==="tool_result"?"[result] "+String(typeof __b.content==="string"?__b.content:JSON.stringify(__b.content)).slice(0,300):' +
+        '"["+__b?.type+"]").join("\\n");if(!__bt)return null;' +
+        // Provenance comes from the ENVELOPE first (isMeta / toolUseResult are
+        // what Claude Code itself uses to tell synthetic and tool messages
+        // apart) and only falls back to sniffing wrapper markers.
+        'let __role=__m.role||__M.type||"?";' +
+        'if(__role==="user")__role=(__M?.toolUseResult!==void 0||__c.some((__x)=>__x?.type==="tool_result"))' +
+          // Вывод локальной команды приходит под ролью "user" — это ОТВЕТ
+          // ПРОГРАММЫ на действие человека, а не его слова. Измерено стендом
+          // 2026-08-21: блоки <local-command-stdout> оседали в единственном
+          // происхождении, которому судья даёт вес санкции, и после
+          // закрепления оседали НАВСЕГДА. Сам вызов команды — действие
+          // человека, но не указание судье, поэтому у него своя метка.
+          '?"tool-output":__M?.isCompactSummary?"compaction-summary":' +
+          '(__bt.includes("<local-command-stdout")||' +
+            '__bt.includes("<local-command-stderr"))?"tool-output":' +
+          // <command-args> несёт СОБСТВЕННЫЕ слова человека («веди полосу
+          // lane-16, без агентов и без скриптов»), а не имя команды. Измерено
+          // стендом 2026-08-21 по стенограммам проекта: 24 непустых блока, все
+          // — распоряжения. Значит запись с непустыми аргументами это речь
+          // человека со всеми правами санкции; голый вызов вроде /model —
+          // действие человека, но не указание судье.
+          '(/<command-args>\\s*[^\\s<]/.test(__bt))?"user":' +
+          '(__bt.includes("<command-name>")||__bt.includes("<command-message>")||' +
+            '__bt.includes("<command-args>"))?"user-command":' +
+          '((__M?.isMeta||__M?.isVisibleInTranscriptOnly||' +
+            '__bt.includes("<system-reminder")||__bt.includes("<task-notification")||' +
+            '__bt.includes("<cross-session-message")||__bt.includes("[SYSTEM NOTIFICATION")||' +
+            '__bt.includes("[Request interrupted by user"))?"injected":"user");' +
+        'if(__role==="user"){let __wm=/^\\s*<([a-z][a-z0-9-]*)/i.exec(__bt);' +
+          'if(__wm&&["command-name","command-message","command-args"].indexOf(__wm[1].toLowerCase())<0' +
+            '&&__uw.indexOf(__wm[1])<0)__uw.push(__wm[1])}' +
+        'return{src:__role,text:__bt}}).filter(Boolean);' +
       // enforce/fail_closed вычисляются ДО консультации: обязательство
       // вынести решение должно быть известно и на пути отказа, где ни
       // вердикта, ни __cfg уже не прочитать.
       // Непонятый конфиг = enforce и fail_closed НЕИЗВЕСТНЫ. Считать их
       // выключенными значит выключать гейт одним битым файлом, поэтому
       // здесь они считаются включёнными: ложная отмена дешевле пропуска.
-      'let __en=process.env.CLAUDE_JUDGE==="enforce"||__cfg.enforce===!0||__cfgbad;' +
+      'let __en=__o.sw==="enforce"||__cfg.enforce===!0||__cfgbad;' +
       'let __fcl=__cfgbad||__cfg.fail_closed===!0;' +
-      'if(__ask){__jarm=__en&&__fcl;' +
+      'if(__ask){__jarm=!!__o.arm&&__en&&__fcl;' +
       // The transcript is handed over as a JSON ARRAY, not as labelled lines.
       // A text prefix cannot carry trust: content and label share one
       // namespace, so any line inside a tool output, a file, a web page or a
@@ -1514,9 +1534,12 @@ step('22 judge consulted before a subagent dispatch', () => {
         'return JSON.stringify(__a)};' +
       'let __max=Number(__cfg.context_chars||60000);' +
       'let __ctx=__cut(__max);' +
-      'let __disp=JSON.stringify($3).slice(0,Number(__cfg.dispatch_chars||4000));' +
+      'let __disp=String(__o.payload!==void 0?(typeof __o.payload==="function"?' +
+        'await __o.payload():__o.payload):JSON.stringify(__o.input))' +
+        '.slice(0,Number(__cfg.dispatch_chars||4000));' +
+      'let __lbl=String(__o.label||"DISPATCH");' +
       'let __emb=(__s)=>JSON.stringify(String(__s)).slice(1,-1);' +
-      'let __sys=process.env.CLAUDE_JUDGE_PROMPT;' +
+      'let __sys=__o.promptEnv;' +
       'if(!__sys&&__pdir)__sys=await __rdj(__pdir+"/prompt.md");' +
       'if(!__sys)__sys=await __rdj(__dir+"/prompt.md");' +
       // Дописка проекта читается той же читалкой: её немое исчезновение —
@@ -1550,7 +1573,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // differ — a congested provider needs a longer deadline, a reasoning
       // model a larger budget, an oversized transcript a shorter tail. A bare
       // string stays valid shorthand for {model:<name>}.
-      'let __mdls=(process.env.CLAUDE_JUDGE_MODEL?[process.env.CLAUDE_JUDGE_MODEL]:' +
+      'let __mdls=(__o.modelEnv?[__o.modelEnv]:' +
         '(Array.isArray(__cfg.models)&&__cfg.models.length?__cfg.models:[__cfg.model||"glm-5.3"]))' +
         '.map((__x)=>typeof __x==="string"?{model:__x}:__x).filter((__x)=>__x&&__x.model);' +
       'if(!__mdls.length)__mdls=[{model:"glm-5.3"}];' +
@@ -1574,16 +1597,16 @@ step('22 judge consulted before a subagent dispatch', () => {
         'return JSON.stringify(__obj)}catch{' +
         'return JSON.stringify({model:__mdl,max_tokens:Number(__e.max_tokens||__cfg.max_tokens||300),' +
           'messages:[{role:"system",content:__sys},' +
-          '{role:"user",content:"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== DISPATCH ===\\n"+__disp}]})}};' +
+          '{role:"user",content:"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp}]})}};' +
       'let __pool=typeof ' + QM + '==="function"?' + QM + ':null;' +
-      'let __purl=(()=>{let __u=process.env.CLAUDE_JUDGE_URL||__cfg.url||process.env.ANTHROPIC_BASE_URL||"http://127.0.0.1:8317";__u=String(__u).replace(/\\/+$/,"");return /\\/v1$/.test(__u)?__u+"/chat/completions":__u+"/v1/chat/completions"})();' +
+      'let __purl=(()=>{let __u=__o.urlEnv||__cfg.url||process.env.ANTHROPIC_BASE_URL||"http://127.0.0.1:8317";__u=String(__u).replace(/\\/+$/,"");return /\\/v1$/.test(__u)?__u+"/chat/completions":__u+"/v1/chat/completions"})();' +
       // Пул — путь по умолчанию. Сырой HTTP остаётся ТОЛЬКО как явно названный
       // адрес (проба стенда бьёт в свой приёмник) или как страховка, если
       // связывания с пулом в этой сборке не нашлось: судья, потерявший канал,
       // обязан деградировать, а не молчать.
-      'let __http=!!(process.env.CLAUDE_JUDGE_URL||__cfg.url||__cfg.raw_http===!0)||!__pool;' +
+      'let __http=!!(__o.urlEnv||__cfg.url||__cfg.raw_http===!0)||!__pool;' +
       '__jurl=__http?__purl:"pool";' +
-      'let __tmo=Number(process.env.CLAUDE_JUDGE_TIMEOUT_MS||__cfg.timeout_ms||8000);' +
+      'let __tmo=Number(__o.tmoEnv||__cfg.timeout_ms||8000);' +
       'let __call=async(__cx,__ms,__e)=>{' +
         'let __s0=Date.now(),__a={model:__e.model,via:__http?"http":"pool",ctx_chars:__cx.length,' +
           'timeout_ms:__ms,max_tokens:__e.max_tokens||__cfg.max_tokens||null,' +
@@ -1595,7 +1618,7 @@ step('22 judge consulted before a subagent dispatch', () => {
         '__jres=null;__jst=null;' +
         'try{' +
           'if(__http){let __b=__mkb(__cx,__e);__jreq=__b;' +
-            'if(process.env.CLAUDE_JUDGE_DEBUG)try{await __fs.writeFile(__dir+"/last-request.json",__b)}catch{}' +
+            'if(__o.dbg)try{await __fs.writeFile(__dir+"/last-request.json",__b)}catch{}' +
             'let __r=await fetch(__purl,{method:"POST",signal:__ac.signal,' +
               'headers:{"content-type":"application/json"},body:__b});' +
             'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.resp=__clip(__t,800);' +
@@ -1604,7 +1627,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           // Усилие едет полем options, а не полем тела: тело здесь не наше, его
           // собирает клиент. Ограничение вывода — maxOutputTokensOverride, оно
           // же единственный дом бюджета на этом пути.
-          'let __ut="=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== DISPATCH ===\\n"+__disp;' +
+          'let __ut="=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp;' +
           '__jreq=JSON.stringify({via:"pool",model:__e.model,effort:__e.effort||null,' +
             'max_tokens:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
             'messages:[{role:"system",content:__sys},{role:"user",content:__ut}]});' +
@@ -1615,8 +1638,8 @@ step('22 judge consulted before a subagent dispatch', () => {
             'options:{model:__e.model,isNonInteractiveSession:!0,hasAppendSystemPrompt:!1,' +
               'agents:[],mcpTools:[],querySource:"hook_prompt",toolChoice:void 0,' +
               'maxOutputTokensOverride:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
-              'effortValue:__e.effort||void 0,agentId:$4?.agentId,agentContext:$4?.agentContext,' +
-              'getToolPermissionContext:async()=>$4?.getAppState?.()?.toolPermissionContext}});' +
+              'effortValue:__e.effort||void 0,agentId:__o.ctx?.agentId,agentContext:__o.ctx?.agentContext,' +
+              'getToolPermissionContext:async()=>__o.ctx?.getAppState?.()?.toolPermissionContext}});' +
           'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__clip(__t2,800);' +
           '__a.ms=Date.now()-__s0;' +
           '__jst=__r2?.isApiErrorMessage?"api_error":200;__a.http=__jst;' +
@@ -1650,7 +1673,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // «вердикт первой строкой» не разошлось между каналами.
       'let __pv=(__r0)=>{let __j;try{__j=JSON.parse(__r0)}catch{__j=null}' +
         'let __mm=__j?.choices?.[0]?.message||{};' +
-        'let __rx=/^\\s*(?:OK|BLOCK|STOP|DENY|WARN):.*$/gm;' +
+        'let __rx=new RegExp("^\\\\s*(?:"+__o.rx+"):.*$","gm");' +
         'let __bl=Array.isArray(__j?.message?.content)?__j.message.content:' +
           '(Array.isArray(__j?.content)?__j.content:null);' +
         'let __ct=String(__mm.content??"");' +
@@ -1668,10 +1691,16 @@ step('22 judge consulted before a subagent dispatch', () => {
         // «я не знаю, по каким правилам судить». Под enforce такой вызов
         // отменяется с названием файла, а не пропускается молча.
         'if(__degb.length&&__en){' +
-          'try{await __jlog({outcome:"block_degraded",tries:__jtry,jm:null,' +
-            'cfg:__pdir||null,deg:__dcut(__deg,5)})}catch{}' +
-          'let __e3=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u043d\\u0430\\u0441\\u0442\\u0440\\u043e\\u0439\\u043a\\u0438 \\u0441\\u0443\\u0434\\u044c\\u0438 \\u0441\\u043b\\u043e\\u043c\\u0430\\u043d\\u044b ("+__dcut(__degb,3).join("; ")+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443: \\u043f\\u043e\\u043a\\u0430 \\u0444\\u0430\\u0439\\u043b \\u043d\\u0435 \\u043f\\u043e\\u0447\\u0438\\u043d\\u0435\\u043d, \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0437\\u043d\\u0430\\u0435\\u0442, \\u043f\\u043e \\u043a\\u0430\\u043a\\u0438\\u043c \\u043f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430\\u043c \\u0441\\u0443\\u0434\\u0438\\u0442\\u044c.");' +
-          '__e3.__ccJudgeBlock=!0;throw __e3}' +
+          // Проба, которая не отменяет вызов, ничего и не заблокировала —
+          // писать ей «block_degraded» значит одним словом называть отмену и
+          // молчание.
+          'try{await __jlog({outcome:__o.arm?"block_degraded":"skip_degraded",' +
+            'tries:__jtry,jm:null,cfg:__pdir||null,deg:__dcut(__deg,5)})}catch{}' +
+          'await __o.onBroken(__dcut(__degb,3).join("; "));' +
+          // Судья отсюда не возвращается — его onBroken бросает. Вернувшаяся
+          // проба не знает своих правил, и запасной промпт её словаря не
+          // содержит: консультация была бы платой за заведомое молчание.
+          'return}' +
       'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
         'try{__jtry=__i+1;__jm=__e.model;' +
@@ -1700,7 +1729,7 @@ step('22 judge consulted before a subagent dispatch', () => {
         'catch(__ce){__raw=null;__errs.push(__jm+": "+String(__ce?.name||"Error")+": "+' +
           '__clip(__ce?.message??__ce,80))}}' +
       '__jerr1=__errs.join(" | ")||null;' +
-      'if(process.env.CLAUDE_JUDGE_DEBUG){console.error("[Judge] "+__v.slice(0,300));' +
+      'if(__o.dbg){console.error(__o.tag+" "+__v.slice(0,300));' +
         'try{await __fs.writeFile(__dir+"/last-verdict.txt",__v)}catch{}}' +
       // The judge does not rewrite the dispatch — it CANCELS it and says why.
       // Rewriting would produce a model/effort pair that nothing validates:
@@ -1710,7 +1739,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // mattering. Thrown rather than hand-built: a tool that throws already
       // surfaces to the model as an error tool_result, which is exactly
       // "stop, and here is what is wrong" — and it couples to no minified name.
-      'let __bl=/^(?:BLOCK|STOP|DENY):\\s*([\\s\\S]+)$/m.exec(__v);' +
+      'let __bl=new RegExp("^(?:"+__o.act+"):\\\\s*([\\\\s\\\\S]+)$","m").exec(__v);' +
       // Отмена по исчерпанию лестницы — дефект КАНАЛА, отмена по вердикту —
       // дефект СУЖДЕНИЯ, и лечатся они разным. Пока обе писались как "empty"
       // (то же слово, что у пропущенного вызова при fail_closed:false), снаружи
@@ -1718,9 +1747,15 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __fc=!__v&&__en&&__fcl;' +
       // Журнал не смеет увести управление мимо решений ниже: сбой записи
       // при готовом BLOCK ушёл бы во внешний catch и стал бы пропуском.
-      'try{await __jlog({http:__jst,outcome:__bl?(__en?"block":"block_not_enforced"):' +
-        '(/^\\s*WARN:/.test(__v)?"warn":__v?"ok":(__fc?"block_no_verdict":"empty")),' +
-        'en:__en?(process.env.CLAUDE_JUDGE==="enforce"?"env":"config"):null,' +
+      // Слово исхода — тот самый класс, который назвала модель, а не судейское
+      // «block». Ядро словаря не знает: он приходит от вызывающего в __o.rx, и
+      // зашитое здесь «block» писало бы в журнал наблюдателя, что тот отменил
+      // диспатч, — одним словом с настоящей отменой судьи, неотличимо.
+      // Для судейских OK/WARN/BLOCK слово выходит прежним, знак в знак.
+      'let __ocw=String((/^\\s*([A-Za-z]+):/.exec(__v||"")||[])[1]||"ok").toLowerCase();' +
+      'try{await __jlog({http:__jst,outcome:__bl?(__en?__ocw:__ocw+"_not_enforced"):' +
+        '(__v?__ocw:(__fc?"block_no_verdict":"empty")),' +
+        'en:__en?(__o.sw==="enforce"?"env":"config"):null,' +
         '...(__uw.length?{uw:__uw.slice(0,5)}:{}),' +
         '...(__deg.length?{deg:__dcut(__deg,5)}:{}),' +
         'tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
@@ -1732,16 +1767,8 @@ step('22 judge consulted before a subagent dispatch', () => {
       // ступень по подписке лежит только вместе с самим клиентом, так что
       // полный провал означает, что сессии и так нечем работать. Выключается
       // одним ключом конфига, без пересборки бинарника.
-      'if(__fc){' +
-        'let __e0=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u043f\\u043e\\u043b\\u0443\\u0447\\u0438\\u043b \\u0432\\u0435\\u0440\\u0434\\u0438\\u043a\\u0442 \\u043d\\u0438 \\u043d\\u0430 \\u043e\\u0434\\u043d\\u043e\\u0439 \\u0441\\u0442\\u0443\\u043f\\u0435\\u043d\\u0438 (' + '"+String(__jerr1||"").slice(0,200)+"' + '). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435, \\u043a\\u043e\\u0433\\u0434\\u0430 \\u043a\\u0430\\u043d\\u0430\\u043b \\u043e\\u0436\\u0438\\u0432\\u0451\\u0442.");' +
-        '__e0.__ccJudgeBlock=!0;throw __e0}' +
-      'if(__bl&&__en){' +
-                // tweakcc unpacks and repacks the bundle as BYTES, so a literal
-        // non-ASCII character injected here comes back double-encoded and
-        // the model reads mojibake (measured 2026-08-20). Emitted escaped,
-        // it is ASCII on the wire and correct in the running string.
-        'let __er=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d \\u0441\\u0443\\u0434\\u044c\\u0451\\u0439 \\u0432\\u044b\\u0437\\u043e\\u0432\\u043e\\u0432 (\\u044d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438 hooks/routing-table.toml). \\u041f\\u0440\\u0438\\u0447\\u0438\\u043d\\u0430: "+__bl[1].trim());' +
-        '__er.__ccJudgeBlock=!0;throw __er}' +
+      'if(__fc)await __o.onNoVerdict(String(__jerr1||"").slice(0,200));' +
+      'if(__bl&&__en)await __o.onAct(__bl[1].trim());' +
       // Решение вынесено — обязательство снято. Снимается ПОСЛЕДНИМ: всё,
       // что бросит раньше, обязано отменить вызов, а не пропустить его.
       '__jarm=!1;' +
@@ -1752,14 +1779,110 @@ step('22 judge consulted before a subagent dispatch', () => {
       // Отказ судьи при взведённом обязательстве — не пропуск, а отмена:
       // сюда приходит и падение до лестницы (конфиг, тело, подрезка), где
       // вердикта нет и быть не может.
-      'if(__jarm){let __e2=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0441\\u043c\\u043e\\u0433 \\u0432\\u044b\\u043d\\u0435\\u0441\\u0442\\u0438 \\u0440\\u0435\\u0448\\u0435\\u043d\\u0438\\u0435 ("+__rs+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435.");' +
-        '__e2.__ccJudgeBlock=!0;throw __e2}' +
-      'if(process.env.CLAUDE_JUDGE_DEBUG)console.error("[Judge] skipped: "+(__e?.message??__e));}}';
+      'if(__jarm)await __o.onFail(__rs);' +
+      'if(__o.dbg)console.error(__o.tag+" skipped: "+(__e?.message??__e));}};';
+
+  // Судья — первый потребитель ядра. Судейское живёт ЗДЕСЬ и только здесь:
+  // когда звать, что показывать, каким словарём судить и чем отвечать на
+  // вердикт. Тексты отказов перенесены ДОСЛОВНО: они приходят в модель как
+  // ошибка инструмента, и правка их формулировок меняет то, что модель
+  // прочтёт, — это отдельное решение, а не побочный эффект разбора на ядро.
+  //
+  // Реакция судьи — бросок. Он не привязан ни к одному минифицированному имени:
+  // инструмент, бросивший исключение, и так возвращается модели ошибкой.
+  const judgeCall =
+    'if(process.env.CLAUDE_JUDGE&&($2.name==="Agent"||$2.name==="Task")' +
+      '&&$4?.agentContext?.agentType==="main")' +
+    'await globalThis.__ccProbe({' +
+      'tag:"[Judge]",dirName:"judge",arm:!0,' +
+      // Словарь вердикта — параметр, а не свойство ядра: у наблюдателя он свой.
+      'rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",' +
+      'sw:process.env.CLAUDE_JUDGE,dirEnv:process.env.CLAUDE_JUDGE_DIR,' +
+      'promptEnv:process.env.CLAUDE_JUDGE_PROMPT,modelEnv:process.env.CLAUDE_JUDGE_MODEL,' +
+      'urlEnv:process.env.CLAUDE_JUDGE_URL,tmoEnv:process.env.CLAUDE_JUDGE_TIMEOUT_MS,' +
+      'dbg:process.env.CLAUDE_JUDGE_DEBUG,' +
+      'tool:$2,input:$3,ctx:$4,key:$5,' +
+      'onAct:(__r)=>{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d \\u0441\\u0443\\u0434\\u044c\\u0451\\u0439 \\u0432\\u044b\\u0437\\u043e\\u0432\\u043e\\u0432 (\\u044d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438 hooks/routing-table.toml). \\u041f\\u0440\\u0438\\u0447\\u0438\\u043d\\u0430: "+__r);__e.__ccJudgeBlock=!0;throw __e},' +
+      'onNoVerdict:(__r)=>{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u043f\\u043e\\u043b\\u0443\\u0447\\u0438\\u043b \\u0432\\u0435\\u0440\\u0434\\u0438\\u043a\\u0442 \\u043d\\u0438 \\u043d\\u0430 \\u043e\\u0434\\u043d\\u043e\\u0439 \\u0441\\u0442\\u0443\\u043f\\u0435\\u043d\\u0438 (' + '"+__r+"' + '). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435, \\u043a\\u043e\\u0433\\u0434\\u0430 \\u043a\\u0430\\u043d\\u0430\\u043b \\u043e\\u0436\\u0438\\u0432\\u0451\\u0442.");__e.__ccJudgeBlock=!0;throw __e},' +
+      'onBroken:(__r)=>{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u043d\\u0430\\u0441\\u0442\\u0440\\u043e\\u0439\\u043a\\u0438 \\u0441\\u0443\\u0434\\u044c\\u0438 \\u0441\\u043b\\u043e\\u043c\\u0430\\u043d\\u044b ("+__r+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443: \\u043f\\u043e\\u043a\\u0430 \\u0444\\u0430\\u0439\\u043b \\u043d\\u0435 \\u043f\\u043e\\u0447\\u0438\\u043d\\u0435\\u043d, \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0437\\u043d\\u0430\\u0435\\u0442, \\u043f\\u043e \\u043a\\u0430\\u043a\\u0438\\u043c \\u043f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430\\u043c \\u0441\\u0443\\u0434\\u0438\\u0442\\u044c.");__e.__ccJudgeBlock=!0;throw __e},' +
+      'onFail:(__r)=>{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0441\\u043c\\u043e\\u0433 \\u0432\\u044b\\u043d\\u0435\\u0441\\u0442\\u0438 \\u0440\\u0435\\u0448\\u0435\\u043d\\u0438\\u0435 ("+__r+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435.");__e.__ccJudgeBlock=!0;throw __e}' +
+    '});';
+
+
+  // Канал наблюдателя: очередь ожидающих уведомлений — та же, которой посреди
+  // хода приходят результаты фоновых задач. Она НЕ отменяет исполнение, а
+  // вкладывает текст в ход, и это единственная форма, годная для напоминания:
+  // изнутри исполняющегося инструмента массив сообщений недостижим вовсе
+  // (вложения собираются только ПОСЛЕ всего батча), поэтому судейский бросок
+  // здесь не подходит по устройству, а не по вкусу.
+  const nrx = new RegExp(
+    `(?:^|[^.\\w$])(${ID})\\(\\{mode:"task-notification",agentId:(${ID})\\(\\)`,
+  );
+  const nm = js.match(nrx);
+  if (!nm) fail('pending-notification queue not found');
+  const TV = repEsc(nm[1]);
+  const DI = repEsc(nm[2]);
+
+  // Наблюдатель — второй потребитель того же ядра. Отличий ровно четыре:
+  // когда звать, что показывать, каким промтом судить и как отвечать.
+  const watchCall =
+    // Счётчик флота ведётся на КАЖДОМ вызове инструмента, а не только при
+    // диспатче: без общей отметки времени «диспатчей за окно» неоткуда взять.
+    // Текущий диспатч учитывается ДО счёта — ход, в котором субагент запущен,
+    // молчалив по построению, и отдельного условия на это не нужно.
+    'globalThis.__ccFleet??=[];' +
+    'if($2.name==="Agent"||$2.name==="Task"){globalThis.__ccFleet.push(Date.now());' +
+      'if(globalThis.__ccFleet.length>256)globalThis.__ccFleet=globalThis.__ccFleet.slice(-256)}' +
+    'if(process.env.CLAUDE_IDLE&&$4?.agentContext?.agentType==="main")' +
+    'await globalThis.__ccProbe({' +
+      'tag:"[Watch]",dirName:"idle-watch",arm:!1,label:"FLEET",' +
+      // Словарь свой: наблюдателю нечего разрешать или запрещать, он либо
+      // молчит, либо называет предмет.
+      'rx:"SILENT|NUDGE",act:"NUDGE",' +
+      'sw:process.env.CLAUDE_IDLE,dirEnv:process.env.CLAUDE_IDLE_DIR,' +
+      'promptEnv:process.env.CLAUDE_IDLE_PROMPT,modelEnv:process.env.CLAUDE_IDLE_MODEL,' +
+      'urlEnv:process.env.CLAUDE_IDLE_URL,tmoEnv:process.env.CLAUDE_IDLE_TIMEOUT_MS,' +
+      'dbg:process.env.CLAUDE_IDLE_DEBUG,' +
+      'tool:$2,input:$3,ctx:$4,key:$5,' +
+      // Дешёвый счёт: окно, порог, период покоя. Окно должно сперва набраться —
+      // сессии моложе окна упрекнуть не в чем, она ещё ничего не пропустила.
+      // Предикат отсева знает ровно одно число и ни одного файла.
+      'pre:()=>{let __s=globalThis.__ccWatch;' +
+        'return __s&&__s.nextAt>Date.now()?"not-yet":null},' +
+      'gate:(__c)=>{let __now=Date.now(),' +
+        '__w=Number(__c.window_min||30)*60000,__th=Number(__c.threshold||1),' +
+        '__cd=Number(__c.cooldown_min||30)*60000;' +
+        'let __s=globalThis.__ccWatch??={last:0,start:__now};' +
+        '__s.w=__w;' +
+        'let __f=(globalThis.__ccFleet||[]).filter((__x)=>__now-__x<__w);' +
+        'let __n=__f.length;__s.n=__n;' +
+        // Каждый отказ называет МИГ, раньше которого он не может смениться:
+        // окно истекает у своей отметки, покой у своей, а счёт флота падает
+        // ниже порога, когда из окна выйдет (n-порог+1)-я по старшинству
+        // отметка. Отметки лежат в порядке появления, поэтому это индекс.
+        // Новый диспатч только отодвигает этот миг, значит ранняя оценка
+        // безопасна: она стоит одного лишнего полного прохода, не пропуска.
+        'if(__n>=__th){__s.nextAt=__f[__n-__th]+__w;return "fleet-busy:"+__n}' +
+        'if(__now-__s.start<__w){__s.nextAt=__s.start+__w;return "window-not-filled"}' +
+        'if(__now-__s.last<__cd){__s.nextAt=__s.last+__cd;return "cooldown"}' +
+        '__s.last=__now;__s.nextAt=__now+__cd;return null},' +
+      'payload:()=>JSON.stringify({spawns_in_window:globalThis.__ccWatch?.n??0,' +
+        'window_min:Math.round((globalThis.__ccWatch?.w??0)/60000),' +
+        'current_tool:$2.name}),' +
+      // Реакция: постановка в очередь. Ошибка постановки гасится — напоминание,
+      // уронившее рабочий вызов, было бы хуже пропущенного напоминания.
+      'onAct:(__r)=>{try{' + TV + '({value:"[fleet-idle] "+__r+"\\n(\\u041d\\u0430\\u043f\\u043e\\u043c\\u0438\\u043d\\u0430\\u043d\\u0438\\u0435 \\u043d\\u0430\\u0431\\u043b\\u044e\\u0434\\u0430\\u0442\\u0435\\u043b\\u044f \\u0437\\u0430 \\u0444\\u043b\\u043e\\u0442\\u043e\\u043c, \\u0430 \\u043d\\u0435 \\u0433\\u0435\\u0439\\u0442: \\u0440\\u0435\\u0448\\u0430\\u0435\\u0448\\u044c \\u0442\\u044b.)",' +
+        'mode:"task-notification",agentId:' + DI + '(),priority:"later"})}catch{}},' +
+      // Наблюдатель fail-open: нет вердикта, сломаны настройки, отказал канал —
+      // всё это остаётся в журнале и НИЧЕГО не останавливает.
+      'onNoVerdict:()=>{},onBroken:()=>{},onFail:()=>{}' +
+    '});/*__ccProbe1*/';
+
   // Вклейка по СМЕЩЕНИЮ, а не через String.replace: номера групп разъезжаются
   // между двумя формами вызова, а строка замены ещё и читает `$` как ссылку.
   // Срез по m.index не трактует ничего, а сам вызов возвращается на место
   // дословно (m[0]) — переписывать его нам незачем.
-  const judgeResolved = judge.replace(/\$([1-9])/g, (t, d) => {
+  const judgeResolved = (core + judgeCall + watchCall).replace(/\$([1-9])/g, (t, d) => {
     const v = SLOT['$' + d];
     if (!v) fail(`judge body references ${t}, which this call shape does not bind`);
     return v;

@@ -277,7 +277,18 @@ def load_proxy_catalogue():
         return {}
     out = {}
     for provider_id, rows in data.items():
+        # Прокси публикует запись провайдера двумя формами: голым списком
+        # моделей и обёрткой {"models": [...], "priority": N}. Обход словаря
+        # даёт СТРОКИ-ключи, а не записи, и читатель, знающий одну форму,
+        # падает на первой же обёртке — унося с собой весь шаг синхронизации
+        # цен и окон, а не одного провайдера. Поле "priority" здесь намеренно
+        # не используется: старшинство провайдеров задаётся своим списком ниже,
+        # и подменять его числом неизвестной полярности значит гадать.
+        if isinstance(rows, dict):
+            rows = rows.get("models")
         for row in rows or []:
+            if not isinstance(row, dict):
+                continue
             published = row.get("alias") or row.get("name")
             if not published or any(s in published for s in SKIP_SUBSTRINGS):
                 continue
