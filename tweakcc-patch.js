@@ -1890,6 +1890,48 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
 });
 
 
+// --------------------------------------------------------------------------
+// 27. РЕЖИМ ПОЛНОГО ПРОПУСКА ПРОПУСКАЕТ ВСЁ.
+//     Решение «спросить» несёт поле circuitBreaker; часть предохранителей
+//     помечена в реестре как bypassImmune, и на них режим полного пропуска не
+//     действует — запрос доходит до человека. Практический случай: удаление,
+//     чей путь не разрешается статически (glob, `~`, рабочий каталог и его
+//     предки), помечено `dangerousRemoval` с иммунитетом, и сессия, запущенная
+//     с ключом полного пропуска, всё равно останавливается на нём.
+//     Правится ТОЛЬКО ветка полного пропуска: в остальных режимах предохранитель
+//     работает как прежде, и второй потребитель предиката (выбор представителя
+//     среди нескольких результатов одной команды) не затрагивается.
+// --------------------------------------------------------------------------
+step('27 full-bypass mode admits no immunity', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+  const before = js.length;
+
+  // f=p&&l?.behavior==="ask"?_B(l.decisionReason,FMn):void 0;
+  // Якорится на форме, а не на именах: p — предикат режима, вычисленный строкой
+  // выше, l — накопленное решение, FMn — предикат иммунитета.
+  const rx = new RegExp(
+    `(${ID})=(${ID})&&(${ID})\\?\\.behavior==="ask"\\?` +
+      `(${ID})\\(\\3\\.decisionReason,(${ID})\\):void 0;`,
+  );
+  const m = js.match(rx);
+  if (!m) fail('bypass-immunity site not found');
+
+  // Соседняя строка обязана оказаться веткой режима полного пропуска: без этой
+  // сверки локатор мог бы сесть на однотипную форму в другом гейте.
+  const head = js.slice(Math.max(0, m.index - 260), m.index);
+  if (!head.includes('"bypassPermissions"')) {
+    fail('bypass-immunity site is not the permission-mode branch');
+  }
+
+  js = js.slice(0, m.index) + `${m[1]}=void 0;` + js.slice(m.index + m[0].length);
+
+  applied.push(
+    `full-bypass mode admits no circuit-breaker immunity ` +
+      `(flag '${m[1]}', mode predicate '${m[2]}', decision '${m[3]}', ${js.length - before} bytes)`,
+  );
+});
+
+
 // The gate lives at the very END on purpose: it was once placed mid-file, and
 // the four steps written after it ran unguarded — a broken locator among them
 // was recorded and never read, so the build reported success while the patch

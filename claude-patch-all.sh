@@ -240,10 +240,27 @@ def _judge_both_shapes(src):
     blk = src[i:j] if i >= 0 and j > i else ''
     return (r'\\.call|' in blk) and (r'\\)\\.execute' in blk) and ('m[2] ?? m[3]' in blk)
 
+def _bypass_no_immunity(d):
+    # Реестр помечает часть предохранителей иммунными к режиму полного пропуска,
+    # и на них сессия с ключом полного пропуска всё равно останавливается.
+    # Правится ТОЛЬКО режимная ветка: предикат иммунитета остаётся жив для
+    # второго потребителя (выбор представителя среди нескольких результатов
+    # одной команды), поэтому его единственное оставшееся употребление и есть
+    # доказательство, что снята именно ветка, а не механизм целиком.
+    # На непропатченном образе употреблений два — проверка падает.
+    m = re.search(rb'isBypassImmuneCircuitBreaker:\(\)=>(' + ID + rb')', d)
+    if not m:
+        return False
+    immune = re.escape(m.group(1))
+    if not re.search(rb'"bypassPermissions"\|\|.{0,240}?,' + ID + rb'=void 0;if\(', d, re.S):
+        return False
+    return len(re.findall(rb'\.decisionReason,' + immune + rb'\)', d)) == 1
+
 checks = {
     'routing (claude-* -> subscription)': b'baseURL:/^claude/i.test(' in d,
     'captured names are escaped into patterns': _escaped_interpolations(src),
     'judge anchors both tool-call shapes':      _judge_both_shapes(src),
+    'full bypass admits no immunity':          _bypass_no_immunity(d),
     'agent model schema relaxed':         b'.enum(["sonnet","opus","haiku","fable"])' not in d,
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
     'subagent model badge':               not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d),
