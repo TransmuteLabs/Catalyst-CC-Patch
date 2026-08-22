@@ -428,11 +428,21 @@ checks = {
     # Реакция наблюдателя — вкладка в ход, а не отмена вызова. Бросок здесь
     # ронял бы работающий инструмент ради напоминания; `arm:!1` вдобавок
     # запирает путь отказа, по которому судья отменяет вызов.
+    # Отсев главного лупа в ОБРАЗЕ — `dA(e)=e.agentId===Di()`; реконструкция
+    # typescript-src в этом месте говорит `undefined` и с 2.1.239 разошлась.
+    # Порог слива равен "later" только в ход со Sleep, поэтому "later" ждал бы
+    # Sleep неопределённо долго: журнал с "nudge" и ноль доставки.
     'watcher nudges through the notification queue': bool(re.search(
-                                              rb'onAct:\(__r\)=>\{try\{' + ID +
+                                              rb'onAct:async\(__r\)=>\{try\{' + ID +
                                               rb'\(\{value:"\[fleet-idle\] "\+__r\+"[^"]*",'
                                               rb'mode:"task-notification",agentId:' + ID +
-                                              rb'\(\),priority:"later"\}\)\}catch\{\}\}', d))
+                                              rb'\(\),priority:"next"\}\)\}', d))
+                                          # молчаливый catch здесь = журнал с nudge и ноль доставки
+                                          and bool(re.search(
+                                              rb'outcome:"nudge_undelivered"', d))
+                                          # адресат обязан совпадать с тем, что требует сам отсев
+                                          and bool(re.search(
+                                              rb'function (\w+)\(\w+\)\{return \w+\.agentId===(\w+)\(\)\}', d))
                                           and bool(re.search(
                                               rb'onNoVerdict:\(\)=>\{\},onBroken:\(\)=>\{\},'
                                               rb'onFail:\(\)=>\{\}\}\)', d)),
