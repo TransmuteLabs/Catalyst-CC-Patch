@@ -66,7 +66,9 @@ function locateNames(carved) {
   if (!slots) throw new Error('free names not found: tool, input, context, key');
   const pool = /let __pool=typeof ([A-Za-z_$][\w$]*)==="function"/.exec(carved);
   if (!pool) throw new Error('free name not found: pool');
-  const notify = /onAct:\(__r\)=>\{try\{([A-Za-z_$][\w$]*)\(\{value:"\[fleet-idle\] "/.exec(carved);
+  // Форма реакции менялась (стала асинхронной) — локатор не должен падать на
+  // том, что для него несущественно.
+  const notify = /onAct:(?:async)?\(__r\)=>\{try\{([A-Za-z_$][\w$]*)\(\{value:"\[fleet-idle\] "/.exec(carved);
   if (!notify) throw new Error('free name not found: notify');
   const agent = /mode:"task-notification",agentId:([A-Za-z_$][\w$]*)\(\)/.exec(carved);
   if (!agent) throw new Error('free name not found: agentId');

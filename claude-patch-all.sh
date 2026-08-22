@@ -504,6 +504,17 @@ checks = {
                                               rb'\(__v\?__ocw:', d))
                                           and not re.search(
                                               rb'outcome:__bl\?\(__en\?"block"', d),
+    # Корпус записей — материал для выбора модели и обучения своей, и разбирать
+    # его придётся снаружи. Словарь вердикта поэтому лежит В САМОЙ записи: копия
+    # в config.json была бы вторым источником правды и разъехалась бы молча, а
+    # без словаря инструменты разбора зашивают судейские OK/WARN/BLOCK и не
+    # выражают наблюдательские SILENT/NUDGE вовсе. В журнальной строке словаря
+    # нет намеренно — её читает человек.
+    'records carry their own verdict vocabulary': bool(re.search(
+                                              rb'JSON\.stringify\(\{\.\.\.__base,rx:__o\.rx,act:__o\.act,'
+                                              rb'http:__jst,url:__jurl,pid:process\.pid,', d))
+                                          and not re.search(
+                                              rb'let __base=\{t:__ts,rx:', d),
     # a WARN never reaches the model and a fail-open skip leaves no trace,
     # so both are only observable through the append-only journal
     'judge journals every consultation': bool(re.search(
@@ -571,7 +582,8 @@ checks = {
     # a record has to be REPLAYABLE, so it carries the endpoint, the sending
     # process, and what every rung was fed — not just the body that answered
     'judge keeps the full consultation': bool(re.search(
-                                              rb'\{\.\.\.__base,http:__jst,url:__jurl,pid:process\.pid,'
+                                              rb'\{\.\.\.__base,rx:__o\.rx,act:__o\.act,'
+                                              rb'http:__jst,url:__jurl,pid:process\.pid,'
                                               rb'cwd:process\.cwd\(\),attempts:__jatt,request:__rq,'
                                               rb'response:__jres\}', d))
                                           and bool(re.search(

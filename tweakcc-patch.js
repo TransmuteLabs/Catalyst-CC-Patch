@@ -1235,7 +1235,13 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __n=__ts.replace(/[:.]/g,"-")+"-"+String(__o.key).slice(-8)+".json"+(__jgz?".gz":"");' +
       'try{await __jfs.mkdir(__jdir+"/records",{recursive:!0});' +
         'let __rq;try{__rq=JSON.parse(__jreq)}catch{__rq=__jreq}' +
-        'let __data=JSON.stringify({...__base,http:__jst,url:__jurl,pid:process.pid,' +
+        // rx/act — только здесь, а не в общей основе: основа кормит и журнальную
+        // строку. Разборщику корпуса словарь нужен, чтобы не зашивать судейские
+        // OK/WARN/BLOCK в инструменты: у наблюдателя классы свои, и выразить его
+        // разметку судейскими словами нельзя. Источник словаря один — вызывающий
+        // в бинарнике; копия в config.json разъехалась бы с ним молча.
+        'let __data=JSON.stringify({...__base,rx:__o.rx,act:__o.act,' +
+          'http:__jst,url:__jurl,pid:process.pid,' +
           'cwd:process.cwd(),attempts:__jatt,request:__rq,response:__jres},null,1);' +
         'let __out=__data;' +
         'if(__jgz){try{let __z=await import("node:zlib");__out=__z.gzipSync(Buffer.from(__data))}' +
