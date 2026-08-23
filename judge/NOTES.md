@@ -125,3 +125,24 @@ thought of. A blocklist cannot catch the site nobody listed. It now pins the
 dispatch positively (the announced conditional must be present) and negatively
 (the bare form must be absent), and it was mutation-tested both ways: it fails
 on the pre-fix image and passes on the fixed one.
+
+### The notice had to move out of the payload (same day)
+
+The first fix appended `[диспатч подрезан: …]` to the END of the dispatch —
+inside text the caller writes. A brief ending with that line would declare
+itself cut BY US, and the prompt obliges the judge not to hold the truncation
+against it: a brief could excuse its own incompleteness. That is the origin
+confusion the transcript already defends against with the `src` field,
+reintroduced by hand at the one place where the payload is not framed.
+
+The notice now lives in the block HEADER, which we write and print BEFORE the
+payload: `=== DISPATCH — подрезан: показано N из M знаков ===`. The prompt says
+in as many words that a look-alike line inside the dispatch carries no weight.
+
+Two mechanical lessons from the same edit. `__dcut` was already taken in the
+core (the journal's list clipper, line ~1220) — the shadowing variable would
+have broken `deg` clipping silently; the write was aborted by the assertion
+before it landed. And the check caught the migration half-done: its positive
+pin still named the old tail form, so it failed on a correct image. A check
+that fails on the right binary is doing its job — that is what makes it not a
+rubber stamp.

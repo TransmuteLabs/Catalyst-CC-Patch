@@ -707,8 +707,11 @@ checks = {
                                           and len(re.findall(rb'\.resp=__t2?\.slice\(0,800\)', d)) == 0
                                           # диспатч режется ТОЛЬКО с объявлением
                                           and bool(re.search(
-                                              rb'__dsrc\.length>__dmax\?__dsrc\.slice\(0,__dmax\)\+', d))
-                                          and bool(re.search(rb'\]":__dsrc;', d))
+                                              rb'__dtr=__dsrc\.length>__dmax;', d))
+                                          and bool(re.search(
+                                              rb'__disp=__dtr\?__dsrc\.slice\(0,__dmax\):__dsrc', d))
+                                          and bool(re.search(
+                                              rb'__lbl=String\(__o\.label\|\|"DISPATCH"\)\+\(__dtr\?', d))
                                           and len(re.findall(
                                               rb'\.slice\(0,Number\(__cfg\.dispatch_chars', d)) == 0
                                           # до первой попытки попыток НОЛЬ

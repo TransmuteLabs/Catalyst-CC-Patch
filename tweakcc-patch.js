@@ -1548,9 +1548,15 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __dsrc=String(__o.payload!==void 0?(typeof __o.payload==="function"?' +
         'await __o.payload():__o.payload):JSON.stringify(__o.input));' +
       'let __dmax=Number(__cfg.dispatch_chars||16000);' +
-      'let __disp=__dsrc.length>__dmax?__dsrc.slice(0,__dmax)+' +
-        '"\\n[диспатч подрезан: показано "+__dmax+" из "+__dsrc.length+" знаков]":__dsrc;' +
-      'let __lbl=String(__o.label||"DISPATCH");' +
+      'let __dtr=__dsrc.length>__dmax;' +
+      'let __disp=__dtr?__dsrc.slice(0,__dmax):__dsrc;' +
+      // Объявление стоит в ШАПКЕ блока, а не в хвосте: хвост — текст
+      // вызывающего, и бриф, кончающийся такой строкой, объявил бы себя
+      // подрезанным НАМИ и выпросил снисхождение, которое судья по промпту
+      // обязан дать. Та же подмена происхождения, от которой ленту защищает
+      // поле src. Шапку пишем мы, и она печатается ПЕРЕД нагрузкой.
+      'let __lbl=String(__o.label||"DISPATCH")+(__dtr?" — подрезан: показано "' +
+        '+__dmax+" из "+__dsrc.length+" знаков":"");' +
       'let __emb=(__s)=>JSON.stringify(String(__s)).slice(1,-1);' +
       'let __sys=__o.promptEnv;' +
       'if(!__sys&&__pdir)__sys=await __rdj(__pdir+"/prompt.md");' +
