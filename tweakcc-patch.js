@@ -1617,7 +1617,8 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __s0=Date.now(),__a={model:__e.model,via:__http?"http":"pool",ctx_chars:__cx.length,' +
           'timeout_ms:__ms,max_tokens:__e.max_tokens||__cfg.max_tokens||null,' +
           'effort:__e.effort||null};__jatt.push(__a);' +
-        'let __ac=new AbortController(),__to=setTimeout(()=>__ac.abort(),__ms);' +
+        'let __ac=new AbortController(),__mine=!1,' +
+        '__to=setTimeout(()=>{__mine=!0;__ac.abort()},__ms);' +
         // Ответ и статус гасятся в НАЧАЛЕ попытки: запрос писался каждой
         // попыткой, а ответ только удачной, и запись склеивала запрос
         // последней попытки с ответом ранней, молча.
@@ -1658,8 +1659,13 @@ step('22 judge consulted before a subagent dispatch', () => {
               '.map((__b)=>__b.text).join(" ").slice(0,300)}catch{}' +
             'throw new Error("api error from the pool: "+(__et||"(\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430)"))}' +
           'return __t2}' +
-        'catch(__xe){__a.ms=Date.now()-__s0;' +
-          '__a.error=String(__xe?.name||"Error")+": "+String(__xe?.message??__xe).slice(0,120);throw __xe}' +
+        'catch(__xe){__a.ms=Date.now()-__s0;__a.timed_out=__mine||void 0;' +
+          // Свой потолок и чужой сбой приходят одной строкой "Request was aborted".
+          // Измерено 2026-08-23: ступень три дня умирала на СВОЁМ таймауте, а в
+          // журнале это читалось как флаки модели. Причина обязана называться на
+          // месте: разное лечение (потолок правится, апстрим — нет).
+          '__a.error=(__mine?"our cap "+__ms+"ms fired -> ":"")+String(__xe?.name||"Error")' +
+            '+": "+String(__xe?.message??__xe).slice(0,120);throw __xe}' +
         'finally{clearTimeout(__to)}};' +
       // The transcript IS the cost: a 60 KB consultation hit the deadline twice
       // running (measured 2026-08-20) and fail-open waved both dispatches
