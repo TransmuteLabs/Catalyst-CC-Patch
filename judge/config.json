@@ -1,6 +1,6 @@
 {
   "max_tokens": 12000,
-  "timeout_ms": 60000,
+  "timeout_ms": 240000,
   "enforce": true,
   "context_chars": 60000,
   "dispatch_chars": 4000,

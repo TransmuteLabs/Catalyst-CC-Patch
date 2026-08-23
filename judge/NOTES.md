@@ -43,8 +43,23 @@ budget. No cap below ~90 s can hold it at the judge's 12000-token budget, and
 shrinking the budget only guarantees truncation.
 
 So the ordering is not a cost question. glm-5.3 answers the same consultation
-in 6.4 s at 93%, flash in 22.5 s at 21%. flash stays as the second rung with
-the global 60 s cap, where it is reached only after glm has already failed.
+in 6.4 s at 93%, flash in 22.5 s at 21%. flash stays as the second rung, where
+it is reached only after glm has already failed.
+
+Note the quantity that makes this counter-intuitive: flash is genuinely the
+FASTER model per token — ~106 tokens/s against glm's ~41 (5204 tokens in 49 s
+against 181 in 4.4 s). It loses on wall-clock because it emits 29x more of
+them. For a gate standing in the dispatch path, time-to-verdict is the
+quantity that matters, not throughput.
+
+## The cap is 240 s (user ruling 2026-08-23)
+
+Raised from 60 s so flash can finish rather than be strangled: at the judge's
+budget it needs 49-118 s. The cap is global, so every rung inherits it, and
+the ladder is walked in sequence plus one short-tail retry — four calls, so a
+consultation where every rung times out can stand for 16 minutes in the path
+of the dispatch it is judging. The common path is unaffected: glm answers
+first in 4-10 s on 93% of consultations.
 
 ## The defect that let this hide for three days
 
