@@ -95,3 +95,33 @@ running the old strangled ladder for a full slice — 6 of 7 consultations
 burning 25 s on a rung that never answered. Any change to one is a change to
 both until the day they are meant to differ, and today they differ only in
 `max_tokens`, `dispatch_chars`, `fail_closed` and the watcher's own gate keys.
+
+## The dispatch was the one truncation nobody announced (2026-08-23)
+
+The house rule is old and written into the core itself: *every* truncation is
+declared, with the same convention as the transcript's, because a cut mid-word
+reads as a finished text. Journal fields declare it, records declare it, a
+clipped verdict declares it. The dispatch did not:
+
+    let __disp = String(...).slice(0, Number(__cfg.dispatch_chars || 4000));
+
+A bare slice, on the single object the judge exists to judge. Measured over the
+last 120 records: 29% of dispatches hit the 4000 ceiling (median 2815, max
+8982). Two verdicts named the cut explicitly, one of them a BLOCK that
+cancelled a valid dispatch and sent the main loop off to repair a brief that
+was already complete — the failure mode is worse than it looks, because a brief
+whose report-format section fell past the ceiling reads as a brief with no
+report format, and that BLOCK looks perfectly reasonable in the journal.
+
+Fixed in three places, because any one alone leaves the judge unable to do its
+job: the core announces the cut (`[диспатч подрезан: показано N из M знаков]`),
+the prompt states that the marker is OURS and is not a ground for return, and
+the budget rose 4000 -> 16000 so a normal brief arrives whole.
+
+The check `judge declares every truncation` was green for the entire life of
+the defect. It enumerated the forbidden sites BY NAME — `__v.slice(0,400)`,
+`.resp=__t.slice(0,800)` — so it forbade exactly what someone had already
+thought of. A blocklist cannot catch the site nobody listed. It now pins the
+dispatch positively (the announced conditional must be present) and negatively
+(the bare form must be absent), and it was mutation-tested both ways: it fails
+on the pre-fix image and passes on the fixed one.

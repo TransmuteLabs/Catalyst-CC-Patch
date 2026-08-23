@@ -1540,9 +1540,16 @@ step('22 judge consulted before a subagent dispatch', () => {
         'return JSON.stringify(__a)};' +
       'let __max=Number(__cfg.context_chars||60000);' +
       'let __ctx=__cut(__max);' +
-      'let __disp=String(__o.payload!==void 0?(typeof __o.payload==="function"?' +
-        'await __o.payload():__o.payload):JSON.stringify(__o.input))' +
-        '.slice(0,Number(__cfg.dispatch_chars||4000));' +
+      // Подрезка диспатча объявляется той же конвенцией, что подрезка ленты.
+      // Диспатч — единственный объект, о полноте которого судья и судит, и
+      // немой обрыв посреди слова он обязан прочесть как незаконченный бриф.
+      // Измерено 2026-08-23: в потолок упирались 29% диспатчей, один BLOCK
+      // отменил исправный вызов по нашему же обрубку.
+      'let __dsrc=String(__o.payload!==void 0?(typeof __o.payload==="function"?' +
+        'await __o.payload():__o.payload):JSON.stringify(__o.input));' +
+      'let __dmax=Number(__cfg.dispatch_chars||16000);' +
+      'let __disp=__dsrc.length>__dmax?__dsrc.slice(0,__dmax)+' +
+        '"\\n[диспатч подрезан: показано "+__dmax+" из "+__dsrc.length+" знаков]":__dsrc;' +
       'let __lbl=String(__o.label||"DISPATCH");' +
       'let __emb=(__s)=>JSON.stringify(String(__s)).slice(1,-1);' +
       'let __sys=__o.promptEnv;' +

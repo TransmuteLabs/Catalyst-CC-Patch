@@ -696,11 +696,21 @@ checks = {
                                               rb'try\{await __jlog\(\{http:__jst,outcome:__bl\?', d))
                                           and bool(re.search(
                                               rb'verdict:__clip\(__v,400\)\|\|null\}\)\}catch\{\}', d)),
-    # всякое усечение в журнале и записи объявляется, как и подрезка ленты
+    # всякое усечение в журнале и записи объявляется, как и подрезка ленты.
+    # Перечень запрещённых мест поимённо запрещает только уже придуманное:
+    # подрезка САМОГО ДИСПАТЧА в него не входила, и голый slice на главном
+    # объекте суда держал 69/69, пока судья возвращал исправные вызовы за
+    # обрыв, сделанный нами (измерено 2026-08-23). Диспатч пинуется отдельно.
     'judge declares every truncation': len(re.findall(
                                               rb'__clip\(', d)) >= 6
                                           and len(re.findall(rb'__v\.slice\(0,400\)', d)) == 0
                                           and len(re.findall(rb'\.resp=__t2?\.slice\(0,800\)', d)) == 0
+                                          # диспатч режется ТОЛЬКО с объявлением
+                                          and bool(re.search(
+                                              rb'__dsrc\.length>__dmax\?__dsrc\.slice\(0,__dmax\)\+', d))
+                                          and bool(re.search(rb'\]":__dsrc;', d))
+                                          and len(re.findall(
+                                              rb'\.slice\(0,Number\(__cfg\.dispatch_chars', d)) == 0
                                           # до первой попытки попыток НОЛЬ
                                           and bool(re.search(rb'__jtry=0,__jerr1=null', d)),
     # битый конфиг молча снимал enforce и fail_closed: судья выглядел
