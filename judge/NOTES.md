@@ -76,6 +76,17 @@ The cap is global and the ladder is sequential plus a short-tail retry, so a
 consultation where every rung times out can stand for 16 minutes in the path
 of what it judges. That is the accepted price of the ruling above.
 
+That ruling governs the CLOCK and nothing else. It was briefly mis-carried into
+`judge/prompt.md` as a cost model — a section telling the judge that a wrong
+dispatch burns budget and can stop the work — and the user struck it out on
+sight (2026-08-23): «судья должен судить о задаче, а не о том как экономить
+бюджет… это решение мое и главного оркестратора». The judge reasons about the
+task: what is being done, whether the brief suffices, whether the model fits
+the work. Spend, quota and exhaustion are decided by the human and the main
+loop, and reach the judge already decided — as the allowed-model list in the
+gate's settings. A latency tolerance is not a licence to make the judge an
+economiser.
+
 ## The same ladder lives in two places
 
 `judge/config.json` and `idle-watch/config.json` are separate files over one
