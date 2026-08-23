@@ -42,30 +42,45 @@ The model writes at roughly 60-85 tokens/s and keeps writing until it hits the
 budget. No cap below ~90 s can hold it at the judge's 12000-token budget, and
 shrinking the budget only guarantees truncation.
 
-So the ordering is not a cost question. glm-5.3 answers the same consultation
-in 6.4 s at 93%, flash in 22.5 s at 21%. flash stays as the second rung, where
-it is reached only after glm has already failed.
+So the ordering is not a cost question, and the first reading of it was
+incomplete. flash is genuinely the FASTER model per token — ~106 tokens/s
+against glm's ~41 (5204 tokens in 49 s against 181 in 4.4 s). It loses on
+wall-clock only because it emits 29x more of them.
 
-Note the quantity that makes this counter-intuitive: flash is genuinely the
-FASTER model per token — ~106 tokens/s against glm's ~41 (5204 tokens in 49 s
-against 181 in 4.4 s). It loses on wall-clock because it emits 29x more of
-them. For a gate standing in the dispatch path, time-to-verdict is the
-quantity that matters, not throughput.
+There is no small-budget escape. Probed at 300, 600 and 1200 output tokens,
+flash returns a `thinking` block and no verdict at all — it is still working
+through the criteria when the budget ends. It needs its ~5000 tokens, so ~50 s
+is its floor on this task, and the "verdict on the first line" rule it does
+not obey.
 
-## The cap is 240 s (user ruling 2026-08-23)
+## Why flash leads anyway (user ruling 2026-08-23)
 
-Raised from 60 s so flash can finish rather than be strangled: at the judge's
-budget it needs 49-118 s. The cap is global, so every rung inherits it, and
-the ladder is walked in sequence plus one short-tail retry — four calls, so a
+Latency was the wrong optimisation target. glm-5.3 is nominally unlimited but
+carries a 5-hour ceiling and degrades under load — and it is the same model the
+fleet executes with, so a judge that leads with glm competes for quota with the
+work it judges. That is the failure this house already records: the judge
+shares a channel with the fleet it judges, and under load the judge is what
+drops out first.
+
+Ruling, verbatim: «пусть растет консультация потому что это важно. лучше
+потерять минуту чем пару дней». A consultation may cost a minute; a dispatch
+sent wrong, or a fleet standing idle, costs days.
+
+So both ladders lead with flash under a 240 s cap that lets it finish, glm
+second as the fallback, haiku third in the judge. Every rung declares its own
+`context_chars` explicitly: an omitted key inherits the global maximum, which
+is how the leading rung silently ended up carrying the LARGEST transcript
+under the TIGHTEST clock.
+
+The cap is global and the ladder is sequential plus a short-tail retry, so a
 consultation where every rung times out can stand for 16 minutes in the path
-of the dispatch it is judging. The common path is unaffected: glm answers
-first in 4-10 s on 93% of consultations.
+of what it judges. That is the accepted price of the ruling above.
 
-## The defect that let this hide for three days
+## The same ladder lives in two places
 
-Our own abort and an upstream abort arrived in the journal as the same
-sentence. Diagnosing it needed comparing each attempt's `ms` against its own
-`timeout_ms` by hand. The core now marks its own cap explicitly: the attempt
-carries `timed_out: true` and the error text is prefixed
-`our cap <N>ms fired -> `. A self-inflicted timeout must never again read like
-a flaky provider — the two have different remedies.
+`judge/config.json` and `idle-watch/config.json` are separate files over one
+shared core. The first fix landed in the judge alone and left the watcher
+running the old strangled ladder for a full slice — 6 of 7 consultations
+burning 25 s on a rung that never answered. Any change to one is a change to
+both until the day they are meant to differ, and today they differ only in
+`max_tokens`, `dispatch_chars`, `fail_closed` and the watcher's own gate keys.

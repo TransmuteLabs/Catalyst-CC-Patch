@@ -6,13 +6,13 @@
   "dispatch_chars": 4000,
   "models": [
     {
-      "model": "glm-5.3",
-      "effort": "max",
+      "model": "deepseek-v4-flash",
+      "effort": "high",
       "context_chars": 24000
     },
     {
-      "model": "deepseek-v4-flash",
-      "effort": "high",
+      "model": "glm-5.3",
+      "effort": "max",
       "context_chars": 24000
     },
     {

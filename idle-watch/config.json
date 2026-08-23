@@ -1,6 +1,6 @@
 {
   "max_tokens": 8000,
-  "timeout_ms": 60000,
+  "timeout_ms": 240000,
   "enforce": true,
   "context_chars": 60000,
   "dispatch_chars": 2000,
@@ -8,7 +8,7 @@
     {
       "model": "deepseek-v4-flash",
       "effort": "high",
-      "timeout_ms": 25000
+      "context_chars": 24000
     },
     {
       "model": "glm-5.3",
