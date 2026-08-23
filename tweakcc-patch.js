@@ -1677,8 +1677,19 @@ step('22 judge consulted before a subagent dispatch', () => {
           // Измерено 2026-08-23: ступень три дня умирала на СВОЁМ таймауте, а в
           // журнале это читалось как флаки модели. Причина обязана называться на
           // месте: разное лечение (потолок правится, апстрим — нет).
-          '__a.error=(__mine?"our cap "+__ms+"ms fired -> ":"")+String(__xe?.name||"Error")' +
-            '+": "+String(__xe?.message??__xe).slice(0,120);throw __xe}' +
+          // Свой потолок ВЫВОДА приходит текстом пула ("api error from the
+          // pool"), как свой таймаут приходил словами "Request was aborted":
+          // в журнале то и другое читается сбоем провайдера, а лечится
+          // настройкой. Причина называется на месте — лечение разное.
+          // Сообщение режется ОБЪЯВЛЯЮЩИМ клипом: голый slice(0,120) обрубал
+          // фразу "To configure this behavior…", то есть именно ту часть,
+          // которая называет средство (измерено 2026-08-24).
+          'let __em=String(__xe?.message??__xe);' +
+          'let __ob=/exceeded the (\\d+) output token/.exec(__em);' +
+          '__a.budget=__ob?Number(__ob[1]):void 0;' +
+          '__a.error=(__mine?"our cap "+__ms+"ms fired -> ":' +
+            '(__ob?"our output budget "+__ob[1]+" exhausted -> ":""))' +
+            '+String(__xe?.name||"Error")+": "+__clip(__em,200);throw __xe}' +
         'finally{clearTimeout(__to)}};' +
       // The transcript IS the cost: a 60 KB consultation hit the deadline twice
       // running (measured 2026-08-20) and fail-open waved both dispatches

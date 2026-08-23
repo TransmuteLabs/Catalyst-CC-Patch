@@ -146,3 +146,36 @@ before it landed. And the check caught the migration half-done: its positive
 pin still named the old tail form, so it failed on a correct image. A check
 that fails on the right binary is doing its job — that is what makes it not a
 rubber stamp.
+
+## "api error from the pool" was our own output ceiling (2026-08-24)
+
+Three consultations in one 30-minute window died on the leading rung with
+`api error from the pool`, and the rate was climbing — 4% over six hours, 8%
+over two, 23% in the last thirty minutes. It reads like an upstream fault. The
+full text says otherwise:
+
+    API Error: Claude's response exceeded the 8000 output token maximum.
+    To configure this behavior
+
+8000 is OUR `max_tokens` for the watcher (12000 for the judge, exceeded once).
+flash at `effort: high` writes past it — thinking counts — and the pool aborts
+the response. The same trap as the timeout, which spent three days looking like
+a flaky model: OUR limit arrives wearing the provider's name, and the two need
+opposite treatment (a ceiling is edited, an upstream fault is waited out).
+
+Fixed the class, not the instance:
+* the ceiling is named at the point of failure — `our output budget 8000
+  exhausted -> `, symmetric with `our cap 25000ms fired -> `, plus a numeric
+  `budget` field on the attempt;
+* both ceilings raised to 24000;
+* the attempt's message was clipped by a BARE `slice(0,120)` — the third
+  unannounced truncation found in two days, and this one cut the sentence at
+  "To configure this behavior", hiding the remedy from every reader of every
+  journal. It now goes through the announcing `__clip(…, 200)`.
+
+The check now forbids the class rather than the site: no bare slice on the
+attempt message, the announcing clip present, the budget label present. Mutation
+-tested — fails on the pre-fix image, passes on the fixed one.
+
+Open: 24000 is chosen with headroom, not measured. If flash exceeds it too, the
+new label will say so in as many words instead of blaming the pool.

@@ -714,6 +714,12 @@ checks = {
                                               rb'__lbl=String\(__o\.label\|\|"DISPATCH"\)\+\(__dtr\?', d))
                                           and len(re.findall(
                                               rb'\.slice\(0,Number\(__cfg\.dispatch_chars', d)) == 0
+                                          # сообщение упавшей попытки: голый slice
+                                          # обрубал фразу, называющую средство
+                                          and len(re.findall(rb'__xe\?\.message\?\?__xe\)\.slice\(', d)) == 0
+                                          and bool(re.search(rb'__clip\(__em,200\)', d))
+                                          # свой потолок ВЫВОДА называется своим именем
+                                          and bool(re.search(rb'our output budget "\+__ob\[1\]\+" exhausted', d))
                                           # до первой попытки попыток НОЛЬ
                                           and bool(re.search(rb'__jtry=0,__jerr1=null', d)),
     # битый конфиг молча снимал enforce и fail_closed: судья выглядел
