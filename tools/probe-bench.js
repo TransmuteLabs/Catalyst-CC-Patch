@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 'use strict';
 
 const fs = require('node:fs');
@@ -47,12 +47,50 @@ function parseArgs(argv) {
     }
   }
 
-  if (!binary) throw new Error('usage: node tools/probe-bench.js --binary <path> [--json <file>]');
+  if (!binary) throw new Error('usage: bun tools/probe-bench.js --binary <path> [--json <file>]');
   return { binary, json };
 }
 
-function carveBlock(binaryPath) {
-  const source = fs.readFileSync(binaryPath, 'latin1');
+// Образ — однофайловый исполняемый bun, и вырезанный блок исполняется его
+// движком. Под node другой движок: тексты ошибок JSON.parse отличаются, API
+// Bun.* отсутствует — стенд измерял бы не тот рантайм.
+function assertRuntime() {
+  const version = globalThis.Bun?.version;
+  if (version) return version;
+  throw new Error(
+    'стенд обязан идти под bun (образ — однофайловый исполняемый bun, ' +
+      'вырезанный блок исполняется его движком; под node другие тексты ошибок ' +
+      'разбора и нет API Bun.*). Запуск: bun tools/probe-bench.js --binary <path>',
+  );
+}
+
+// Версия рантайма пишется самим bun в шаблон npm-агента; запасная форма —
+// адрес самообновления.
+function imageBunVersion(source) {
+  const match =
+    /bun\/(\d+\.\d+\.\d+) npm\//.exec(source) || /bun-v(\d+\.\d+\.\d+)/.exec(source);
+  return match ? match[1] : null;
+}
+
+function warnRuntimeSkew(source, benchVersion) {
+  const imageVersion = imageBunVersion(source);
+  if (!imageVersion) {
+    console.error('probe-bench: ВНИМАНИЕ — версия bun образа не найдена, расхождение рантайма не проверено');
+    return;
+  }
+  if (imageVersion !== benchVersion) {
+    console.error(
+      `probe-bench: ВНИМАНИЕ — bun стенда ${benchVersion}, bun образа ${imageVersion}; ` +
+        'расхождения рантайма (тексты ошибок разбора, состав API) не покрыты',
+    );
+  }
+}
+
+function readImage(binaryPath) {
+  return fs.readFileSync(binaryPath, 'latin1');
+}
+
+function carveBlock(source) {
   const start = source.indexOf(START_MARKER);
   const end = start < 0 ? -1 : source.indexOf(END_MARKER, start + START_MARKER.length);
 
@@ -646,8 +684,11 @@ function printTable(results) {
 async function main() {
   let options;
   try {
+    const benchVersion = assertRuntime();
     options = parseArgs(process.argv.slice(2));
-    const carved = carveBlock(options.binary);
+    const source = readImage(options.binary);
+    warnRuntimeSkew(source, benchVersion);
+    const carved = carveBlock(source);
     const names = locateNames(carved);
     const probe = compileProbe(carved, names);
     const results = [];
