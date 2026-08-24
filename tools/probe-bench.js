@@ -8,14 +8,13 @@ const path = require('node:path');
 const START_MARKER = '/*__ccProbe0*/';
 const END_MARKER = '/*__ccProbe1*/';
 const ENV_KEYS = [
-  'CLAUDE_JUDGE_DIR',
+  'CLAUDE_PROBES_DIR',
   'CLAUDE_JUDGE',
   'CLAUDE_JUDGE_URL',
   'CLAUDE_JUDGE_MODEL',
   'CLAUDE_JUDGE_PROMPT',
   'CLAUDE_JUDGE_DEBUG',
   'CLAUDE_IDLE',
-  'CLAUDE_IDLE_DIR',
   'CLAUDE_IDLE_URL',
   'CLAUDE_IDLE_MODEL',
   'CLAUDE_IDLE_PROMPT',
@@ -52,7 +51,7 @@ function parseArgs(argv) {
 }
 
 // Образ — однофайловый исполняемый bun, и вырезанный блок исполняется его
-// движком. Под node другой движок: тексты ошибок JSON.parse отличаются, API
+// движком. Под node другой движок: тексты ошибок TOML-разбора отличаются, API
 // Bun.* отсутствует — стенд измерял бы не тот рантайм.
 function assertRuntime() {
   const version = globalThis.Bun?.version;
@@ -143,7 +142,57 @@ function baseConfig(scenario) {
   return { enforce: true, fail_closed: true, models: [{ model: 'stub-model' }], max_tokens: 8000 };
 }
 
+function tomlScalar(value) {
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    return `[${value.map((item) => JSON.stringify(item)).join(', ')}]`;
+  }
+  throw new Error(`unsupported TOML scalar: ${JSON.stringify(value)}`);
+}
+
+function isObjectArray(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((entry) => (
+    entry && typeof entry === 'object' && !Array.isArray(entry)
+  ));
+}
+
+function appendTomlTable(lines, name, value, arrayTable = false) {
+  lines.push(`${arrayTable ? '[[' : '['}${name}${arrayTable ? ']]' : ']'}`);
+  for (const [key, item] of Object.entries(value)) {
+    const nested = item && typeof item === 'object' && !Array.isArray(item);
+    const objectArray = isObjectArray(item);
+    if (!nested && !objectArray) lines.push(`${key} = ${tomlScalar(item)}`);
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      lines.push('');
+      appendTomlTable(lines, `${name}.${key}`, item);
+    } else if (isObjectArray(item)) {
+      for (const entry of item) {
+        lines.push('');
+        appendTomlTable(lines, `${name}.${key}`, entry, true);
+      }
+    }
+  }
+}
+
+function probeConfigToml(scenario, config) {
+  if (scenario.configText !== undefined) return scenario.configText;
+  const lines = [];
+  if (scenario.defaultsOnly || scenario.defaultsConfig !== undefined) {
+    appendTomlTable(lines, 'defaults', scenario.defaultsOnly ? config : scenario.defaultsConfig);
+  }
+  if (!scenario.defaultsOnly) {
+    if (lines.length > 0) lines.push('');
+    appendTomlTable(lines, `probe.${homeName(scenario)}`, config);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 const OLD = () => ({ last: 0, start: Date.now() - 3600000 });
+const BROKEN_TOML_DEG = ["unparsed:<temp>/probes.toml: TOML Parse error: Expected a key but found '{'"];
 
 const scenarios = [
   {
@@ -264,7 +313,8 @@ const scenarios = [
     name: 'broken-config',
     configText: '{',
     response: 'OK: бриф полон',
-    expected: null,
+    expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
+                degExact: BROKEN_TOML_DEG },
   },
   {
     name: 'missing-prompt',
@@ -288,6 +338,31 @@ const scenarios = [
     config: { enforce: false },
     response: 'BLOCK: нет',
     expected: { passed: true, outcome: 'block_not_enforced' },
+  },
+  {
+    name: 'probe-disabled',
+    config: { enabled: false },
+    response: 'OK: не должно дойти',
+    expected: { passed: true, outcome: 'skip_disabled', poolCalls: 0, nudges: 0 },
+  },
+  {
+    name: 'no-toml-parser',
+    withoutTomlParser: true,
+    response: 'OK: не должно дойти',
+    expected: { passed: false, outcome: 'block_degraded', degStartsWith: 'no-toml-parser:', poolCalls: 0, nudges: 0 },
+  },
+  {
+    name: 'probe-absent-from-file',
+    defaultsOnly: true,
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok' },
+  },
+  {
+    name: 'defaults-overridden',
+    defaultsConfig: { max_tokens: 1 },
+    config: { max_tokens: 24000 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', requestMaxTokens: 24000 },
   },
   { name: 'watch-silent', probe: 'watch', toolName: 'Read', watchState: OLD,
     response: 'SILENT: человек велел не звать субагентов',
@@ -329,7 +404,7 @@ const scenarios = [
     tasks: { t1: { id: 't1', type: 'local_agent', status: 'running' } },
     response: 'SILENT: —',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'live-work:1', nudges: 0,
-                cfg: '<temp>/proj/.claude/idle-watch' } },
+                cfg: '<temp>/proj/.claude/probes/idle-watch' } },
   // Снятая фоновость — работа НЕ живая (признак взят из образа).
   { name: 'watch-live-backgrounded-off', probe: 'watch', toolName: 'Read', watchState: OLD,
     tasks: { t1: { id: 't1', type: 'local_agent', status: 'running', isBackgrounded: false } },
@@ -355,7 +430,8 @@ const scenarios = [
   { name: 'watch-broken-config', probe: 'watch', toolName: 'Read', watchState: OLD,
     configText: '{',
     response: 'NUDGE: не должно дойти',
-    expected: { passed: true, outcome: 'skip_degraded', poolCalls: 0, nudges: 0 } },
+    expected: { passed: true, outcome: 'skip_degraded', poolCalls: 0, nudges: 0,
+                degExact: BROKEN_TOML_DEG } },
 ];
 
 // HOME входит в сохранение, но НЕ в список удаляемых: слоёный сценарий его
@@ -384,27 +460,45 @@ function homeName(scenario) {
   return scenario.probe === 'watch' ? 'idle-watch' : 'judge';
 }
 
-// Корневой каталог настроек. Явный CLAUDE_*_DIR ОТКЛЮЧАЕТ наслоение — так
-// задумано в бою (проба должна получать ровно то, что ей задали). Поэтому
-// сценарий со слоями обязан задавать корень через HOME, иначе он проверял бы
-// не тот путь, которым слой находят на самом деле.
+// Явный CLAUDE_PROBES_DIR отключает проектное наслоение. Слоёные
+// сценарии обязаны задавать дом через HOME, чтобы пройти боевой поиск от cwd.
 function rootDir(tempDir, scenario) {
   return scenario.projectLayer === undefined
     ? tempDir
-    : path.join(tempDir, '.claude', homeName(scenario));
+    : path.join(tempDir, '.claude', 'probes');
 }
 
+// HOME подменяется ВСЕГДА, а не только в слоёных сценариях. Дом проб ядро
+// берёт из переменной среды ИЛИ из $HOME — и пока HOME оставался настоящим,
+// любое расхождение в имени переменной уводило запись сценария в живой
+// ~/.claude/probes. Это не гипотеза: 144 поддельные записи с сессией "a1"
+// оказались в боевом журнале, пока стенд задавал старое имя переменной.
 function setScenarioEnvironment(tempDir, scenario) {
   for (const key of ENV_KEYS) delete process.env[key];
-  const layered = scenario.projectLayer !== undefined;
-  if (layered) process.env.HOME = tempDir;
-  if (scenario.probe === 'watch') {
-    process.env.CLAUDE_IDLE = '1';
-    if (!layered) process.env.CLAUDE_IDLE_DIR = tempDir;
-  } else {
-    process.env.CLAUDE_JUDGE = '1';
-    if (!layered) process.env.CLAUDE_JUDGE_DIR = tempDir;
-  }
+  process.env.HOME = tempDir;
+  if (scenario.projectLayer === undefined) process.env.CLAUDE_PROBES_DIR = tempDir;
+  if (scenario.probe === 'watch') process.env.CLAUDE_IDLE = '1';
+  else process.env.CLAUDE_JUDGE = '1';
+}
+
+// Вторая линия: подмена HOME делает утечку невозможной по построению, но
+// проверка обязана падать и тогда, когда построение изменят. Живой дом
+// снимается ДО прогона и сверяется ПОСЛЕ.
+function homeFingerprint(realHome) {
+  const dir = path.join(realHome, '.claude', 'probes');
+  const walk = (d) => {
+    let out = [];
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return out; }
+    for (const e of entries.sort((x, y) => x.name.localeCompare(y.name))) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) out = out.concat(walk(full));
+      else { let st; try { st = fs.statSync(full); } catch { continue; }
+        out.push(`${full}:${st.size}:${st.mtimeMs}`); }
+    }
+    return out;
+  };
+  return walk(dir).join('\n');
 }
 
 // Каталог приходит в двух написаниях: логическом (/var/...) и физическом
@@ -469,6 +563,9 @@ function expectationText(expected) {
   if (expected.headerExcludes !== undefined) parts.push(`шапка БЕЗ «${expected.headerExcludes}»`);
   if (expected.dispatchLen !== undefined) parts.push(`нагрузка=${expected.dispatchLen}`);
   if (expected.dispatchIncludes !== undefined) parts.push(`нагрузка содержит «${expected.dispatchIncludes}»`);
+  if (expected.degStartsWith !== undefined) parts.push(`деградация начинается с «${expected.degStartsWith}»`);
+  if (expected.degExact !== undefined) parts.push(`деградация=${JSON.stringify(expected.degExact)}`);
+  if (expected.requestMaxTokens !== undefined) parts.push(`бюджет запроса=${expected.requestMaxTokens}`);
   return parts.join(', ');
 }
 
@@ -494,6 +591,9 @@ function checkMismatch(result, expected) {
   if (expected.headerExcludes !== undefined && result.sentHeader.includes(expected.headerExcludes)) return true;
   if (expected.dispatchLen !== undefined && result.sentDispatchLen !== expected.dispatchLen) return true;
   if (expected.dispatchIncludes !== undefined && !result.sentDispatch.includes(expected.dispatchIncludes)) return true;
+  if (expected.degStartsWith !== undefined && !result.deg?.some((item) => item.startsWith(expected.degStartsWith))) return true;
+  if (expected.degExact !== undefined && JSON.stringify(result.deg) !== JSON.stringify(expected.degExact)) return true;
+  if (expected.requestMaxTokens !== undefined && result.requestMaxTokens !== expected.requestMaxTokens) return true;
   return false;
 }
 
@@ -504,6 +604,7 @@ async function runScenario(probe, scenario) {
   const savedProbe = Object.getOwnPropertyDescriptor(globalThis, '__ccProbe');
   const savedFleet = Object.getOwnPropertyDescriptor(globalThis, '__ccFleet');
   const savedWatch = Object.getOwnPropertyDescriptor(globalThis, '__ccWatch');
+  const savedToml = globalThis.Bun.TOML;
   delete globalThis.__ccProbe;
   delete globalThis.__ccFleet;
   delete globalThis.__ccWatch;
@@ -513,30 +614,32 @@ async function runScenario(probe, scenario) {
 
   try {
     const root = rootDir(tempDir, scenario);
-    fs.mkdirSync(root, { recursive: true });
+    const probeDir = path.join(root, homeName(scenario));
+    fs.mkdirSync(probeDir, { recursive: true });
     setScenarioEnvironment(tempDir, scenario);
+    if (scenario.withoutTomlParser) globalThis.Bun.TOML = undefined;
     // Проектный слой воспроизводится ТОЛЬКО сменой рабочего каталога: ядро
-    // ищет ближайший .claude/<дом> над cwd, и подделать это переменной среды
-    // нельзя — проверялся бы не тот путь, которым слой находят в бою.
+    // ищет ближайший .claude/probes над cwd, и переменная среды отключила бы
+    // именно тот путь, который обязан проверять этот сценарий.
     if (scenario.projectLayer !== undefined) {
       const proj = path.join(tempDir, 'proj');
-      const home = path.join(proj, '.claude', scenario.probe === 'watch' ? 'idle-watch' : 'judge');
+      const home = path.join(proj, '.claude', 'probes');
       fs.mkdirSync(home, { recursive: true });
-      fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(scenario.projectLayer));
+      fs.writeFileSync(
+        path.join(home, 'probes.toml'),
+        probeConfigToml({ ...scenario, configText: undefined }, scenario.projectLayer),
+      );
       prevCwd = process.cwd();
       process.chdir(proj);
     }
 
     const config = { ...baseConfig(scenario), ...(scenario.config || {}) };
-    fs.writeFileSync(
-      path.join(root, 'config.json'),
-      scenario.configText === undefined ? JSON.stringify(config) : scenario.configText,
-    );
+    fs.writeFileSync(path.join(root, 'probes.toml'), probeConfigToml(scenario, config));
     if (!scenario.omitPrompt) {
       const prompt = scenario.probe === 'watch'
         ? 'Rules must contain NUDGE.\n'
         : 'Rules must contain BLOCK.\n';
-      fs.writeFileSync(path.join(root, 'prompt.md'), prompt);
+      fs.writeFileSync(path.join(probeDir, 'prompt.md'), prompt);
     }
 
     if (scenario.fleet) globalThis.__ccFleet = scenario.fleet();
@@ -574,9 +677,11 @@ async function runScenario(probe, scenario) {
     // модели и что шапку нельзя подделать из нагрузки — доказывает только
     // перехваченный запрос.
     let sentUser = '';
+    let requestMaxTokens = null;
     const pool = async (args) => {
       poolCalls += 1;
       sentUser = args?.messages?.[0]?.message?.content ?? '';
+      requestMaxTokens = args?.options?.maxOutputTokensOverride ?? null;
       if (scenario.poolError) throw scenario.poolError;
       return {
         message: {
@@ -600,7 +705,7 @@ async function runScenario(probe, scenario) {
       errorText = sanitizeText(error?.message ?? error, tempDir);
     }
 
-    const journal = readLastJournal(root);
+    const journal = readLastJournal(probeDir);
     const entry = journal.entry ? sanitizeValue(journal.entry, tempDir) : null;
     if (!errorText && journal.error) errorText = sanitizeText(journal.error, tempDir);
 
@@ -620,6 +725,7 @@ async function runScenario(probe, scenario) {
       sentHeader,
       sentDispatchLen: sentDispatch.length,
       sentDispatch,
+      requestMaxTokens,
       result: passed ? 'прошёл' : 'отменён',
       outcome: entry?.outcome ?? null,
       sid: entry === null ? undefined : (entry.sid ?? null),
@@ -647,6 +753,7 @@ async function runScenario(probe, scenario) {
     else delete globalThis.__ccFleet;
     if (savedWatch) Object.defineProperty(globalThis, '__ccWatch', savedWatch);
     else delete globalThis.__ccWatch;
+    if (scenario.withoutTomlParser) globalThis.Bun.TOML = savedToml;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
@@ -686,6 +793,8 @@ async function main() {
   try {
     const benchVersion = assertRuntime();
     options = parseArgs(process.argv.slice(2));
+    const realHome = process.env.HOME || os.homedir();
+    const homeBefore = homeFingerprint(realHome);
     const source = readImage(options.binary);
     warnRuntimeSkew(source, benchVersion);
     const carved = carveBlock(source);
@@ -698,6 +807,11 @@ async function main() {
     }
 
     printTable(results);
+    if (homeFingerprint(realHome) !== homeBefore) {
+      console.error('probe-bench: ПРОВАЛ — прогон изменил живой дом проб ' +
+        path.join(realHome, '.claude', 'probes') + '; фикстуры обязаны жить только во временном каталоге');
+      process.exitCode = 1;
+    }
     if (options.json) fs.writeFileSync(options.json, `${JSON.stringify(results, null, 2)}\n`);
     if (results.some((result) => result.mismatch)) process.exitCode = 1;
   } catch (error) {
