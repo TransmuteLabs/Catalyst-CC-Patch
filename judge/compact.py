@@ -15,10 +15,16 @@ import argparse, glob, gzip, json, os, shutil, time
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--dir', default=os.path.expanduser('~/.claude/judge/records'))
+    home = os.environ.get('CLAUDE_PROBES_DIR') or '~/.claude/probes'
+    p.add_argument('--home', default=home, help='дом проб')
+    p.add_argument('--probe', default='judge', help='идентификатор пробы')
+    p.add_argument('--dir', default=None,
+                   help='каталог записей (умолчание: <дом>/<проба>/records)')
     p.add_argument('--older-than-hours', type=float, default=24)
     p.add_argument('--dry-run', action='store_true')
     a = p.parse_args()
+    if a.dir is None:
+        a.dir = os.path.join(os.path.expanduser(a.home), a.probe, 'records')
 
     cutoff = time.time() - a.older_than_hours * 3600
     done = saved = skipped = 0

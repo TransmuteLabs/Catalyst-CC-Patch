@@ -7,6 +7,7 @@ import glob
 import json
 import math
 import os
+import re
 import statistics
 import sys
 
@@ -15,10 +16,63 @@ sys.path.insert(0, HERE)
 import channel
 import replay
 
-DEFAULT_RECORDS = os.path.join(HERE, 'records')
-CONFIG_PATH = os.path.join(HERE, 'config.json')
-PROMPT_PATH = os.path.join(HERE, 'prompt.md')
-LABELS_PATH = os.path.join(HERE, 'labels.jsonl')
+# Дом проб один на все пробы; настройки берутся из общего probes.toml, а промт,
+# записи и метки — из подкаталога пробы.
+DEFAULT_HOME = os.environ.get('CLAUDE_PROBES_DIR') or '~/.claude/probes'
+DEFAULT_PROBE = 'judge'
+DEFAULT_IMAGE = '~/.local/bin/claude'
+
+
+def configure_paths(home, probe):
+    global PROBES_HOME, PROBE_ID, DEFAULT_RECORDS, SETTINGS_PATH, PROMPT_PATH, LABELS_PATH
+    PROBES_HOME = os.path.expanduser(home)
+    PROBE_ID = probe
+    base = os.path.join(PROBES_HOME, probe)
+    DEFAULT_RECORDS = os.path.join(base, 'records')
+    PROMPT_PATH = os.path.join(base, 'prompt.md')
+    LABELS_PATH = os.path.join(base, 'labels.jsonl')
+    SETTINGS_PATH = os.path.join(PROBES_HOME, 'probes.toml')
+
+
+configure_paths(DEFAULT_HOME, DEFAULT_PROBE)
+
+
+def probe_settings(settings_path=None, probe=None):
+    import tomllib
+    path = settings_path or SETTINGS_PATH
+    try:
+        with open(path, 'rb') as fh:
+            table = tomllib.load(fh)
+    except FileNotFoundError:
+        return {}
+    pid = probe or PROBE_ID
+    merged = dict(table.get('defaults') or {})
+    merged.update((table.get('probe') or {}).get(pid) or {})
+    return merged
+
+
+# Дом словаря вердиктов — бинарник: там он и применяется. Копия в инструменте
+# разъехалась бы с образом молча, а расхождение словаря даёт неверную разметку
+# корпуса, по которой потом выбирают модель.
+def verdict_vocabulary(image_path, probe):
+    path = os.path.realpath(os.path.expanduser(image_path))
+    try:
+        with open(path, 'rb') as fh:
+            data = fh.read()
+    except OSError as err:
+        raise SystemExit(f'образ не прочитан: {path} ({err.__class__.__name__})')
+    pattern = (rb'dirName:"' + re.escape(probe.encode()) +
+               rb'"[^\n]{0,160}?rx:"([^"]+)",act:"([^"]+)"')
+    found = re.search(pattern, data)
+    if not found:
+        raise SystemExit(
+            f'словарь вердиктов не извлечён из образа {path} для пробы "{probe}"; '
+            'зашитый словарь не подставляется — расхождение с образом даёт неверную разметку')
+    return found.group(1).decode().split('|'), found.group(2).decode().split('|')
+
+
+RX_VALUES = []
+ACT_VALUES = []
 COSTS_PATH = os.path.expanduser('~/.claude.json')
 DEFAULT_BASE_URL = 'http://127.0.0.1:8317'
 
@@ -77,7 +131,7 @@ def configured_models(config):
         elif isinstance(item, dict) and item.get('model'):
             result.append((str(item['model']), str(item.get('effort') or 'high')))
     if not result:
-        raise ValueError('модели не заданы ни в --models, ни в config.json')
+        raise ValueError('модели не заданы ни в --models, ни в probes.toml')
     return result
 
 
@@ -164,7 +218,7 @@ def compose_body(record, model, effort, args, global_config):
                     extra = read_text(extra_prompt)
                     if extra.strip():
                         prompt += '\n\n=== ПРАВИЛА ЭТОГО ПРОЕКТА ===\n' + extra
-                project_config = read_json(os.path.join(cfg, 'config.json'), {}) or {}
+                project_config = probe_settings(os.path.join(os.path.dirname(cfg), 'probes.toml'))
                 if 'max_tokens' in project_config:
                     max_tokens = project_config['max_tokens']
                 if 'context_chars' in project_config:
@@ -228,7 +282,8 @@ def run_one(task):
 
 
 def effective_class(value):
-    return 'BLOCK' if value in ('BLOCK', 'STOP', 'DENY') else value
+    # Какие ответы считаются отменой, решает образ, а не литерал здесь.
+    return ACT_VALUES[0] if value in ACT_VALUES else value
 
 
 def percentile_90(values):
@@ -418,7 +473,7 @@ def command_label(args):
 
 
 def command_run(args):
-    config = read_json(CONFIG_PATH, {}) or {}
+    config = probe_settings()
     models = models_from_args(args.models, config)
     if args.project_layer == 'off' and not args.prompt:
         raise SystemExit('--prompt обязателен при --project-layer off')
@@ -472,11 +527,18 @@ def command_report(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser()
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('--home', default=argparse.SUPPRESS,
+                        help='дом проб (умолчание: $CLAUDE_PROBES_DIR или ~/.claude/probes)')
+    common.add_argument('--probe', default=argparse.SUPPRESS,
+                        help='идентификатор пробы (умолчание: judge)')
+    common.add_argument('--image', default=argparse.SUPPRESS,
+                        help='образ, из которого берётся словарь вердиктов')
+    parser = argparse.ArgumentParser(parents=[common])
     sub = parser.add_subparsers(dest='command', required=True)
 
-    run = sub.add_parser('run')
-    run.add_argument('--records', default=DEFAULT_RECORDS)
+    run = sub.add_parser('run', parents=[common])
+    run.add_argument('--records', default=None)
     run.add_argument('--models')
     run.add_argument('--repeat', type=int, default=1)
     run.add_argument('--limit', type=int, default=0)
@@ -489,25 +551,35 @@ def build_parser():
     run.add_argument('--out')
     run.set_defaults(func=command_run)
 
-    label = sub.add_parser('label')
+    label = sub.add_parser('label', parents=[common])
     label.add_argument('record')
-    label.add_argument('--truth', choices=('OK', 'WARN', 'BLOCK'), required=True)
+    label.add_argument('--truth', required=True)
     label.add_argument('--note')
     label.set_defaults(func=command_label)
 
-    listing = sub.add_parser('list')
-    listing.add_argument('--records', default=DEFAULT_RECORDS)
+    listing = sub.add_parser('list', parents=[common])
+    listing.add_argument('--records', default=None)
     listing.add_argument('--unlabelled', action='store_true')
     listing.set_defaults(func=command_list)
 
-    report = sub.add_parser('report')
+    report = sub.add_parser('report', parents=[common])
     report.add_argument('files', nargs='+')
     report.set_defaults(func=command_report)
     return parser
 
 
 def main():
+    global RX_VALUES, ACT_VALUES
     args = build_parser().parse_args()
+    configure_paths(getattr(args, 'home', None) or DEFAULT_HOME,
+                    getattr(args, 'probe', None) or DEFAULT_PROBE)
+    if getattr(args, 'records', None) is None and hasattr(args, 'records'):
+        args.records = DEFAULT_RECORDS
+    RX_VALUES, ACT_VALUES = verdict_vocabulary(
+        getattr(args, 'image', None) or DEFAULT_IMAGE, PROBE_ID)
+    truth = getattr(args, 'truth', None)
+    if truth is not None and truth not in RX_VALUES:
+        raise SystemExit('--truth: допустимы ' + ', '.join(RX_VALUES) + '; получено ' + truth)
     if getattr(args, 'repeat', 1) < 1:
         raise SystemExit('--repeat должен быть не меньше 1')
     if getattr(args, 'jobs', 1) < 1:

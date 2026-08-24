@@ -12,6 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import channel
 import replay
+import validate
 
 LABELS_PATH = os.path.join(HERE, 'labels.jsonl')
 DEFAULT_BASE_URL = 'http://127.0.0.1:8317'
@@ -52,9 +53,17 @@ def url_for(record):
     return normalize_url(os.environ.get('ANTHROPIC_BASE_URL') or DEFAULT_BASE_URL)
 
 
+# Словарь вердиктов живёт в образе; validate.verdict_vocabulary — единственная
+# читалка. Копия литералом разъезжалась бы с образом молча.
+DEFAULT_IMAGE = '~/.local/bin/claude'
+RX_VALUES, ACT_VALUES = validate.verdict_vocabulary(
+    os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE,
+    os.environ.get('CLAUDE_JUDGE_PROBE') or 'judge')
+
+
 def recorded_class(verdict):
     value = replay.klass(verdict)
-    return 'BLOCK' if value in ('BLOCK', 'STOP', 'DENY') else value
+    return ACT_VALUES[0] if value in ACT_VALUES else value
 
 
 def review_input(record):
@@ -70,10 +79,10 @@ def review_input(record):
 def parse_adjudication(text, klass_recorded):
     first = (text.splitlines() or [''])[0].strip()
     if first.startswith('CORRECT:'):
-        if klass_recorded not in ('OK', 'WARN', 'BLOCK'):
+        if klass_recorded not in RX_VALUES:
             return None, None, f'CORRECT для неразобранного класса {klass_recorded}'
         return klass_recorded, True, None
-    wrong = re.match(r'^WRONG:(OK|WARN|BLOCK):', first)
+    wrong = re.match(r'^WRONG:(' + '|'.join(re.escape(v) for v in RX_VALUES) + r'):', first)
     if wrong:
         return wrong.group(1), False, None
     if first.startswith('UNSURE:'):
