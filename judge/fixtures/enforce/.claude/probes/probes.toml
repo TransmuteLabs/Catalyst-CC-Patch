@@ -1,0 +1,10 @@
+# Проектный слой оснастки: отмена, доехавшая до модели. enforce делает вердикт
+# действующим, а правило проекта в judge/prompt.extra.md даёт причину отменить.
+[probe.judge]
+timeout_ms = 60000
+max_tokens = 3000
+enforce = true
+
+[[probe.judge.models]]
+model = "deepseek-v4-flash"
+effort = "high"

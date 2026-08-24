@@ -1,0 +1,15 @@
+# Проектный слой оснастки: первая ступень заведомо несуществующая модель,
+# вторая живая. Список ступеней задаётся ЦЕЛИКОМ — при слиянии слоёв значение
+# ключа заменяется, а не дополняется, иначе домашняя лестница поехала бы первой.
+[probe.judge]
+timeout_ms = 60000
+max_tokens = 3000
+enforce = false
+
+[[probe.judge.models]]
+model = "totally-unknown-model-9x"
+timeout_ms = 20000
+
+[[probe.judge.models]]
+model = "deepseek-v4-flash"
+effort = "high"
