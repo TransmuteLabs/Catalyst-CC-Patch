@@ -68,6 +68,10 @@
 ```
 
 `<id>` — ключ таблицы в `probes.toml`, он же имя каталога и поле в журнале.
+Идентификаторы нынешних проб — **`judge`** и **`idle-watch`**, то есть их
+сегодняшние имена каталогов: id виден в журналах, `validate.py`, комплекте и
+записях памяти, и переименование множит поверхность миграции, ничего не давая
+механизму.
 Судья и наблюдатель за флотом становятся записями этого же реестра (см.
 «Миграция»).
 
@@ -100,14 +104,14 @@ context_chars   = 24000
 cooldown_min    = 30
 dispatch_chars  = 16000
 
-[probe.dispatch-judge]
+[probe.judge]
 enabled = true                   # выключение пробы целиком
 on      = ["PreToolUse"]         # события-триггеры; см. словарь
 show    = ["dispatch"]           # что кладём в нагрузку
 act     = "cancel"               # log_only | nudge | cancel
 rx      = "OK|WARN|BLOCK"        # словарь вердиктов
 
-  [probe.dispatch-judge.when]    # предикат; см. словарь
+  [probe.judge.when]    # предикат; см. словарь
   field = "tool_name"
   in    = ["Agent", "Task"]
 ```
@@ -154,7 +158,7 @@ rx      = "OK|WARN|BLOCK"        # словарь вердиктов
 и ровно одна форма-ключ.
 
 ```toml
-  [probe.dispatch-judge.when]
+  [probe.judge.when]
   field = "tool_name"
   in    = ["Agent", "Task"]
 ```
@@ -162,11 +166,11 @@ rx      = "OK|WARN|BLOCK"        # словарь вердиктов
 Сочетание — массив таблиц, по условию на таблицу:
 
 ```toml
-  [[probe.fleet-idle.when.all]]
+  [[probe.idle-watch.when.all]]
   field       = "live_works"
   count_below = 1
 
-  [[probe.fleet-idle.when.all]]
+  [[probe.idle-watch.when.all]]
   field          = "last_consultation"
   older_than_min = 30
 ```
@@ -243,18 +247,18 @@ rx      = "OK|WARN|BLOCK"        # словарь вердиктов
 `Bun.TOML.parse` целиком, вместе с `[defaults]` из раздела «Модель»):
 
 ```toml
-[probe.dispatch-judge]
+[probe.judge]
 enabled = true
 on      = ["PreToolUse"]
 show    = ["dispatch"]
 act     = "cancel"
 rx      = "OK|WARN|BLOCK"
 
-  [probe.dispatch-judge.when]
+  [probe.judge.when]
   field = "tool_name"
   in    = ["Agent", "Task"]
 
-[probe.fleet-idle]
+[probe.idle-watch]
 enabled      = true
 on           = ["PostToolUse"]
 show         = ["fleet", "tool"]
@@ -262,19 +266,19 @@ act          = "nudge"
 rx           = "SILENT|NUDGE"
 cooldown_min = 30
 
-  [[probe.fleet-idle.when.all]]
+  [[probe.idle-watch.when.all]]
   field       = "live_works"
   count_below = 1
 
-  [[probe.fleet-idle.when.all]]
+  [[probe.idle-watch.when.all]]
   field       = "spawns_in_window"
   count_below = 1
 
-  [[probe.fleet-idle.when.all]]
+  [[probe.idle-watch.when.all]]
   field          = "last_consultation"
   older_than_min = 30
 
-  [probe.fleet-idle.gate]
+  [probe.idle-watch.gate]
   live_kinds      = ["local_agent", "remote_agent", "in_process_teammate"]
   live_threshold  = 1
   live_recheck_ms = 60000
