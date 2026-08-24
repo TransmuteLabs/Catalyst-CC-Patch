@@ -1255,7 +1255,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     '__clip=(__s,__k)=>{let __x=String(__s??"");return __x.length<=__k?__x:'+
       '__x.slice(0,__k)+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+'+
       '(__x.length-__k)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432]"},' +
-    '__jdir=__o.dirEnv||((process.env.HOME||".")+"/.claude/"+__o.dirName);' +
+    '__jdir=(__o.dirEnv||((process.env.HOME||".")+"/.claude/probes"))+"/"+__o.dirName;' +
     // The journal line is an INDEX, not evidence: its verdict is clipped and
     // the material the judge actually saw is nowhere in it, so neither
     // "did it judge correctly" nor "train a smaller model on these" can be
@@ -1346,7 +1346,10 @@ step('22 judge consulted before a subagent dispatch', () => {
       // Поэтому неизвестная обёртка, уцелевшая в классе "user", попадает в
       // журнал полем uw — класс становится измеримым, а не сюрпризом.
       'let __fs=await import("node:fs/promises");__jfs=__fs;' +
-      'let __dir=__o.dirEnv||((process.env.HOME||".")+"/.claude/"+__o.dirName);' +
+      // Один дом на все пробы: настройки всех — в probes.toml рядом, у пробы
+      // остаётся каталог для промта, шаблона, журнала и записей.
+      'let __phome=__o.dirEnv||((process.env.HOME||".")+"/.claude/probes");' +
+      'let __dir=__phome+"/"+__o.dirName;' +
       // The judge stays project-agnostic on purpose: it rules on the event, the
       // logic and the rules, not on what a project is about. What a project MAY
       // do is restate the rules for itself — a nearest `.claude/judge` above the
@@ -1354,7 +1357,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // appended, a full `prompt.md`/`body.json` replaces). An explicit
       // CLAUDE_JUDGE_DIR turns layering off: a probe must get exactly what it
       // was handed.
-      '__pdir=null;' +
+      '__pdir=null;let __phomeP=null;' +
       // Отсутствие слоя и НЕЧИТАЕМЫЙ слой — разные события: первое значит
       // "правил нет", второе "правила есть, но я их не прочёл". Пока оба
       // давали одно и то же (access().catch(()=>!1)), проектные правила
@@ -1369,17 +1372,17 @@ step('22 judge consulted before a subagent dispatch', () => {
         'return __c==="EACCES"||__c==="EPERM"?2:' +
         '(__c==="ENOENT"||__c==="ENOTDIR"||__c==="ELOOP"||__c==="ENAMETOOLONG"?0:3)};' +
       'if(!__o.dirEnv)try{let __p=process.cwd();' +
-        'for(let __i=0;__i<24;__i++){let __c=__p+"/.claude/"+__o.dirName;' +
-          'let __has=await Promise.all([__c+"/config.json",__c+"/prompt.md",' +
+        'for(let __i=0;__i<24;__i++){let __ch=__p+"/.claude/probes",__c=__ch+"/"+__o.dirName;' +
+          'let __has=await Promise.all([__ch+"/probes.toml",__c+"/prompt.md",' +
             '__c+"/prompt.extra.md",__c+"/body.json"].map((__f)=>' +
             '__fs.access(__f).then(()=>({c:1})).catch((__er)=>' +
               '({c:__pcode(__er),e:String(__er?.code||"ERR")}))));' +
           'let __no=__has.find((__x)=>__x.c===2),__un=__has.find((__x)=>__x.c===3);' +
           'if(__no){__deg.push("layer-unreadable:"+__c+" ("+__no.e+")");' +
             '__degb.push("layer-unreadable:"+__c+" ("+__no.e+")");' +
-            'if(__c!==__dir)__pdir=__c;break}' +
+            'if(__c!==__dir){__pdir=__c;__phomeP=__ch}break}' +
           'if(__un)__deg.push("layer-unknown:"+__c+" ("+__un.e+")");' +
-          'if(__has.some((__x)=>__x.c===1)){if(__c!==__dir)__pdir=__c;break}' +
+          'if(__has.some((__x)=>__x.c===1)){if(__c!==__dir){__pdir=__c;__phomeP=__ch}break}' +
           'let __up=__p.replace(/\\/[^\\/]*$/,"");if(!__up||__up===__p)break;__p=__up}}catch{}' +
       // Читалка объявляет исход: null — файла нет, !1 — файл есть, но не
       // прочитан или не разобран. Молчаливый разбор превращал битый конфиг
@@ -1403,11 +1406,31 @@ step('22 judge consulted before a subagent dispatch', () => {
         'try{return JSON.parse(__x)}catch(__pe){__deg.push("unparsed:"+__f+": "+' +
           '__clip(__pe?.message??__pe,60));' +
           '__degb.push("unparsed:"+__f+": "+__clip(__pe?.message??__pe,60));return !1}};' +
+      // Разборщик TOML принадлежит рантайму образа (bun). Его отсутствие —
+      // событие для журнала, а не пустой объект: пустые настройки молча
+      // снимают enforce, лестницу и бюджеты.
+      'let __ldt=async(__f)=>{let __x=await __rdj(__f);if(__x===null)return null;' +
+        'if(__x.charCodeAt(0)===65279)__x=__x.slice(1);' +
+        'if(!__x.trim()){__deg.push("empty:"+__f);__degb.push("empty:"+__f);return !1}' +
+        'let __tp=globalThis.Bun?.TOML?.parse;' +
+        'if(typeof __tp!=="function"){__deg.push("no-toml-parser:"+__f);' +
+          '__degb.push("no-toml-parser:"+__f);return !1}' +
+        'try{return __tp(__x)}catch(__pe){__deg.push("unparsed:"+__f+": "+' +
+          '__clip(__pe?.message??__pe,60));' +
+          '__degb.push("unparsed:"+__f+": "+__clip(__pe?.message??__pe,60));return !1}};' +
+      // Действующие настройки пробы: [defaults] под своей таблицей, проектный
+      // слой сверху в том же порядке. Проба, не названная в файле, получает
+      // одни defaults — это не ошибка, а отсутствие своих правок.
+      'let __eff=(__t,__id)=>__t&&typeof __t==="object"' +
+        '?{...(__t.defaults||{}),...((__t.probe||{})[__id]||{})}:{};' +
       'let __cfg={},__cfgbad=!1;' +
-      'let __c0=await __ldj(__dir+"/config.json");' +
-      'if(__c0===!1)__cfgbad=!0;else if(__c0)__cfg=__c0;' +
-      'if(__pdir){let __c1=await __ldj(__pdir+"/config.json");' +
-        'if(__c1===!1)__cfgbad=!0;else if(__c1)__cfg={...__cfg,...__c1}}' +
+      'let __c0=await __ldt(__phome+"/probes.toml");' +
+      'if(__c0===!1)__cfgbad=!0;else if(__c0)__cfg=__eff(__c0,__o.dirName);' +
+      'if(__phomeP){let __c1=await __ldt(__phomeP+"/probes.toml");' +
+        'if(__c1===!1)__cfgbad=!0;else if(__c1)__cfg={...__cfg,...__eff(__c1,__o.dirName)}}' +
+      // Выключение пробы — настройка, а не отсутствие файла: реестр обязан
+      // уметь погасить одного потребителя, не трогая остальных.
+      'if(__cfg.enabled===!1){await __jlog({outcome:"skip_disabled"});return}' +
       'if(__cfg.record===!1)__jrec=!1;' +
       'if(__cfg.record_gzip===!0)__jgz=!0;' +
       'let __ask=!0;' +
@@ -1897,7 +1920,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'tag:"[Judge]",dirName:"judge",arm:!0,' +
       // Словарь вердикта — параметр, а не свойство ядра: у наблюдателя он свой.
       'rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",' +
-      'sw:process.env.CLAUDE_JUDGE,dirEnv:process.env.CLAUDE_JUDGE_DIR,' +
+      'sw:process.env.CLAUDE_JUDGE,dirEnv:process.env.CLAUDE_PROBES_DIR,' +
       'promptEnv:process.env.CLAUDE_JUDGE_PROMPT,modelEnv:process.env.CLAUDE_JUDGE_MODEL,' +
       'urlEnv:process.env.CLAUDE_JUDGE_URL,tmoEnv:process.env.CLAUDE_JUDGE_TIMEOUT_MS,' +
       'dbg:process.env.CLAUDE_JUDGE_DEBUG,' +
@@ -1926,7 +1949,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // Словарь свой: наблюдателю нечего разрешать или запрещать, он либо
       // молчит, либо называет предмет.
       'rx:"SILENT|NUDGE",act:"NUDGE",' +
-      'sw:process.env.CLAUDE_IDLE,dirEnv:process.env.CLAUDE_IDLE_DIR,' +
+      'sw:process.env.CLAUDE_IDLE,dirEnv:process.env.CLAUDE_PROBES_DIR,' +
       'promptEnv:process.env.CLAUDE_IDLE_PROMPT,modelEnv:process.env.CLAUDE_IDLE_MODEL,' +
       'urlEnv:process.env.CLAUDE_IDLE_URL,tmoEnv:process.env.CLAUDE_IDLE_TIMEOUT_MS,' +
       'dbg:process.env.CLAUDE_IDLE_DEBUG,' +

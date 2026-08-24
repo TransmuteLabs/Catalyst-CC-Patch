@@ -570,11 +570,11 @@ checks = {
     # the global one
     'judge takes a project layer': bool(re.search(
                                               rb'if\(__has\.some\(\(__x\)=>__x\.c===1\)\)\{if\(__c!==__dir\)'
-                                              rb'__pdir=__c;break\}', d))
+                                              rb'\{__pdir=__c;__phomeP=__ch\}break\}', d))
                                   and bool(re.search(
-                                              rb'if\(__pdir\)\{let __c1=await __ldj\(__pdir\+"/config\.json"\);'
+                                              rb'if\(__phomeP\)\{let __c1=await __ldt\(__phomeP\+"/probes\.toml"\);'
                                               rb'if\(__c1===!1\)__cfgbad=!0;else if\(__c1\)'
-                                              rb'__cfg=\{\.\.\.__cfg,\.\.\.__c1\}\}', d)),
+                                              rb'__cfg=\{\.\.\.__cfg,\.\.\.__eff\(__c1,__o\.dirName\)\}\}', d)),
     'judge context is structured, not prefixed': bool(re.search(
                                               rb'return\{src:__role,text:__bt\}\}\)\.filter\(Boolean\)', d))
                                           and bool(re.search(
@@ -789,10 +789,42 @@ checks = {
                                           and bool(re.search(rb'__jtry=0,__jerr1=null', d)),
     # битый конфиг молча снимал enforce и fail_closed: судья выглядел
     # работающим и пропускал всё, включая собственный вердикт BLOCK
-    'judge tells a broken config from a missing one': bool(re.search(
-                                              rb'let __ldj=async\(__f\)=>\{let __x=await __rdj\(__f\)', d))
+    # один дом на все пробы: id — подкаталог, а не отдельный корень настроек
+    'settings live in one probes home': bool(re.search(
+                                              rb'let __phome=__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
+                                              rb'\+"/\.claude/probes"\);let __dir=__phome\+"/"\+__o\.dirName', d))
+                                          # журнал пробы живёт в её подкаталоге того же дома
                                           and bool(re.search(
-                                              rb'if\(__c0===!1\)__cfgbad=!0;else if\(__c0\)__cfg=__c0', d))
+                                              rb'__jdir=\(__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
+                                              rb'\+"/\.claude/probes"\)\)\+"/"\+__o\.dirName', d))
+                                          # переменная среды ОДНА на все пробы
+                                          and len(re.findall(rb'dirEnv:process\.env\.CLAUDE_PROBES_DIR', d)) == 2
+                                          and len(re.findall(rb'CLAUDE_JUDGE_DIR', d)) == 0
+                                          and len(re.findall(rb'CLAUDE_IDLE_DIR', d)) == 0,
+    # [defaults] под таблицей пробы; проба, не названная в файле, получает
+    # одни defaults — это отсутствие своих правок, а не ошибка
+    'probe settings merge defaults under the probe table': bool(re.search(
+                                              rb'let __eff=\(__t,__id\)=>__t&&typeof __t==="object"'
+                                              rb'\?\{\.\.\.\(__t\.defaults\|\|\{\}\),'
+                                              rb'\.\.\.\(\(__t\.probe\|\|\{\}\)\[__id\]\|\|\{\}\)\}:\{\}', d)),
+    # выключение пробы — настройка; реестр обязан гасить одного потребителя,
+    # не трогая остальных, и гашение обязано быть ВИДНО в журнале
+    'a disabled probe says so in the journal': bool(re.search(
+                                              rb'if\(__cfg\.enabled===!1\)\{await __jlog\('
+                                              rb'\{outcome:"skip_disabled"\}\);return\}', d)),
+    # отсутствие разборщика TOML — событие, а не пустые настройки: пустые
+    # молча снимают enforce, лестницу и бюджеты
+    'a missing TOML parser is declared, not silently empty': bool(re.search(
+                                              rb'let __tp=globalThis\.Bun\?\.TOML\?\.parse;'
+                                              rb'if\(typeof __tp!=="function"\)\{'
+                                              rb'__deg\.push\("no-toml-parser:"\+__f\);'
+                                              rb'__degb\.push\("no-toml-parser:"\+__f\);return !1\}', d)),
+    'judge tells a broken config from a missing one': bool(re.search(
+                                              rb'let __ldt=async\(__f\)=>\{let __x=await __rdj\(__f\)', d))
+                                          and bool(re.search(
+                                              rb'let __c0=await __ldt\(__phome\+"/probes\.toml"\);'
+                                              rb'if\(__c0===!1\)__cfgbad=!0;else if\(__c0\)'
+                                              rb'__cfg=__eff\(__c0,__o\.dirName\)', d))
                                           # неизвестные enforce/fail_closed считаются ВКЛЮЧЁННЫМИ
                                           and bool(re.search(
                                               rb'__cfg\.enforce===!0\|\|__cfgbad', d))
