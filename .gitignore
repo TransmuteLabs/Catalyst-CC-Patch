@@ -4,3 +4,5 @@ judge/records/
 judge/journal.jsonl
 judge/bench/
 judge/labels.jsonl
+__pycache__/
+*.pyc
