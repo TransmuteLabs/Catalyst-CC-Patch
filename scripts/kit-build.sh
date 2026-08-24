@@ -34,10 +34,17 @@ for f in claude-patch-all.sh tweakcc-patch.js claude_patch.py set-model-costs.py
 done
 cp "$ROOT/README.md"                        "$STAGE/README.md"
 cp "$ROOT/AGENTS.md"                        "$STAGE/AGENTS.md"
-cp "$ROOT/docs/judge-architecture.md"       "$STAGE/docs/judge-architecture.md"
-cp "$ROOT/docs/judge-patch-spec.md"         "$STAGE/docs/judge-patch-spec.md"
-cp "$ROOT/docs/idle-watch.md"               "$STAGE/docs/idle-watch.md"
-cp "$ROOT/docs/probe-core.md"               "$STAGE/docs/probe-core.md"
+# Документы кладутся ПЕРЕЧИСЛЕНИЕМ каталога, а не поимённым списком: список
+# молча отстаёт от дерева. Так и вышло — новая спека реестра наблюдателей не
+# попала в комплект, а сборка при этом отработала успешно. Брифы задач
+# (brief-*) в комплект не идут: это наряды на разовую работу, а не описание
+# механизма.
+for f in "$ROOT/docs"/*.md; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$b" in brief-*) continue;; esac
+  cp "$f" "$STAGE/docs/$b"
+done
 cp "$ROOT/tools/listener.py"                "$STAGE/tools/listener.py"
 cp "$ROOT/tools/probe-bench.js"             "$STAGE/tools/probe-bench.js"
 cp "$ROOT/tools/emit-check.js"              "$STAGE/tools/emit-check.js"
@@ -67,6 +74,15 @@ grep -qE "$N (проверок|проверки|проверка)" "$STAGE/READM
 # теряет новое молча — так из архива и выпал наблюдатель.
 SKIP=" fixtures "
 miss=0
+# Каталог docs проверяется по тому же правилу, что и дома проб: файл на диске,
+# которого нет в комплекте, — ошибка сборки, а не мелочь. Без этой ветви
+# отставание списка от дерева не замечалось вовсе.
+for f in "$ROOT/docs"/*.md; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$b" in brief-*) continue;; esac
+  [ -f "$STAGE/docs/$b" ] || { echo "ОШИБКА: docs/$b живёт на диске, но в комплект не кладётся" >&2; miss=1; }
+done
 for home in judge idle-watch; do
   for f in "$ROOT/$home"/*; do
     [ -f "$f" ] || continue

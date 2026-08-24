@@ -20,5 +20,12 @@
   "fail_closed": false,
   "window_min": 30,
   "threshold": 1,
-  "cooldown_min": 30
+  "cooldown_min": 30,
+  "live_kinds": [
+    "local_agent",
+    "remote_agent",
+    "in_process_teammate"
+  ],
+  "live_threshold": 1,
+  "live_recheck_ms": 60000
 }
