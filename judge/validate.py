@@ -51,24 +51,9 @@ def probe_settings(settings_path=None, probe=None):
     return merged
 
 
-# Дом словаря вердиктов — бинарник: там он и применяется. Копия в инструменте
-# разъехалась бы с образом молча, а расхождение словаря даёт неверную разметку
-# корпуса, по которой потом выбирают модель.
-def verdict_vocabulary(image_path, probe):
-    path = os.path.realpath(os.path.expanduser(image_path))
-    try:
-        with open(path, 'rb') as fh:
-            data = fh.read()
-    except OSError as err:
-        raise SystemExit(f'образ не прочитан: {path} ({err.__class__.__name__})')
-    pattern = (rb'dirName:"' + re.escape(probe.encode()) +
-               rb'"[^\n]{0,160}?rx:"([^"]+)",act:"([^"]+)"')
-    found = re.search(pattern, data)
-    if not found:
-        raise SystemExit(
-            f'словарь вердиктов не извлечён из образа {path} для пробы "{probe}"; '
-            'зашитый словарь не подставляется — расхождение с образом даёт неверную разметку')
-    return found.group(1).decode().split('|'), found.group(2).decode().split('|')
+# Читалка словаря живёт в replay: его импортируют оба инструмента, и второй
+# копии функции быть не должно.
+verdict_vocabulary = replay.verdict_vocabulary
 
 
 RX_VALUES = []

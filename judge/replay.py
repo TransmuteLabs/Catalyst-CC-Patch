@@ -7,7 +7,49 @@ import os
 import re
 import sys
 
-VERDICT = re.compile(r'^\s*(?:OK|BLOCK|STOP|DENY|WARN):.*$', re.M)
+# Дом словаря вердиктов — образ: там он и применяется. Копия литералом
+# разъезжается с образом молча, а неверный словарь даёт неверную разметку
+# корпуса, по которой потом выбирают модель.
+DEFAULT_IMAGE = '~/.local/bin/claude'
+_VOCAB_CACHE = {}
+
+
+def verdict_vocabulary(image_path=None, probe='judge'):
+    path = os.path.realpath(os.path.expanduser(
+        image_path or os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE))
+    key = (path, probe)
+    if key in _VOCAB_CACHE:
+        return _VOCAB_CACHE[key]
+    try:
+        with open(path, 'rb') as fh:
+            data = fh.read()
+    except OSError as err:
+        raise SystemExit(f'образ не прочитан: {path} ({err.__class__.__name__})')
+    pattern = (rb'dirName:"' + re.escape(probe.encode()) +
+               rb'"[^\n]{0,160}?rx:"([^"]+)",act:"([^"]+)"')
+    found = re.search(pattern, data)
+    if not found:
+        raise SystemExit(
+            f'словарь вердиктов не извлечён из образа {path} для пробы "{probe}"; '
+            'зашитый словарь не подставляется — расхождение с образом даёт неверную разметку')
+    result = (found.group(1).decode().split('|'), found.group(2).decode().split('|'))
+    _VOCAB_CACHE[key] = result
+    return result
+
+
+class _VerdictPattern:
+    # Ленивое построение: словарь берётся из образа при первом же поиске, а не
+    # при импорте — иначе любой импорт replay требовал бы наличия образа.
+    def findall(self, text):
+        return verdict_pattern().findall(text)
+
+
+VERDICT = _VerdictPattern()
+
+
+def verdict_pattern(probe='judge'):
+    rx, _ = verdict_vocabulary(probe=probe)
+    return re.compile(r'^\s*(?:' + '|'.join(re.escape(v) for v in rx) + r'):.*$', re.M)
 
 
 def load(path):
@@ -118,8 +160,9 @@ def replay(rec, args):
     return sent, verdict_of(sent['raw']) if not sent['error'] else ''
 
 
-def klass(verdict):
-    match = re.match(r'\s*(OK|WARN|BLOCK|STOP|DENY)', verdict or '')
+def klass(verdict, probe='judge'):
+    rx, _ = verdict_vocabulary(probe=probe)
+    match = re.match(r'\s*(' + '|'.join(re.escape(v) for v in rx) + r')', verdict or '')
     return match.group(1) if match else 'EMPTY'
 
 
