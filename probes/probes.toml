@@ -1,0 +1,44 @@
+[defaults]
+max_tokens = 24000
+timeout_ms = 240000
+enforce = true
+context_chars = 60000
+retry_context_chars = 8000
+
+[probe.judge]
+dispatch_chars = 16000
+fail_closed = true
+
+[[probe.judge.models]]
+model = "deepseek-v4-flash"
+effort = "high"
+context_chars = 24000
+
+[[probe.judge.models]]
+model = "glm-5.3"
+effort = "max"
+context_chars = 24000
+
+[[probe.judge.models]]
+model = "claude-haiku-4-5-20251001"
+context_chars = 12000
+
+[probe.idle-watch]
+dispatch_chars = 2000
+fail_closed = false
+window_min = 30
+threshold = 1
+cooldown_min = 30
+live_kinds = ["local_agent", "remote_agent", "in_process_teammate"]
+live_threshold = 1
+live_recheck_ms = 60000
+
+[[probe.idle-watch.models]]
+model = "deepseek-v4-flash"
+effort = "high"
+context_chars = 24000
+
+[[probe.idle-watch.models]]
+model = "glm-5.3"
+effort = "max"
+context_chars = 24000

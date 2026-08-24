@@ -45,21 +45,44 @@ for f in "$ROOT/docs"/*.md; do
   case "$b" in brief-*) continue;; esac
   cp "$f" "$STAGE/docs/$b"
 done
-cp "$ROOT/tools/listener.py"                "$STAGE/tools/listener.py"
-cp "$ROOT/tools/probe-bench.js"             "$STAGE/tools/probe-bench.js"
-cp "$ROOT/tools/emit-check.js"              "$STAGE/tools/emit-check.js"
-for f in config.json prompt.md body.json README.md NOTES.md replay.py compact.py validate.py \
+# Перечень ИМЁН отставал от дерева уже дважды (наблюдатель выпадал из архива
+# двое суток; probes-migrate.py не попал в комплект в день своего появления).
+# Поэтому tools/ кладётся обходом каталога, а не списком.
+for f in "$ROOT/tools"/*; do
+  [ -f "$f" ] || continue
+  cp "$f" "$STAGE/tools/$(basename "$f")"
+done
+for f in README.md NOTES.md replay.py compact.py validate.py \
          channel.py adjudicate.py; do
-  cp "$JUDGE/$f" "$STAGE/judge/$f"
+  [ -f "$JUDGE/$f" ] && cp "$JUDGE/$f" "$STAGE/judge/$f"
+done
+# Дом проб: один файл настроек на все пробы плюс каталог артефактов у каждой.
+mkdir -p "$STAGE/probes"
+for f in "$ROOT/probes"/*; do
+  [ -f "$f" ] && cp "$f" "$STAGE/probes/$(basename "$f")"
+  if [ -d "$f" ]; then
+    mkdir -p "$STAGE/probes/$(basename "$f")"
+    cp "$f"/* "$STAGE/probes/$(basename "$f")/" 2>/dev/null || true
+  fi
 done
 # Наблюдатель за флотом — вторая проба того же ядра. В комплект он не попадал
 # двое суток: рецепт перечисляет ИМЕНА, и появившийся механизм в перечень
 # никто не дописал. Ниже стоит сторож, чтобы это не повторилось молча.
-for f in config.json prompt.md README.md; do
+for f in README.md; do
   cp "$ROOT/idle-watch/$f" "$STAGE/idle-watch/$f"
 done
 PLIST="$ROOT/judge/com.maratkarimov.judge-compact.plist"
 [[ -f "$PLIST" ]] && cp "$PLIST" "$STAGE/judge/$(basename "$PLIST")"
+
+# Сторож полноты tools/: обход каталога делает пропуск невозможным, но
+# проверка обязана падать и тогда, когда обход заменят обратно на список.
+miss_tools=0
+for f in "$ROOT/tools"/*; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  [ -f "$STAGE/tools/$b" ] || { echo "ОШИБКА: tools/$b живёт на диске, но в комплект не кладётся" >&2; miss_tools=1; }
+done
+[ "$miss_tools" = 0 ] || exit 1
 
 # Число проверок в README обязано совпадать с числом проверок в конвейере:
 # именно это расхождение и было симптомом отставшей документации.
