@@ -1,62 +1,71 @@
-# Общее ядро консультаций (судья и наблюдатель)
+# The shared consultation core (the judge and the watcher)
 
-Судья вызовов и наблюдатель за флотом — один механизм. Совпадает всё: слои
-настройки, сборка ленты с происхождением записей, канал к модели через пул CC,
-лестница моделей, журнал, разбор вердикта первой строкой. Различий ровно
-четыре, и они и есть параметры:
+The dispatch judge and the fleet idle watcher are one mechanism. Everything
+matches: settings layers, transcript assembly with record provenance, the
+channel to the model via the CC pool, the ladder of models, the journal,
+parsing the verdict from the first line. There are exactly four differences,
+and those four are precisely the parameters:
 
-| Что | Судья | Наблюдатель |
+| What | The judge | The watcher |
 |---|---|---|
-| КОГДА зовут | перед вызовом субагента | живых работ нет, диспатчей за окно меньше порога, и прошёл период покоя |
-| ЧТО показывают | лента + сам разбираемый диспатч | лента + живые работы + счёт диспатчей за окно + текущий инструмент |
-| КАКИМ промтом | `~/.claude/probes/judge/prompt.md` | `~/.claude/probes/idle-watch/prompt.md` |
-| КАК реагируют | бросок: вызов отменяется, текст приходит как ошибка инструмента | вкладка напоминания: исполнение не трогается |
+| WHEN it is called | before a subagent call | no live work, dispatches within the window below threshold, and cooldown has passed |
+| WHAT it is shown | the transcript + the dispatch under review | the transcript + live work + the dispatch count over the window + the current tool |
+| WITH WHICH prompt | `~/.claude/probes/judge/prompt.md` | `~/.claude/probes/idle-watch/prompt.md` |
+| HOW it reacts | a throw: the call is cancelled, the text arrives as a tool error | a reminder tab: execution is not touched |
 
-Копия с исключениями отвергнута: это два расходящихся куска по ~600 строк, и
-всякий урок, оплаченный на одном, пришлось бы платить второй раз на другом
-(классы `$`-экранирования, подрезки ленты, самоописания журнала — все они
-достались дорого и живут именно в ядре).
+A copy with exceptions was rejected: it would be two diverging pieces of ~600
+lines each, and every lesson paid for on one would have to be paid a second
+time on the other (the `$`-escaping classes, transcript trimming, journal
+self-description — all of these were earned the hard way and live precisely in
+the core).
 
-## Контракт ядра
+## The core contract
 
-Ядро вклеивается ОДИН раз и принимает описание пробы:
+The core is injected ONCE and takes a probe description:
 
-1. **Идентификатор пробы** — `judge`, `idle-watch`. Дом у всех проб ОДИН
-   (`~/.claude/probes`, оверрайд `CLAUDE_PROBES_DIR` на все пробы сразу).
-   Настройки берутся из общего `probes.toml`: `[defaults]`, поверх них таблица
-   `[probe.<id>]`, поверх — то же из проектного слоя. В подкаталоге `<id>/`
-   живут `prompt.md` (замена), `prompt.extra.md` (дописывание), `body.json`,
-   `journal.jsonl`, `records/`. `enabled = false` гасит пробу с исходом
-   `skip_disabled`; отсутствие разборщика TOML объявляется строкой
-   `no-toml-parser`, а не отдаёт пустые настройки.
-2. **Данные** — функция, собирающая полезную нагрузку поверх ленты. Лента общая:
-   записи `{src,text}`, происхождение не сплющивается, `src:"user"` закрепляется
-   при подрезке, пропуск объявляется маркером, бюджет считается в знаках JSON.
-3. **Триггер** — предикат и точка вызова. У судьи точка — сам диспатч, предикат
-   тривиален. У наблюдателя точка — ход, предикат считает окно, порог и период
-   покоя; дешёвый счёт обязан идти ПЕРЕД моделью, иначе консультация станет
-   постоянной статьёй расхода.
-4. **Словарь вердикта** — допустимые первые слова (`OK|WARN|BLOCK` против
-   `SILENT|NUDGE`). Нераспознанное вердиктом не считается ни у одной пробы.
-5. **Реакция** — что делать с распознанным вердиктом. Здесь же живёт разная
-   политика отказа: судья при ошибке канала fail-closed (отменяет вызов),
-   наблюдатель fail-open (молчит). Обе пишут в журнал ВСЕГДА — иначе молчание и
-   поломка снаружи неразличимы.
+1. **Probe identifier** — `judge`, `idle-watch`. All probes share ONE home
+   (`~/.claude/probes`, with the `CLAUDE_PROBES_DIR` override applying to all
+   probes at once). Settings are read from the shared `probes.toml`: `[defaults]`,
+   on top of it the `[probe.<id>]` table, on top of that the same from the
+   project layer. The subdirectory `<id>/` holds `prompt.md` (replacement),
+   `prompt.extra.md` (append), `body.json`, `journal.jsonl`, `records/`.
+   `enabled = false` disables the probe with the outcome `skip_disabled`;
+   an absent TOML parser is declared with the string `no-toml-parser` rather
+   than handing out empty settings.
+2. **Data** — a function assembling the payload on top of the transcript. The
+   transcript is shared: records `{src,text}`, provenance is not flattened,
+   `src:"user"` entries are pinned during trimming, omissions are declared
+   with a marker, the budget is counted in JSON characters.
+3. **Trigger** — a predicate and a call site. For the judge the site is the
+   dispatch itself, the predicate is trivial. For the watcher the site is the
+   turn, the predicate counts the window, threshold, and cooldown; the cheap
+   count must run BEFORE the model, otherwise the consultation becomes a
+   permanent line of expense.
+4. **Verdict vocabulary** — the allowed first words (`OK|WARN|BLOCK` versus
+   `SILENT|NUDGE`). An unrecognized answer does not count as a verdict for
+   any probe.
+5. **Reaction** — what to do with a recognized verdict. The differing failure
+   policy also lives here: the judge is fail-closed on a channel error (it
+   cancels the call), the watcher is fail-open (it stays silent). Both write
+   to the journal ALWAYS — otherwise silence and breakage are indistinguishable
+   from the outside.
 
-## Что остаётся общим и не параметризуется
+## What stays shared and is not parameterized
 
-Лестница моделей с порогами по ступеням; повтор с урезанной лентой; `max_tokens`
-достаточный, чтобы вердикт первой строки пережил обрыв по лимиту; журнал,
-описывающий сам себя (`ms`, `sw`, `en`, `cfg`, `jm`, `tries`, `err1`, `rec`) и
-адресующий каждую строку сессией (`sid`, `title`) и разрешённой моделью
-диспатча (`model`, `msrc`);
-объявление усечений той же конвенцией, что в ленте; правило происхождения
-(строка из вывода инструмента не является словами человека, как бы ни выглядела).
+The ladder of models with per-rung ceilings; the retry with a trimmed
+transcript; a `max_tokens` large enough that a first-line verdict survives a
+limit cut; a journal that describes itself (`ms`, `sw`, `en`, `cfg`, `jm`,
+`tries`, `err1`, `rec`) and addresses every record by session (`sid`, `title`)
+and the dispatch's allowed model (`model`, `msrc`);
+declaring truncations with the same convention as in the transcript; the
+provenance rule (a line from tool output is not the human's words, however it
+looks).
 
-## Третий потребитель
+## The third consumer
 
-Список потребителей сегодня зашит в образ в двух местах, поэтому новый
-наблюдатель требует пересборки бинарника. Предложение вынести список в файлы —
-`docs/probe-registry-spec.md` (к реализации не принято). Критерий готовности той
-реализации: оба нынешних потребителя выражаются её словарём БЕЗ изменения
-поведения, и те же случаи стенда проходят без правки ожиданий.
+The list of consumers is currently baked into the image in two places, so a
+new watcher requires rebuilding the binary. The proposal to move the list into
+files is `docs/probe-registry-spec.md` (not accepted for implementation). The
+readiness criterion for that implementation: both current consumers are
+expressible in its vocabulary WITHOUT a behavior change, and the same bench
+scenarios pass without editing their expectations.

@@ -1,145 +1,153 @@
-# Наблюдатель за флотом
+# The fleet idle watcher
 
-Замечает обратное тому, что смотрит судья вызовов. Судья спрашивает «этот вызов
-субагента годен?», наблюдатель — «а почему вызовов нет вовсе?». Механизм у них
-ОДИН (`docs/probe-core.md`), различий ровно четыре: когда зовут, что показывают,
-каким промтом судят, как реагируют.
+It notices the reverse of what the dispatch judge watches. The judge asks
+"is this subagent call any good?", the watcher — "and why are there no calls
+at all?". The mechanism is ONE (`docs/probe-core.md`), with exactly four
+differences: when it is called, what it is shown, with which prompt it judges,
+how it reacts.
 
-Он НЕ гейт. Ничего не отменяет и ничего не требует: его текст приходит вкладкой
-в ход, и главный луп вправе не послушаться — он знает про свою работу больше.
+It is NOT a gate. It cancels nothing and demands nothing: its text arrives as
+a tab within the turn, and the main loop is free to ignore it — it knows more
+about its own work.
 
-## Файлы (читаются на КАЖДОМ вызове — правка не требует пересборки бинарника)
+## Files (read on EVERY call — editing requires no binary rebuild)
 
-Настройки ВСЕХ проб — в одном файле `~/.claude/probes/probes.toml`, у пробы
-остаётся каталог для текста и данных:
+The settings of ALL probes live in one file, `~/.claude/probes/probes.toml`;
+the probe keeps a directory for text and data:
 
-| Файл | Что задаёт |
+| File | What it defines |
 |---|---|
-| `~/.claude/probes/probes.toml`, таблица `[probe.idle-watch]` | лестница моделей, бюджеты, пороги счёта |
-| `~/.claude/probes/idle-watch/prompt.md` | сами правила: когда молчать, когда называть предмет |
-| `~/.claude/probes/idle-watch/prompt.extra.md` | дописывается к `prompt.md` (проектная добавка) |
-| `~/.claude/probes/idle-watch/body.json` | полный шаблон запроса, если нужен свой провайдер или роли |
-| `~/.claude/probes/idle-watch/journal.jsonl` | строка на каждую консультацию и на каждый отказ счёта |
-| `~/.claude/probes/idle-watch/records/` | полная пара «запрос → ответ» на консультацию |
+| `~/.claude/probes/probes.toml`, table `[probe.idle-watch]` | the model ladder, budgets, count thresholds |
+| `~/.claude/probes/idle-watch/prompt.md` | the rules themselves: when to stay silent, when to name a subject |
+| `~/.claude/probes/idle-watch/prompt.extra.md` | appended to `prompt.md` (a project addition) |
+| `~/.claude/probes/idle-watch/body.json` | the full request template, if a custom provider or roles are needed |
+| `~/.claude/probes/idle-watch/journal.jsonl` | a line for every consultation and every count refusal |
+| `~/.claude/probes/idle-watch/records/` | the full request → response pair per consultation |
 
-Действующие настройки = `[defaults]`, поверх которых наложена `[probe.idle-watch]`;
-таблица пробы сильнее. Проба, не названная в файле, получает одни `[defaults]` —
-это отсутствие своих правок, а не ошибка. `enabled = false` гасит пробу, и
-гашение видно в журнале исходом `skip_disabled`.
+The effective settings = `[defaults]` with `[probe.idle-watch]` layered on
+top; the probe's table is stronger. A probe not named in the file gets the
+bare `[defaults]` — that is the absence of its own edits, not an error.
+`enabled = false` disables the probe, and the disabling is visible in the
+journal as the outcome `skip_disabled`.
 
-Проектный слой — ближайший над рабочим каталогом `.claude/probes`: `probes.toml`
-сливается по ключам, `prompt.md` и `body.json` заменяют, `prompt.extra.md`
-дописывается. Применённый слой виден в журнале полем `cfg`.
+The project layer is the nearest `.claude/probes` above the working directory:
+`probes.toml` merges by keys, `prompt.md` and `body.json` replace,
+`prompt.extra.md` is appended. The applied layer is visible in the journal via
+the `cfg` field.
 
-## Включение
+## Enabling
 
-В `~/.claude/settings.json`, раздел `env`:
+In `~/.claude/settings.json`, the `env` section:
 
 ```json
 "CLAUDE_IDLE": "1"
 ```
 
-Без переменной вклейка не делает ничего. Субагентам наблюдатель не идёт:
-условие врезки — `agentType === "main"`.
+Without the variable the injection does nothing. The watcher does not go to
+subagents: the injection condition is `agentType === "main"`.
 
-Дом проб задаётся одной переменной на все пробы — `CLAUDE_PROBES_DIR`; заданная
-явно, она ОТКЛЮЧАЕТ проектный слой (проба должна получать ровно то, что ей
-задали).
+The probes home is set by a single variable for all probes —
+`CLAUDE_PROBES_DIR`; when set explicitly, it DISABLES the project layer (the
+probe must receive exactly what was given to it).
 
-Оверрайды на один запуск: `CLAUDE_IDLE_PROMPT`,
+Per-run overrides: `CLAUDE_IDLE_PROMPT`,
 `CLAUDE_IDLE_MODEL`, `CLAUDE_IDLE_URL`, `CLAUDE_IDLE_TIMEOUT_MS`,
 `CLAUDE_IDLE_DEBUG`.
 
-## Пороги
+## Thresholds
 
 ```json
 "live_kinds": ["local_agent","remote_agent","in_process_teammate"],
-"live_threshold": 1,      // сколько живых работ делают сессию занятой
-"live_recheck_ms": 60000, // как скоро перепроверить, пока работа идёт
-"window_min": 30,         // окно счёта диспатчей, минуты
-"threshold": 1,           // сколько диспатчей за окно считается достаточным
-"cooldown_min": 30        // как часто напоминание вообще возможно
+"live_threshold": 1,      // how many live works make the session occupied
+"live_recheck_ms": 60000, // how soon to re-check while a work is running
+"window_min": 30,         // the dispatch count window, minutes
+"threshold": 1,           // how many dispatches over the window counts as sufficient
+"cooldown_min": 30        // how often a reminder is possible at all
 ```
 
-Занятость сессии берётся из РЕГИСТРА ЗАДАЧ, а не выводится из отметок времени
-диспатчей: субагент, работающий дольше окна, из отметок выпадал, и сессия
-выглядела простаивающей ровно тогда, когда веер шёл. Живой считается работа со
-статусом `running`/`pending`, у которой не снята фоновость — признак взят из
-самого образа, а не назначен нами. `live_kinds` перечисляет виды работ, которые
-идут в счёт; по умолчанию только агентские, поэтому фоновая сборка занятостью
-не считается.
+Session occupancy is taken from the TASK REGISTRY, not derived from dispatch
+timestamps: a subagent working longer than the window dropped out of the
+marks, and the session looked idle exactly while a fan-out was running. A
+work counts as live if its status is `running`/`pending` and its background
+flag is not stripped — the sign is taken from the image itself, not assigned
+by us. `live_kinds` lists the kinds of work that count; by default only
+agent ones, so a background build does not count as occupancy.
 
-Пока живая работа есть, перепроверка идёт каждую минуту, а не в конце окна:
-момент окончания веера неизвестен, и ждать конца окна значило бы проспать
-простой, начавшийся сразу после веера.
+While live work exists, re-checking runs every minute, not at the end of the
+window: the moment the fan-out ends is unknown, and waiting for the end of
+the window would mean sleeping through an idle period that began right after
+the fan-out.
 
-Отметки диспатчей за окно СОХРАНЕНЫ как отдельное показание — «недавно
-запускали» и «работают прямо сейчас» это разные факты, и наблюдателю показывают
-оба.
+Dispatch marks over the window are KEPT as a separate reading — "launched
+recently" and "working right now" are different facts, and the watcher is
+shown both.
 
-Пока сессия моложе окна, наблюдатель молчит по построению: она ещё ничего не
-успела пропустить. Текущий диспатч учитывается ДО счёта, поэтому ход, в котором
-субагент запущен, молчалив без отдельного условия.
+While the session is younger than the window, the watcher is silent by
+construction: it has not yet had time to miss anything. The current dispatch
+is counted BEFORE the count, so the turn in which a subagent is launched is
+silent without a separate condition.
 
-Понижать `window_min` ниже нескольких минут не стоит: консультация занимает
-десятки секунд, и на коротком окне она будет приходить к уже сделанной работе.
+Lowering `window_min` below a few minutes is not worth it: a consultation
+takes tens of seconds, and with a short window it would arrive at work
+already done.
 
-## Вердикты
+## Verdicts
 
-Первой строкой, до любого обоснования:
+On the first line, before any justification:
 
 ```
-SILENT:<причина молчания>
-NUDGE:<что диспатчить прямо сейчас>
+SILENT:<reason for silence>
+NUDGE:<what to dispatch right now>
 ```
 
-Нераспознанный ответ вердиктом НЕ считается — молчание. При `enforce: false`
-вердикт выносится и пишется в журнал, но напоминание не ставится: исход
-называется `nudge_not_enforced`.
+An unrecognized answer does NOT count as a verdict — silence. With
+`enforce: false` the verdict is still delivered and written to the journal,
+but the reminder is not enqueued: the outcome is called `nudge_not_enforced`.
 
-## Журнал: как читать
+## Journal: how to read it
 
-| `outcome` | Что произошло |
+| `outcome` | What happened |
 |---|---|
-| `filtered` | отказ дешёвого счёта; причина в поле `by`: `live-work:<N>`, `fleet-busy:<N>`, `window-not-filled`, `cooldown` |
-| `silent` | консультация была, предмета нет либо есть причина молчать |
-| `nudge` | напоминание вынесено и поставлено в очередь |
-| `nudge_not_enforced` | вердикт был, но `enforce` выключен |
-| `nudge_undelivered` | вердикт был, постановка в очередь не удалась; причина в поле `reason` |
-| `empty` | ни одна ступень не дала вердикта (наблюдатель fail-open — молчит) |
-| `skip_degraded` | настройки или промт сломаны; консультация НЕ выполнялась |
+| `filtered` | a cheap-count refusal; the reason is in the `by` field: `live-work:<N>`, `fleet-busy:<N>`, `window-not-filled`, `cooldown` |
+| `silent` | there was a consultation, no subject or a reason to stay silent |
+| `nudge` | the reminder was delivered and enqueued |
+| `nudge_not_enforced` | there was a verdict, but `enforce` is off |
+| `nudge_undelivered` | there was a verdict, enqueueing failed; the reason is in the `reason` field |
+| `empty` | no rung produced a verdict (the watcher is fail-open — it stays silent) |
+| `skip_degraded` | settings or the prompt are broken; the consultation was NOT performed |
 
-Каждая строка адресуется сессией: `sid` — идентификатор сессии (он же именует
-файл транскрипта), `title` — её заголовок, `cfg` — применённый слой настроек.
-`pid` для этого не годится: система его переиспользует, и после смерти процесса
-запись не указывает ни на что.
+Every line is addressed by session: `sid` is the session identifier (it also
+names the transcript file), `title` is its title, `cfg` is the applied
+settings layer. `pid` is not suitable for this: the system reuses it, and
+after the process dies the record points at nothing.
 
-Строки на каждый вызов инструмента в журнале быть НЕ должно: отсев по памяти
-работает до всякого ввода-вывода и ничего не пишет. Если журнал растёт на
-каждом вызове — сломан отсев, а не пороги.
+There must be NO line per tool call in the journal: the memory filter runs
+before any I/O and writes nothing. If the journal grows on every call, it is
+the filter that is broken, not the thresholds.
 
-## Отказоустойчивость
+## Fault tolerance
 
-Обратная судейской. Судья fail-closed: не смог рассудить — отменяет вызов.
-Наблюдатель fail-open, и это устройство, а не настройка: он передаёт в ядро
-`arm:!1`, а обязательство что-либо сделать взводится только при
-`arm && enforce && fail_closed`. Пустые реакции на отсутствие вердикта, поломку
-и отказ канала — сама политика.
+The reverse of the judge's. The judge is fail-closed: unable to judge, it
+cancels the call. The watcher is fail-open, and this is the design, not a
+setting: it passes `arm:!1` to the core, and the obligation to do anything is
+armed only at `arm && enforce && fail_closed`. The empty reactions to no
+verdict, breakage, and channel failure are the policy itself.
 
-Сломанный `probes.toml` или отсутствующий `prompt.md` дают `skip_degraded` без
-обращения к модели: проба, не знающая своих правил, получила бы запасной промпт
-без своего словаря и заплатила бы за заведомое молчание.
+A broken `probes.toml` or a missing `prompt.md` yield `skip_degraded` without
+calling the model: a probe not knowing its own rules would get a fallback
+prompt without its vocabulary and pay for a guaranteed silence.
 
-## Как убедиться, что он жив
+## How to make sure it is alive
 
-1. В журнале есть строки `filtered` — значит вклейка работает и счёт идёт.
-2. Хотя бы одна строка `silent` или `nudge` — значит канал до модели жив.
-3. Ни одной строки `nudge_undelivered` — значит постановка в очередь проходит.
+1. The journal has `filtered` lines — the injection works and the counting
+   runs.
+2. At least one `silent` or `nudge` line — the channel to the model is alive.
+3. No `nudge_undelivered` lines — enqueueing passes.
 
-Печатный режим (`claude -p`) для проверки ДОСТАВКИ не годится: очередь
-ожидающих уведомлений там до модели не доезжает. Журнал в нём при этом ведётся
-полностью, поэтому пункты 1-3 в `-p` проверяются, а появление самого текста в
-ходе — только в интерактивной сессии.
+Print mode (`claude -p`) is not suitable for verifying DELIVERY: the pending
+notifications queue never reaches the model there. The journal is still kept
+in full, so items 1-3 are verifiable in `-p`, while the appearance of the text
+itself in the turn — only in an interactive session.
 
-Устройство целиком — `docs/idle-watch.md`; контракт общего ядра —
+The whole design is in `docs/idle-watch.md`; the shared core contract is in
 `docs/probe-core.md`.
