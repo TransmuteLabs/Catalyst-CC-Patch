@@ -87,14 +87,17 @@ loop, and reach the judge already decided — as the allowed-model list in the
 gate's settings. A latency tolerance is not a licence to make the judge an
 economiser.
 
-## The same ladder lives in two places
+## One core, several probes — a setting does not travel with it
 
-`judge/config.json` and `idle-watch/config.json` are separate files over one
-shared core. The first fix landed in the judge alone and left the watcher
+`[probe.judge]` and `[probe.idle-watch]` are separate tables in one
+`probes.toml` over one shared core. Sharing the core does NOT share the
+settings: the first ladder fix landed in the judge alone and left the watcher
 running the old strangled ladder for a full slice — 6 of 7 consultations
-burning 25 s on a rung that never answered. Any change to one is a change to
-both until the day they are meant to differ, and today they differ only in
-`max_tokens`, `dispatch_chars`, `fail_closed` and the watcher's own gate keys.
+burning 25 s on a rung that never answered. The single file made the two
+tables visible side by side; it did not make an edit to one an edit to the
+other. After changing a shared mechanism, name its consumers one by one.
+What genuinely differs today: `max_tokens`, `dispatch_chars`, `fail_closed`
+and the watcher's own gate keys; everything equal lives in `[defaults]`.
 
 ## The dispatch was the one truncation nobody announced (2026-08-23)
 

@@ -64,8 +64,8 @@
 отодвигает, поэтому ранняя оценка безопасна: она стоит одного лишнего полного
 прохода, а не пропуска.
 
-**Второй — `gate`, по настройкам.** Работает уже с прочитанным `config.json`
-(пороги живут в нём) и ДО сборки ленты и любого обращения к модели. Три отказа,
+**Второй — `gate`, по настройкам.** Работает уже с прочитанными настройками
+(пороги живут в `[probe.idle-watch]` файла `probes.toml`) и ДО сборки ленты и любого обращения к модели. Три отказа,
 каждый со своей строкой в журнале и каждый выставляющий свой `nextAt`:
 
 | Строка | Что значит |
@@ -154,13 +154,14 @@ Sleep, поэтому запись с `later` ждала бы Sleep неопре
 
 ## 7. Настройки
 
-`~/.claude/idle-watch/` — `config.json`, `prompt.md`, `prompt.extra.md`,
-`journal.jsonl`, `records/`; проектный слой `.claude/idle-watch` над cwd
-сливается тем же правилом, что у судьи. Переключатель — `CLAUDE_IDLE`;
+Настройки — в `~/.claude/probes/probes.toml`, таблица `[probe.idle-watch]` поверх
+`[defaults]`. Свой каталог пробы `~/.claude/probes/idle-watch/` несёт `prompt.md`,
+`prompt.extra.md`, `journal.jsonl`, `records/`; проектный слой `.claude/probes` над
+cwd сливается тем же правилом, что у судьи. Переключатель — `CLAUDE_IDLE`;
 оверрайды `CLAUDE_PROBES_DIR` (дом всех проб), `CLAUDE_IDLE_PROMPT`, `CLAUDE_IDLE_MODEL`,
 `CLAUDE_IDLE_URL`, `CLAUDE_IDLE_TIMEOUT_MS`, `CLAUDE_IDLE_DEBUG`.
 
-Сверх схемы ядра `config.json` несёт шесть полей дешёвого счёта: `live_kinds`,
+Сверх схемы ядра таблица `[probe.idle-watch]` несёт шесть полей дешёвого счёта: `live_kinds`,
 `live_threshold`, `live_recheck_ms` (занятость по факту живых работ) и
 `window_min`, `threshold`, `cooldown_min` (счёт по отметкам диспатчей). Все
 шесть выписаны в файл ЯВНО, а не оставлены на умолчаниях кода: настройка,
