@@ -711,6 +711,26 @@ checks = {
     # и сессия выглядела простаивающей ровно тогда, когда веер шёл. Пин
     # классовый: чтение регистра, признак живости ровно как в образе (_L),
     # объявление достижимости в нагрузке и перепроверка НЕ через окно.
+    # Модель диспатча РАЗРЕШАЕТСЯ (вызов -> определение агента -> наследование),
+    # источник называется полем msrc. Треть записей уходила без модели, и
+    # перепись «кто чем работал» недосчитывала эту треть. Пин классовый:
+    # запрещена и прежняя форма — модель прямо из вызова в основу записи.
+    'journal resolves the dispatch model': bool(re.search(
+                                              rb'__mdl=\(\)=>\{try\{let __m=__o\.input\?\.model;', d))
+                                          and bool(re.search(
+                                              rb'ctx\?\.options\?\.agentDefinitions\?\.activeAgents', d))
+                                          and bool(re.search(rb'__dm!=="inherit"\)return\{m:__dm,s:"agent"\}', d))
+                                          and bool(re.search(rb's:__dm==="inherit"\?"inherit":"main"', d))
+                                          and bool(re.search(rb'model:__mv\.m,msrc:__mv\.s', d))
+                                          and len(re.findall(rb'model:__o\.input\?\.model,', d)) == 0,
+    # Заголовок сессии берётся аксессором, чьё связывание в образе НЕ доказано:
+    # неверное имя вернуло бы разбор стека вместо строки МОЛЧА. Проверка формы
+    # обязательна — без неё в журнал попадал бы мусор, выглядящий как данные.
+    'session title is shape-guarded': bool(re.search(
+                                              rb'__ttl=\(\)=>\{try\{let __i=__sid\(\);', d))
+                                          and bool(re.search(
+                                              rb'typeof __v==="string"&&__v\?__v:void 0', d))
+                                          and bool(re.search(rb'title:__ttl\(\)', d)),
     'watcher counts live work, not dispatch marks': bool(re.search(
                                               rb'__tr=[\w$]+\?\.taskRegistry\?\.all\?\.\(\)', d))
                                           and bool(re.search(

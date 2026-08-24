@@ -1200,6 +1200,16 @@ step('22 judge consulted before a subagent dispatch', () => {
   const TV = repEsc(nm[1]);
   const DI = repEsc(nm[2]);
 
+  // Аксессор заголовка сессии. Локатор требует АРГУМЕНТ: в схемах хуков то же
+  // имя свойства несёт zod-строку (`session_title:H().optional()`), и локатор
+  // без аргумента цеплялся бы за неё. Само имя в образе объявлено в нескольких
+  // областях, поэтому связывание в точке врезки НЕ доказано — вызов ниже
+  // защищён проверкой формы, а не верой в имя.
+  const trx = new RegExp(`session_title:(${ID})\\([\\w$]+[.\\w$]*\\)`);
+  const tm = js.match(trx);
+  if (!tm) fail('session title accessor not found');
+  const TTL = repEsc(tm[1]);
+
   const core =
     '/*__ccProbe0*/globalThis.__ccProbe??=async function(__o){' +
     // Отсев ДО всякого ввода-вывода. Пробу, которую зовут на каждом вызове
@@ -1259,6 +1269,29 @@ step('22 judge consulted before a subagent dispatch', () => {
     // Бросок гасится: журнальная строка — единственное, по чему человек
     // судит о работе механизма, и потерять её из-за поля хуже, чем поле.
     'let __sid=()=>{try{return ' + DI + '()}catch{return null}};' +
+    // Модель диспатча РАЗРЕШАЕТСЯ, а не переписывается из вызова: треть
+    // диспатчей не называет модель явно — она приходит из определения
+    // агента или наследуется от главного лупа. Журнал, писавший только
+    // явную, недосчитывал эту треть, и перепись «кто чем работал» врала.
+    // Источник разрешения кладётся рядом (msrc): диспатч по наследованию
+    // и диспатч с явной моделью — разные факты, и различать их должен
+    // читатель журнала, а не догадка.
+    'let __mdl=()=>{try{let __m=__o.input?.model;if(__m)return{m:__m,s:"call"};' +
+      'let __a=__o.input?.subagent_type;if(!__a)return{m:void 0,s:void 0};' +
+      'let __d=(__o.ctx?.options?.agentDefinitions?.activeAgents||[])' +
+        '.find((__x)=>__x?.agentType===__a);' +
+      'let __dm=__d?.model;' +
+      'if(__dm&&__dm!=="inherit")return{m:__dm,s:"agent"};' +
+      'let __im=__o.ctx?.options?.mainLoopModel;' +
+      'if(__im)return{m:__im,s:__dm==="inherit"?"inherit":"main"};' +
+      'return{m:void 0,s:__d?"unresolved":"no-def"}}catch{return{m:void 0,s:"error"}}};' +
+    // Заголовок сессии: имя аксессора в образе объявлено в нескольких
+    // областях, и неверное связывание вернуло бы разбор стека вместо
+    // строки — молча. Проверка формы превращает недоказуемое допущение в
+    // измеримое: не строка значит поля нет, а не мусор в журнале.
+    'let __ttl=()=>{try{let __i=__sid();if(!__i)return void 0;' +
+      'let __v=' + TTL + '(__i);' +
+      'return typeof __v==="string"&&__v?__v:void 0}catch{return void 0}};' +
     'let __jsave=async(__ts,__base)=>{if(!__jrec||!__jreq||!__jfs)return null;' +
       'let __n=__ts.replace(/[:.]/g,"-")+"-"+String(__o.key).slice(-8)+".json"+(__jgz?".gz":"");' +
       'try{await __jfs.mkdir(__jdir+"/records",{recursive:!0});' +
@@ -1281,7 +1314,9 @@ step('22 judge consulted before a subagent dispatch', () => {
     // never held, and the latency tax — the feature's whole running cost —
     // was measurable only by watching a session with a stopwatch.
     'let __jlog=async(__oc)=>{let __ts=new Date().toISOString();' +
-      'let __base={t:__ts,sid:__sid(),tool:__o.tool.name,agent:__o.input?.subagent_type,model:__o.input?.model,' +
+      'let __mv=__mdl();' +
+      'let __base={t:__ts,sid:__sid(),title:__ttl(),tool:__o.tool.name,' +
+        'agent:__o.input?.subagent_type,model:__mv.m,msrc:__mv.s,' +
         'ms:Date.now()-__t0,sw:__o.sw||null,...__oc};' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +

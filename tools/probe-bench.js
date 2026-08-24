@@ -72,7 +72,11 @@ function locateNames(carved) {
   if (!notify) throw new Error('free name not found: notify');
   const agent = /mode:"task-notification",agentId:([A-Za-z_$][\w$]*)\(\)/.exec(carved);
   if (!agent) throw new Error('free name not found: agentId');
-  return [slots[1], slots[2], slots[3], slots[4], pool[1], notify[1], agent[1]];
+  // Аксессор заголовка — свободное имя, чьё связывание в образе НЕ доказано.
+  // Стенд обязан уметь подать и правильную форму, и неправильную.
+  const title = /let __v=([A-Za-z_$][\w$]*)\(__i\)/.exec(carved);
+  if (!title) throw new Error('free name not found: sessionTitle');
+  return [slots[1], slots[2], slots[3], slots[4], pool[1], notify[1], agent[1], title[1]];
 }
 
 function compileProbe(carved, names) {
@@ -108,6 +112,50 @@ const scenarios = [
     name: 'ok',
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', sid: 'a1' },
+  },
+  {
+    // Модель названа в вызове — источник call, определения не спрашиваются.
+    name: 'model-from-call',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', jmodel: 'glm-5.3', msrc: 'call', title: 'починка наблюдателя' },
+  },
+  {
+    // Вызов молчит — модель берётся из определения агента. Ровно этот случай
+    // и терялся: треть записей уходила в журнал без модели.
+    name: 'model-from-agent',
+    omitModel: true,
+    subagentType: 'glm-critic',
+    agents: [{ agentType: 'glm-critic', model: 'glm-5.3' }],
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', jmodel: 'glm-5.3', msrc: 'agent' },
+  },
+  {
+    // Определение говорит inherit — фактическая модель это модель лупа, и
+    // источник обязан это назвать: наследование и явный выбор разные факты.
+    name: 'model-inherited',
+    omitModel: true,
+    subagentType: 'glm-critic',
+    agents: [{ agentType: 'glm-critic', model: 'inherit' }],
+    mainLoopModel: 'opus',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', jmodel: 'opus', msrc: 'inherit' },
+  },
+  {
+    // Определения нет вовсе — это НЕ «модель неизвестна», это названный случай.
+    name: 'model-no-definition',
+    omitModel: true,
+    subagentType: 'glm-critic',
+    agents: [],
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', jmodel: null, msrc: 'no-def' },
+  },
+  {
+    // Аксессор заголовка связался не с тем: вернул не строку. Поля нет,
+    // мусора в журнале нет.
+    name: 'title-wrong-binding',
+    titleValue: [{ fn: 'x', file: null }],
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', title: null },
   },
   {
     // Добытчик идентификатора бросил: строка журнала обязана уцелеть, а поле
@@ -334,6 +382,9 @@ function expectationText(expected) {
   const parts = [expected.passed ? 'прошёл' : 'отменён'];
   if (expected.outcome !== undefined) parts.push(`outcome=${expected.outcome}`);
   if (expected.sid !== undefined) parts.push(`сессия=${expected.sid}`);
+  if (expected.title !== undefined) parts.push(`заголовок=${expected.title}`);
+  if (expected.jmodel !== undefined) parts.push(`модель=${expected.jmodel}`);
+  if (expected.msrc !== undefined) parts.push(`источник модели=${expected.msrc}`);
   if (expected.poolCalls !== undefined) parts.push(`канал=${expected.poolCalls}`);
   if (expected.by !== undefined) parts.push(`причина=${expected.by}`);
   if (expected.nudges !== undefined) parts.push(`напоминаний=${expected.nudges}`);
@@ -351,6 +402,9 @@ function checkMismatch(result, expected) {
   if (result.passed !== expected.passed) return true;
   if (expected.outcome !== undefined && result.outcome !== expected.outcome) return true;
   if (expected.sid !== undefined && result.sid !== expected.sid) return true;
+  if (expected.title !== undefined && result.title !== expected.title) return true;
+  if (expected.jmodel !== undefined && result.jmodel !== expected.jmodel) return true;
+  if (expected.msrc !== undefined && result.msrc !== expected.msrc) return true;
   if (expected.poolCalls !== undefined && result.poolCalls !== expected.poolCalls) return true;
   // Три отказа дешёвого счёта дают ОДИН И ТОТ ЖЕ outcome; различает их только
   // причина, и без неё перепутанная ветка прошла бы зелёной.
@@ -402,8 +456,10 @@ async function runScenario(probe, scenario) {
       ?? ('[' + 'dispatch-class' + ':1e]' + ' сделай X');
     const tool = { name: scenario.toolName || 'Agent' };
     const input = {
-      subagent_type: 'glm-executor',
-      model: 'glm-5.3',
+      subagent_type: scenario.subagentType ?? 'glm-executor',
+      // Вызов без модели — не редкость, а треть диспатчей: сценарий обязан
+      // уметь её опустить, иначе разрешение по определению не проверяется.
+      ...(scenario.omitModel ? {} : { model: 'glm-5.3' }),
       prompt: stubPrompt,
     };
     const context = {
@@ -417,6 +473,12 @@ async function runScenario(probe, scenario) {
     // обязан уметь воспроизвести оба.
     if (scenario.tasks !== undefined) {
       context.taskRegistry = { all: () => scenario.tasks };
+    }
+    if (scenario.agents !== undefined || scenario.mainLoopModel !== undefined) {
+      context.options = {
+        agentDefinitions: { activeAgents: scenario.agents ?? [] },
+        mainLoopModel: scenario.mainLoopModel,
+      };
     }
     // Узор в байтах доказывает лишь наличие кода. Что объявление доезжает до
     // модели и что шапку нельзя подделать из нагрузки — доказывает только
@@ -434,12 +496,15 @@ async function runScenario(probe, scenario) {
     };
     const nudges = [];
     const notify = (payload) => { nudges.push(payload); };
+    const sessionTitle = scenario.titleValue === undefined
+      ? () => 'починка наблюдателя'
+      : () => scenario.titleValue;
     const agentId = scenario.agentIdThrows
       ? () => { throw new Error('session not ready'); }
       : () => 'a1';
 
     try {
-      await probe(tool, input, context, 'tool-use-1', pool, notify, agentId);
+      await probe(tool, input, context, 'tool-use-1', pool, notify, agentId, sessionTitle);
     } catch (error) {
       passed = false;
       errorText = sanitizeText(error?.message ?? error, tempDir);
@@ -468,6 +533,9 @@ async function runScenario(probe, scenario) {
       result: passed ? 'прошёл' : 'отменён',
       outcome: entry?.outcome ?? null,
       sid: entry === null ? undefined : (entry.sid ?? null),
+      title: entry === null ? undefined : (entry.title ?? null),
+      jmodel: entry === null ? undefined : (entry.model ?? null),
+      msrc: entry === null ? undefined : (entry.msrc ?? null),
       by: entry?.by ?? null,
       deg: entry?.deg ?? null,
       poolCalls,
