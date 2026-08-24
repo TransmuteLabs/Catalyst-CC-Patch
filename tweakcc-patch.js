@@ -1317,6 +1317,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __mv=__mdl();' +
       'let __base={t:__ts,sid:__sid(),title:__ttl(),tool:__o.tool.name,' +
         'agent:__o.input?.subagent_type,model:__mv.m,msrc:__mv.s,' +
+        'cfg:__pdir||null,' +
         'ms:Date.now()-__t0,sw:__o.sw||null,...__oc};' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +
@@ -1794,7 +1795,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           // писать ей «block_degraded» значит одним словом называть отмену и
           // молчание.
           'try{await __jlog({outcome:__o.arm?"block_degraded":"skip_degraded",' +
-            'tries:__jtry,jm:null,cfg:__pdir||null,deg:__dcut(__deg,5)})}catch{}' +
+            'tries:__jtry,jm:null,deg:__dcut(__deg,5)})}catch{}' +
           'await __o.onBroken(__dcut(__degb,3).join("; "));' +
           // Судья отсюда не возвращается — его onBroken бросает. Вернувшаяся
           // проба не знает своих правил, и запасной промпт её словаря не
@@ -1857,7 +1858,7 @@ step('22 judge consulted before a subagent dispatch', () => {
         'en:__en?(__o.sw==="enforce"?"env":"config"):null,' +
         '...(__uw.length?{uw:__uw.slice(0,5)}:{}),' +
         '...(__deg.length?{deg:__dcut(__deg,5)}:{}),' +
-        'tries:__jtry,jm:__jm,cfg:__pdir||null,err1:__jerr1,' +
+        'tries:__jtry,jm:__jm,err1:__jerr1,' +
         'verdict:__clip(__v,400)||null})}catch{}' +
       // Принцип юзера (2026-08-20): «лучше ложная отмена, чем молчаливый
       // пропуск». Провал ВСЕЙ лестницы — это и есть молчаливый пропуск: судья
@@ -1874,7 +1875,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     '}}catch(__e){if(__e&&__e.__ccJudgeBlock)throw __e;' +
       'let __rs=String(__e?.name||"Error")+": "+__clip(__e?.message??__e,200);' +
       'try{await __jlog({outcome:__jarm?"block_no_verdict":"skip",tries:__jtry,jm:__jm,' +
-        'cfg:__pdir||null,err1:__jerr1,reason:__rs})}catch{}' +
+        'err1:__jerr1,reason:__rs})}catch{}' +
       // Отказ судьи при взведённом обязательстве — не пропуск, а отмена:
       // сюда приходит и падение до лестницы (конфиг, тело, подрезка), где
       // вердикта нет и быть не может.

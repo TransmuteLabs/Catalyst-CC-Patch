@@ -284,10 +284,14 @@ const scenarios = [
     expected: { passed: true, outcome: null, poolCalls: 0, nudges: 0 } },
   // Живой субагент: сессия занята ФАКТИЧЕСКИ, даже если диспатч был давно и
   // из окна отметок уже выпал.
+  // Строка ОТСЕВА обязана назвать применённый слой наравне с консультацией:
+  // именно на отсеве поле молчало, и слой приходилось выводить по поведению.
   { name: 'watch-live-work', probe: 'watch', toolName: 'Read', watchState: OLD,
+    projectLayer: {},
     tasks: { t1: { id: 't1', type: 'local_agent', status: 'running' } },
     response: 'SILENT: —',
-    expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'live-work:1', nudges: 0 } },
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'live-work:1', nudges: 0,
+                cfg: '<temp>/proj/.claude/idle-watch' } },
   // Снятая фоновость — работа НЕ живая (признак взят из образа).
   { name: 'watch-live-backgrounded-off', probe: 'watch', toolName: 'Read', watchState: OLD,
     tasks: { t1: { id: 't1', type: 'local_agent', status: 'running', isBackgrounded: false } },
@@ -316,8 +320,14 @@ const scenarios = [
     expected: { passed: true, outcome: 'skip_degraded', poolCalls: 0, nudges: 0 } },
 ];
 
+// HOME входит в сохранение, но НЕ в список удаляемых: слоёный сценарий его
+// подменяет (корень настроек считается от HOME), а неслоёный обязан видеть
+// настоящий — стирать его на всех значило бы менять условия там, где их не
+// проверяют.
+const SAVE_ONLY_KEYS = ['HOME'];
+
 function saveEnvironment() {
-  return new Map(ENV_KEYS.map((key) => [
+  return new Map([...ENV_KEYS, ...SAVE_ONLY_KEYS].map((key) => [
     key,
     Object.prototype.hasOwnProperty.call(process.env, key)
       ? { present: true, value: process.env[key] }
@@ -332,20 +342,46 @@ function restoreEnvironment(saved) {
   }
 }
 
+function homeName(scenario) {
+  return scenario.probe === 'watch' ? 'idle-watch' : 'judge';
+}
+
+// Корневой каталог настроек. Явный CLAUDE_*_DIR ОТКЛЮЧАЕТ наслоение — так
+// задумано в бою (проба должна получать ровно то, что ей задали). Поэтому
+// сценарий со слоями обязан задавать корень через HOME, иначе он проверял бы
+// не тот путь, которым слой находят на самом деле.
+function rootDir(tempDir, scenario) {
+  return scenario.projectLayer === undefined
+    ? tempDir
+    : path.join(tempDir, '.claude', homeName(scenario));
+}
+
 function setScenarioEnvironment(tempDir, scenario) {
   for (const key of ENV_KEYS) delete process.env[key];
+  const layered = scenario.projectLayer !== undefined;
+  if (layered) process.env.HOME = tempDir;
   if (scenario.probe === 'watch') {
     process.env.CLAUDE_IDLE = '1';
-    process.env.CLAUDE_IDLE_DIR = tempDir;
+    if (!layered) process.env.CLAUDE_IDLE_DIR = tempDir;
   } else {
     process.env.CLAUDE_JUDGE = '1';
-    process.env.CLAUDE_JUDGE_DIR = tempDir;
+    if (!layered) process.env.CLAUDE_JUDGE_DIR = tempDir;
   }
+}
+
+// Каталог приходит в двух написаниях: логическом (/var/...) и физическом
+// (/private/var/...). Ядро видит физическое, потому что путь ему даёт сама
+// система, и подстановка только логического оставляла в снимке хвост
+// «/private» — ожидание не сходилось из-за формы пути, а не из-за поведения.
+function realForm(dir) {
+  try { return fs.realpathSync(dir); } catch { return dir; }
 }
 
 function sanitizeText(value, tempDir) {
   if (value === null || value === undefined) return '';
+  const real = realForm(tempDir);
   return String(value)
+    .split(real).join('<temp>')
     .split(tempDir).join('<temp>')
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -385,6 +421,7 @@ function expectationText(expected) {
   if (expected.title !== undefined) parts.push(`заголовок=${expected.title}`);
   if (expected.jmodel !== undefined) parts.push(`модель=${expected.jmodel}`);
   if (expected.msrc !== undefined) parts.push(`источник модели=${expected.msrc}`);
+  if (expected.cfg !== undefined) parts.push(`слой=${expected.cfg}`);
   if (expected.poolCalls !== undefined) parts.push(`канал=${expected.poolCalls}`);
   if (expected.by !== undefined) parts.push(`причина=${expected.by}`);
   if (expected.nudges !== undefined) parts.push(`напоминаний=${expected.nudges}`);
@@ -405,6 +442,7 @@ function checkMismatch(result, expected) {
   if (expected.title !== undefined && result.title !== expected.title) return true;
   if (expected.jmodel !== undefined && result.jmodel !== expected.jmodel) return true;
   if (expected.msrc !== undefined && result.msrc !== expected.msrc) return true;
+  if (expected.cfg !== undefined && result.cfg !== expected.cfg) return true;
   if (expected.poolCalls !== undefined && result.poolCalls !== expected.poolCalls) return true;
   // Три отказа дешёвого счёта дают ОДИН И ТОТ ЖЕ outcome; различает их только
   // причина, и без неё перепутанная ветка прошла бы зелёной.
@@ -423,6 +461,7 @@ function checkMismatch(result, expected) {
 
 async function runScenario(probe, scenario) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-'));
+  let prevCwd = null;
   const savedEnvironment = saveEnvironment();
   const savedProbe = Object.getOwnPropertyDescriptor(globalThis, '__ccProbe');
   const savedFleet = Object.getOwnPropertyDescriptor(globalThis, '__ccFleet');
@@ -435,18 +474,31 @@ async function runScenario(probe, scenario) {
   let errorText = '';
 
   try {
+    const root = rootDir(tempDir, scenario);
+    fs.mkdirSync(root, { recursive: true });
     setScenarioEnvironment(tempDir, scenario);
+    // Проектный слой воспроизводится ТОЛЬКО сменой рабочего каталога: ядро
+    // ищет ближайший .claude/<дом> над cwd, и подделать это переменной среды
+    // нельзя — проверялся бы не тот путь, которым слой находят в бою.
+    if (scenario.projectLayer !== undefined) {
+      const proj = path.join(tempDir, 'proj');
+      const home = path.join(proj, '.claude', scenario.probe === 'watch' ? 'idle-watch' : 'judge');
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(scenario.projectLayer));
+      prevCwd = process.cwd();
+      process.chdir(proj);
+    }
 
     const config = { ...baseConfig(scenario), ...(scenario.config || {}) };
     fs.writeFileSync(
-      path.join(tempDir, 'config.json'),
+      path.join(root, 'config.json'),
       scenario.configText === undefined ? JSON.stringify(config) : scenario.configText,
     );
     if (!scenario.omitPrompt) {
       const prompt = scenario.probe === 'watch'
         ? 'Rules must contain NUDGE.\n'
         : 'Rules must contain BLOCK.\n';
-      fs.writeFileSync(path.join(tempDir, 'prompt.md'), prompt);
+      fs.writeFileSync(path.join(root, 'prompt.md'), prompt);
     }
 
     if (scenario.fleet) globalThis.__ccFleet = scenario.fleet();
@@ -510,7 +562,7 @@ async function runScenario(probe, scenario) {
       errorText = sanitizeText(error?.message ?? error, tempDir);
     }
 
-    const journal = readLastJournal(tempDir);
+    const journal = readLastJournal(root);
     const entry = journal.entry ? sanitizeValue(journal.entry, tempDir) : null;
     if (!errorText && journal.error) errorText = sanitizeText(journal.error, tempDir);
 
@@ -536,6 +588,7 @@ async function runScenario(probe, scenario) {
       title: entry === null ? undefined : (entry.title ?? null),
       jmodel: entry === null ? undefined : (entry.model ?? null),
       msrc: entry === null ? undefined : (entry.msrc ?? null),
+      cfg: entry === null ? undefined : (entry.cfg ?? null),
       by: entry?.by ?? null,
       deg: entry?.deg ?? null,
       poolCalls,
@@ -548,6 +601,7 @@ async function runScenario(probe, scenario) {
     result.mismatch = checkMismatch(result, scenario.expected);
     return result;
   } finally {
+    if (prevCwd !== null) process.chdir(prevCwd);
     restoreEnvironment(savedEnvironment);
     if (savedProbe) Object.defineProperty(globalThis, '__ccProbe', savedProbe);
     else delete globalThis.__ccProbe;
