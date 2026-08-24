@@ -1,0 +1,34 @@
+MIT License
+
+Copyright (c) 2026 TransmuteLabs (Marat Karimov)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+SCOPE. This licence covers the files IN THIS REPOSITORY — the patch pipeline,
+its checks, the probe tooling, the bench and the documentation. It does NOT
+cover Claude Code itself, which is Anthropic's proprietary software distributed
+under its own terms.
+
+The patches here MODIFY a locally installed Claude Code image. Whether you may
+do that is governed by Anthropic's terms and your agreement with them, not by
+this licence. Nothing in this repository grants any right to Anthropic's
+software, and no part of that software is redistributed here: the pipeline
+reads the image already present on your machine.

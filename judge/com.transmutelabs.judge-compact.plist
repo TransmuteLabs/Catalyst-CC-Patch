@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.maratkarimov.judge-compact</string>
+    <string>com.transmutelabs.judge-compact</string>
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/python3</string>
-        <string>/Users/maratkarimov/.claude/judge/compact.py</string>
+        <string>/Users/YOUR-USER/.claude/judge/compact.py</string>
         <string>--older-than-hours</string>
         <string>24</string>
     </array>
@@ -30,11 +30,11 @@
         <key>PATH</key>
         <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
-        <string>/Users/maratkarimov</string>
+        <string>/Users/YOUR-USER</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/maratkarimov/Library/Logs/judge-compact.log</string>
+    <string>/Users/YOUR-USER/Library/Logs/judge-compact.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/maratkarimov/Library/Logs/judge-compact.log</string>
+    <string>/Users/YOUR-USER/Library/Logs/judge-compact.log</string>
 </dict>
 </plist>

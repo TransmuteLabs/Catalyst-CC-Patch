@@ -784,7 +784,7 @@ glm-5.3 — три из трёх OK, причём вердикт сам отме
 
     python3 ~/.claude/probes/judge/compact.py --older-than-hours 24
 
-Запускает его агент launchd `com.maratkarimov.judge-compact` (04:07,
+Запускает его агент launchd `com.transmutelabs.judge-compact` (04:07,
 `RunAtLoad false`, лог `~/Library/Logs/judge-compact.log`). Не crontab:
 пропущенный из-за сна запуск launchd отрабатывает после пробуждения. Образец
 plist лежит в комплекте рядом с этим файлом — в нём правятся пути под себя, и
