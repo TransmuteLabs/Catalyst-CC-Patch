@@ -234,6 +234,34 @@ const scenarios = [
     watchState: () => ({ last: 0, start: Date.now() - 3600000, nextAt: Date.now() + 600000 }),
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: null, poolCalls: 0, nudges: 0 } },
+  // Живой субагент: сессия занята ФАКТИЧЕСКИ, даже если диспатч был давно и
+  // из окна отметок уже выпал.
+  { name: 'watch-live-work', probe: 'watch', toolName: 'Read', watchState: OLD,
+    tasks: { t1: { id: 't1', type: 'local_agent', status: 'running' } },
+    response: 'SILENT: —',
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'live-work:1', nudges: 0 } },
+  // Снятая фоновость — работа НЕ живая (признак взят из образа).
+  { name: 'watch-live-backgrounded-off', probe: 'watch', toolName: 'Read', watchState: OLD,
+    tasks: { t1: { id: 't1', type: 'local_agent', status: 'running', isBackgrounded: false } },
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0 } },
+  // Не агентский вид работы в счёт занятости по умолчанию не идёт.
+  { name: 'watch-live-other-kind', probe: 'watch', toolName: 'Read', watchState: OLD,
+    tasks: { t1: { id: 't1', type: 'local_bash', status: 'running' } },
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0 } },
+  // Пустой регистр: работ нет, достижимость объявлена ИСТИНОЙ.
+  { name: 'watch-registry-empty', probe: 'watch', toolName: 'Read', watchState: OLD,
+    tasks: {},
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
+                dispatchIncludes: '"task_registry_readable":true' } },
+  // Регистра нет вовсе: механизм не падает и НЕ выдаёт слепоту за тишину —
+  // недостижимость объявлена в нагрузке.
+  { name: 'watch-registry-absent', probe: 'watch', toolName: 'Read', watchState: OLD,
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
+                dispatchIncludes: '"task_registry_readable":false' } },
   { name: 'watch-broken-config', probe: 'watch', toolName: 'Read', watchState: OLD,
     configText: '{',
     response: 'NUDGE: не должно дойти',
@@ -314,6 +342,7 @@ function expectationText(expected) {
   if (expected.headerIncludes !== undefined) parts.push(`шапка содержит «${expected.headerIncludes}»`);
   if (expected.headerExcludes !== undefined) parts.push(`шапка БЕЗ «${expected.headerExcludes}»`);
   if (expected.dispatchLen !== undefined) parts.push(`нагрузка=${expected.dispatchLen}`);
+  if (expected.dispatchIncludes !== undefined) parts.push(`нагрузка содержит «${expected.dispatchIncludes}»`);
   return parts.join(', ');
 }
 
@@ -334,6 +363,7 @@ function checkMismatch(result, expected) {
   if (expected.headerIncludes !== undefined && !result.sentHeader.includes(expected.headerIncludes)) return true;
   if (expected.headerExcludes !== undefined && result.sentHeader.includes(expected.headerExcludes)) return true;
   if (expected.dispatchLen !== undefined && result.sentDispatchLen !== expected.dispatchLen) return true;
+  if (expected.dispatchIncludes !== undefined && !result.sentDispatch.includes(expected.dispatchIncludes)) return true;
   return false;
 }
 
@@ -382,6 +412,12 @@ async function runScenario(probe, scenario) {
       agentContext: { agentType: 'main' },
       getAppState: () => ({ toolPermissionContext: {} }),
     };
+    // Регистр задач — источник «живых работ». Отсутствие регистра и пустой
+    // регистр это РАЗНЫЕ состояния: первое слепота, второе тишина, и стенд
+    // обязан уметь воспроизвести оба.
+    if (scenario.tasks !== undefined) {
+      context.taskRegistry = { all: () => scenario.tasks };
+    }
     // Узор в байтах доказывает лишь наличие кода. Что объявление доезжает до
     // модели и что шапку нельзя подделать из нагрузки — доказывает только
     // перехваченный запрос.
@@ -428,6 +464,7 @@ async function runScenario(probe, scenario) {
       passed,
       sentHeader,
       sentDispatchLen: sentDispatch.length,
+      sentDispatch,
       result: passed ? 'прошёл' : 'отменён',
       outcome: entry?.outcome ?? null,
       sid: entry === null ? undefined : (entry.sid ?? null),

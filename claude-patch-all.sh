@@ -706,6 +706,24 @@ checks = {
     # что. Пин классовый: поле обязано стоять в общей основе (её наследует и
     # файл записи), добытчик обязан гасить бросок — журнальная строка не имеет
     # права пропасть из-за поля, — и голого вызова в основе быть не должно.
+    # Занятость сессии берётся из РЕГИСТРА задач, а не выводится из отметок
+    # времени диспатчей: субагент, работающий дольше окна, из отметок выпадал,
+    # и сессия выглядела простаивающей ровно тогда, когда веер шёл. Пин
+    # классовый: чтение регистра, признак живости ровно как в образе (_L),
+    # объявление достижимости в нагрузке и перепроверка НЕ через окно.
+    'watcher counts live work, not dispatch marks': bool(re.search(
+                                              rb'__tr=[\w$]+\?\.taskRegistry\?\.all\?\.\(\)', d))
+                                          and bool(re.search(
+                                              rb'status==="running"\|\|[\w$.?]+status==="pending"', d))
+                                          and bool(re.search(
+                                              rb'isBackgrounded!==!1', d))
+                                          and bool(re.search(
+                                              rb'return "live-work:"\+', d))
+                                          and bool(re.search(
+                                              rb'task_registry_readable:', d))
+                                          # недостижимый регистр НЕ выдаётся за «работ нет»
+                                          and bool(re.search(rb'__s\.reg=!!__tr', d))
+                                          and bool(re.search(rb'if\(__tr&&__lv\.length>=__lth\)', d)),
     'journal line carries the session id': bool(re.search(
                                               rb'__base=\{t:__ts,sid:__sid\(\)', d))
                                           and bool(re.search(

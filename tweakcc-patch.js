@@ -1902,9 +1902,20 @@ step('22 judge consulted before a subagent dispatch', () => {
         'return __s&&__s.nextAt>Date.now()?"not-yet":null},' +
       'gate:(__c)=>{let __now=Date.now(),' +
         '__w=Number(__c.window_min||30)*60000,__th=Number(__c.threshold||1),' +
-        '__cd=Number(__c.cooldown_min||30)*60000;' +
+        '__cd=Number(__c.cooldown_min||30)*60000,' +
+        '__lth=Number(__c.live_threshold||1),' +
+        '__lk=__c.live_kinds||["local_agent","remote_agent","in_process_teammate"],' +
+        '__rc=Number(__c.live_recheck_ms||60000);' +
         'let __s=globalThis.__ccWatch??={last:0,start:__now};' +
         '__s.w=__w;' +
+        'let __tr=null;try{__tr=$4?.taskRegistry?.all?.()}catch{}' +
+        '__s.reg=!!__tr;' +
+        'let __lv=__tr?Object.values(__tr).filter((__x)=>(__x?.status==="running"' +
+          '||__x?.status==="pending")&&__x?.isBackgrounded!==!1' +
+          '&&__lk.includes(__x?.type)):[];' +
+        '__s.lv=__lv.length;' +
+        'if(__tr&&__lv.length>=__lth){__s.nextAt=__now+__rc;' +
+          'return "live-work:"+__lv.length}' +
         'let __f=(globalThis.__ccFleet||[]).filter((__x)=>__now-__x<__w);' +
         'let __n=__f.length;__s.n=__n;' +
         // Каждый отказ называет МИГ, раньше которого он не может смениться:
@@ -1919,6 +1930,8 @@ step('22 judge consulted before a subagent dispatch', () => {
         '__s.last=__now;__s.nextAt=__now+__cd;return null},' +
       'payload:()=>JSON.stringify({spawns_in_window:globalThis.__ccWatch?.n??0,' +
         'window_min:Math.round((globalThis.__ccWatch?.w??0)/60000),' +
+        'live_works:globalThis.__ccWatch?.lv??0,' +
+        'task_registry_readable:globalThis.__ccWatch?.reg??!1,' +
         'current_tool:$2.name}),' +
       // Реакция: постановка в очередь. Ошибка постановки гасится — напоминание,
       // уронившее рабочий вызов, было бы хуже пропущенного напоминания.
