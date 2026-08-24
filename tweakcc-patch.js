@@ -1180,6 +1180,26 @@ step('22 judge consulted before a subagent dispatch', () => {
   // editable; prompt.md is the shorthand when only the instruction changes.
   // Substituted text goes through JSON.stringify minus its outer quotes, so a
   // quote or newline in the transcript cannot break the template's JSON.
+  // Локатор очереди уведомлений стоит ВЫШЕ ядра, потому что имя источника
+  // идентификатора сессии нужно самому ядру: журнал ведут оба потребителя, и
+  // pid, которым запись адресовалась раньше, после смерти процесса не
+  // указывает ни на что — операционная система переиспользует его, а
+  // транскрипт сессии лежит под её собственным именем. Раньше блок стоял
+  // ниже, и ядро не могло на него сослаться.
+  // Канал наблюдателя: очередь ожидающих уведомлений — та же, которой посреди
+  // хода приходят результаты фоновых задач. Она НЕ отменяет исполнение, а
+  // вкладывает текст в ход, и это единственная форма, годная для напоминания:
+  // изнутри исполняющегося инструмента массив сообщений недостижим вовсе
+  // (вложения собираются только ПОСЛЕ всего батча), поэтому судейский бросок
+  // здесь не подходит по устройству, а не по вкусу.
+  const nrx = new RegExp(
+    `(?:^|[^.\\w$])(${ID})\\(\\{mode:"task-notification",agentId:(${ID})\\(\\)`,
+  );
+  const nm = js.match(nrx);
+  if (!nm) fail('pending-notification queue not found');
+  const TV = repEsc(nm[1]);
+  const DI = repEsc(nm[2]);
+
   const core =
     '/*__ccProbe0*/globalThis.__ccProbe??=async function(__o){' +
     // Отсев ДО всякого ввода-вывода. Пробу, которую зовут на каждом вызове
@@ -1231,6 +1251,14 @@ step('22 judge consulted before a subagent dispatch', () => {
     // "did it judge correctly" nor "train a smaller model on these" can be
     // answered from it. The full request/response pair is written beside it,
     // one file per consultation, and the journal line carries its name.
+    // Идентификатор сессии добывается тем же способом, каким наблюдатель
+    // адресует напоминание: `Di()` в образе возвращает ровно `sessionId`
+    // (обёртка `Pd` — тождество), а в отсутствие сессии — идентификатор
+    // главного агента. Он же именует файл транскрипта, поэтому строка
+    // журнала становится соединимой с перепиской, чего pid не давал.
+    // Бросок гасится: журнальная строка — единственное, по чему человек
+    // судит о работе механизма, и потерять её из-за поля хуже, чем поле.
+    'let __sid=()=>{try{return ' + DI + '()}catch{return null}};' +
     'let __jsave=async(__ts,__base)=>{if(!__jrec||!__jreq||!__jfs)return null;' +
       'let __n=__ts.replace(/[:.]/g,"-")+"-"+String(__o.key).slice(-8)+".json"+(__jgz?".gz":"");' +
       'try{await __jfs.mkdir(__jdir+"/records",{recursive:!0});' +
@@ -1253,7 +1281,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     // never held, and the latency tax — the feature's whole running cost —
     // was measurable only by watching a session with a stopwatch.
     'let __jlog=async(__oc)=>{let __ts=new Date().toISOString();' +
-      'let __base={t:__ts,tool:__o.tool.name,agent:__o.input?.subagent_type,model:__o.input?.model,' +
+      'let __base={t:__ts,sid:__sid(),tool:__o.tool.name,agent:__o.input?.subagent_type,model:__o.input?.model,' +
         'ms:Date.now()-__t0,sw:__o.sw||null,...__oc};' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +
@@ -1845,19 +1873,6 @@ step('22 judge consulted before a subagent dispatch', () => {
     '});';
 
 
-  // Канал наблюдателя: очередь ожидающих уведомлений — та же, которой посреди
-  // хода приходят результаты фоновых задач. Она НЕ отменяет исполнение, а
-  // вкладывает текст в ход, и это единственная форма, годная для напоминания:
-  // изнутри исполняющегося инструмента массив сообщений недостижим вовсе
-  // (вложения собираются только ПОСЛЕ всего батча), поэтому судейский бросок
-  // здесь не подходит по устройству, а не по вкусу.
-  const nrx = new RegExp(
-    `(?:^|[^.\\w$])(${ID})\\(\\{mode:"task-notification",agentId:(${ID})\\(\\)`,
-  );
-  const nm = js.match(nrx);
-  if (!nm) fail('pending-notification queue not found');
-  const TV = repEsc(nm[1]);
-  const DI = repEsc(nm[2]);
 
   // Наблюдатель — второй потребитель того же ядра. Отличий ровно четыре:
   // когда звать, что показывать, каким промтом судить и как отвечать.

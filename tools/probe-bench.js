@@ -107,7 +107,15 @@ const scenarios = [
   {
     name: 'ok',
     response: 'OK: бриф полон',
-    expected: { passed: true, outcome: 'ok' },
+    expected: { passed: true, outcome: 'ok', sid: 'a1' },
+  },
+  {
+    // Добытчик идентификатора бросил: строка журнала обязана уцелеть, а поле
+    // стать пустым. Потерять запись из-за поля хуже, чем потерять поле.
+    name: 'sid-unavailable',
+    agentIdThrows: true,
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', sid: null },
   },
   {
     // Диспатч длиннее потолка: подрезка объявляется в ШАПКЕ, нагрузка режется
@@ -197,7 +205,7 @@ const scenarios = [
   },
   { name: 'watch-silent', probe: 'watch', toolName: 'Read', watchState: OLD,
     response: 'SILENT: человек велел не звать субагентов',
-    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0 } },
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0, sid: 'a1' } },
   { name: 'watch-nudge', probe: 'watch', toolName: 'Read', watchState: OLD,
     response: 'NUDGE: отправь scout на перечисление файлов',
     expected: { passed: true, outcome: 'nudge', poolCalls: 1, nudges: 1,
@@ -297,6 +305,7 @@ function expectationText(expected) {
   if (!expected) return '—';
   const parts = [expected.passed ? 'прошёл' : 'отменён'];
   if (expected.outcome !== undefined) parts.push(`outcome=${expected.outcome}`);
+  if (expected.sid !== undefined) parts.push(`сессия=${expected.sid}`);
   if (expected.poolCalls !== undefined) parts.push(`канал=${expected.poolCalls}`);
   if (expected.by !== undefined) parts.push(`причина=${expected.by}`);
   if (expected.nudges !== undefined) parts.push(`напоминаний=${expected.nudges}`);
@@ -312,6 +321,7 @@ function checkMismatch(result, expected) {
   if (!expected) return false;
   if (result.passed !== expected.passed) return true;
   if (expected.outcome !== undefined && result.outcome !== expected.outcome) return true;
+  if (expected.sid !== undefined && result.sid !== expected.sid) return true;
   if (expected.poolCalls !== undefined && result.poolCalls !== expected.poolCalls) return true;
   // Три отказа дешёвого счёта дают ОДИН И ТОТ ЖЕ outcome; различает их только
   // причина, и без неё перепутанная ветка прошла бы зелёной.
@@ -388,7 +398,9 @@ async function runScenario(probe, scenario) {
     };
     const nudges = [];
     const notify = (payload) => { nudges.push(payload); };
-    const agentId = () => 'a1';
+    const agentId = scenario.agentIdThrows
+      ? () => { throw new Error('session not ready'); }
+      : () => 'a1';
 
     try {
       await probe(tool, input, context, 'tool-use-1', pool, notify, agentId);
@@ -418,6 +430,7 @@ async function runScenario(probe, scenario) {
       sentDispatchLen: sentDispatch.length,
       result: passed ? 'прошёл' : 'отменён',
       outcome: entry?.outcome ?? null,
+      sid: entry === null ? undefined : (entry.sid ?? null),
       by: entry?.by ?? null,
       deg: entry?.deg ?? null,
       poolCalls,
