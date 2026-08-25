@@ -1,102 +1,109 @@
-# Реестр наблюдателей — спека
+# The probes registry — spec
 
-Статус: **реализация не начата**. Написано 2026-08-24 после того, как основание
-под него было проверено живым прогоном (см. «Что уже измерено»).
+Status: **implementation not started**. Written 2026-08-24, after the basis
+underneath it had been verified by a live run (see "What has already been
+measured").
 
-Раскладка настроек **ратифицирована человеком 2026-08-24** («согласен»): один
-`probes.toml` на все пробы в общей папке, промты — отдельными файлами. Всё
-остальное в этом документе остаётся предложением.
+The settings layout is **ratified by the human on 2026-08-24** ("agreed"):
+one `probes.toml` for all probes in the shared home, prompts as separate
+files. Everything else in this document remains a proposal.
 
-## Зачем
+## Why
 
-Сегодня в образе два потребителя общего ядра `globalThis.__ccProbe`: судья вызовов
-и наблюдатель за флотом. Они различаются **ровно четырьмя параметрами** — когда
-звать, что показывать, каким промтом судить, как реагировать, — но сами эти четыре
-зашиты в бинарник в двух местах. Добавить третьего наблюдателя сегодня значит
-пропатчить и переустановить образ.
+Today the image has two consumers of the shared core `globalThis.__ccProbe`:
+the dispatch judge and the fleet idle watcher. They differ in **exactly four
+parameters** — when to call, what to show, which prompt to judge by, how to
+react — but those four are baked into the binary in two places. Adding a
+third watcher today means patching and reinstalling the image.
 
-Реестр выносит СПИСОК потребителей из образа в файлы. Тогда наблюдатель под новую
-ситуацию заводится правкой каталога, а не пересборкой бинарника, и переопределяется
-по проекту наравне с прочими настройками.
+The registry moves the LIST of consumers out of the image and into files.
+A watcher for a new situation is then introduced by editing a directory,
+not by rebuilding the binary, and is overridden per project on the same
+footing as the other settings.
 
-Мотивирующие примеры (от человека, 2026-08-24):
+Motivating examples (from the human, 2026-08-24):
 
-- **покрытие моделей** — напоминать, что допущенная к замеру модель не получила ни
-  одного диспатча, или получила их только в одной линзе (замер в чужой сильной
-  линзе не даёт честной картины возможностей);
-- **гигиена сборок** — следить, чтобы агенты не собирали локально постоянно, а
-  только когда это действительно нужно;
-- **проверка соблюдения правил** — с обязательным пропуском отработки по
-  умолчанию, чтобы ложных блоков не было по устройству.
+- **model coverage** — remind that a model admitted to measurement has not
+  received a single dispatch, or received them all in one lens only (a
+  measurement in someone else's strong lens gives no honest picture of
+  capabilities);
+- **build hygiene** — watch that agents do not build locally all the time,
+  only when it is genuinely needed;
+- **rule-compliance checking** — with skipping the work by default, so that
+  there are no false blocks by construction.
 
-## Что уже измерено (основание)
+## What has already been measured (the basis)
 
-Всё ниже подтверждено фактом, а не выведено.
+Everything below is confirmed by fact, not inferred.
 
-| факт | чем подтверждён |
+| fact | confirmed by |
 |---|---|
-| 31 вид хук-события конструируется в образе | перечисление литералов `hook_event_name:"…"` |
-| события сходятся в воронку `t4({session,getAppState,hookInput,…})`, поверх генератор `yB` | 17 точек испускания через `yB`, 11 прямых вызовов формы `t4` |
-| в КАЖДОМ событии есть общая часть `session_id, transcript_path, cwd, prompt_id, permission_mode, agent_id, agent_type, effort` | разбор схемы `YP()` |
-| `Stop`/`SubagentStop` несут `background_tasks` и `session_crons` | схема события; строитель `Yuh(taskRegistry.all())` |
-| регистр задач читается ПРЯМО в точке врезки | в бою: `task_registry_readable: true` в нагрузке консультации |
-| признак живой работы — `status running|pending` и не снятая фоновость | `_L` в образе; в бою 9 отсевов `live-work:N` |
-| проектный слой настроек применяется и называется в записи | в бою: `window_min: 1` вместо боевых 30, `cfg=/tmp/watch-probe/.claude/idle-watch` |
-| запись адресуется сессией и её заголовком | в бою: `sid=0ed12ae4`, `title=CC-Pathc-Test2` |
-| модель диспатча разрешается из определения агента | в бою: `model=glm-5.3`, `msrc=agent` при вызове без модели |
-| разбор TOML в рантайме образа бесплатен | образ — однофайловый исполняемый bun 1.4.0 (`bun/1.4.0 npm/…` в нативной части, адрес самообновления `bun-v1.4.0`); в бандле есть вызов `Bun.TOML`; разбор проверен на bun 1.3.14 — комментарии снимаются, вложенные таблицы дают вложенные объекты |
-| стенд способен идти тем же рантаймом, что и образ | `bun tools/probe-bench.js` — 32/32 без правки сценариев на момент замера (после переезда на `probes.toml` сценариев 36); гейт рантайма добавлен 2026-08-24 |
-| вложенные массивы в TOML версия образа читает | на bun **1.4.0** (версия образа) `x = [[1]]` разбирается. На 1.3.14 — отказ: лексер жадно читал `[[` как заголовок массива таблиц. Дефект чужой и закрыт до нас; на дизайн НЕ влияет |
+| 31 kinds of hook event are constructed in the image | enumeration of the literals `hook_event_name:"…"` |
+| events converge into the funnel `t4({session,getAppState,hookInput,…})`, with the `yB` generator on top | 17 emission points via `yB`, 11 direct calls of the `t4` form |
+| EVERY event carries the common part `session_id, transcript_path, cwd, prompt_id, permission_mode, agent_id, agent_type, effort` | schema parse in `YP()` |
+| `Stop`/`SubagentStop` carry `background_tasks` and `session_crons` | event schema; the builder `Yuh(taskRegistry.all())` |
+| the task registry is read DIRECTLY at the injection point | in the field: `task_registry_readable: true` in the consultation payload |
+| the sign of live work — `status running|pending` and background-ness not lifted | `_L` in the image; in the field, 9 `live-work:N` filter hits |
+| the project layer of settings is applied and named in the record | in the field: `window_min: 1` instead of the field value 30, `cfg=/tmp/watch-probe/.claude/idle-watch` |
+| the record is addressed by session and its title | in the field: `sid=0ed12ae4`, `title=CC-Pathc-Test2` |
+| the dispatch model is resolved from the agent definition | in the field: `model=glm-5.3`, `msrc=agent` when called without a model |
+| TOML parsing in the image runtime is free | the image is a single-file bun 1.4.0 executable (`bun/1.4.0 npm/…` in the native part, self-update address `bun-v1.4.0`); the bundle contains a `Bun.TOML` call; parsing verified on bun 1.3.14 — comments are stripped, nested tables yield nested objects |
+| the bench can run on the same runtime as the image | `bun tools/probe-bench.js` — 32/32 without touching the scenarios at measurement time (36 scenarios after the move to `probes.toml`); the runtime gate added 2026-08-24 |
+| the image's TOML version reads nested arrays | on bun **1.4.0** (the image version) `x = [[1]]` parses. On 1.3.14 it fails: the lexer greedily read `[[` as an array-of-tables header. The defect is someone else's and closed before us; it does NOT affect the design |
 
-Незакрытое: полная трасса `yB → sdh → adh → … → t4` не прослежена. На выбор точки
-врезки это не влияет (обе формы ведут в `t4`), но записать стоит.
+Still open: the full trace `yB → sdh → adh → … → t4` has not been followed.
+This does not affect the choice of injection point (both forms lead into
+`t4`), but it should be written down.
 
-## Модель
+## Model
 
-Все настройки всех проб — в ОДНОМ файле; у пробы остаётся каталог для текста и
-данных:
+All settings of all probes live in ONE file; each probe keeps a directory
+for its text and data:
 
 ```
-<дом>/probes/
-    probes.toml          # ВСЕ настройки ВСЕХ проб; сливается по слоям
+<home>/probes/
+    probes.toml          # ALL settings of ALL probes; merged across layers
     <id>/
-        prompt.md        # чем судить; заменяется целиком
-        prompt.extra.md  # дописывается к унаследованному
-        body.json        # полный шаблон запроса (необязательно)
-        journal.jsonl    # записи пробы
-        records/         # корпус консультаций
+        prompt.md        # what to judge by; replaced wholesale
+        prompt.extra.md  # appended to the inherited one
+        body.json        # full request template (optional)
+        journal.jsonl    # the probe's records
+        records/         # the corpus of consultations
 ```
 
-`<id>` — ключ таблицы в `probes.toml`, он же имя каталога и поле в журнале.
-Идентификаторы нынешних проб — **`judge`** и **`idle-watch`**, то есть их
-сегодняшние имена каталогов: id виден в журналах, `validate.py`, комплекте и
-записях памяти, и переименование множит поверхность миграции, ничего не давая
-механизму.
-Судья и наблюдатель за флотом становятся записями этого же реестра (см.
-«Миграция»).
+`<id>` is the table key in `probes.toml`, the directory name, and the field
+in the journal. The current probes' identifiers are **`judge`** and
+**`idle-watch`**, i.e. their present directory names: the id is visible in
+journals, `validate.py`, the kit, and memory records, and renaming would
+multiply the migration surface while giving the mechanism nothing.
+The judge and the fleet watcher become entries of this same registry (see
+"Migration").
 
-**Почему настройки в одном файле, а промты — нет.** Настройка человека — число
-и список; их удобно видеть рядом и сравнивать между пробами, а TOML держит ещё и
-комментарии (сегодня смысл `window_min` живёт только в README рядом). Промт —
-многокилобайтный markdown, который правят на порядок чаще настроек
-(`judge/prompt.md` переписывался и в день ратификации). Внесение промтов внутрь
-общего файла расширяет радиус поражения: сегодня битый файл настроек выводит из
-строя ОДНУ пробу — и даже это пришлось чинить отдельно, он молча снимал
-`enforce`, — а случайный ограничитель внутри вложенного промта уронил бы разбор
-для ВСЕХ проб разом.
+**Why settings in one file, but not prompts.** A human-facing setting is a
+number and a list; those are convenient to see side by side and compare
+across probes, and TOML additionally carries comments (today the meaning of
+`window_min` lives only in the README next to it). A prompt is a
+multi-kilobyte markdown that is edited an order of magnitude more often
+than settings (`judge/prompt.md` was rewritten even on the ratification
+day). Folding prompts into the shared file widens the blast radius: today
+a broken settings file takes out ONE probe — and even that had to be fixed
+separately, it silently unset `enforce`, — while an accidental delimiter
+inside a nested prompt would break parsing for ALL probes at once.
 
-Журналы и записи остаются по каталогам проб: это данные, они пишутся построчно и
-параллельно, слияние их в общий файл смысла не имеет.
+Journals and records stay in the per-probe directories: that is data,
+written line by line and in parallel; merging them into a shared file makes
+no sense.
 
-**Почему TOML, а не JSON.** Комментарии. Дом уже держит этот образец —
-`routing-override.toml`. Разбор бесплатен: образ собран bun, `Bun.TOML.parse`
-есть в рантайме и уже используется бандлом. Цена названа и уплачена — стенд
-обязан идти под bun, иначе он измеряет другой движок (гейт добавлен 2026-08-24).
+**Why TOML and not JSON.** Comments. The home already keeps this pattern —
+`routing-override.toml`. Parsing is free: the image is built with bun,
+`Bun.TOML.parse` exists in the runtime and is already used by the bundle.
+The price is named and paid — the bench must run under bun, otherwise it
+measures a different engine (gate added 2026-08-24).
 
 ### probes.toml
 
 ```toml
-# Значения по умолчанию для всех проб; своя таблица пробы их перекрывает.
+# Default values for all probes; a probe's own table overrides them.
 [defaults]
 max_tokens      = 24000
 timeout_ms      = 240000
@@ -105,57 +112,62 @@ cooldown_min    = 30
 dispatch_chars  = 16000
 
 [probe.judge]
-enabled = true                   # выключение пробы целиком
-on      = ["PreToolUse"]         # события-триггеры; см. словарь
-show    = ["dispatch"]           # что кладём в нагрузку
+enabled = true                   # disables the probe entirely
+on      = ["PreToolUse"]         # trigger events; see the vocabulary
+show    = ["dispatch"]           # what goes into the payload
 act     = "cancel"               # log_only | nudge | cancel
-rx      = "OK|WARN|BLOCK"        # словарь вердиктов
+rx      = "OK|WARN|BLOCK"        # the verdict vocabulary
 
-  [probe.judge.when]    # предикат; см. словарь
+  [probe.judge.when]    # predicate; see the vocabulary
   field = "tool_name"
   in    = ["Agent", "Task"]
 ```
 
-Порядок значений: `[defaults]` → таблица пробы → тот же путь в проектном слое.
-Ключи лестницы, бюджетов и лент наследуются от нынешних настроек судьи и
-наблюдателя без изменений — реестр их не переизобретает.
+Precedence of values: `[defaults]` → the probe's table → the same path in
+the project layer. The keys of the ladder, budgets, and transcripts are
+inherited from the current judge and watcher settings unchanged — the
+registry does not reinvent them.
 
-Форма выше разобрана `Bun.TOML.parse` и даёт ровно ожидаемую структуру.
+The form above is parsed by `Bun.TOML.parse` and yields exactly the expected
+structure.
 
-### Словарь условий
+### The predicate vocabulary
 
-Условие — **данные, а не код**. Исполняемое выражение из конфига запрещено:
-битый `config.json` уже однажды молча снимал `enforce`, и превращение настройки в
-код расширило бы этот класс. Поэтому фиксированный словарь предикатов над уже
-собранным состоянием.
+A condition is **data, not code**. Executable expressions from the config
+are forbidden: a broken `config.json` once silently unset `enforce`, and
+turning settings into code would widen that very class. Hence a fixed
+vocabulary of predicates over already-collected state.
 
-Источники, доступные предикату:
+Sources available to a predicate:
 
-1. **Поля события.** Общая часть (8 полей, есть всегда) плюс своё у каждого из 31
-   вида: инструмент и его вход/выход/ошибка, `background_tasks`, `session_crons`,
-   `agent_type`, `session_title`, `permission_mode`, `trigger` компакции,
-   `task_*`/`teammate_*`, `file_path`, `reason` и прочее.
-2. **Внутрипроцессные источники.** Ядро работает внутри процесса и берёт то же,
-   из чего строятся поля события: регистр задач, реестр кронов, определения
-   агентов. Ждать нужного события ради этого не требуется.
-3. **Наши собственные состояния.** Возраст процесса, время с прошлой
-   консультации ЭТОГО наблюдателя, исходы его прошлых консультаций, счётчики окна.
-4. **Наши журналы и файлы ростера.** Перепись «кто чем работал» уже ведётся
-   журналом судьи; ростер моделей и классов лежит в `routing-override.toml`.
+1. **Event fields.** The common part (8 fields, always present) plus each
+   of the 31 kinds' own: tool and its input/output/error,
+   `background_tasks`, `session_crons`, `agent_type`, `session_title`,
+   `permission_mode`, the compaction `trigger`, `task_*`/`teammate_*`,
+   `file_path`, `reason`, and the rest.
+2. **In-process sources.** The core runs inside the process and takes the
+   same things the event fields are built from: the task registry, the cron
+   registry, agent definitions. No need to wait for a specific event for
+   this.
+3. **Our own states.** Process age, time since the previous consultation of
+   THIS watcher, the outcomes of its past consultations, window counters.
+4. **Our journals and roster files.** The census of "who worked on what" is
+   already kept by the judge's journal; the roster of models and classes
+   lives in `routing-override.toml`.
 
-Формы предикатов (замкнутый список):
+Predicate forms (a closed list):
 
-| форма | смысл |
+| form | meaning |
 |---|---|
-| `equals` / `in` | поле равно значению / входит в список |
-| `matches` | поле совпадает с регулярным выражением |
-| `count_at_least` / `count_below` | размер списка (живые работы, диспатчи окна) |
-| `older_than_min` / `newer_than_min` | давность отметки |
-| `absent` / `present` | поле есть или его нет |
-| `all` / `any` / `not` | сочетания перечисленного |
+| `equals` / `in` | field equals a value / belongs to a list |
+| `matches` | field matches a regular expression |
+| `count_at_least` / `count_below` | list size (live works, window dispatches) |
+| `older_than_min` / `newer_than_min` | how old a mark is |
+| `absent` / `present` | field exists or not |
+| `all` / `any` / `not` | combinations of the above |
 
-Запись — **именованными ключами**, не позиционными парами: у условия есть `field`
-и ровно одна форма-ключ.
+A condition is written with **named keys**, not positional pairs: it has a
+`field` and exactly one form key.
 
 ```toml
   [probe.judge.when]
@@ -163,7 +175,7 @@ rx      = "OK|WARN|BLOCK"        # словарь вердиктов
   in    = ["Agent", "Task"]
 ```
 
-Сочетание — массив таблиц, по условию на таблицу:
+A combination is an array of tables, one condition per table:
 
 ```toml
   [[probe.idle-watch.when.all]]
@@ -175,76 +187,87 @@ rx      = "OK|WARN|BLOCK"        # словарь вердиктов
   older_than_min = 30
 ```
 
-Позиционная форма (`in = ["tool_name", ["Agent","Task"]]`) отвергнута за
-читаемость: смысл элемента задаётся его местом в массиве, и при добавлении
-формы условия молча меняется у всех. Именованные ключи самоописательны и
-вложенных массивов не порождают вовсе.
+The positional form (`in = ["tool_name", ["Agent","Task"]]`) was rejected
+for readability: the meaning of an element is fixed by its place in the
+array, and adding a condition form would silently change it for everyone.
+Named keys are self-describing and produce no nested arrays at all.
 
-Оговорка о том, как этот довод складывался. Сперва позиционная форма была
-отвергнута как НЕРАЗБИРАЕМАЯ — стенд шёл под bun 1.3.14, где `x = [[1]]`
-отказывает. Версия образа (1.4.0) её читает, то есть довод «не разбирается»
-оказался свойством не того рантайма. Форма остаётся именованной по причине
-выше, но записывать сюда её надо было измерением на рантайме образа. Тот же
-случай, ради которого стенду добавлен гейт рантайма.
+A caveat about how this argument took shape. At first the positional form
+was rejected as UNPARSEABLE — the bench ran under bun 1.3.14, where
+`x = [[1]]` fails. The image version (1.4.0) reads it, so the "unparseable"
+argument turned out to be a property of the wrong runtime. The form stays
+named for the reason above, but recording it here should have been done as
+a measurement on the image's runtime. The same case the bench's runtime
+gate was added for.
 
-Расширять словарь можно только новой формой в образе, с проверкой и случаем на
-стенде. Это цена, которая держит конфиг данными.
+The vocabulary can be extended only by a new form in the image, with a
+check and a scenario on the bench. That is the price that keeps the config
+data.
 
-### Реакции
+### Actions
 
-| `act` | что делает | канал |
+| `act` | what it does | channel |
 |---|---|---|
-| `log_only` | пишет вердикт в свой журнал, молчит | — |
-| `nudge` | кладёт напоминание в очередь ожидающих уведомлений | тот же, что у наблюдателя сегодня |
-| `cancel` | отменяет вызов броском | тот же, что у судьи сегодня |
+| `log_only` | writes the verdict to its own journal, stays silent | — |
+| `nudge` | puts a reminder into the pending-notification queue | the same the watcher uses today |
+| `cancel` | cancels the call by throwing | the same the judge uses today |
 
-Третья реакция потребует работы в образе — каналов сегодня ровно два.
+The third action will require work in the image — there are exactly two
+channels today.
 
-## Слои
+## Layers
 
-Порядок: **встроенная база → глобальный дом → ближайший `.claude` над cwd**
-(≤24 уровней), последний сильнее. Механизм уже реализован и проверен в бою:
-файл настроек сливается по ключам, `prompt.md`/`body.json` заменяют целиком,
-`prompt.extra.md` дописывается, применённый каталог называется полем `cfg` в
-каждой строке журнала.
+Order: **built-in base → global home → nearest `.claude` above cwd**
+(≤24 levels), the later one wins. The mechanism is already implemented and
+field-verified: the settings file is merged by keys, `prompt.md`/`body.json`
+are replaced wholesale, `prompt.extra.md` is appended, and the applied
+directory is named by the `cfg` field in every journal line.
 
-Проектный слой — `<проект>/.claude/probes/probes.toml`; сливается по путям
-внутрь, а не заменяет файл целиком. Проект может: переопределить любой ключ
-любой пробы, **выключить** пробу (`enabled = false`), **добавить** свою (новая
-таблица `[probe.<id>]` плюс каталог с промтом).
+The project layer is `<project>/.claude/probes/probes.toml`; it is merged
+by inner paths, not replacing the file wholesale. A project may: override
+any key of any probe, **disable** a probe (`enabled = false`), **add** its
+own (a new `[probe.<id>]` table plus a directory with a prompt).
 
-Явный `CLAUDE_PROBES_DIR` отключает наслоение — так задумано: проба должна
-получать ровно то, что ей задали. Реестр это поведение сохраняет; нынешние
-`CLAUDE_JUDGE_DIR` и `CLAUDE_IDLE_DIR` схлопываются в одну переменную.
+An explicit `CLAUDE_PROBES_DIR` disables the layering — by design: a probe
+must receive exactly what was set for it. The registry preserves this
+behavior; the current `CLAUDE_JUDGE_DIR` and `CLAUDE_IDLE_DIR` collapse
+into one variable.
 
-## Против пустой отработки
+## Against vacuous operation
 
-Главная опасность реестра не в расходе, а в том, что наблюдателей станет много и
-часть из них будет работать вхолостую, выглядя живой. Требования, без которых
-реестр принимать нельзя:
+The main danger of the registry is not cost but that watchers will multiply
+and some of them will run vacuously while looking alive. Requirements
+without which the registry must not be accepted:
 
-1. **`log_only` — дефолт для нового наблюдателя.** Право говорить и тем более
-   отменять выдаётся отдельно и явно. Ложных блоков тогда нет по устройству.
-2. **Инкубация.** Сутки в `log_only`; голос — после того, как корпус записей
-   прочитан человеком.
-3. **Молчание отличимо от слепоты.** Каждая запись обязана нести: была ли
-   подрезана лента, был ли разобран вердикт, читались ли источники предиката.
-   Недостижимый источник объявляется полем, а не выдаётся за «ничего нет» —
-   прецедент `task_registry_readable`.
-4. **Пустота считается.** По `id` из журнала должно считаться: позвали → дошло до
-   модели → дало разобранный вердикт → дало находку. Наблюдатель с нулём находок
-   за N консультаций либо безупречен, либо слеп, и различить это надо ИЗ ЗАПИСИ.
-5. **Общий потолок на сессию, а не на наблюдателя.** Иначе десять наблюдателей с
-   вольными условиями умножат трафик без чьего-либо решения.
-6. **Считаем мы, судит модель.** Наблюдателю подаётся посчитанная таблица, а не
-   сырьё для пересчёта. Пересчёт — место, где утверждения ломаются.
-7. **Механически решаемое условие модели не отдаётся.** Если ответ даёт регулярка
-   или готовая утилита, место условию в дешёвом предикате, а не в консультации.
+1. **`log_only` is the default for a new watcher.** The right to speak, let
+   alone cancel, is granted separately and explicitly. False blocks are
+   then absent by construction.
+2. **Incubation.** A day in `log_only`; a voice — only after the corpus of
+   records has been read by a human.
+3. **Silence is distinguishable from blindness.** Every record must carry:
+   whether the transcript was trimmed, whether the verdict was parsed,
+   whether the predicate's sources were read. An unreachable source is
+   declared by a field, not passed off as "nothing there" — the
+   `task_registry_readable` precedent.
+4. **Emptiness is counted.** By `id` from the journal it must be countable:
+   called → reached the model → produced a parsed verdict → produced a
+   finding. A watcher with zero findings over N consultations is either
+   impeccable or blind, and TELLING THEM APART must be possible FROM THE
+   RECORD.
+5. **A shared cap per session, not per watcher.** Otherwise ten watchers
+   with freewheeling conditions will multiply traffic without anyone's
+   decision.
+6. **We count, the model judges.** The watcher is fed a computed table,
+   not raw material to recompute. Recomputation is where claims break.
+7. **A mechanically decidable condition is not handed to the model.** If a
+   regex or a ready utility answers it, the condition belongs in a cheap
+   predicate, not in a consultation.
 
-## Миграция
+## Migration
 
-Оба нынешних потребителя выражаются словарём в одном файле (форма ниже разобрана
-`Bun.TOML.parse` целиком, вместе с `[defaults]` из раздела «Модель»):
+Both current consumers are expressible through the vocabulary in one file
+(the form below is parsed by `Bun.TOML.parse` wholesale, together with the
+`[defaults]` from the "Model" section):
 
 ```toml
 [probe.judge]
@@ -284,31 +307,39 @@ cooldown_min = 30
   live_recheck_ms = 60000
 ```
 
-**Переезд живых каталогов.** `~/.claude/judge/` и `~/.claude/idle-watch/`
-работают прямо сейчас и содержат журналы и корпус записей. Настройки из обоих
-`config.json` сводятся в один `probes.toml` разово; промты переезжают в
-`probes/<id>/prompt.md`. Старые каталоги **остаются на месте** как исторические
-журналы — читать настройки из двух источников нельзя, это ровно тот класс, где
-живёт молчаливое расхождение. Момент переключения обязан быть один.
+**Moving the live directories.** `~/.claude/judge/` and
+`~/.claude/idle-watch/` are working right now and hold journals and the
+corpus of records. The settings from both `config.json` files are folded
+into one `probes.toml` once; the prompts move to
+`probes/<id>/prompt.md`. The old directories **stay in place** as
+historical journals — reading settings from two sources is forbidden;
+that is exactly the class where silent divergence lives. The switch-over
+moment must be exactly one.
 
-**Оговорка про канал отмены.** Судья сегодня бросает изнутри исполняющегося
-инструмента, и отмена приходит как `tool_result` с `is_error` — с объяснением,
-которое читает луп. Хук-сторона предлагает другой канал (`permissionBehavior:
-deny`), и это ДРУГОЕ наблюдаемое поведение. Поэтому `act: cancel` либо сохраняет
-нынешнюю врезку, либо переходит на deny-форму только после доказательства
-эквивалентности на стенде. Молча подменить канал нельзя.
+**A caveat about the cancellation channel.** Today the judge throws from
+inside the executing tool, and the cancellation arrives as a `tool_result`
+with `is_error` — with an explanation the loop reads. The hook side offers
+a different channel (`permissionBehavior: deny`), and that is DIFFERENT
+observable behavior. So `act: cancel` either keeps the current injection,
+or moves to the deny form only after equivalence is proven on the bench.
+Swapping the channel silently is not allowed.
 
-**Критерий готовности реализации:** все случаи стенда (36 на сегодня) обязаны пройти на
-реестровой реализации без правки ожиданий. Если поведение судьи или наблюдателя
-изменилось — реестр не готов, а не «стенд устарел».
+**The implementation readiness criterion:** every bench scenario (36 today)
+must pass on the registry implementation without editing expectations. If
+the judge's or the watcher's behavior changed — the registry is not ready,
+not "the bench is outdated".
 
-## Открытое
+## Open questions
 
-- Полная трасса `yB → … → t4` не прослежена (на выбор врезки не влияет).
-- Форма общего потолка консультаций на сессию не выбрана.
-- Стенд идёт под bun **другой версии**, чем образ (1.3.14 против 1.4.0): гейт об
-  этом предупреждает, но расхождение не закрыто. Закрывается установкой bun
-  версии образа — изменение среды человека, отдельным решением.
-- Перечень проб перестал быть вопросом: список — это сам `probes.toml`, обход
-  каталога на каждой пробе не нужен. Осталось выбрать момент перечитывания файла
-  (сегодня настройки читаются на каждой консультации).
+- The full trace `yB → … → t4` has not been followed (does not affect the
+  choice of injection point).
+- The form of the shared per-session cap on consultations has not been
+  chosen.
+- The bench runs under bun of a **different version** than the image
+  (1.3.14 vs 1.4.0): the gate warns about it, but the divergence is not
+  closed. Closing it means installing the image's bun version — a change
+  to the human's environment, a separate decision.
+- The list of probes is no longer a question: the list IS the
+  `probes.toml` itself; walking the directory on every probe is unneeded.
+  What remains is choosing the moment the file is re-read (today settings
+  are read on every consultation).
