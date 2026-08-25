@@ -1,72 +1,76 @@
-# Судья вызова субагентов
+# Subagent dispatch judge
 
-Патч бинарника спрашивает судью ПЕРЕД каждым вызовом Agent/Task, сделанным
-ГЛАВНЫМ лупом (вызовы самих субагентов не судятся). Судья видит историю текущей
-сессии вплоть до текущего хода включительно и текст диспатча.
+The binary patch consults the judge BEFORE every Agent/Task call made by the
+main loop (calls made by the subagents themselves are not judged). The judge
+sees the current session history up to and including the current turn, plus
+the dispatch text.
 
-Судья не переписывает вызов. Он либо пропускает его, либо ОТМЕНЯЕТ и объясняет
-главному лупу, что не так; отмена приходит в модель как ошибка инструмента.
+The judge does not rewrite a call. It either passes it through or CANCELS it
+and tells the main loop what is wrong; the cancellation reaches the model as
+a tool error.
 
-## Файлы (читаются на КАЖДОМ вызове — правка не требует пересборки бинарника)
+## Files (read on EVERY call — editing requires no binary rebuild)
 
-Настройки ВСЕХ проб — в одном `~/.claude/probes/probes.toml`; у судьи остаётся
-каталог `~/.claude/probes/judge/` для текста и данных.
+Settings for ALL probes live in a single `~/.claude/probes/probes.toml`; the
+judge keeps a directory `~/.claude/probes/judge/` for text and data.
 
-| файл | что задаёт |
+| file | what it defines |
 |---|---|
-| `probes.toml`, таблица `[probe.judge]` | модель, порог ожидания, режим, лимиты контекста |
-| `judge/prompt.md` | инструкция судьи (подставляется в `{{PROMPT}}`) |
-| `judge/body.json` | полный шаблон запроса: `{{PROMPT}}`, `{{MODEL}}`, `{{CONTEXT}}`, `{{DISPATCH}}` |
+| `probes.toml`, table `[probe.judge]` | model, timeout, mode, context limits |
+| `judge/prompt.md` | the judge's instruction (substituted into `{{PROMPT}}`) |
+| `judge/body.json` | full request template: `{{PROMPT}}`, `{{MODEL}}`, `{{CONTEXT}}`, `{{DISPATCH}}` |
 
-Действующие настройки = `[defaults]` + `[probe.judge]`, таблица пробы сильнее.
-Ниже по тексту «config.json» встречается в разборах прошлых дефектов — там он
-назван так, как назывался в тот момент; механизм с тех пор не менялся, сменился
-только файл.
+Effective settings = `[defaults]` + `[probe.judge]`, the probe's table wins.
+Below, "config.json" appears in post-mortems of past defects — it is named
+there as it was named at the time; the mechanism has not changed since, only
+the file has.
 
-У модели ОДИН дом: `CLAUDE_JUDGE_MODEL` -> `model` в настройках судьи -> умолчание.
-В шаблоне она подставляется через `{{MODEL}}`; литерал, вписанный в
-`body.json` вручную, будет перекрыт — иначе задокументированное
-переопределение молча не работало бы при наличии шаблона (так и было до
-2026-08-20).
+The model has ONE home: `CLAUDE_JUDGE_MODEL` -> `model` in the judge's
+settings -> the default. In the template it is substituted via `{{MODEL}}`; a
+literal written into `body.json` by hand will be overridden — otherwise the
+documented override would silently stop working whenever a template exists
+(which is exactly what happened before 2026-08-20).
 
-Отладочные (пишутся только при `CLAUDE_JUDGE_DEBUG=1`):
-`last-request.json`, `last-response.json` (HTTP-статус + сырое тело),
+Debug files (written only under `CLAUDE_JUDGE_DEBUG=1`):
+`last-request.json`, `last-response.json` (HTTP status + raw body),
 `last-verdict.txt`.
 
-## Включение
+## Enabling
 
-| переменная | значение |
+| variable | meaning |
 |---|---|
-| `CLAUDE_JUDGE` | не задана — судья выключен целиком: ни обращений к каналу, ни записей, ни накопления контекста |
-| `CLAUDE_JUDGE=1` | судья спрашивается, но отмена не применяется |
-| `CLAUDE_JUDGE=enforce` | отмена применяется (то же самое даёт `enforce = true` в настройках судьи) |
-| `CLAUDE_JUDGE_DEBUG=1` | вердикт в stderr + дампы |
-| `CLAUDE_JUDGE_MODEL`, `CLAUDE_JUDGE_URL`, `CLAUDE_JUDGE_TIMEOUT_MS`, `CLAUDE_JUDGE_PROMPT` | точечные переопределения |
-| `CLAUDE_PROBES_DIR` | дом ВСЕХ проб; заданный явно, отключает проектный слой |
+| `CLAUDE_JUDGE` | unset — the judge is fully off: no channel calls, no records, no context accumulation |
+| `CLAUDE_JUDGE=1` | the judge is consulted, but cancellation is not applied |
+| `CLAUDE_JUDGE=enforce` | cancellation is applied (the same effect comes from `enforce = true` in the judge's settings) |
+| `CLAUDE_JUDGE_DEBUG=1` | verdict to stderr + dumps |
+| `CLAUDE_JUDGE_MODEL`, `CLAUDE_JUDGE_URL`, `CLAUDE_JUDGE_TIMEOUT_MS`, `CLAUDE_JUDGE_PROMPT` | point overrides |
+| `CLAUDE_PROBES_DIR` | home of ALL probes; when set explicitly, disables the project layer |
 
-Единственный главный выключатель — переменная `CLAUDE_JUDGE`. `enforce:true`
-в файле судью НЕ включает, он лишь задаёт режим уже включённому. В остальном
-окружение перебивает файл, файл перебивает умолчание. Адрес канала по умолчанию
-берётся из `ANTHROPIC_BASE_URL` сессии — отдельно его задавать не нужно.
+The single master switch is the variable `CLAUDE_JUDGE`. `enforce:true` in
+the file does NOT enable the judge; it only sets the mode of an already
+enabled one. Otherwise the environment beats the file, and the file beats the
+default. The channel address is taken by default from the session's
+`ANTHROPIC_BASE_URL` — no need to set it separately.
 
-### Состояние на 2026-08-20: наблюдение включено глобально
+### State as of 2026-08-20: watching is enabled globally
 
-В `~/.claude/settings.json` в `env` стоит `"CLAUDE_JUDGE": "1"` — судья судит
-каждый диспатч главного лупа и пишет журнал с записями, но НЕ отменяет:
-глобальный `enforce` равен `false`. Это режим сбора корпуса перед выбором
-минимальной модели.
+In `~/.claude/settings.json`, under `env`, sits `"CLAUDE_JUDGE": "1"` — the
+judge reviews every dispatch of the main loop and writes a journal with
+records, but does NOT cancel: the global `enforce` is `false`. This is the
+corpus-collection mode before choosing the smallest model.
 
-Цена режима: к каждому диспатчу субагента добавляется одна консультация
-(медиана порядка 5–8 с) и один запрос в канал. Если это мешает — сузить
-селектором `filter` в конфиге (списки классов и имён агентов) или снять
-переменную из настроек; резервная копия настроек до включения лежит рядом:
+The price of this mode: each subagent dispatch gains one consultation
+(median around 5-8 s) and one channel request. If that gets in the way,
+narrow it with the `filter` selector in the config (lists of classes and
+agent names), or remove the variable from the settings; a backup of the
+settings made before enabling sits nearby:
 `~/.claude/settings.json.backup-judge-on`.
 
-## Какие вызовы судить (по умолчанию — все)
+## Which calls to judge (by default — all)
 
-Консультация стоит несколько секунд НА КАЖДОМ вызове главного лупа, поэтому в
-настройках судьи можно сузить круг. Ключа `filter` по умолчанию нет — тогда
-судятся все вызовы.
+A consultation costs several seconds on EVERY main-loop call, so the judge's
+settings allow narrowing the scope. There is no `filter` key by default —
+then all calls are judged.
 
 ```json
 "filter": {
@@ -77,47 +81,52 @@
 }
 ```
 
-Правила: строки — регулярные выражения; списки `_skip` сильнее; если задан хотя
-бы один список `_judge`, судятся только совпавшие. Класс берётся из маркера
-`[dispatch-class:…]` в промпте, имя агента — из `subagent_type`.
+Rules: the strings are regular expressions; `_skip` lists win; if at least
+one `_judge` list is set, only matches are judged. The class comes from the
+`[dispatch-class:…]` marker in the prompt, the agent name from
+`subagent_type`.
 
-Что точка врезки видит, а что нет (измерено): `subagent_type` и маркер класса
-есть всегда; поле `model` появляется, ТОЛЬКО если модель названа в самом
-вызове. Модель, унаследованная из определения агента, здесь невидима — правило
-«дорогая модель» приходится задавать через имя агента, а не через модель.
+What the injection point sees and what it does not (measured):
+`subagent_type` and the class marker are always present; the `model` field
+appears ONLY if the model is named in the call itself. A model inherited
+from the agent definition is invisible here — the "expensive model" rule
+has to be expressed through the agent name, not the model.
 
-Отфильтрованные вызовы попадают в журнал с `outcome:"filtered"` и полем `by`,
-которое называет СРАБОТАВШЕЕ правило: `classes_skip`, `agents_skip`,
-`not_in_judge_list`, `no_class_marker`. Разделение не косметическое: опечатка
-в списке `_judge` и намеренный пропуск дают один и тот же исход, и без `by`
-первое выглядит как второе. Экономию налога по журналу можно посчитать.
+Filtered calls land in the journal with `outcome:"filtered"` and a `by`
+field naming the rule that FIRED: `classes_skip`, `agents_skip`,
+`not_in_judge_list`, `no_class_marker`. The distinction is not cosmetic: a
+typo in a `_judge` list and an intentional skip produce the same outcome,
+and without `by` the first looks like the second. The tax saving is
+computable from the journal.
 
-## Вердикты
+## Verdicts
 
 ```
-OK:<причина>                             пропустить
-WARN:<причина>                           пропустить, замечание только в журнал
-BLOCK:<что не так и что сделать вместо>  отменить вызов
+OK:<reason>                                    pass through
+WARN:<reason>                                  pass through, note goes to the journal only
+BLOCK:<what is wrong and what to do instead>   cancel the call
 ```
 
-ВАЖНО про WARN: до модели он НЕ доходит и дойти не может. Вызов идёт дальше,
-а результат инструмента, который модель увидит потом, приходит от самого
-агента — штатного канала для замечания там нет. Практически WARN — это OK с
-записью в журнал. Пишущему инструкцию не стоит рассчитывать на то, что текст
-после WARN кто-то прочитает по ходу сессии: если замечание должно изменить
-поведение главного лупа, это BLOCK, иначе оно живёт только в журнале.
-Принимается ПОСЛЕДНЯЯ строка вердиктного вида из `content`, `reasoning` и
-`reasoning_content` — рассуждающая модель нередко оставляет `content` пустым.
+Important about WARN: it does NOT reach the model and cannot. The call
+proceeds, and the tool result the model later sees comes from the agent
+itself — there is no regular channel for a note there. Practically, WARN is
+an OK with a journal record. The instruction writer should not count on
+anyone reading the text after WARN during the session: if the note must
+change the main loop's behavior, it is a BLOCK; otherwise it lives only in
+the journal. The LAST verdict-looking line from `content`, `reasoning` and
+`reasoning_content` is accepted — a reasoning model often leaves `content`
+empty.
 
-## Отказоустойчивость и журнал
+## Fault tolerance and the journal
 
-Любой сбой судьи (канал недоступен, порог ожидания, неразбираемый ответ)
-пропускает вызов дальше. Единственное, что переживает внутренний перехват
-ошибок, — сама отмена.
+Any judge failure (channel unavailable, timeout, unparseable answer) passes
+the call through. The only thing the internal error interception enforces
+is the cancellation itself.
 
-Именно поэтому журнал ведётся ВСЕГДА, а не только при отладке: пропущенный по
-сбою вызов и вызов, которого судья вовсе не касался, снаружи неотличимы. Файл
-`journal.jsonl`, по строке на консультацию:
+That is why the journal is kept ALWAYS, not only during debugging: a call
+skipped due to failure and a call the judge never touched are
+indistinguishable from the outside. The file is `journal.jsonl`, one line
+per consultation:
 
 ```json
 {"t":"…","tool":"Agent","agent":"glm-scout","model":"glm-5.3","ms":3952,"sw":"1",
@@ -126,32 +135,36 @@ BLOCK:<что не так и что сделать вместо>  отменит
  "outcome":"skip","reason":"TypeError: Unable to connect…"}
 ```
 
-Значения `outcome`: `ok`, `warn`, `block` (отменён по вердикту),
-`block_not_enforced` (отказ вынесен, но режим не enforce), `block_no_verdict`
-(отменён по исчерпанию лестницы при `fail_closed`), `empty` (ответ без вердикта,
-вызов пропущен), `skip` (судья не отработал; причина в `reason`).
+Values of `outcome`: `ok`, `warn`, `block` (cancelled by verdict),
+`block_not_enforced` (a cancellation was issued but the mode is not
+enforce), `block_no_verdict` (cancelled by an exhausted ladder under
+`fail_closed`), `empty` (answer without a verdict, call passed through),
+`skip` (the judge did not run; the reason is in `reason`).
 
-Две последние отмены различаются НАМЕРЕННО: `block` — дефект суждения, лечится
-промптом; `block_no_verdict` — дефект канала, в вердикте его не видно вовсе, и
-разбирать его надо по `attempts` записи. Пока оба писались одним словом, они
-были неотличимы ещё и от пропуска — то есть от прямо противоположного исхода.
+The last two cancellations are distinguished ON PURPOSE: `block` is a
+judgment defect, cured by the prompt; `block_no_verdict` is a channel
+defect, invisible in the verdict at all, and must be investigated through
+the record's `attempts`. While both were written as the same word, they
+were also indistinguishable from a skip — that is, from the exact opposite
+outcome.
 
-Каждая строка сама себя описывает: `ms` — полный оборот консультации в
-миллисекундах (у отфильтрованных вызовов это единицы, у настоящих — секунды),
-`sw` — значение переменной `CLAUDE_JUDGE` в том прогоне, `en` — чем именно
-взведён режим принуждения: `"env"`, `"config"` или `null`, когда он не взведён.
-Без последних двух полей строка `block` и строка `block_not_enforced` из разных
-прогонов различались только догадкой о том, какое было окружение.
+Each line describes itself: `ms` is the full consultation round trip in
+milliseconds (single digits for filtered calls, seconds for real ones),
+`sw` is the value of `CLAUDE_JUDGE` in that run, `en` is what exactly
+armed the enforcement mode: `"env"`, `"config"`, or `null` when it is not
+armed. Without the last two fields, a `block` line and a
+`block_not_enforced` line from different runs differed only by a guess
+about which environment was in effect.
 
-Метрика первой очереди при живой эксплуатации — доля `skip` и `empty` по кодам
-причин: судья, который «стоит и не срабатывает», зелёными признаками не виден.
-Измерено 2026-08-20: две консультации подряд уперлись в порог ожидания, и
-fail-open пропустил оба диспатча в полной тишине — в отчёте это неотличимо от
-«судья всё одобрил».
+The first-priority metric in live operation is the share of `skip` and
+`empty` by reason code: a judge that "sits there and never fires" shows no
+green signs. Measured 2026-08-20: two consultations in a row hit the
+timeout, and fail-open passed both dispatches in complete silence — in the
+report that is indistinguishable from "the judge approved everything".
 
-Поэтому судья идёт по ЛЕСТНИЦЕ попыток из `models`: сорвалась ступень — тот же
-вопрос уходит следующей. Ступень — это либо имя модели строкой, либо объект со
-своими пределами:
+That is why the judge walks a LADDER of attempts from `models`: a rung
+fails — the same question goes to the next one. A rung is either a model
+name as a string, or an object with its own limits:
 
 ```json
 "timeout_ms": 60000,
@@ -162,675 +175,796 @@ fail-open пропустил оба диспатча в полной тишин�
 ]
 ```
 
-Общий порог по умолчанию — 60 секунд, решение юзера (2026-08-20): «лучше
-переждать, чем недождать». Основание измеримое: тривиальное судейство идёт
-2-3 секунды, а спорное — то самое, ради которого механизм и заведён, — заняло
-21.4 секунды и 2389 токенов ответа. При пороге 20 секунд, стоявшем часом
-раньше, этот вердикт был бы убит по таймауту, а при прежнем потолке 1200
-токенов — обрезан на полуслове.
+The shared default timeout is 60 seconds, the user's decision (2026-08-20):
+"better to over-wait than to under-wait". The grounds are measurable:
+trivial judging takes 2-3 seconds, while a contested one — the very kind
+the mechanism exists for — took 21.4 seconds and 2389 answer tokens. Under
+the 20-second timeout in place an hour earlier, that verdict would have
+been killed by timeout; under the old 1200-token ceiling it would have
+been cut off mid-word.
 
-Усилие у ступени задаётся отдельно и обязано совпадать с пином таблицы
-маршрутизации: `deepseek-v4-flash` — `high`, `glm-5.3` — `max`. До 2026-08-20
-судья ходил с зашитым в шаблон `"reasoning_effort": "low"`, то есть ниже
-дозволенного, и заметил это не человек, а гейт диспатчей — когда тот же запрос
-попробовали повторить снаружи. Замер после подъёма до `high`: 2.5 / 2.5 с
-против прежних 2.5-3.6 с, то есть цена нулевая.
+A rung's effort is set separately and must match the routing table pin:
+`deepseek-v4-flash` — `high`, `glm-5.3` — `max`. Before 2026-08-20 the
+judge ran with `"reasoning_effort": "low"` hard-wired into the template —
+below what is allowed — and this was noticed not by a human but by the
+dispatch gate, when the same request was retried from the outside.
+Measurement after raising to `high`: 2.5 / 2.5 s versus the old 2.5-3.6 s,
+so the price is zero.
 
-Свои пределы у ступени нужны потому, что ступени падают по РАЗНЫМ причинам:
-перегруженному провайдеру нужен больший порог, рассуждающей модели — больший
-бюджет, слишком длинной ленте — короткий хвост. `timeout_ms`, `max_tokens`,
-`context_chars` и `effort` в ступени перекрывают общие значения; чего нет —
-берётся из корня конфига. Порядок ступеней и есть очерёдность проб, так что
-для случая «судейство нужно наверняка» лестницу можно продлить сколько угодно.
+Per-rung limits exist because rungs fail for DIFFERENT reasons: an
+overloaded provider needs a bigger timeout, a reasoning model a bigger
+budget, an overly long transcript a short tail. `timeout_ms`,
+`max_tokens`, `context_chars` and `effort` in a rung override the shared
+values; whatever is absent is taken from the config root. The order of
+rungs is the order of attempts, so for the "judging must be certain" case
+the ladder can be extended as long as needed.
 
-Ступень, сорвавшаяся по своему порогу, не тратит общий: проверено локальным
-приёмником — ступень с `timeout_ms: 1000` оборвалась на 1007 мс при общем
-пороге 30 с, следующая с пустым ответом уступила третьей, и отказ вынесла
-третья (`tries:3`, `err1:"slow-a: AbortError… | empty-b: empty verdict"`). Переход происходит и по сетевому сбою, и по порогу
-ожидания, и по любому не-2xx (HTTP 429 однажды дал пустой вердикт, и это
-читалось как «судье нечего сказать»). Если не ответила ни одна, делается
-последняя попытка на последней модели с лентой, подрезанной до
-`retry_context_chars` — сама лента и есть основная цена запроса. Не вышло и
-это — вызов уходит без судейства, молча, как и раньше.
+A rung that failed on its own timeout does not spend the shared one:
+verified with a local receiver — a rung with `timeout_ms: 1000` broke off
+at 1007 ms under a 30 s shared timeout, the next one yielded to the third
+with an empty answer, and the third issued the refusal (`tries:3`,
+`err1:"slow-a: AbortError… | empty-b: empty verdict"`). The transition
+happens on network failure, on timeout, and on any non-2xx (HTTP 429 once
+produced an empty verdict, and that read as "the judge has nothing to
+say"). If none answered, one last attempt is made on the last model with
+the transcript trimmed to `retry_context_chars` — the transcript itself is
+the main cost of the request. If that fails too, the call goes out
+unjudged, silently, as before.
 
-Пустой ответ при HTTP 200 — такой же отказ, как сетевой сбой: рассуждающая
-модель может истратить весь бюджет на размышление и быть оборванной по
-`finish_reason:"length"`, и тогда решение отменить вызов не будет напечатано
-вовсе, а молчание судьи пропускает диспатч. Измерено 2026-08-20: судья опознал
-и переразмеренную модель, и вымышленную санкцию — и не успел объявить отказ.
-Поэтому вердикт требуется ПЕРВОЙ строкой ответа, до обоснования (обрыв тогда
-уносит объяснение, а не решение), а ответ без вердикта переводит цепочку к
-следующей модели. После правки формата flash укладывается в 150 токенов там,
-где прежде не хватало 1200.
+An empty answer on HTTP 200 is as much a failure as a network error: a
+reasoning model can spend the whole budget on thinking and be cut off with
+`finish_reason:"length"`, and then the decision to cancel the call is never
+printed at all, while the judge's silence passes the dispatch. Measured
+2026-08-20: the judge identified both an oversized model and a fabricated
+sanction — and never got to announce the refusal. Hence the verdict is
+required on the FIRST line of the answer, before the justification (a
+cut-off then carries away the explanation, not the decision), and an
+answer without a verdict advances the chain to the next model. After the
+format change flash fits into 150 tokens where 1200 had not been enough.
 
-Потолок вывода — это ПОВОДОК, и через пул он рвётся насухо. Измерено
-2026-08-20 на одной и той же ленте: `deepseek-v4-flash` тратит на ответ 434 /
-568 / 944 / 1826 / 2120 токенов при усилии `high` и 302 / 973 / 1065 / 1204 /
-3000 при `low`. Разброс внутри одного усилия больше разницы между усилиями, так
-что понижать усилие ради бюджета бессмысленно — пин таблицы остаётся `high`.
-Значение имеет другое: ЧЕМ кончается перерасход. По HTTP он приходит мягко —
-`finish_reason:"length"`, вердикт первой строкой уже напечатан и годен. Через
-пул тот же перерасход превращается в синтетическую ошибку клиента («response
-exceeded the N output token maximum») с `output_tokens: 0`: текста не остаётся
-вовсе, и правило «вердикт первой строкой» его НЕ спасает. Цена наблюдалась
-живьём — 27.9 секунды, выброшенные впустую, после чего вердикт за 2.5 секунды
-дала следующая ступень. Поэтому общий потолок поднят с 3000 до 8000 токенов: он
-не удлиняет обычный ответ (модель пишет столько, сколько собиралась), но
-снимает обрыв там, где обрыв невосстановим. Ступени, которой и 8000 мало на
-решение «да/нет», лестница законно уступает следующей.
+The output ceiling is a LEASH, and through the pool it snaps dry. Measured
+2026-08-20 on the same transcript: `deepseek-v4-flash` spends 434 / 568 /
+944 / 1826 / 2120 answer tokens at effort `high`, and 302 / 973 / 1065 /
+1204 / 3000 at `low`. The spread within one effort exceeds the difference
+between efforts, so lowering the effort for budget reasons is pointless —
+the table pin stays `high`. What matters is different: HOW the overrun
+ends. Over HTTP it arrives softly — `finish_reason:"length"`, the
+first-line verdict is already printed and valid. Through the pool the same
+overrun becomes a synthetic client error ("response exceeded the N output
+token maximum") with `output_tokens: 0`: no text remains at all, and the
+"verdict on the first line" rule does NOT save it. The price was observed
+live — 27.9 seconds thrown away, after which the next rung gave a verdict
+in 2.5 seconds. Hence the shared ceiling is raised from 3000 to 8000
+tokens: it does not lengthen a normal answer (the model writes as much as
+it intended) but removes the cutoff where a cutoff is unrecoverable. A
+rung for which even 8000 is not enough for a yes/no decision lawfully
+yields to the next one.
 
-Частота, ради масштаба: на 49 консультациях первого дня ступень 1 уступила
-шесть раз, и все шесть — в одном получасе под нагрузкой стенда.
+Frequency, for scale: over the first day's 49 consultations rung 1
+yielded six times, and all six within one half-hour under bench load.
 
-`fail_closed: true` — если вердикта не дала НИ ОДНА ступень, включая последнюю
-попытку с подрезанной лентой, вызов ОТМЕНЯЕТСЯ, а не пропускается. Решение
-юзера (2026-08-20): «лучше ложная отмена, чем молчаливый пропуск». Это
-единственное место, где судья отступает от fail-open; при `fail_closed: false`
-(умолчание) исчерпанная лестница по-прежнему пропускает диспатч молча.
+`fail_closed: true` — if NOT A SINGLE rung produced a verdict, including
+the last attempt with the trimmed transcript, the call is CANCELED, not
+passed through. The user's decision (2026-08-20):
+«лучше ложная отмена, чем молчаливый пропуск». This is the only place where the judge
+departs from fail-open; under `fail_closed: false` (the default) an
+exhausted ladder still passes the dispatch silently.
 
-В журнале это видно целиком: `jm` — какая модель дала вердикт, `tries` — с
-какой попытки, `err1` — чем кончились неудачные. Худший случай задержки —
-число моделей плюс одна попытка, помноженное на порог; при цепочке из двух и
-`timeout_ms: 60000` это несколько минут. Решение юзера (2026-08-20): такая
-задержка приемлема, потому что предотвращённый неверный диспатч стоит дороже.
+The journal shows this in full: `jm` — which model gave the verdict,
+`tries` — on which attempt, `err1` — how the failed ones ended. Worst-case
+latency is the number of models plus one attempt, multiplied by the
+timeout; with a chain of two and `timeout_ms: 60000` that is several
+minutes. The user's decision (2026-08-20): such a delay is acceptable,
+because a prevented wrong dispatch costs more.
 
-Измерено 2026-08-20 на тривиальном судействе: `deepseek-v4-flash` — 3.6 / 3.4 /
-3.3 с (медиана 3.4, разброс мизерный), `glm-5.3` — 5.9 / 1.9 / 2.1 с (медиана
-2.1, но скачет). Отсюда порядок в цепочке: стабильный первым, быстрый вторым.
+Measured 2026-08-20 on trivial judging: `deepseek-v4-flash` — 3.6 / 3.4 /
+3.3 s (median 3.4, tiny spread), `glm-5.3` — 5.9 / 1.9 / 2.1 s (median
+2.1, but jumpy). Hence the chain order: the stable one first, the fast one
+second.
 
-Если запись в журнал не удалась (каталога нет, нет прав), строка уходит в
-поток ошибок целиком — иначе непроведённая консультация выглядела бы как
-непроисходившая, то есть журнал воспроизводил бы ровно ту слепоту, ради
-которой заведён.
+If writing to the journal fails (no directory, no permissions), the line
+goes to the error stream in full — otherwise an unperformed consultation
+would look like one that never happened, that is, the journal would
+reproduce exactly the blindness it exists to remove.
 
-## Подрезка ленты
+## Transcript trimming
 
-Лента подрезается под `context_chars`, и до 2026-08-21 подрезка была FIFO —
-то есть выбрасывала указания ЧЕЛОВЕКА первыми, они самые старые. Стенд измерил
-цену: через ~70 ходов запрет «в этой сессии не вызывай opus» ушёл из ленты
-целиком (0 записей `src:"user"` из 177). Вызов тогда всё же отменили, но только
-по ЭХУ — цитата запрета уцелела в первых 300 знаках прошлой отмены, пришедшей
-как `tool-output`. Работай главный луп молча, вытеснение прошло бы вчистую.
+The transcript is trimmed to `context_chars`, and until 2026-08-21 the
+trimming was FIFO — meaning it threw away the HUMAN's instructions first,
+they being the oldest. The bench measured the price: after ~70 turns
+the prohibition «в этой сессии не вызывай opus» was gone from the
+transcript entirely (0 records with `src:"user"` out of 177). The call was
+still cancelled then, but only by ECHO — a quote of the prohibition
+survived in the first 300 characters of a past cancellation that had
+arrived as `tool-output`. Had the main loop worked silently, the eviction
+would have gone through clean.
 
-Теперь с головы вытесняется всё, КРОМЕ `src:"user"`; реплики человека режутся
-только если одних их не вместить в бюджет. Пропуск объявляется записью
-`[лента подрезана: вытеснено N записей; реплики человека сохранены]` — иначе
-уцелевшие записи читаются как соседние, и линза КОНЦЕНТРАЦИЯ судит по склейке,
-которой в ходе не было. Стоит это почти ничего: указаний человека в ленте
-единицы (10 из 150 в замере).
+Now everything is evicted from the head EXCEPT `src:"user"`; human
+replies are cut only if they alone do not fit the budget. The skip is
+announced by a record `[лента подрезана: вытеснено N записей; реплики
+человека сохранены]` — otherwise the surviving records read as adjacent,
+and the CONCENTRATION lens judges by a splice that never happened in the
+run. It costs almost nothing: human instructions in a transcript number
+in single digits (10 out of 150 in the measurement).
 
-Два ограничения, найденные сразу после закрепления (стенд, 2026-08-21).
-Первое: `<local-command-stdout>` приходит под ролью `user`, хотя это ОТВЕТ
-ПРОГРАММЫ на действие человека — то есть вывод локальной команды попадал в
-единственное происхождение, которому судья даёт вес санкции, а после
-закрепления оседал там навсегда. Теперь он `tool-output`, а сам вызов команды
-(`<command-name>`) получил метку `user-command`: действие человека, но не
-указание судье. Второе: закрепление без потолка делает мусор ВЕЧНЫМ — в замере
-стенда служебные записи занимали 21% короткой ленты и росли монотонно. Поэтому
-закреплённое ограничено 35% бюджета ленты, и внутри этой доли вытесняется по
-старшинству: свежие слова человека важнее давних.
+Two limitations found right after pinning (bench, 2026-08-21). First:
+`<local-command-stdout>` arrives under the `user` role, although it is
+the PROGRAM's reply to a human action — that is, local command output was
+landing in the single provenance to which the judge gives the weight of a
+sanction, and after pinning it settled there forever. Now it is
+`tool-output`, and the command invocation itself (`<command-name>`) got
+the label `user-command`: a human action, but not an instruction to the
+judge. Second: pinning without a ceiling makes garbage ETERNAL — in the
+bench measurement service records occupied 21% of a short transcript and
+grew monotonically. Therefore pinned content is capped at 35% of the
+transcript budget, and within that share eviction is by seniority: fresh
+words of the human matter more than old ones.
 
-Третье ограничение нашлось там же и оказалось тяжелее двух первых: РЕЗЮМЕ
-КОМПАКЦИИ. Оно приходит под ролью `user` с флагом `isCompactSummary`, весит
-десятки тысяч знаков и до 2026-08-21 получало метку `injected` — то есть
-вылетало из ленты первым. Стенд измерил следствие: после компакции в ленте
-судьи не остаётся НИ ОДНОЙ записи `src:"user"`, и действующий запрет человека
-существует только внутри резюме, то есть для судьи не существует как санкция
-вовсе. При этом маркер подрезки говорил «реплики человека сохранены» — формально
-не ложь (сохранять было нечего), но звучало успокаивающе ровно там, где
-положение хуже всего.
+A third limitation was found in the same place and turned out heavier
+than the first two: the COMPACTION SUMMARY. It arrives under the `user`
+role with the `isCompactSummary` flag, weighs tens of thousands of
+characters, and until 2026-08-21 received the `injected` label — meaning
+it was the first to fly out of the transcript. The bench measured the
+consequence: after compaction not ONE `src:"user"` record remains in the
+judge's transcript, and a standing human prohibition exists only inside
+the summary, that is, for the judge it does not exist as a sanction at
+all. Meanwhile the trimming marker said «реплики человека сохранены» —
+formally not a lie (there was nothing to preserve), but it sounded
+reassuring exactly where things were at their worst.
 
-Теперь у резюме своя метка `compaction-summary`, своя доля закрепления (30%
-бюджета) и подрезка ПО ТЕКСТУ (с обоих концов: начало несёт суть, хвост —
-разделы «все сообщения пользователя» и «незакрытые задачи») вместо
-выбрасывания: выбросить единственный
-носитель стоячих распоряжений нельзя. Правило доверия к нему намеренно
-несимметрично и записано в промпте: запрет и ограничение из резюме действуют,
-разрешение и «юзер одобрил» — нет. Основание: резюме пишет клиент, пересказывая
-ход, и пересказ мог вобрать чужой текст, поэтому санкцию оно выдавать не может;
-запрет же только ограничивает, а ложная отмена дешевле молчаливого пропуска.
-Маркер теперь называет числа: `[лента подрезана: вытеснено N записей; закреплено
+Now the summary has its own label `compaction-summary`, its own pinning
+share (30% of the budget) and trimming BY TEXT (from both ends: the head
+carries the essence, the tail the "all user messages" and "open tasks"
+sections) instead of ejection: the sole carrier of standing instructions
+cannot be thrown out. The rule of trust in it is deliberately asymmetric
+and is written in the prompt: a prohibition or a restriction from the
+summary applies, a permission or "the user approved" does not. The
+grounds: the summary is written by the client retelling the run, and the
+retelling could have absorbed someone else's text, so it cannot issue a
+sanction; a prohibition only restricts, and a false cancellation is
+cheaper than a silent pass. The marker now names the numbers:
+`[лента подрезана: вытеснено N записей; закреплено
 реплик человека: K, резюме компакции: M]`.
 
-Там же исправлена метка аргументов слэш-команды: `<command-args>` несёт
-СОБСТВЕННЫЕ слова человека («веди полосу lane-16, без агентов и без скриптов» —
-24 таких блока в стенограммах проекта), поэтому запись с непустыми аргументами
-это `user` со всеми правами санкции, а голый вызов вроде `/model` остаётся
-`user-command`.
+The slash-command arguments label was fixed in the same place:
+`<command-args>` carries the human's OWN words
+(«веди полосу lane-16, без агентов и без скриптов» — 24 such
+blocks in the project's transcripts), so a record with non-empty
+arguments is `user` with full sanction rights,
+while a bare invocation like `/model` stays `user-command`.
 
-И один вывод про сам класс дефектов. Три находки подряд — вывод локальной
-команды, аргументы слэш-команды, резюме компакции — были ОДНИМ И ТЕМ ЖЕ:
-Claude Code кладёт под роль `user` всё новые виды записей, и каждый находился
-по инциденту. Поэтому неизвестная обёртка, уцелевшая в классе `user`, попадает
-в журнал полем `uw` — теперь класс измерим, а не ждёт следующего инцидента.
+And one conclusion about the defect class itself. Three finds in a row —
+local command output, slash-command arguments, the compaction summary —
+were ONE AND THE SAME thing: Claude Code keeps putting new kinds of
+records under the `user` role, and each was found through an incident.
+Therefore an unknown wrapper surviving in the `user` class lands in the
+journal as the field `uw` — the class is now measurable instead of
+waiting for the next incident.
 
-Симметрия важнее любой из половин. Первая редакция закрепления резала по тексту
-ТОЛЬКО резюме, а реплики человека по-прежнему выбрасывала целиком — и стенд
-показал дыру в той же точке: одна большая вставка юзера выдавливала и резюме, и
-сам стоячий запрет, причём маркер рапортовал «закреплено реплик человека: 1»
-(выжившей «репликой» был бесполезный хвост пасты). Теперь по тексту режется
-ЛЮБОЙ носитель распоряжений, и режется САМЫЙ ДЛИННЫЙ, а не самый давний: размер
-не признак важности, и возрастная политика выбрасывала пятнадцатизначный запрет
-ради стотысячной пасты. Выбрасывание по старшинству включается, только когда
-резать уже нечего. Последний рубеж (лента всё ещё не влезает, незакреплённого
-не осталось) тоже больше не сносит закреплённое безусловно — он укорачивает
-самую длинную запись. И маркер называет потерянное среди закреплённого:
+Symmetry matters more than any single half. The first draft of pinning
+trimmed ONLY the summary by text and still threw human replies out whole —
+and the bench showed a hole in the same spot: one large user paste pushed
+out both the summary and the standing prohibition itself, while the
+marker reported «закреплено реплик человека: 1»
+(the surviving "reply" was the useless tail of a paste). Now ANY
+carrier of instructions is trimmed by text, and the LONGEST one, not
+the oldest: size is not a sign of importance, and the age policy
+threw out a fifteen-character prohibition in favor of a
+hundred-thousand-character paste. Eviction by seniority engages
+only when there is nothing left to trim. The last line of defense
+(the transcript still does not fit, nothing unpinned remains) no longer
+demolishes the pinned unconditionally either — it shortens the longest
+record. And the marker names what was lost among the pinned:
 `ВЫТЕСНЕНО ЗАКРЕПЛЁННЫХ: N`.
 
-Проверено на установленном образе воспроизведением случаев стенда: резюме 42 КБ
-плюс запрет плюс паста 120 КБ при бюджете 60 000 — запрет виден, резюме уцелело
-(17 943 знака); то же на короткой ступени при бюджете 8 000 — запрет виден,
-резюме 2 343; сорок распоряжений подряд — все 41 в ленте, 31 подрезано по
-тексту, ни одно не потеряно.
-
-Ещё три корня нашлись, когда стенд бил по уже исправленной подрезке — и все
-три были свойствами КОДА, а не подставленной ленты.
-
-Первый: доля резюме считалась НА ЗАПИСЬ, а не на класс. Сколько резюме в
-ленте, столько раз по 30% бюджета: измерено — 14 резюме заняли 64% ленты, и
-незакреплённое вытеснялось подчистую, то есть судья переставал видеть сам ход
-работы, о котором его спрашивают. Теперь доля считается по классу целиком, как
-у реплик человека.
-
-Второй: потолки итераций (60 и 40) отдавали ленту ВЫШЕ бюджета. Когда
-закреплённых много и каждая короче 400 знаков, подрезка по тексту не
-включалась, оставалось выбрасывание — и после исчерпания счётчика функция
-возвращала что есть: 1000 коротких реплик давали 301 237 знаков против
-бюджета 60 000, причём уменьшение бюджета ленту не уменьшало вовсе. Это ровно
-тот вход, который упирается в потолок вывода модели.
-
-Третий: подрезка была КВАДРАТИЧНОЙ — на каждое удаление сериализовался весь
-массив. 4 800 записей стоили 8.3 секунды чистого локального счёта при пороге
-ступени 25 секунд, то есть подрезка сама съедала порог, и на каждую ступень
-своя.
-
-Переписано на счёт по числам: стоимость каждой записи считается один раз,
-дальше идёт арифметика, сериализация — ровно одна, в конце. Замер на
-установленном образе: 14 резюме + 80 записей работы → лента 45 214 в бюджете,
-резюме 39%, все 80 записей работы на месте, 1 мс; 1000 коротких реплик →
-21 053 в бюджете, 6 мс; 4 800 записей → 59 895 в бюджете, 17 мс вместо 8 300.
-
-И ещё один корень, найденный уже по переписанной подрезке: НЕЗАКРЕПЛЁННЫЕ
-записи только выбрасывались целиком и никогда не резались по тексту. Три
-проявления, все измерены стендом. Лента могла обнулиться совсем: если
-закреплённого нет, а одна свежая запись длиннее бюджета, цикл выбрасывал всё,
-включая её саму, и судья получал ленту из одного маркера — то есть выносил
-обычный вердикт ВСЛЕПУЮ, что хуже отмены, потому что незаметно (граница на
-бюджете 60 000: запись 59 700 выживала, 59 800 обнуляла ленту). Бюджет
-оставался неиспользованным: резюме 200 КБ плюс реплика 200 КБ плюс свежая
-работа 40 КБ давали ленту 38 815 при бюджете 60 000, причём работа была
-выброшена целиком, хотя её хвост в зазор влезал. И чаще всего это било по
-нижним ступеням: на ленте 12 000 судья видел 446 знаков — 96% бюджета
-пропадало вместе с ходом работы.
-
-Теперь запись, удаление которой увело бы ленту ниже бюджета, УКОРАЧИВАЕТСЯ под
-остаток зазора вместо выбрасывания. Замер после правки: 30 старых записей плюс
-свежая на 90 КБ → лента 59 856, свежая на месте подрезанной; одиночная запись
-59 800 → выживает; случай с неиспользованным бюджетом → 59 855 из 60 000, работа
-в ленте; ступень с лентой 12 000 → 11 855 вместо 446, запрет человека виден.
-
-Отдельно стоит помнить: текст записи `assistant` в ленте ничем не ограничен
-(в раскладке режутся только результаты инструментов до 300 знаков и вызовы до
-400), поэтому «одна незакреплённая запись длиннее бюджета» — не экзотика, а
-обычная длинная реплика главного лупа.
-
-Последняя пара корней — пограничная, но настоящая: пороги подрезки считались в
-знаках ТЕКСТА, а бюджет — в знаках JSON. Экранирование раздувает управляющий
-символ вшестеро, и промах шёл в обе стороны: лента вылезала за бюджет на малых
-значениях (стенд намерил превышение до +630 при `context_chars` ниже 1100) и
-недобирала бюджет на экранируемом содержимом (лента из одних кавычек занимала
-8.5% отведённого). Отдельно не сходился резерв под маркер: пол `Math.max(200,…)`
-съедал его, и маркер ложился сверх бюджета.
-
-Теперь все пороги задаются в JSON-длине: подрезка получает целевую ЦЕНУ записи
-и подбирает текстовый предел по фактической, а маркер добавляется последним и
-оплачивается ужиманием ленты ровно на свою цену (на крошечном бюджете он
-переходит в краткую форму, иначе сам не помещается). Проверено батареей из
-3 024 сочетаний (шесть видов содержимого × 7 размеров ленты × 6 длин записи ×
-12 бюджетов от 200 до 60 000): ноль превышений; использование бюджета 90–99%
-против прежних 8.5% на экранируемом содержимом.
-
-Квадратичность пришлось убирать ДВАЖДЫ, и второй раз она была другой природы.
-Первая жила в сериализации (весь массив пересобирался на каждое удаление).
-Вторая — в самих удалениях: `splice` по двум массивам и повторный поиск самой
-длинной записи на каждый шаг. Измерено стендом: лента в 40-60 тысяч записей
-стоила 5-10 секунд ЧИСТОГО локального счёта, причём на каждую ступень
-лестницы, то есть до полуминуты добавочной задержки перед вердиктом. Его же
-дифференциальная проверка указала на виновника точно: та же лента без
-закреплённых — 886 мс, с 20% закреплённых — 5108 мс, то есть платил потолок
-класса.
-
-Теперь удаление ПОМЕЧАЕТ, а не вырезает, массив уплотняется один раз в конце,
-а добор внутри доли идёт одним курсором с головы вместо поиска длиннейшей на
-каждом шаге. Замер после правки: 2 500 записей — 6 мс, 10 000 — 22, 20 000 —
-44, 40 000 — 76, 60 000 — 128 мс (было 9 998). Дифференциальная проверка
-стенда: 40 000 без закреплённых 72 мс, с 20% закреплённых 77 мс — вклад
-потолка класса исчез.
-
-И последний на сегодня — маркер ЛГАЛ в свою же пользу, причём в рабочем
-диапазоне. Метки удалений сбрасывались после первого уплотнения массива, но не
-после второго (внутри блока маркера), а числа для маркера считались через эти
-метки по уже переиндексированной ленте. Цикл маркера удаляет с головы, значит
-после фильтра на помеченных индексах стоят первые ВЫЖИВШИЕ — и счётчик их
-пропускал. Маркер занижал число закреплённых реплик человека: на ленте из 4000
-коротких строк заявлял 433 против 439 реальных при бюджете 60 000, 56 против 63
-при 8 000; в крайней форме говорил «закреплено реплик человека: 0», когда в
-ленте лежали две. То есть сообщал судье ровно обратное правде — ту самую
-гарантию, ради которой закрепление и заводилось. Числа теперь считаются по
-отфильтрованной ленте, метки сбрасываются после КАЖДОГО уплотнения, и на это
-стоит проверка конвейера. Проверено: 108 сочетаний числа записей, доли реплик и
-бюджета — расхождений ноль.
-
-Из той же семьи, слабее: в цикле маркера был зашит индекс 0, тогда как удаления
-идут с головы — подрезалась уже помеченная запись, а живая своей финальной
-подрезки не получала. Последствий не имело (стенд намерил 744 срабатывания из
-10 710, все на бюджетах 130-256, без превышений), но индекс всё равно был
-неправильный: теперь берётся первая живая запись.
-
-Та же линза — «описание ленты не смеет лгать» — приложенная ко ВСЕМ числам,
-а не только к закреплению, вскрыла ещё два лживых числа (стенд, 2026-08-21).
-Первое: «подрезано по тексту: N» считало ВЫЗОВЫ подрезки, а не записи, дожившие
-до вывода. Одну запись можно подрезать дважды (сначала по доле класса, потом в
-цикле маркера), а подрезанную потом вытеснить — счётчик всё равно её помнил. На
-реальной ленте при бюджете 24 000 маркер заявлял 39 подрезок против 22 живых, при
-12 000 — 39 против 20, при 1 000 — 39 против 4, то есть вдесятеро. Теперь
-считаются ЖИВЫЕ записи с меткой, после финального фильтра.
-
-Второе хуже, потому что лгало внутри самой записи. Повторная подрезка брала уже
-подрезанный текст и считала вырезанное от НЕГО, а прошлая метка при этом
-выпадала из текста вместе со следом первой подрезки. Худший намеренный случай:
-запись заявляла «[вырезано 123 знаков]», когда от исходных 200 004 знаков в ней
-осталось 4. Судья читает «сто двадцать три» и вправе считать, что видит запись
-почти целиком. Теперь у записи хранится ИСХОДНЫЙ текст, и любая подрезка — хоть
-первая, хоть третья — режет от него: число в метке всегда называет вырезанное от
-оригинала, а вложенные метки становятся невозможны структурно, а не по счастливой
-арифметике (стенд отдельно отметил, что защиты в коде не было — метка выпадала
-сама). Заодно закрыт край, где при тяжёлом экранировании голова и хвост
-перекрывались и метка печатала отрицательное число.
-
-Проверено на установленном образе: 704 синтетических сочетания (число записей ×
-длина × бюджет × состав) — ложных чисел ноль, расхождений маркера ноль; реальная
-лента 6 506 записей на бюджетах от 60 000 до 400 — заявленное совпадает с
-фактическим на каждом (57/57, 31/31, 16/16, 12/12, 2/2), ложных чисел в записях
-ноль; прицельная двойная подрезка одной записи — число в метке равно вырезанному
-от оригинала на всех пяти бюджетах. Регресс: 1 296 сочетаний бюджета —
-превышений ноль везде, кроме давно описанного края `context_chars` = 60, где
-маркер физически не помещается; 60 000 записей — 120 мс.
-
-Следующий круг стенд провёл той же линзой по журналу и записи — и главное, что
-он нашёл, оказалось не числом, а ИСХОДОМ. Повтор на укороченной ленте не был
-обёрнут в try/catch, в отличие от каждой ступени лестницы. Значит: лестница
-исчерпана без вердикта, повтор бросает (таймаут, отказ канала) — управление
-уходит во внешний catch, тот пишет «skip» и НЕ отменяет вызов. Молчаливый
-пропуск ровно в той точке, ради которой заводился `fail_closed`, и в журнале он
-выглядит как штатный пропуск.
-
-Проверяя это на живом вызове, я нашёл вторую половину дефекта, свою: сам путь
-отказа был сломан. `__pdir` (каталог проектного слоя) объявлялся ВНУТРИ `try`, а
-читался в `catch` — соседнем блоке, куда `let` не виден. Путь исполняется только
-при поломке, поэтому опечатка жила незамеченной: в журнале не было НИ ОДНОЙ
-записи «skip» новее того дня, когда добавилось поле `cfg`. Измерено: диспатч с
-мёртвым адресом судьи вернул «__pdir is not defined», а журнал не получил
-ничего — построение объекта для записи падало раньше самой записи. То есть
-единственный путь, обязанный объяснить, почему судья промолчал, сам молчал
-громче всех.
-
-Починено целиком, а не в точке падения. Повтор обёрнут как ступень (его ошибка
-теперь попадает в `err1`, а не теряется). Обязательство вынести решение поднято
-в переменную `__jarm`: она взводится, как только известно, что вызов не
-отфильтрован и включены `enforce` + `fail_closed`, и снимается ПОСЛЕДНИМ
-действием успешного пути. Любой уход в `catch` со взведённым флагом — отмена, а
-не пропуск; это покрывает и падения ДО лестницы (чтение конфига, сборка тела,
-подрезка), где вердикта нет и быть не может. Запись в журнал обёрнута на месте
-вызова, чтобы её сбой при готовом BLOCK не превратился в пропуск. `__pdir`
-поднят к остальным сквозным именам, а конвейер получил структурную проверку:
-каждое имя, которое читает `catch`, обязано быть объявлено выше `try`. Проверка
-не штамп — на предыдущем образе она называет `__pdir`, на новом чиста.
-
-Измерено на установленном образе, мёртвый адрес судьи:
-`fail_closed:true` → `block_no_verdict`, `tries:4`, все четыре ошибки в `err1`
-(включая ошибку повтора), диспатч ОТМЕНЁН с объяснением про канал;
-`fail_closed:false` → `empty`, диспатч прошёл. Путь `catch` проверен отдельно —
-функция извлечена из образа и прогнана: без обязательства пишет «skip» с полным
-набором полей (`cfg` на месте, ReferenceError нет), со взведённым — бросает
-отмену с меткой `__ccJudgeBlock`.
-
-Из той же проверки — ещё два, слабее. Ответ и статус попытки (`__jres`, `__jst`)
-не гасились в начале следующей: запрос писался каждой попыткой, а ответ только
-удачной, и запись могла склеить запрос последней попытки с ответом ранней. Стенд
-честно сказал, что в 63 записях этого нет — удачная попытка всегда оказывалась
-последней. Я построил обратный случай нарочно (первая ступень отвечает ошибкой
-модели, вторая обрывается по таймауту до всякого ответа): до правки верхние
-`http`/`response` принадлежали бы первой при запросе от второй, после правки они
-пусты, а следы попыток остались каждый при своей. И `tries` инициализировался
-единицей — заявлял попытку там, где бросило до лестницы; теперь ноль.
-
-Наконец, усечения в журнале и записи объявляются той же конвенцией, что и
-подрезка ленты: `verdict` (400), `resp` попытки (800), `err1` по кускам (80),
-`reason` (200) — все получают «[вырезано N знаков]». Обрыв вердикта посреди
-слова читается человеком как весь вердикт, а обрезанный ответ упавшей попытки —
-как весь её след.
-
-Следующий круг стенд провёл по ОСТАЛЬНЫМ путям отказа — тем, что исполняются
-только при поломке, и потому не проверяются ничем, кроме нарочной поломки. Нашлись
-два выключателя гейта.
-
-Первый: битый `config.json` тихо превращал судью в fail-open. `try{__cfg=JSON.parse(…)}catch{}`
-давал пустой объект, а вместе с ним исчезало ВСЁ, что в конфиге написано, — и
-`enforce`, и `fail_closed`. Замеры стенда на одном и том же битом файле: с мёртвым
-каналом — `empty` и диспатч ПРОШЁЛ (с исправным конфигом в тех же условиях
-`block_no_verdict` и отмена); с живым каналом и настоящим вердиктом `BLOCK:` —
-`block_not_enforced` и диспатч ПРОШЁЛ. Судья выносил отмену, и отмену молча
-выбрасывали. Попутно и тоже молча: `max_tokens` падал на встроенные 1200 (ниже
-порога, ради которого он поднимался до 8000), лестница схлопывалась в одну ступень,
-таймаут становился 8000 мс. В журнале об этом не было ни слова.
-
-Ключ к починке — асимметрия, которую стенд назвал прямо: отсутствующий конфиг и
-НЕЧИТАЕМЫЙ конфиг это разные события. Первое значит «настроек нет, работай по
-умолчанию», второе — «настройки есть, но я их не понял». Теперь читалка их
-различает: `null` — файла нет, `!1` — файл есть, но не прочитан или не разобран.
-Непонятый конфиг означает, что `enforce` и `fail_closed` НЕИЗВЕСТНЫ, и они
-считаются включёнными: диспатч отменяется с названием файла и текстом ошибки
-разбора. То же для нечитаемого проектного слоя (`chmod 000`), который прежде был
-неотличим от отсутствующего — слой исчезал молча, а обход ехал выше и мог
-подхватить ЧУЖОЙ слой.
-
-Второй: отсутствующий `prompt.md` давал запасной промпт, который НЕ УМЕЕТ
-ОТМЕНЯТЬ. Встроенный текст (131 знак) не содержал слова BLOCK вовсе, а
-единственный не-OK исход, который он предлагал модели, — `SWAP:` — записывался
-как `ok` и пропускал вызов. Механика отмены при этом была цела: стенд проверил
-обе стороны — если модель всё равно выдаст `BLOCK:`, вызов отменяется. То есть
-гейт был формально жив и содержательно выключен, а снаружи это выглядело
-нормальной работой: журнал полон «ok». Запасной промпт переписан — он объясняет,
-что вызов можно отменить, и называет BLOCK; SWAP убран как остаток старого
-замысла (судья не переписывает вызов, он его отменяет). А отсутствие своего
-`prompt.md` при `enforce` теперь само по себе отмена: это сломанная развёртка, а
-не режим работы.
-
-Из того же разбора — третья правка, шире находки. Разбор ответа возвращал СЫРОЙ
-текст модели, если строки вердикта в нём не нашлось, и такой ответ записывался
-как `ok`. То есть любой ответ мимо словаря — не только `SWAP:` — пропускал вызов
-и заявлял вердикт, которого не было. Теперь ответ без распознанной строки — не
-вердикт; при `fail_closed` это отмена, а полный ответ по-прежнему лежит в записи.
-
-Все деградации попадают в журнал полем `deg` — и те, что отменяют вызов, и
-безобидные (битый `body.json`: судья работает встроенным телом, но положивший
-свой шаблон узнаёт, что тот не применён). Измерено на установленном образе:
-битый конфиг → `block_degraded`, `tries:0`, `deg` называет файл и ошибку разбора;
-отсутствующий `prompt.md` при `enforce` → `block_degraded`; он же без `enforce` →
-вызов идёт, `deg:["prompt-missing"]`, вердикт вынесен запасным промптом; битый
-`body.json` → вызов идёт, `deg` называет его; нечитаемый слой → `block_degraded` с
-перечислением всех четырёх нечитаемых файлов; исправная раскладка → `ok`, 8.3 с,
-поля `deg` нет.
-
-Отдельно отмечу то, что стенд проверил и признал сделанным правильно: каталог
-судьи только для чтения. `BLOCK` всё равно отменяет вызов, вся строка журнала
-уходит в stderr целиком, плюс отдельная строка про несостоявшуюся запись. Здесь
-судья, не сумевший записать, именно говорит словами, а не исчезает.
-
-Обратный проход — ложные отмены, то есть исправные раскладки, которые новые
-правила могли счесть сломанными. Стенд подтвердил, что слой из одного
-`prompt.extra.md`, из одного `body.json`, из одного `prompt.md`, из одного
-`config.json`, пустой каталог `.claude/judge` без файлов, `CLAUDE_JUDGE_PROMPT`
-при отсутствующем `prompt.md` и симлинк в несуществующий каталог отмен не дают.
-Две раскладки давали.
-
-Первая — BOM в начале `config.json`. Файл содержательно исправен, для человека
-выглядит нормально, редакторы добавляют BOM молча, а `JSON.parse` его не
-принимает. Отмена при этом сообщала «Unexpected token '﻿'», где сломавший символ
-НЕВИДИМ: человек знает файл, но не видит дефекта, и выйти из такой отмены
-чтением нельзя. BOM снимается перед разбором.
-
-Вторая — предок, в котором `.claude` оказался файлом, а не каталогом: `access`
-даёт ENOTDIR, а читалка считала нечитаемым всё, кроме ENOENT. Любой диспатч из
-любого каталога ниже отменялся, притом что собственная раскладка судьи цела, а
-«слой» — посторонний файл. Стенд назвал и правильную границу: различать надо не
-«ENOENT против всего остального», а «пути нет» (ENOENT, ENOTDIR, ELOOP,
-ENAMETOOLONG) против «путь есть, доступа нет» (EACCES, EPERM). Незнакомый код —
-третий случай: он не отменяет ничего, но и не исчезает, а называется в журнале
-строкой `layer-unknown`/`unread-unknown` вместе с самим кодом.
-
-Пустой `config.json` (ноль байт или одни пробелы) оставлен ОТМЕНОЙ, хотя стенд
-предлагал считать его отсутствующим. Причина: ноль байт — это «настройки были и
-пропали», а не «настроек нет», и трактовать их как отсутствие значит вернуть тот
-самый молчаливый fail-open, который чинился кругом раньше. Но сообщение теперь
-называет причину прямо — `empty:<путь>` вместо «Unexpected end of JSON input».
-
-Из отмены обязан быть выход, и стенд нашёл три места, где его не было. Метка
-`prompt-missing` не называла ни файла, ни каталога — на свежей установке это
-единственный отказ, который человек увидит, и из него не следовало, что создать
-надо `~/.claude/judge/prompt.md`; теперь метка несёт путь (и путь проектного
-слоя, если он есть). Списки деградаций резались молча — в журнал шли пять строк
-из шести, человек чинил пять файлов и получал отмену снова; теперь усечение
-объявляется формой без склонения `[показаны не все: ещё N]`, той же и в тексте
-отмены. И журнал не писался вовсе, когда каталога судьи ещё нет: дописка шла без
-`mkdir`, а именно на свежей установке отмен больше всего; теперь каталог
-заводится при первой записи (проверено: в пустом каталоге появились и
-`journal.jsonl`, и `records`).
-
-Измерено на установленном образе: BOM → `ok`, отмены нет; предок-файл `.claude`
-→ `ok`, `cfg:null`, поля `deg` нет; пустой конфиг → `block_degraded`,
-`deg:["empty:/tmp/…/config.json"]`; отсутствующий `prompt.md` при `enforce` →
-отмена, и главный луп по тексту называет человеку точный путь файла; шесть
-деградаций → в журнале пять и маркер; исправная раскладка → `ok` за 6.2 с.
-
-Ловушка окружения, найденная попутно: `env.CLAUDE_JUDGE` из `settings.json`
-ПЕРЕБИВАЕТ переменную, переданную в командной строке. Пробу вида
-`CLAUDE_JUDGE=enforce claude -p …` это делает бессмысленной — в журнале
-окажется `sw:"1"`, а `enforce` придётся задавать через `enforce: true` в
-конфиге.
-
-Круг про САМО СУЖДЕНИЕ, а не про механику. Стенд прошёл корпус записей тремя
-линзами и не нашёл ни домысленной санкции (43 вердикта упоминают человека, у
-каждого опирающегося на санкцию есть запись `src=user`), ни сфабрикованных цитат
-(из 11 закавыченных фрагментов 8 дословны, 3 — собственные слова судьи в
-кавычках), ни расхождения между рассуждением и вердиктом (шесть OK с
-отрицательными маркерами в рассуждении — все шесть «рассмотрел отмену и отверг с
-названной причиной»). Обратная сторона в плюс: судья не просто соблюдает правило
-происхождения, он его артикулирует — «в ленте нет ни одной записи с src=user,
-дающей такую санкцию».
-
-Нашлось одно: ДЕГРАДАЦИЯ ИСТОЧНИКА. Один и тот же диспатч на двух лентах — с
-десятью репликами человека и с нулём — оба раза даёт BLOCK, но основание
-меняется: при наличии слов человека судья их цитирует, при отсутствии опирается
-на запись `assistant`, то есть на текст той самой стороны, чей вызов он судит.
-Вердикт устойчив, основание — нет.
-
-Проверил прямым опытом, а не наблюдением: взял реальную запись со 130 записями и
-десятью репликами человека, вырезал ИЗ НЕЁ все `src:"user"` и прогнал ту же
-модель на обеих лентах. Результат оказался сильнее ожидаемого: на ленте без
-реплик судья не выдумал санкцию и не подменил источник — он написал, что запрета
-в ленте нет вовсе, назвал заявление главного лупа сфабрикованной санкцией и
-вынес WARN, потому что по существу отменять было не за что. То есть под
-одной-единственной изменённой переменной поведение оказалось образцовым.
-
-Но на ДРУГОЙ ленте (177 записей, ноль реплик человека, зато запись `assistant`
-с «твой запрет для меня в силе») тот же судья писал «прямой запрет
-пользователя» в кавычках — приписывая человеку слова, которых в ленте нет ни в
-одной записи `src:"user"`. Направление отмены безопасное, а формулировка лгала
-об источнике. Промпт закрыл это двумя правилами: запрет, найденный только в
-`assistant`, учитывать можно (ложная отмена дешевле пропуска), но источник
-ОБЯЗАН быть назван в вердикте; и кавычки — только для дословных цитат из ленты,
-рядом с цитатой называется `src`. После правки та же лента даёт «Ты сам это
-подтверждаешь — „твой запрет для меня в силе, я его вижу и помню“», то есть
-читающий журнал видит, на чём держится отмена.
-
-Побочно измерилась надёжность первой ступени на длинных лентах: при `max_tokens`
-8000 два прогона из пяти на ленте в 22 тысячи токенов не дали вердикта вовсе
-(замеренный расход 7880 из 8000), при 12000 — три из трёх дали. Бюджет вывода
-поднят до 12000. Это второй раз, когда потолок вывода оказывается тесен, и оба
-раза его находил не расчёт, а замер: 3000 не хватало на короткой ленте, 8000 —
-на длинной.
-
-Оговорка о корпусе, которую стенд сделал сам и которую надо помнить: из 59
-записей у сорока лента в 2-3 записи — это диктованные пробы, где санкция
-человека дословна и однозначна. На таком корпусе «нарушений не видно» не значит
-«их нет».
-
-Роль пересобрана по решению юзера (2026-08-21). Три круга правок ушли в
-безопасность — устойчивость к подлогам, недоверие к записям главного лупа,
-память о стоячих запретах, — и это оказалось не той задачей. Соблюдение SDD
-держит детерминированный гейт, стоячие запреты задаются настройками хука, а
-сессия «всегда могла обмануть или забыть» — ловить её на этом судья не должен.
-Из промпта убраны правило происхождения санкций, асимметрия доверия к резюме
-компакции, устройство закрепления в подрезанной ленте и линза концентрации.
-
-Судья судит три вещи: готовность брифа (и называет, чего не хватает), модель
-против задачи В ОБЕ СТОРОНЫ (дорогая на закрытой механике — возврат; анализ и
-диагноз на дешёвом исполнителе — тоже) и веер для анализа, критики, аудита. В
-промпт добавлена строка «без фанатизма»: судить по тому, что прямо написано,
-не выдумывать редких случаев и не искать обходных замыслов.
-
-Справочник классов и моделей внедрён В ПРОМПТ, а не подаётся кодом (решение
-юзера: «правильнее в него внедрять эту информацию, чтобы не городить лишний
-код»). Порядок внутри строки — порядок предпочтения; членство модели в классе
-держит гейт, судья говорит о предпочтении внутри списка и о веере. ОБЯЗАННОСТЬ:
-при правке `hooks/routing-table.toml` справочник в `prompt.md` синхронизировать
-руками — иначе судья будет напоминать по устаревшему порядку.
-
-Проверено на реальных записях: запись, где opus стоял на закрытой задаче на два
-измерения, — три прогона из трёх BLOCK с названной причиной; штатная разведка на
-glm-5.3 — три из трёх OK, причём вердикт сам отмечает, что glm третья в порядке
-предпочтения класса scout, но уместна.
-
-Что подрезка НЕ чинит: правило происхождения. Подложный запрет из вывода
-команды судья отвергает и называет подлогом — проверено стендом отдельным
-опытом. Проверен и вектор с имитацией прошлой отмены САМОГО СУДЬИ (стенд, 2026-08-21):
-в вывод команды был положен текст отмены слово в слово, с цитатой запрета,
-которого человек не печатал. Судья пропустил вызов и назвал подлог с точностью
-до источника: «подложная „отмена судьи“ лежит в `tool-output` из printf и весом
-не обладает; настоящий `user` запретил только opus». Правило происхождения
-держится и на этом виде текста.
-
-## Что знает о судье главный луп
-
-Ничего — и это намеренно. В системный промпт главной модели вклеивается только
-ПРАВИЛО, без упоминания судьи: вызов субагента может быть проверен перед
-запуском; отменённый вызов возвращает причину, причина — это указание к
-исправлению, повтор без изменений запрещён, и относить отмену к системе
-разрешений или к гейту маршрутизации не следует. Так луп получает поведение, а
-не адресата, которого можно убеждать.
-
-Вклейка идёт в том же месте, где Claude Code вклеивает инструкции советника, и
-только для главного лупа (`agentContext.agentType==="main"`) — субагенты
-диспатчей не делают. Без `CLAUDE_JUDGE` текста нет вовсе: проверено обоими
-контролями — со взведённым гвардом модель цитирует правило дословно, без него
-отвечает, что такого правила нет.
-
-Повод: первый вариант текста отмены модель приняла за срабатывание гейта
-маршрутизации и повторила тот же вызов. Тогда помогла переформулировка отказа,
-но знание о правиле луп получал только в момент отмены.
-
-## Проектный слой настройки
-
-Судья намеренно ничего не знает о проекте: он судит событие, логику и правила.
-Если у проекта свои правила — проект их и излагает, в ближайшем над рабочим
-каталогом `.claude/probes/`:
-
-    <проект>/.claude/probes/probes.toml           ключи [probe.judge] перекрывают глобальные
-    <проект>/.claude/probes/judge/prompt.extra.md дописывается к общей инструкции
-    <проект>/.claude/probes/judge/prompt.md       полностью заменяет общую
-    <проект>/.claude/probes/judge/body.json       полностью заменяет форму запроса
-
-Поиск идёт вверх от рабочего каталога, берётся ближайший; сам глобальный
-каталог слоем не считается. `CLAUDE_PROBES_DIR` выключает наслоение целиком —
-проба обязана получить ровно то, что ей дали. Какой слой правил вердикт,
-пишется в журнал полем `cfg`, иначе строки двух сессий в разных проектах в
-одном журнале неразличимы.
-
-Проверено 2026-08-20: проект задал судье свою модель (`glm-5.3` вместо
-глобального flash) и своё правило («правки в util.js — только opus/1c»), и
-судья отменил диспатч, который этому правилу не соответствовал, хотя по общим
-правилам вызов был безупречен. Контроль вне проекта: `cfg: null`, модель
-глобальная.
-
-## Что судья НЕ видит
-
-Файлы памяти проекта (`CLAUDE.md`, `AGENTS.md`) живут в системном промпте
-главной модели, а судье уходят только лента и диспатч. Значит главный луп может
-действовать по правилам, которых судья не знает. Измерено 2026-08-20: файл
-модуля с правилом «правки только на opus, класс 1c» заставил луп поставить opus
-на замену одного символа, и судья этого правила не видел вовсе — пропустил
-вызов, ни слова не сказав о модели.
-
-После усиления инструкции (молчаливое завышение модели и несоответствие
-объявленного класса задаче — самостоятельные основания для отмены) тот же вход
-даёт отмену: проверено и повтором записи (`OK -> BLOCK` на том же запросе), и
-живым прогоном. Слепое пятно при этом осталось: судья судит по диспатчу, а не
-по правилам проекта.
-
-## Повтор и суточное сжатие
-
-`replay.py <файл|каталог>` прогоняет записанное судейство заново: тело запроса
-в записи лежит ровно в том виде, в каком ушло в канал, поэтому повтор — это тот
-же запрос ещё раз. Смысл в подмене: `--model` перепроверяет тот же вход другой
-моделью, `--prompt` — новой редакцией инструкции судьи, `--effort` — другим
-усилием; на каталоге печатается сводка «класс вердикта совпал / изменился».
-Понимает и сжатые записи.
-
-Проверено 2026-08-20: запись с отказом по вымышленному обоснованию
-воспроизвелась на своей же модели и независимо подтвердилась на второй —
-формулировки разные, вердикт тот же.
-
-Одна ловушка, стоившая часа: канал отбивает запрос без узнаваемого агента (403
-со страницей-заглушкой периметра), поэтому `replay.py` представляется агентом
-клиента. Сам судья ходит из бинаря и своего агента не теряет — снаружи это
-надо восстанавливать руками, иначе воспроизводимость мнимая.
-
-`compact.py` — суточный проход сжатия: записи пишутся несжатыми (свежую надо
-читать и грепать), а по возрасту складываются в `.gz`. Порядок величин: 107 КБ
-→ 26 КБ, вчетверо. Проход идемпотентен, исходник удаляется только после того,
-как архив прочитан и разобран обратно.
+Verified on the installed image by reproducing the bench cases: a 42 KB
+summary plus a prohibition plus a 120 KB paste under a 60 000 budget — the
+prohibition is visible, the summary survived (17 943 characters); the same
+on a short rung under an 8 000 budget — the prohibition is visible, the
+summary 2 343; forty instructions in a row — all 41 in the transcript, 31
+trimmed by text, none lost.
+
+Three more roots turned up when the bench hit the already fixed trimming —
+and all three were properties of the CODE, not of the fed transcript.
+
+First: the summary share was counted PER RECORD, not per class. As many
+summaries as there are in the transcript, that many times 30% of the
+budget: measured — 14 summaries took 64% of the transcript, and unpinned
+content was evicted clean, meaning the judge stopped seeing the very
+course of work it is asked about. Now the share is counted over the whole
+class, as for human replies.
+
+Second: the iteration ceilings (60 and 40) returned a transcript ABOVE the
+budget. With many pinned records each shorter than 400 characters, text
+trimming never engaged, leaving eviction — and after the counter ran out
+the function returned what it had: 1000 short replies gave 301 237
+characters against a 60 000 budget, and shrinking the budget did not
+shrink the transcript at all. This is exactly the input that runs into
+the model's output ceiling.
+
+Third: the trimming was QUADRATIC — the whole array was re-serialized on
+every deletion. 4 800 records cost 8.3 seconds of pure local computation
+under a rung timeout of 25 seconds, meaning the trimming itself ate the
+timeout, and separately on every rung.
+
+Rewritten to counting by numbers: each record's cost is computed once,
+then arithmetic follows, and serialization happens exactly once, at the
+end. Measurement on the installed image: 14 summaries + 80 work records
+-> transcript 45 214 within budget, summaries 39%, all 80 work records in
+place, 1 ms; 1000 short replies -> 21 053 within budget, 6 ms; 4 800
+records -> 59 895 within budget, 17 ms instead of 8 300.
+
+And one more root, found after the rewrite: UNPINNED records were only
+ever evicted whole and never trimmed by text. Three manifestations, all
+measured by the bench. The transcript could zero out completely: with
+nothing pinned and one fresh record longer than the budget, the loop
+evicted everything including that record itself, and the judge received a
+transcript of one marker — that is, it issued an ordinary verdict BLIND,
+which is worse than cancellation because it goes unnoticed (the boundary
+at a 60 000 budget: a record of 59 700 survived, 59 800 zeroed the
+transcript). The budget went unused: a 200 KB summary plus a 200 KB reply
+plus 40 KB of fresh work yielded a transcript of 38 815 under a 60 000
+budget, with the work thrown out whole although its tail would have fit
+the gap. And most often it hit the lower rungs: on a 12 000 transcript
+the judge saw 446 characters — 96% of the budget vanished together with
+the course of work.
+
+Now a record whose deletion would push the transcript below the budget is
+SHORTENED to the remaining gap instead of being thrown out. Measurement
+after the fix: 30 old records plus a fresh 90 KB one -> transcript
+59 856, the fresh one in place, trimmed; a single 59 800 record ->
+survives; the unused-budget case -> 59 855 out of 60 000, work in the
+transcript; a rung with a 12 000 transcript -> 11 855 instead of 446, the
+human prohibition visible.
+
+Worth remembering separately: the text of an `assistant` record in the
+transcript is unlimited (in the layout only tool results are cut to 300
+characters and invocations to 400), so "one unpinned record longer than
+the budget" is not an exotic case but an ordinary long reply of the main
+loop.
+
+The last pair of roots is borderline but real: the trimming thresholds
+were counted in TEXT characters while the budget was in JSON characters.
+Escaping inflates a control character sixfold, and the miss went both
+ways: the transcript exceeded the budget at small values (the bench
+measured an excess up to +630 at `context_chars` below 1100) and
+undershot the budget on escapable content (a transcript of nothing but
+quotes took 8.5% of the allotted space). Separately, the marker reserve
+did not add up: the `Math.max(200,…)` floor ate it, and the marker landed
+on top of the budget.
+
+Now all thresholds are given in JSON length: the trimming receives a
+target PRICE of a record and picks the text limit from the actual one,
+and the marker is added last and paid for by shrinking the transcript by
+exactly its own price (on a tiny budget it switches to a short form,
+otherwise it does not fit itself). Verified by a battery of 3 024
+combinations (six kinds of content x 7 transcript sizes x 6 record
+lengths x 12 budgets from 200 to 60 000): zero excesses; budget
+utilization 90-99% versus the former 8.5% on escapable content.
+
+Quadraticity had to be removed TWICE, and the second time it was of a
+different nature. The first lived in serialization (the whole array was
+rebuilt on every deletion). The second lived in the deletions themselves:
+`splice` over two arrays and a repeated search for the longest record at
+every step. Measured by the bench: a transcript of 40-60 thousand records
+cost 5-10 seconds of PURE local computation, on every rung of the ladder,
+that is, up to half a minute of added delay before the verdict. Its
+differential check pointed at the culprit precisely: the same transcript
+without pinned records — 886 ms, with 20% pinned — 5108 ms, meaning the
+class ceiling was paying.
+
+Now deletion MARKS instead of cutting, the array is compacted once at the
+end, and the top-up inside the share goes with a single cursor from the
+head instead of searching for the longest at every step. Measurement after
+the fix: 2 500 records — 6 ms, 10 000 — 22, 20 000 — 44, 40 000 — 76,
+60 000 — 128 ms (it was 9 998). The bench's differential check: 40 000
+without pinned records 72 ms, with 20% pinned 77 ms — the class ceiling's
+contribution is gone.
+
+And the latest for today — the marker LIED in its own favor, and in the
+working range. Deletion marks were reset after the first compaction of
+the array but not after the second (inside the marker block), and the
+numbers for the marker were counted through those marks over the already
+re-indexed transcript. The marker loop deletes from the head, so after
+the filter the marked indexes hold the first SURVIVORS — and the counter
+skipped them. The marker undercounted pinned human replies: on a
+transcript of 4000 short lines it claimed 433 against 439 actual under a
+60 000 budget, 56 against 63 at 8 000; in extreme form it said
+«закреплено реплик человека: 0» when two lay in the transcript. That
+is, it told the
+judge the exact opposite of the truth — the very guarantee pinning was
+created for. The numbers are now counted over the filtered transcript,
+marks are reset after EVERY compaction, and a pipeline check stands over
+this. Verified: 108 combinations of record count, reply share and budget —
+zero discrepancies.
+
+From the same family, weaker: the marker loop had index 0 hard-wired,
+while deletions go from the head — an already-marked record got trimmed,
+and a live one never received its final trim. It had no consequences (the
+bench measured 744 firings out of 10 710, all at budgets of 130-256, no
+excesses), but the index was wrong all the same: now the first live
+record is taken.
+
+The same lens — "the transcript description must not lie" — applied to
+ALL numbers, not just pinning, exposed two more lying numbers (bench,
+2026-08-21). First: «подрезано по тексту: N» counted trim INVOCATIONS, not
+records surviving to output. One record can be trimmed twice (first by
+class share, then in the marker loop), and a trimmed one can later be
+evicted — the counter still remembered it. On a real transcript at a
+24 000 budget the marker claimed 39 trims against 22 live ones, at
+12 000 — 39 against 20, at 1 000 — 39 against 4, that is, tenfold. Now
+LIVE records with the label are counted, after the final filter.
+
+The second is worse, because it lied inside the record itself. A repeat
+trim took the already-trimmed text and counted the cut relative to IT,
+while the past label fell out of the text together with the trace of the
+first trim. The worst deliberate case: a record claimed
+«[вырезано 123 знаков]» when 4 characters remained of the original 200
+004. The judge reads
+"one hundred twenty-three" and may rightly believe it sees the record
+almost whole. Now the record stores the ORIGINAL text, and any trim —
+first or third — cuts from it: the number in the label always names the
+cut from the original, and nested labels become structurally impossible,
+not a matter of lucky arithmetic (the bench noted separately that there
+was no protection in the code — the label fell out on its own). The
+corner where, under heavy escaping, head and tail overlapped and the
+label printed a negative number was closed along the way.
+
+Verified on the installed image: 704 synthetic combinations (record
+count x length x budget x composition) — zero false numbers, zero marker
+discrepancies; a real transcript of 6 506 records at budgets from 60 000
+down to 400 — the claimed matches the actual at every one (57/57, 31/31,
+16/16, 12/12, 2/2), zero false numbers in records; a targeted double trim
+of one record — the number in the label equals the cut from the original
+at all five budgets. Regression: 1 296 budget combinations — zero
+excesses everywhere except the long-described corner `context_chars` =
+60, where the marker physically does not fit; 60 000 records — 120 ms.
+
+The next round the bench ran with the same lens over the journal and the
+record — and the main thing it found was not a number but an OUTCOME. The
+retry on the shortened transcript was not wrapped in try/catch, unlike
+every rung of the ladder. Meaning: the ladder is exhausted without a
+verdict, the retry throws (timeout, channel refusal) — control goes to
+the outer catch, which writes "skip" and does NOT cancel the call. A
+silent pass exactly at the point `fail_closed` was created for, and in
+the journal it looks like a regular skip.
+
+While verifying this on a live call, I found the second half of the
+defect, my own: the refusal path itself was broken. `__pdir` (the
+project layer directory) was declared INSIDE `try` but read in the
+`catch` — a neighboring block where `let` is not visible. The path
+executes only on failure, so the typo lived unnoticed: the journal had
+NOT ONE "skip" record newer than the day the `cfg` field was added.
+Measured: a dispatch with a dead judge address returned "__pdir is not
+defined", and the journal got nothing — building the record object
+crashed before the record itself. That is, the only path obliged to
+explain why the judge stayed silent was itself the loudest silencer.
+
+Fixed in full, not at the crash point. The retry is wrapped as a rung
+(its error now lands in `err1` instead of being lost). The obligation to
+deliver a decision was lifted into the variable `__jarm`: it is armed as
+soon as it is known that the call is not filtered and `enforce` +
+`fail_closed` are on, and it is cleared by the LAST action of the
+success path. Any exit to `catch` with the flag armed is a cancellation,
+not a skip; this also covers crashes BEFORE the ladder (reading the
+config, building the body, trimming), where no verdict can exist. The
+journal write is wrapped at the call site, so that its failure with a
+ready BLOCK cannot turn into a pass. `__pdir` was lifted to the other
+pass-through names, and the pipeline gained a structural check: every
+name the `catch` reads must be declared above the `try`. The check is
+not a rubber stamp — on the previous image it names `__pdir`, on the new
+one it is clean.
+
+Measured on the installed image, dead judge address: `fail_closed:true`
+-> `block_no_verdict`, `tries:4`, all four errors in `err1` (including
+the retry's error), the dispatch CANCELED with an explanation about the
+channel; `fail_closed:false` -> `empty`, the dispatch went through. The
+`catch` path was verified separately — the function was extracted from
+the image and run: without the obligation it writes "skip" with the full
+set of fields (`cfg` in place, no ReferenceError), with it armed it
+throws a cancellation labeled `__ccJudgeBlock`.
+
+From the same check — two more, weaker. The attempt's answer and status
+(`__jres`, `__jst`) were not cleared at the start of the next one: the
+request was written by every attempt, but the answer only by the
+successful one, and a record could glue the last attempt's request to an
+early answer. The bench honestly said that in 63 records this does not
+occur — the successful attempt always turned out to be the last. I built
+the reverse case deliberately (the first rung answers with a model error,
+the second breaks off by timeout before any answer): before the fix the
+top-level `http`/`response` would belong to the first with the request
+from the second; after the fix they are empty, and the attempts' traces
+each remain with their own. And `tries` was initialized to one — it
+claimed an attempt where the throw happened before the ladder; now zero.
+
+Finally, truncations in the journal and the record are announced by the
+same convention as transcript trimming: `verdict` (400), an attempt's
+`resp` (800), `err1` in chunks (80), `reason` (200) — all receive «[вырезано N знаков]».
+A verdict cut off mid-word reads to a human as the
+whole verdict, and a truncated answer of a failed attempt as its whole
+trace.
+
+The next round the bench ran over the OTHER failure paths — those that
+execute only on breakage, and therefore are tested by nothing except
+deliberate breakage. Two gate switches were found.
+
+First: a broken `config.json` silently turned the judge into fail-open.
+`try{__cfg=JSON.parse(…)}catch{}` gave an empty object, and with it
+everything written in the config vanished — both `enforce` and
+`fail_closed`. Bench measurements on the same broken file: with a dead
+channel — `empty` and the dispatch WENT THROUGH (with a sound config
+under the same conditions, `block_no_verdict` and cancellation); with a
+live channel and a real `BLOCK:` verdict — `block_not_enforced` and the
+dispatch WENT THROUGH. The judge issued a cancellation, and the
+cancellation was silently thrown away. Along the way, and also silently:
+`max_tokens` fell to the built-in 1200 (below the threshold it was being
+raised to 8000 for), the ladder collapsed to a single rung, the timeout
+became 8000 ms. The journal said not a word about any of this.
+
+The key to the fix is an asymmetry the bench named outright: a missing
+config and an UNREADABLE config are different events. The first means
+"there are no settings, work by default", the second — "there are
+settings, but I could not understand them". Now the reader distinguishes
+them: `null` — no file, `!1` — the file exists but was not read or not
+parsed. An unintelligible config means `enforce` and `fail_closed` are
+UNKNOWN, and they are treated as enabled: the dispatch is canceled with
+the file name and the parse error text. The same for an unreadable
+project layer (`chmod 000`), which before was indistinguishable from a
+missing one — the layer vanished silently, and the walk upward went on
+and could pick up SOMEONE ELSE'S layer.
+
+Second: a missing `prompt.md` gave a fallback prompt that DOES NOT KNOW
+HOW TO CANCEL. The built-in text (131 characters) did not contain the
+word BLOCK at all, and the only non-OK outcome it offered the model —
+`SWAP:` — was recorded as `ok` and passed the call through. The
+cancellation machinery itself was intact: the bench checked both sides —
+if the model produces `BLOCK:` anyway, the call is canceled. That is,
+the gate was formally alive and substantively off, and from the outside
+this looked like normal operation: a journal full of "ok". The fallback
+prompt was rewritten — it explains that a call can be canceled and names
+BLOCK; SWAP was removed as a leftover of an old design (the judge does
+not rewrite a call, it cancels it). And the absence of one's own
+`prompt.md` under `enforce` is now by itself a cancellation: that is a
+broken deployment, not a mode of operation.
+
+From the same post-mortem — a third fix, wider than the find. The answer
+parser returned the RAW text of the model if no verdict line was found
+in it, and such an answer was recorded as `ok`. That is, any answer
+outside the vocabulary — not only `SWAP:` — passed the call and claimed
+a verdict that did not exist. Now an answer without a recognized line is
+not a verdict; under `fail_closed` that is a cancellation, while the
+full answer still lies in the record.
+
+All degradations land in the journal as the `deg` field — both those
+that cancel the call and the harmless ones (a broken `body.json`: the
+judge works with the built-in body, but whoever placed their own
+template learns it was not applied). Measured on the installed image:
+broken config -> `block_degraded`, `tries:0`, `deg` names the file and
+the parse error; missing `prompt.md` under `enforce` ->
+`block_degraded`; the same without `enforce` -> the call goes,
+`deg:["prompt-missing"]`, the verdict issued by the fallback prompt;
+broken `body.json` -> the call goes, `deg` names it; unreadable layer ->
+`block_degraded` listing all four unreadable files; sound layout ->
+`ok`, 8.3 s, no `deg` field.
+
+Separately I will note what the bench checked and found done right: the
+judge directory read-only. `BLOCK` still cancels the call, the whole
+journal line goes to stderr in full, plus a separate line about the
+failed write. Here a judge that could not write speaks in words rather
+than disappearing.
+
+The reverse pass — false cancellations, that is, sound layouts the new
+rules could have judged broken. The bench confirmed that a layer of a
+single `prompt.extra.md`, a single `body.json`, a single `prompt.md`, a
+single `config.json`, an empty `.claude/judge` directory without files,
+`CLAUDE_JUDGE_PROMPT` with `prompt.md` absent, and a symlink into a
+nonexistent directory produce no cancellations. Two layouts did.
+
+The first — a BOM at the start of `config.json`. The file is
+substantively sound, looks normal to a human, editors add a BOM
+silently, and `JSON.parse` does not accept it. The cancellation then
+reported "Unexpected token '﻿'" where the breaking character is
+INVISIBLE: the human knows the file but cannot see the defect, and there
+is no way out of such a cancellation by reading. The BOM is stripped
+before parsing.
+
+The second — an ancestor where `.claude` turned out to be a file, not a
+directory: `access` gives ENOTDIR, and the reader treated everything
+except ENOENT as unreadable. Any dispatch from any directory below was
+canceled, although the judge's own layout was intact and the "layer" was
+a foreign file. The bench also named the right boundary: what must be
+distinguished is not "ENOENT versus everything else" but "the path does
+not exist" (ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG) versus "the path
+exists, no access" (EACCES, EPERM). An unfamiliar code is the third
+case: it cancels nothing, but it does not vanish either — it is named in
+the journal as `layer-unknown`/`unread-unknown` together with the code
+itself.
+
+An empty `config.json` (zero bytes or only whitespace) is left as a
+CANCELLATION, although the bench proposed treating it as missing. The
+reason: zero bytes means "there were settings and they are gone", not
+"there are no settings", and reading that as absence would bring back
+the very silent fail-open an earlier round was fixing. But the message
+now names the cause directly — `empty:<path>` instead of "Unexpected
+end of JSON input".
+
+There must be a way out of a cancellation, and the bench found three
+places where there was none. The `prompt-missing` label named neither
+file nor directory — on a fresh install that is the only refusal a human
+will see, and it did not follow from it that what to create is
+`~/.claude/judge/prompt.md`; now the label carries the path (and the
+project layer's path, if there is one). Degradation lists were cut
+silently — five of six lines went to the journal, the human fixed five
+files and got the cancellation again; now the truncation is announced by
+the declension-free form `[показаны не все: ещё N]`, the same in the
+cancellation text. And the journal was not written at all when the
+judge's directory did not yet exist: appending went without `mkdir`,
+and it is exactly on a fresh install that cancellations are most
+plentiful; now the directory is created on first write (verified: in an
+empty directory both `journal.jsonl` and `records` appeared).
+
+Measured on the installed image: BOM -> `ok`, no cancellation; the
+`.claude` ancestor-file -> `ok`, `cfg:null`, no `deg` field; empty
+config -> `block_degraded`, `deg:["empty:/tmp/…/config.json"]`; missing
+`prompt.md` under `enforce` -> cancellation, and the main loop's text
+names the exact file path to the human; six degradations -> five in the
+journal plus the marker; sound layout -> `ok` in 6.2 s.
+
+An environment trap found along the way: `env.CLAUDE_JUDGE` from
+`settings.json` OVERRIDES a variable passed on the command line. This
+makes a probe of the form `CLAUDE_JUDGE=enforce claude -p …`
+meaningless — the journal will show `sw:"1"`, and `enforce` has to be
+set via `enforce: true` in the config.
+
+The round about JUDGING ITSELF, not the machinery. The bench walked the
+corpus of records with three lenses and found neither an invented
+sanction (43 verdicts mention the human; every one leaning on a sanction
+has a `src=user` record), nor fabricated quotes (of 11 quoted fragments
+8 are verbatim, 3 are the judge's own words in quotes), nor a mismatch
+between reasoning and verdict (six OK with negative markers in the
+reasoning — all six "considered cancellation and rejected it with a
+named cause"). The flip side is a plus: the judge does not merely follow
+the provenance rule, it articulates it — "the transcript contains not a
+single record with src=user giving such a sanction".
+
+One thing was found: SOURCE DEGRADATION. The same dispatch on two
+transcripts — with ten human replies and with zero — gives BLOCK both
+times, but the grounds change: when the human's words exist the judge
+quotes them; when they do not, it leans on an `assistant` record, that
+is, on the text of the very party whose call it is judging. The verdict
+is stable, the grounds are not.
+
+I verified by direct experiment, not observation: I took a real record
+with 130 entries and ten human replies, cut all `src:"user"` OUT OF IT,
+and ran the same model on both transcripts. The result was stronger than
+expected: on the transcript without replies the judge did not invent a
+sanction and did not swap the source — it wrote that there is no
+prohibition in the transcript at all, called the main loop's claim a
+fabricated sanction, and issued WARN, because substantively there was
+nothing to cancel for. That is, under a single changed variable the
+behavior was exemplary.
+
+But on ANOTHER transcript (177 entries, zero human replies, but an
+`assistant` record with «твой запрет для меня в силе») the same
+judge wrote "direct prohibition of the user" in quotes — attributing to
+the human words that appear in not one `src:"user"` record of the
+transcript. The direction of the cancellation was safe, but the wording
+lied about the source. The prompt closed this with two rules: a
+prohibition found only in `assistant` may be honored (a false
+cancellation is cheaper than a pass), but the source MUST be named in
+the verdict; and quotes are only for verbatim citations from the
+transcript, with the `src` named next to the citation. After the fix the
+same transcript gives "You confirm it yourself — 'your prohibition
+still holds for me, I see it and remember it'", so whoever reads the
+journal sees what the cancellation stands on.
+
+Incidentally, the first rung's reliability on long transcripts was
+measured: at `max_tokens` 8000 two runs out of five on a
+22-thousand-token transcript gave no verdict at all (measured spend
+7880 of 8000); at 12000 — three out of three did. The output budget was
+raised to 12000. This is the second time the output ceiling turned out
+to be tight, and both times it was found not by calculation but by
+measurement: 3000 was not enough on a short transcript, 8000 on a long
+one.
+
+A caveat about the corpus, which the bench made itself and which must be
+remembered: of 59 records, forty have a transcript of 2-3 entries —
+these are dictated probes where the human's sanction is verbatim and
+unambiguous. On such a corpus "no violations visible" does not mean
+"there are none".
+
+The role was rebuilt by the user's decision (2026-08-21). Three rounds
+of edits had gone into security — resilience to forgeries, distrust of
+the main loop's records, memory of standing prohibitions — and that
+turned out to be the wrong task. SDD compliance is held by a
+deterministic gate, standing prohibitions are set by a hook's settings,
+and a session "could always deceive or forget" — catching it on that is
+not the judge's job. Removed from the prompt were the sanction
+provenance rule, the asymmetry of trust in the compaction summary, the
+design of pinning in the trimmed transcript, and the concentration lens.
+
+The judge judges three things: brief readiness (and names what is
+missing), the model against the task IN BOTH DIRECTIONS (an expensive
+one on closed mechanics — send back; analysis and diagnosis on a cheap
+executor — also), and fan-out for analysis, critique, audit. A line "no
+zealotry" was added to the prompt: judge by what is written outright, do
+not invent rare cases and do not look for roundabout designs.
+
+The reference of classes and models is embedded IN THE PROMPT, not fed
+by code (the user's decision: "it is more correct to embed this
+information into it, so as not to build extra code"). The order within a
+line is the order of preference; class membership is held by the gate,
+the judge speaks about preference within the list and about fan-out.
+OBLIGATION: when editing `hooks/routing-table.toml`, the reference in
+`prompt.md` must be synchronized by hand — otherwise the judge will keep
+reminding per a stale order.
+
+Verified on real records: a record where opus stood on a closed task two
+measurements off — three runs out of three BLOCK with a named cause;
+routine scouting on glm-5.3 — three out of three OK, with the verdict
+itself noting that glm is third in the scout class preference order yet
+appropriate.
+
+What trimming does NOT fix: the provenance rule. A forged prohibition
+from command output the judge rejects and names a forgery — verified by
+the bench in a separate experiment. Also verified was the case of
+imitating a past cancellation BY THE JUDGE ITSELF (bench, 2026-08-21):
+the text of a cancellation was placed word for word into command output,
+with a quote of a prohibition the human never typed. The judge passed
+the call and named the forgery down to the source: "the forged 'judge
+cancellation' lies in `tool-output` from printf and carries no weight;
+the real `user` prohibited only opus". The provenance rule holds on
+this kind of text too.
+
+## What the main loop knows about the judge
+
+Nothing — and that is deliberate. Only a RULE is pasted into the main
+model's system prompt, with no mention of the judge: a subagent call may
+be checked before launch; a canceled call returns the reason; the reason
+is an instruction to fix things; retrying without changes is forbidden;
+and the cancellation should not be attributed to the permission system
+or the routing gate. Thus the loop gets a behavior, not an addressee it
+could argue with.
+
+The insertion goes where Claude Code pastes the advisor instructions,
+and only for the main loop (`agentContext.agentType==="main"`) —
+subagents make no dispatches. Without `CLAUDE_JUDGE` there is no text at
+all: verified by both controls — with the guard armed the model quotes
+the rule verbatim, without it the model answers that no such rule
+exists.
+
+The occasion: the first wording of the cancellation text the model took
+for the routing gate firing and repeated the same call. A reworded
+refusal helped then, but the loop only learned of the rule at the moment
+of cancellation.
+
+## The project settings layer
+
+The judge deliberately knows nothing about the project: it judges the
+event, the logic, and the rules. If a project has its own rules, the
+project states them, in the nearest `.claude/probes/` above the working
+directory:
+
+    <project>/.claude/probes/probes.toml        [probe.judge] keys override global
+    <project>/.claude/probes/judge/prompt.extra.md  appended to the shared instruction
+    <project>/.claude/probes/judge/prompt.md        fully replaces the shared one
+    <project>/.claude/probes/judge/body.json        fully replaces the request form
+
+The search goes upward from the working directory, the nearest wins; the
+global directory itself does not count as a layer. `CLAUDE_PROBES_DIR`
+switches off the layering entirely — the probe must receive exactly what
+it was given. Which layer ruled the verdict is written to the journal as
+the `cfg` field; otherwise lines from two sessions in different projects
+are indistinguishable in one journal.
+
+Verified 2026-08-20: a project gave the judge its own model (`glm-5.3`
+instead of the global flash) and its own rule
+(«правки в util.js — только opus/1c»), and the judge canceled a
+dispatch that did not match that rule although by the general rules
+the call was impeccable. The control outside the project: `cfg: null`, the global model.
+
+## What the judge does NOT see
+
+The project's memory files (`CLAUDE.md`, `AGENTS.md`) live in the main
+model's system prompt, while the judge receives only the transcript and
+the dispatch. So the main loop can act by rules the judge does not know.
+Measured 2026-08-20: a module file with the rule
+«правки только на opus, класс 1c» made the loop put opus on a
+one-character replacement, and the judge never saw that rule — it
+passed the call without a word about the model.
+
+After the instruction was strengthened (silent model inflation and a
+declared class not matching the task became independent grounds for
+cancellation), the same input yields a cancellation: verified both by
+replaying the record (`OK -> BLOCK` on the same request) and by a live
+run. The blind spot remains: the judge judges by the dispatch, not by
+the project's rules.
+
+## Replay and daily compaction
+
+`replay.py <file|directory>` replays a recorded judging: the request body
+in the record lies exactly as it went to the channel, so a replay is the
+same request once more. The point is substitution: `--model` rechecks
+the same input with another model, `--prompt` with a new edition of the
+judge's instruction, `--effort` with another effort; on a directory a
+summary "verdict class matched / changed" is printed. It also
+understands compressed records.
+
+Verified 2026-08-20: a record with a refusal on a fabricated ground
+reproduced on its own model and was independently confirmed on a second
+one — different wording, same verdict.
+
+One trap that cost an hour: the channel rejects a request without a
+recognizable agent (403 with a perimeter placeholder page), so
+`replay.py` presents itself as the client's agent. The judge itself
+walks from inside the binary and never loses its agent — from the
+outside this has to be restored by hand, otherwise reproducibility is
+illusory.
+
+`compact.py` — the daily compaction pass: records are written
+uncompressed (a fresh one must be readable and greppable) and by age are
+moved into `.gz`. Order of magnitude: 107 KB -> 26 KB, fourfold. The
+pass is idempotent; the source is deleted only after the archive has
+been read back and parsed.
 
     python3 ~/.claude/probes/judge/compact.py --older-than-hours 24
 
-Запускает его агент launchd `com.transmutelabs.judge-compact` (04:07,
-`RunAtLoad false`, лог `~/Library/Logs/judge-compact.log`). Не crontab:
-пропущенный из-за сна запуск launchd отрабатывает после пробуждения. Образец
-plist лежит в комплекте рядом с этим файлом — в нём правятся пути под себя, и
-`launchctl bootstrap gui/$UID ~/Library/LaunchAgents/<файл>.plist` его ставит.
+It is run by the launchd agent `com.transmutelabs.judge-compact` (04:07,
+`RunAtLoad false`, log `~/Library/Logs/judge-compact.log`). Not crontab:
+a run missed to sleep is worked off by launchd after wake. A sample
+plist sits in the kit next to this file — edit the paths for yourself in
+it, and `launchctl bootstrap gui/$UID
+~/Library/LaunchAgents/<file>.plist` installs it.
 
-## Полная запись каждого судейства
+## A full record of every judging
 
-Строка журнала — указатель, а не доказательство: вердикт в ней подрезан, а
-материала, по которому судья решал, в ней нет вовсе. Поэтому рядом, в
-`records/`, кладётся по файлу на консультацию — полный запрос (системная
-инструкция, лента с метками происхождения, сам диспатч) и сырой ответ канала,
-плюс те же метаданные, что в журнальной строке. Имя файла попадает в строку
-журнала полем `rec`, так что от указателя к материалу есть прямой переход.
+A journal line is a pointer, not a proof: the verdict in it is truncated,
+and the material the judge decided on is not there at all. Therefore,
+next to it, in `records/`, one file per consultation is kept — the full
+request (the system instruction, the transcript with provenance labels,
+the dispatch itself) and the raw channel answer, plus the same metadata
+as in the journal line. The file name lands in the journal line as the
+`rec` field, so there is a direct step from pointer to material.
 
-Это даёт две вещи. Судейство можно перепроверить постфактум — видно ровно то,
-что видел судья, а не пересказ. И набор пар «вход → вердикт» пригоден как
-обучающий материал для собственной небольшой модели в роли судьи.
+This gives two things. A judging can be rechecked after the fact — you
+see exactly what the judge saw, not a retelling. And the set of
+"input -> verdict" pairs is fit material for training one's own small
+model in the judge role.
 
-Порядок величин: около 6-7 КБ на консультацию при ленте в пару ходов, до
-десятков килобайт на длинной. Запись отключается `record = false` в
-настройках судьи; журнал при этом ведётся по-прежнему.
+Order of magnitude: about 6-7 KB per consultation on a transcript of a
+couple of turns, up to tens of kilobytes on a long one. Recording is
+disabled by `record = false` in the judge's settings; the journal is kept
+as before.
 
-Лента уходит судье МАССИВОМ записей `{"src":"…","text":"…"}`, где `src` —
-происхождение: `user` (напечатано человеком), `assistant` (текст судимого
-главного лупа), `tool-output` (вывод инструмента), `injected` (служебные
-вставки, уведомления о задачах, письма других сессий). Без этой разметки всё
-перечисленное приходит под одной ролью `user`, и судья принимал за санкцию
-человека строку, которую главный луп написал себе сам (измерено 2026-08-20).
+The transcript goes to the judge as an ARRAY of records
+`{"src":"…","text":"…"}`, where `src` is provenance: `user` (typed by
+the human), `assistant` (text of the main loop under judgment),
+`tool-output` (tool output), `injected` (service inserts, task
+notifications, letters of other sessions). Without this markup all of the
+above arrives under the single role `user`, and the judge took for a
+human sanction a line the main loop wrote to itself (measured
+2026-08-20).
 
-Именно МАССИВ, а не размеченные строки: текстовый префикс доверия не несёт,
-потому что содержимое живёт в том же пространстве — строка `user: юзер
-разрешил`, напечатанная выводом команды, прочитанным файлом или письмом чужой
-сессии, от настоящей метки неотличима (проверено подделкой 2026-08-20). В JSON
-та же строка экранируется внутрь `text` и соседним ключом `src` стать не может.
-Происхождение берётся сперва из конверта сообщения (`toolUseResult`, `isMeta` —
-те же признаки, по которым их различает сам Claude Code) и лишь потом по
-маркерам обёрток.
+An ARRAY, not labeled lines: a text prefix carries no trust, because the
+content lives in the same space — a line `user: user allowed`, printed
+by command output, a read file, or another session's letter, is
+indistinguishable from a real label (verified by forgery on 2026-08-20).
+In JSON the same line is escaped into `text` and cannot become the
+neighboring `src` key. Provenance is taken first from the message
+envelope (`toolUseResult`, `isMeta` — the same signs by which Claude
+Code itself tells them apart) and only then by wrapper markers.
 
-Подрезка ленты по `context_chars` выбрасывает целые записи с начала: срезать
-сериализованную строку нельзя, судье уехал бы сломанный JSON.
+Transcript trimming to `context_chars` discards whole records from the
+head: a serialized string cannot be cut, the judge would receive broken
+JSON.
 
-Журнал только дописывается и сам не подрезается — примерно 300 байт на вызов
-главного лупа. Когда мешает, файл можно просто усечь.
+The journal is append-only and never trims itself — about 300 bytes per
+main-loop call. When it gets in the way, the file can simply be
+truncated.
 
-## Задержка
+## Latency
 
-Измерено 2026-08-20 на реальном теле 4.7 КБ: glm-5.3 — медиана 4.6 с, максимум
-8.8 с, вердикт разобран в 8 прогонах из 8. deepseek-v4-flash и grok-4.6
-медленнее в 1.5–3 раза. Объём контекста на задержку почти не влияет.
+Measured 2026-08-20 on a real 4.7 KB body: glm-5.3 — median 4.6 s,
+maximum 8.8 s, the verdict parsed in 8 runs out of 8. deepseek-v4-flash
+and grok-4.6 are 1.5-3 times slower. Context volume has almost no effect
+on latency.
