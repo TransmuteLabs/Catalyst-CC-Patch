@@ -1146,7 +1146,12 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   //    and the model fallback then get their turn, and a turn that cannot
   //    be completed fails honestly.
   const rxFinal = new RegExp(
-    `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"\\}\\),(${ID})!=="credited"\\)` +
+    // 2.1.246 appends `truncatedAfterOutput:<x>&&!<y>?!0:void 0` after the
+    // error field — upstream now MARKS a truncated turn while still finalizing
+    // it as a success, which is the very thing this leg removes. The whole
+    // yield is dropped by the replacement, so trailing fields need only be
+    // tolerated, not captured.
+    `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"(?:,[^;]{0,300}?)?\\}\\),(${ID})!=="credited"\\)` +
       `\\3="credited",(${ID})\\+=([^;]{0,300}?);break (${ID})\\}` +
       `throw (${ID})\\("tengu_streaming_fallback_to_non_streaming",\\{model:(${ID})\\.model,` +
       `error:(${ID}) instanceof Error\\?`,
