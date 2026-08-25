@@ -1,101 +1,116 @@
-# Судья вызовов субагентов — архитектура
+# The Subagent Dispatch Judge — Architecture
 
-Документ описывает МЕХАНИЗМ целиком: где он живёт в бинарнике, как течёт один
-акт судейства, какие слои настройки его определяют, что он гарантирует и чего
-не гарантирует. Хронология находок, измерений и отброшенных вариантов — в
-`judge-patch-spec.md` (журнал кампании); операторская инструкция — в
-`judge/README.md`. Здесь — то, что нужно знать, чтобы механизм ПОНЯТЬ,
-перенести на следующую версию и расширить.
+This document describes the MECHANISM in full: where it lives in the
+binary, how a single act of judging flows, which layers of settings
+define it, what it guarantees and what it does not. The chronology of
+findings, measurements, and rejected options is in `judge-patch-spec.md`
+(the campaign journal); the operator's manual is in `judge/README.md`.
+What is here is what you need to KNOW the mechanism, to carry it to the
+next version, and to extend it.
 
-Состояние на 2026-08-22, образ 2.1.239, проверок в `claude-patch-all.sh` — 68 (все зелёные на собранном образе). С 2026-08-22 механизм судейства разобран на общее ЯДРО и вызывающих: контракт ядра — в `probe-core.md`, второй его потребитель (наблюдатель за флотом) — в `idle-watch.md`. Всё ниже описывает судью; общее у него с наблюдателем помечено как ядро.
-
----
-
-## 1. Задача и граница
-
-Между «модель решила вызвать субагента» и «субагент пошёл работать» есть
-момент, в котором вызов полностью определён, но ещё не исполнен. Судья живёт
-ровно в этом моменте. Он получает раскладку сессии и сам вызов, и отвечает
-одним из трёх: пропустить, пропустить с заметкой, отменить с объяснением.
-
-Что он НЕ делает и почему:
-
-- **Не переписывает вызов.** Подмена модели или усилия породила бы пару, которую
-  никто не валидирует: детерминированный гейт маршрутизации
-  (`hooks/routing-table.toml`) отрабатывает РАНЬШЕ в той же функции, и правка,
-  сделанная здесь, прошла бы мимо него. Отказ строго уже того, что гейт уже
-  разрешил, поэтому порядок перестаёт иметь значение.
-- **Не судит субагентов.** Судится только главный луп (`agentType==="main"`):
-  субагент исполняет уже принятое решение, судить его — судить дважды и в
-  чужой ответственности.
-- **Не знает проекта.** Он судит событие, логику и правила. Проект вправе
-  ИЗЛОЖИТЬ свои правила (слой ниже), но описание предметной области судье не
-  нужно и не передаётся.
+State as of 2026-08-22, image 2.1.239, checks in `claude-patch-all.sh` —
+78 (all green on the built image). As of 2026-08-22 the judging mechanism
+has been split into a shared CORE and its callers: the core contract is
+in `probe-core.md`, and its second consumer (the fleet idle watcher) is
+in `idle-watch.md`. Everything below describes the judge; what it shares
+with the watcher is marked as core.
 
 ---
 
-## 2. Три врезки в бинарник
+## 1. The task and the boundary
 
-Патчер (`tweakcc-patch.js`) находит места структурными регулярками по
-`[A-Za-z_$][\w$]*` с обратными ссылками — не по минифицированным именам,
-которые меняются от сборки к сборке.
+Between "the model decided to call a subagent" and "the subagent went to
+work" there is a moment in which the call is fully defined but not yet
+executed. The judge lives exactly in that moment. It receives the session
+layout and the call itself, and answers with one of three: pass, pass
+with a note, cancel with an explanation.
 
-### Врезка 21 — накопитель текущего хода
+What it does NOT do, and why:
 
-В потоковом режиме КАЖДЫЙ блок содержимого уезжает отдельным assistant-сообщением
-(`content` — массив из одного элемента). До исполнителя инструмента доходит
-сообщение с одним лишь блоком `tool_use`: рассуждение, которое к вызову
-привело, уехало раньше и другим сообщением. Полный ход существует только в
-накопителе цикла, которого исполнитель не видит.
+- **It does not rewrite the call.** Substituting the model or the effort
+  would produce a pair that nobody validates: the deterministic routing
+  gate (`hooks/routing-table.toml`) runs EARLIER in the same function,
+  and an edit made here would slip past it. A refusal is strictly
+  narrower than what the gate has already allowed, so the ordering stops
+  mattering.
+- **It does not judge subagents.** Only the main loop is judged
+  (`agentType==="main"`): a subagent executes a decision already made;
+  judging it means judging twice and inside someone else's
+  responsibility.
+- **It does not know the project.** It judges the event, the logic, and
+  the rules. A project is entitled to STATE its rules (the layer below),
+  but a description of the subject domain is not needed by the judge and
+  is not passed to it.
 
-Врезка кладёт снимок накопителя в `globalThis.__ccJudgeTurn`, ключ — id вызова
-инструмента. Ключ именно id, а не сам объект контекста: цикл ПЕРЕПРИСВАИВАЕТ
-контекст (`Z={...Z,messages:...}`), тождество объекта мостом быть не может.
-Карта ограничена 64 записями и вычищается тем, кто читает. Врезка сама
-закрыта тем же выключателем `CLAUDE_JUDGE`, иначе с выключенным судьёй никто
-записи не удалял бы и карта висела бы на потолке ради неработающей функции.
+---
 
-Лишний аргумент у `addTool` вызываемой стороной игнорируется — он существует
-только чтобы внести побочный эффект, не переписывая оператор.
+## 2. Three injections into the binary
 
-### Врезка 22 — сам судья
+The patcher (`tweakcc-patch.js`) finds locations with structural regexes
+over `[A-Za-z_$][\w$]*` with backreferences — not by minified names,
+which change from build to build.
 
-Место: единственный вызов инструмента внутри исполнителя, где вызов уже
-разрешён, но ещё не исполнен:
+### Injection 21 — the current-turn accumulator
+
+In streaming mode EVERY content block leaves as its own assistant message
+(`content` — an array of one element). What reaches the tool executor is
+a message with only a `tool_use` block in it: the reasoning that led to
+the call has already left, in an earlier and different message. The full
+turn exists only in the loop's accumulator, which the executor does not
+see.
+
+The injection puts a snapshot of the accumulator into
+`globalThis.__ccJudgeTurn`, keyed by the tool call id. The key is the id,
+not the context object itself: the loop REASSIGNS the context
+(`Z={...Z,messages:...}`), so object identity cannot be the bridge. The
+map is capped at 64 entries and cleaned up by whoever reads it. The
+injection itself is gated by the same `CLAUDE_JUDGE` switch — otherwise,
+with the judge off, nobody would delete the entries and the map would
+hang from the ceiling for the sake of a non-working function.
+
+The extra argument at `addTool` is ignored by the receiving side — it
+exists only to introduce the side effect without rewriting the operator.
+
+### Injection 22 — the judge itself
+
+Location: the single tool call inside the executor where the call is
+already resolved but not yet executed:
 
 ```
 Q = await e.call(E, {...n, toolUseId:t, userModified:X.userModified??!1}, o, i, p)
 ```
 
-Врезка встаёт НЕПОСРЕДСТВЕННО перед ним. Отмена бросается `throw`; внешний
-`catch` исполнителя штатно превращает брошенное в `tool_result` с `is_error`.
-Это и есть «стой, и вот что не так» — и это не сцеплено ни с одним
-минифицированным именем.
+The injection sits IMMEDIATELY before it. A cancellation is thrown with
+`throw`; the executor's outer `catch` routinely turns what was thrown
+into a `tool_result` with `is_error`. This is precisely the "stop, and
+here is what is wrong" — and it is not coupled to any minified name.
 
-Консультация идёт через СОБСТВЕННЫЙ одиночный запрос клиента
-(`queryModelWithoutStreaming`, тот же путь, которым пользуются prompt-хуки).
-Это принципиально, а не удобство: функция идёт через ту же фабрику клиента,
-что и любой другой запрос, поэтому пул моделей и обе его полосы — клиентские.
-`claude-*` остаётся на подписочной полосе (патч 1), всё остальное уходит в
-прокси. Собственный HTTP-путь увёл бы claude-модели на api.anthropic.com по
-цене API — другой договор и другой счёт; ранняя редакция судьи именно этим и
-была неправа.
+The consultation goes through the client's OWN single request
+(`queryModelWithoutStreaming`, the same path the prompt hooks use). This
+is a matter of principle, not convenience: the function goes through the
+same client factory as any other request, so the model pool and both of
+its lanes are the client's. `claude-*` stays on the subscription lane
+(patch 1); everything else goes to the proxy. A dedicated HTTP path would
+send claude-models to api.anthropic.com at API prices — a different
+contract and a different bill; an early revision of the judge was wrong
+in exactly this way.
 
-Имя функции находится патчером структурно по сигнатуре
-(`{messages, systemPrompt, thinkingConfig, tools, signal, options}`), а не по
-минифицированному написанию.
+The function's name is located by the patcher structurally, by its
+signature (`{messages, systemPrompt, thinkingConfig, tools, signal,
+options}`), not by its minified spelling.
 
-Сырой HTTP остался ровно двумя случаями: явно названный адрес
-(`CLAUDE_JUDGE_URL` или `url` в конфиге — так пробы стенда бьют в свой
-приёмник) и отсутствие связывания с пулом в конкретной сборке. Второй случай —
-страховка: судья, потерявший канал, обязан деградировать наблюдаемо, а не
-молча. Канал каждой попытки виден в записи полем `via` (`pool` | `http`).
+Raw HTTP remains for exactly two cases: an explicitly named address
+(`CLAUDE_JUDGE_URL` or `url` in the config — this is how the bench's
+probes hit their own receiver) and the absence of pool binding in a
+particular build. The second case is insurance: a judge that has lost its
+channel must degrade observably, not silently. Each attempt's channel is
+visible in the record as the `via` field (`pool` | `http`).
 
-### Врезка 26 — правило в системном промпте
+### Injection 26 — the rule in the system prompt
 
-Отменённый вызов виден модели как ошибка инструмента, а ошибка инструмента
-по умолчанию читается как «попробуй ещё раз». Поэтому главному лупу вклеивается
-правило (по-английски, как остальной системный промпт):
+A cancelled call is visible to the model as a tool error, and a tool
+error by default reads as "try again". Therefore a rule is glued into the
+main loop (in English, like the rest of the system prompt):
 
 > A subagent dispatch may be reviewed before it runs. If one is cancelled, the
 > tool result states the reason: treat that reason as a correction to apply.
@@ -104,96 +119,104 @@ Q = await e.call(E, {...n, toolUseId:t, userModified:X.userModified??!1}, o, i, 
 > from the permission system and from any routing gate, so do not attribute a
 > cancellation to either.
 
-Точка вклейки — та же сборка системного промпта, куда советник кладёт свои
-инструкции (`services/api/claude.ts:2041` в реконструкции). Вклейка закрыта
-`CLAUDE_JUDGE` и `agentType==="main"`: субагентам правило не идёт, с
-выключенным судьёй его нет вовсе.
+The gluing point is the same system prompt assembly where the advisor
+puts its instructions (`services/api/claude.ts:2041` in the
+reconstruction). The gluing is gated by `CLAUDE_JUDGE` and
+`agentType==="main"`: subagents do not get the rule, and with the judge
+off it is not there at all.
 
 ---
 
-## 3. Поток одного судейства
+## 3. The flow of a single judging
 
 ```
-модель решает вызвать Agent/Task
+the model decides to call Agent/Task
    │
-   ├─ врезка 21: снимок хода → __ccJudgeTurn[tool_use.id]
-   │
-   ▼
-детерминированный гейт маршрутизации (PreToolUse, routing-table.toml)
-   │  разрешил
-   ▼
-врезка 22
-   1. выключатель:  CLAUDE_JUDGE задан?  имя == Agent|Task?  agentType == main?
-   2. поиск слоёв:  глобальный ~/.claude/probes  +  ближайший .claude/probes над cwd
-   3. селектор:     filter (classes_skip / agents_skip / classes_judge / agents_judge)
-   4. лента:        messages контекста + снимок хода  →  массив {src,text}
-   5. обрезка:      context_chars, целыми записями с головы
-   6. тело:         body.json + подстановки {{MODEL}} {{PROMPT}} {{CONTEXT}} {{DISPATCH}}
-   7. лестница:     ступень за ступенью, пока не получен вердикт
-   8. разбор:       ПЕРВАЯ строка вида OK:/WARN:/BLOCK:/STOP:/DENY:
-   9. журнал:       строка индекса + полная запись рядом
-  10. исполнение:   BLOCK и enforce  →  throw  →  is_error в модель
+   ├─ injection 21: turn snapshot → __ccJudgeTurn[tool_use.id]
    │
    ▼
-e.call(...) — субагент стартует
+deterministic routing gate (PreToolUse, routing-table.toml)
+   │  allowed
+   ▼
+injection 22
+   1. switch:        CLAUDE_JUDGE set?  name == Agent|Task?  agentType == main?
+   2. layer search:  global ~/.claude/probes  +  nearest .claude/probes above cwd
+   3. selector:      filter (classes_skip / agents_skip / classes_judge / agents_judge)
+   4. transcript:    context messages + turn snapshot  →  array of {src,text}
+   5. trimming:      context_chars, whole entries from the head
+   6. body:          body.json + substitutions {{MODEL}} {{PROMPT}} {{CONTEXT}} {{DISPATCH}}
+   7. ladder:        rung after rung until a verdict is obtained
+   8. parsing:       the FIRST line of the form OK:/WARN:/BLOCK:/STOP:/DENY:
+   9. journal:       index line + full record beside it
+  10. execution:     BLOCK and enforce  →  throw  →  is_error to the model
+   │
+   ▼
+e.call(...) — the subagent starts
 ```
 
-Любая ошибка на шагах 2–9 ловится внешним `catch`: вызов уходит как обычно,
-в журнал ложится `outcome:"skip"` с причиной. Отказ — единственное, что
-пробрасывается наружу (метка `__ccJudgeBlock`).
+Any error in steps 2–9 is caught by the outer `catch`: the call goes
+through as usual, and the journal gets an `outcome:"skip"` with the
+reason. The refusal is the only thing that propagates outward (the
+`__ccJudgeBlock` label).
 
 ---
 
-## 4. Слои настройки
+## 4. Settings layers
 
-Всё, что оператор крутит, читается ФАЙЛАМИ НА КАЖДОМ ВЫЗОВЕ. Судья, чью
-формулировку можно поменять только пересборкой бинарника, не итерируем.
+Everything the operator turns is read FROM FILES ON EVERY CALL. A judge
+whose wording can only be changed by rebuilding the binary is not
+iterable.
 
-| Слой | Откуда | Перекрывает |
+| Layer | Source | Overrides |
 |------|--------|-------------|
-| окружение | `CLAUDE_JUDGE`, `CLAUDE_PROBES_DIR`, `CLAUDE_JUDGE_MODEL`, `_URL`, `_TIMEOUT_MS`, `_PROMPT`, `_DEBUG` | всё |
-| проектный | ближайший `.claude/probes` над cwd (до 24 уровней) | глобальный |
-| глобальный | `~/.claude/probes` | умолчания в коде |
+| environment | `CLAUDE_JUDGE`, `CLAUDE_PROBES_DIR`, `CLAUDE_JUDGE_MODEL`, `_URL`, `_TIMEOUT_MS`, `_PROMPT`, `_DEBUG` | everything |
+| project | nearest `.claude/probes` above cwd (up to 24 levels) | global |
+| global | `~/.claude/probes` | defaults in code |
 
-Правила слияния: действующие настройки пробы — это `[defaults]`, поверх которых
-наложена `[probe.judge]`, и то же самое из проектного `probes.toml` сверху
-(слияние поверхностное, по ключам); `prompt.md` и `body.json` в проекте ЗАМЕНЯЮТ
-глобальные целиком; `prompt.extra.md` ДОПИСЫВАЕТСЯ к промпту под заголовком
-«ПРАВИЛА ЭТОГО ПРОЕКТА». Явно заданный `CLAUDE_PROBES_DIR` отключает проектный
-слой: проба должна получать ровно то, что ей вручили. Применённый проектный
-каталог виден в журнале полем `cfg`.
+Merge rules: a probe's effective settings are `[defaults]`, overlaid with
+`[probe.judge]`, and then the same from the project's `probes.toml` on
+top (a shallow merge, by keys); a project's `prompt.md` and `body.json`
+REPLACE the global ones wholesale; `prompt.extra.md` is APPENDED to the
+prompt under the heading "RULES OF THIS PROJECT". An explicitly set
+`CLAUDE_PROBES_DIR` disables the project layer: a probe must receive
+exactly what was handed to it. The applied project directory is visible
+in the journal as the `cfg` field.
 
-Файлы:
+Files:
 
-| Файл | Роль |
+| File | Role |
 |------|------|
-| `~/.claude/probes/probes.toml`, таблица `[probe.judge]` | лестница, пороги, бюджеты, обрезки, `enforce`, селектор, запись |
-| `prompt.md` | инструкция судье (линзы, правила доверия, формат вердикта) |
-| `prompt.extra.md` | только в проекте: дописываемые правила проекта |
-| `body.json` | ПОЛНЫЙ шаблон запроса с плейсхолдерами — модель, параметры, раскладка сообщений |
-| `journal.jsonl` | индекс судейств, строка на вызов |
-| `records/` | полные запросы и ответы, файл на вызов |
-| `replay.py` | повтор записи с подменой модели/промпта/усилия; единственный дом читалки словаря вердиктов |
-| `validate.py` | прогон корпуса несколькими моделями, метрики, рекомендация |
-| `adjudicate.py` | разметка корпуса сильной моделью поверх вынесенных вердиктов |
-| `compact.py` | суточное сжатие записей (агент launchd) |
+| `~/.claude/probes/probes.toml`, table `[probe.judge]` | ladder, thresholds, budgets, trims, `enforce`, selector, recording |
+| `prompt.md` | the judge's instruction (lenses, trust rules, verdict format) |
+| `prompt.extra.md` | project only: appended project rules |
+| `body.json` | the FULL request template with placeholders — model, parameters, message layout |
+| `journal.jsonl` | index of judgings, one line per call |
+| `records/` | full requests and responses, one file per call |
+| `replay.py` | replay a record with model/prompt/effort substitution; the sole home of the verdict dictionary reader |
+| `validate.py` | run the corpus through several models, metrics, recommendation |
+| `adjudicate.py` | corpus labeling by a strong model over the verdicts already issued |
+| `compact.py` | daily compression of records (launchd agent) |
 
-Все четыре принимают общие `--home <дом проб>`, `--probe <id>` и `--image <путь>`:
-дом задаёт, где искать `probes.toml` и каталог пробы, id выбирает таблицу настроек,
-образ — источник словаря вердиктов. Словарь НЕ зашит ни в одном инструменте: он
-читается из образа, и при неудаче чтения инструмент отказывает, а не подставляет
-зашитый — расхождение с образом дало бы неверную разметку всего корпуса.
+All four accept the common `--home <probes home>`, `--probe <id>`, and
+`--image <path>`: the home says where to look for `probes.toml` and the
+probe directory, the id selects the settings table, the image is the
+source of the verdict dictionary. The dictionary is NOT baked into any
+tool: it is read from the image, and if the read fails the tool refuses
+rather than substituting a baked-in one — a divergence from the image
+would mislabel the entire corpus.
 
-Подстановка в шаблон идёт через `JSON.stringify` без внешних кавычек, поэтому
-кавычка или перевод строки внутри ленты не могут сломать JSON тела.
+Substitution into the template goes through `JSON.stringify` without
+outer quotes, so a quote or a newline inside the transcript cannot break
+the body's JSON.
 
 ---
 
-## 5. Лестница попыток
+## 5. The ladder of attempts
 
-Судья делит канал с тем самым флотом, который судит: когда флот загружен,
-первым отваливается судья — а тихий пропуск неотличим от одобрения. Поэтому
-`models` — не список имён, а лестница ступеней, каждая со СВОИМИ ограничениями:
+The judge shares a channel with the very fleet it judges: when the fleet
+is loaded, the judge is the first to fall off — and a silent pass is
+indistinguishable from approval. That is why `models` is not a list of
+names but a ladder of rungs, each with its OWN limits:
 
 ```json
 "models": [
@@ -202,514 +225,584 @@ e.call(...) — субагент стартует
 ]
 ```
 
-Поля ступени: `model`, `timeout_ms`, `max_tokens`, `context_chars`, `effort`.
-Голая строка — сокращение для `{model:"…"}`. Причины падений разные, поэтому и
-средства разные: перегруженному провайдеру нужен больший порог, рассуждающей
-модели — больший бюджет, раздутой ленте — короткий хвост.
+Rung fields: `model`, `timeout_ms`, `max_tokens`, `context_chars`,
+`effort`. A bare string is shorthand for `{model:"…"}`. Failure causes
+differ, so the remedies differ: an overloaded provider needs a larger
+threshold, a reasoning model needs a larger budget, a bloated transcript
+needs a short tail.
 
-Переход на следующую ступень происходит при: сетевой ошибке, срабатывании
-порога, не-2xx И **ответе 2xx без вердикта** (бюджет ушёл в рассуждение,
-`finish_reason: "length"`). Последнее — отдельный класс: без него лестница
-встаёт на первой модели, которая отвечает пустотой.
+The move to the next rung happens on: a network error, a threshold
+firing, a non-2xx AND **a 2xx response without a verdict** (the budget
+went into reasoning, `finish_reason: "length"`). The last one is a class
+of its own: without it the ladder stalls on the first model that answers
+with emptiness.
 
-Перерасход бюджета вывода приходит по двум каналам ПО-РАЗНОМУ, и это определило
-величину потолка. По сырому HTTP обрыв мягкий: `finish_reason:"length"`, а
-вердикт, напечатанный первой строкой, уже пришёл и годен. Через пул тот же
-обрыв — синтетическая ошибка клиента («response exceeded the N output token
-maximum») с `output_tokens: 0`: текста не остаётся ВОВСЕ, и правило «вердикт
-первой строкой» здесь не спасает. Замер на одной ленте (2026-08-20): flash
-тратит 434–2120 токенов при `high` и 302–3000 при `low` — разброс внутри
-усилия перекрывает разницу между усилиями, поэтому лечить перерасход
-понижением усилия нечем. Потолок поднят 3000 → 8000: он не удлиняет обычный
-ответ, но убирает невосстановимый обрыв на пути, где обрыв стоит всей
-консультации (наблюдалось 27.9 с впустую, после чего ступень 2 ответила за
-2.5 с). Ступень, которой мало и 8000, лестница уступает следующей — это
-поводок, а не бюджет.
+Output-budget overrun arrives over the two channels DIFFERENTLY, and this
+determined the ceiling's size. Over raw HTTP the break is soft:
+`finish_reason:"length"`, and a verdict printed on the first line has
+already arrived and is usable. Through the pool the same break is a
+synthetic client error ("response exceeded the N output token maximum")
+with `output_tokens: 0`: no text remains AT ALL, and the "verdict on the
+first line" rule does not save you here. A measurement on one transcript
+(2026-08-20): flash spends 434–2120 tokens at `high` and 302–3000 at
+`low` — the spread within one effort exceeds the difference between
+efforts, so there is nothing to treat overrun with by lowering the
+effort. The ceiling was raised 3000 → 8000: it does not lengthen a normal
+answer, but it removes the unrecoverable break on the path where a break
+costs the whole consultation (27.9 s observed wasted, after which rung 2
+answered in 2.5 s). A rung for which even 8000 is not enough, the ladder
+yields to the next one — this is a leash, not a budget.
 
-После лестницы, если вердикта всё ещё нет, идёт автоматическая последняя
-ступень: та же последняя модель на коротком хвосте (`retry_context_chars`,
-по умолчанию 8000; `0` выключает — для лестницы, которая уже кончается
-короткой ступенью).
+After the ladder, if there is still no verdict, an automatic last rung
+follows: the same last model on a short tail (`retry_context_chars`,
+default 8000; `0` disables it — for a ladder that already ends with a
+short rung).
 
-Порог по умолчанию — 60 с (`timeout_ms` в поставляемых настройках; если
-конфига нет вовсе, код падает на 8 с). Логика выбора: лучше переждать, чем
-недождаться — долгий ответ дешевле пропущенного вызова.
+The default threshold is 60 s (`timeout_ms` in the shipped settings; if
+there is no config at all, the code falls back to 8 s). The choice logic:
+better to over-wait than to under-wait — a long answer is cheaper than a
+missed call.
 
-Усилие (`effort`) обязательно для прокси-моделей и должно совпадать с
-принятыми в таблице маршрутизации пинами (flash `high|xhigh`, glm-5.3 `max`,
-gpt-5.6-sol `high|xhigh`, grok-4.6 `max`). Без него запрос уходит с усилием по
-умолчанию — однажды это был `low`, и судья работал вполсилы незаметно. На пути
-через пул усилие едет полем `options.effortValue`, а ограничение вывода —
-`options.maxOutputTokensOverride`: тело запроса здесь собирает клиент, и
-`body.json` на этом пути не участвует (он остаётся шаблоном сырого канала).
+Effort (`effort`) is mandatory for proxy models and must match the pins
+accepted in the routing table (flash `high|xhigh`, glm-5.3 `max`,
+gpt-5.6-sol `high|xhigh`, grok-4.6 `max`). Without it the request goes
+out with the default effort — at one point that was `low`, and the judge
+worked at half strength unnoticed. On the pool path effort rides as the
+`options.effortValue` field, and the output limit as
+`options.maxOutputTokensOverride`: here the client assembles the request
+body, and `body.json` takes no part on this path (it remains the
+raw-channel template).
 
-Что именно уходит на пути через пул — снято дампом прокси 2026-08-20 (тело
-клиента и тело апстрима совпадают в существенном):
+What exactly goes out on the pool path was captured by a proxy dump
+2026-08-20 (the client body and the upstream body match in what matters):
 
     model: deepseek-v4-flash | max_tokens: 3000 | stream: true | tools: 0
-    (потолок с тех пор поднят до 8000 — см. выше)
-    output_config: {"effort":"high"}
-    system: 3 блока — биллинговый заголовок клиента,
-            "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
-            и наша инструкция судьи
+    (the ceiling has since been raised to 8000 — see above)
+    output_config: {"effort":"high"} system: 3 blocks — the client's
+    billing header, "You are a Claude agent, built on Anthropic's Claude
+    Agent SDK.", and our judge instruction
 
-Отсюда два факта. Усилие ДОЕЗЖАЕТ до апстрима и для модели, которую клиент
-помечает `unrecognized_model` — предположение, что он его выбрасывает, дампом
-опровергнуто. И инструкция судьи приходит не одна: перед ней клиент кладёт два
-своих блока, так что промпт судьи всегда читается в этом обрамлении.
+Two facts follow. The effort DOES reach the upstream, including for a
+model the client marks `unrecognized_model` — the assumption that it
+drops it was refuted by the dump. And the judge's instruction does not
+arrive alone: ahead of it the client places two blocks of its own, so the
+judge's prompt is always read in this framing.
 
-Ступенью лестницы может быть и `claude-*`: она уходит по подписочной полосе, а
-не по цене API. Промерено 2026-08-20 на живой сессии: `claude-haiku-4-5` дала
-вердикт за 2.3 с. Сравнение каналов на одном входе и одной модели
-(`deepseek-v4-flash`): пул — медиана 5.9 с (5 прогонов, 4.3–15.4), сырой HTTP —
-медиана 6.0 с (4 прогона, 4.6–21.1). Разницы каналов нет; задержку определяет
-длина рассуждения (у выбросов 1700–2100 токенов вывода против 400 у медианы).
-Побочно: на пути через пул часть входа читается из кэша промпта (входные токены
-220–284 вместо 1700 при той же ленте), у сырого HTTP этого нет.
+A `claude-*` can also be a rung of the ladder: it goes over the
+subscription lane, not at API prices. Measured 2026-08-20 on a live
+session: `claude-haiku-4-5` returned a verdict in 2.3 s. A channel
+comparison on one input and one model (`deepseek-v4-flash`): pool —
+median 5.9 s (5 runs, 4.3–15.4), raw HTTP — median 6.0 s (4 runs,
+4.6–21.1). There is no channel difference; latency is determined by the
+length of the reasoning (the outliers had 1700–2100 output tokens against
+400 at the median). Incidentally: on the pool path part of the input is
+read from the prompt cache (input tokens 220–284 instead of 1700 on the
+same transcript); raw HTTP does not have this.
 
 ---
 
-## 6. Лента: происхождение вместо ролей
+## 6. The transcript: provenance instead of roles
 
-Claude Code кладёт под роль `user` четыре разные вещи: то, что напечатал
-человек; результаты инструментов; служебные вставки и уведомления; письма
-других сессий. Судья, которому показали голые роли, читает текст самого
-подсудимого как санкцию пользователя (измерено: вызов прошёл потому, что
-главный луп секундой раньше написал «это санкционированная проба»).
+Claude Code puts four different things under the `user` role: what the
+human typed; tool results; service insertions and notifications; letters
+from other sessions. A judge shown bare roles reads the defendant's own
+text as a user sanction (measured: a call passed because the main loop
+had written "this is a sanctioned probe" a second earlier).
 
-Поэтому каждая запись ленты получает происхождение:
+So every transcript entry gets a provenance:
 
-| `src` | Что это |
+| `src` | What it is |
 |-------|---------|
-| `user` | то, что напечатал человек |
-| `assistant` | текст того самого главного лупа, чей вызов судится |
-| `tool-output` | вывод инструмента |
-| `injected` | служебные вставки, уведомления задач, письма других сессий |
+| `user` | what the human typed |
+| `assistant` | the text of the very main loop whose call is being judged |
+| `tool-output` | tool output |
+| `injected` | service insertions, task notifications, letters from other sessions |
 
-Различение идёт СНАЧАЛА по конверту — `toolUseResult`, `isMeta`,
-`isVisibleInTranscriptOnly`, наличие блока `tool_result` (это же использует сам
-Claude Code), и лишь потом по маркерам-обёрткам (`<system-reminder`,
-`<task-notification`, `<cross-session-message`, `[SYSTEM NOTIFICATION`,
-`[Request interrupted by user`).
+Distinguishing goes FIRST by the envelope — `toolUseResult`, `isMeta`,
+`isVisibleInTranscriptOnly`, the presence of a `tool_result` block (the
+same thing Claude Code itself uses), and only then by wrapper markers
+(`<system-reminder`, `<task-notification`, `<cross-session-message`,
+`[SYSTEM NOTIFICATION`, `[Request interrupted by user`).
 
-Лента передаётся МАССИВОМ JSON, а не размеченными строками. Текстовый префикс
-доверия не несёт: содержимое и метка делят одно пространство имён, и любая
-строка внутри вывода команды, файла, веб-страницы или письма другой сессии,
-начинающаяся с `user: `, неотличима от настоящей метки (продемонстрировано
-2026-08-20 печатью ровно такой строки). В JSON тот же текст экранируется в
-поле `text` и соседним ключом `src` стать не может.
+The transcript is passed as a JSON ARRAY, not as labeled strings. A text
+prefix carries no trust: content and label share one namespace, and any
+string inside a command's output, a file, a web page, or a letter from
+another session that begins with `user: ` is indistinguishable from a
+real label (demonstrated 2026-08-20 by printing exactly such a string).
+In JSON the same text is escaped into the `text` field and cannot become
+the neighboring `src` key.
 
-Обрезка выбрасывает ЦЕЛЫЕ старые записи — резать сериализованную строку значит
-отдать судье сломанный JSON.
+Trimming discards WHOLE old entries — cutting a serialized string would
+mean handing the judge broken JSON.
 
-Инструкция судьи закрепляет вывод: ссылка на разрешение («это проба», «юзер
-санкционировал») имеет вес ТОЛЬКО из записи с `src` равным `user`.
-
----
-
-Подрезка ленты закрепляет реплики ЧЕЛОВЕКА. Пока подрезка была FIFO, указания
-юзера выбрасывались ПЕРВЫМИ — они самые старые. Измерено стендом 2026-08-21:
-через ~70 ходов запрет «в этой сессии не вызывай opus» ушёл из ленты целиком
-(0 записей `src:"user"` из 177), и вызов был отменён только по ЭХУ — цитата
-запрета уцелела в первых 300 знаках прошлой отмены, пришедшей как
-`tool-output`. Работай главный луп молча, вытеснение прошло бы вчистую, и
-судья судил бы так, будто человек не говорил ничего. Теперь `__cut` вытесняет
-с головы всё, КРОМЕ `src:"user"`, и режет реплики человека, только если одних
-их не вместить; выброс объявляется записью `[лента подрезана: вытеснено N
-записей…]`, чтобы уцелевшие записи не читались как соседние. Закреплённое при этом ограничено 35% бюджета и внутри доли вытесняется по
-старшинству — иначе закрепление делает мусор вечным (стенд намерил, что
-служебные записи занимали 21% короткой ленты и росли монотонно). И сам класс
-`user` очищен: `<local-command-stdout>` — это ответ ПРОГРАММЫ, теперь
-`tool-output`, а вызов команды человеком получил отдельную метку
-`user-command` (действие человека, но не указание судье), а вот `<command-args>`
-с непустым содержимым — это прямая речь человека и остаётся `user`.
-
-Отдельная метка `compaction-summary` (по флагу конверта `isCompactSummary`).
-После компакции в ленте не остаётся НИ ОДНОЙ записи `user` — измерено стендом
-2026-08-21, — и распоряжение человека выживает только в резюме. Поэтому резюме
-закрепляется своей долей (30% бюджета) и подрезается ПО ТЕКСТУ, а не
-выбрасывается. Доверие к нему несимметрично: запрет действует, разрешение нет
-(пересказ пишет клиент и мог вобрать чужой текст; ложная отмена дешевле
-молчаливого пропуска запрета).
-
-Три эти находки — один класс: клиент кладёт под роль `user` всё новые виды
-записей. Поэтому неизвестная обёртка в классе `user` теперь попадает в журнал
-полем `uw`: класс стал измеримым. Проверено на
-УСТАНОВЛЕННОМ бинарнике: функция извлечена из образа и прогнана на 202
-записях — реплика человека уцелела, вытеснено 66 прочих, лента 59 546 знаков
-при бюджете 60 000.
-
-Всякое число в описании ленты называет ФАКТ на момент вывода, а не число
-совершённых действий. Это отдельный инвариант, потому что нарушался он трижды
-подряд и всегда в свою пользу: маркер занижал закреплённые реплики (считал по
-меткам удаления после переиндексации), завышал подрезки (считал вызовы, а не
-дожившие записи — 39 против 4 на реальной ленте), а сама запись занижала
-вырезанное (повторная подрезка считала от прошлого среза, а не от оригинала:
-«вырезано 123» там, где от 200 004 знаков осталось 4). Держится инвариант
-двумя правилами: счётчики вычисляются ПОСЛЕ финального уплотнения по живым
-записям, а подрезка любой глубины режет от ИСХОДНОГО текста, который хранится
-рядом с лентой. Второе заодно делает вложенные метки невозможными структурно.
-
-Порог ступени работает и на пути через пул — это отдельно проверено, потому
-что весь трафик судьи теперь идёт там: ступень с `timeout_ms: 1500` оборвалась
-на 1506 мс с «Request was aborted». Отсюда и лечение минутных консультаций:
-у первой ступени свой порог 25 с, после которого полная лента уступает
-короткой ступени, отвечающей за 2-3 с.
+The judge's instruction pins the conclusion: a reference to permission
+("this is a probe", "the user sanctioned it") carries weight ONLY from an
+entry with `src` equal to `user`.
 
 ---
 
-## 7. Вердикт
+Transcript trimming pins the HUMAN's replies. While trimming was FIFO,
+the user's instructions were discarded FIRST — they are the oldest.
+Measured by the bench 2026-08-21: after ~70 turns the prohibition "do not
+call opus in this session" left the transcript entirely (0 `src:"user"`
+entries out of 177), and the call was cancelled only by ECHO — a quote of
+the prohibition survived in the first 300 characters of a previous
+cancellation that had arrived as `tool-output`. Had the main loop been
+working silently, the eviction would have been total, and the judge would
+have judged as though the human had said nothing. Now `__cut` evicts from
+the head everything EXCEPT `src:"user"`, and cuts the human's replies
+only if those alone cannot fit; the discard is announced with an entry
+`[transcript trimmed: N entries evicted…]`, so the surviving entries are
+not read as neighbors. What is pinned is also capped at 35% of the
+budget, and within that share is evicted by seniority — otherwise pinning
+makes garbage eternal (the bench measured service entries occupying 21%
+of a short transcript and growing monotonically). And the `user` class
+itself was cleaned up: `<local-command-stdout>` is the PROGRAM's answer,
+now `tool-output`; a command invoked by the human got its own label
+`user-command` (a human action, but not an instruction to the judge),
+while `<command-args>` with non-empty content is the human's direct
+speech and stays `user`.
 
-Вердикт обязан быть ПЕРВОЙ строкой ответа. Измерено: с объяснением впереди
-рассуждающая модель потратила весь бюджет на решение отменить и была обрезана
-до того, как строку напечатала — вызов ушёл, потому что молчание читается как
-согласие. При таком порядке обрезка стоит объяснения, а не решения.
+A separate label `compaction-summary` (by the envelope flag
+`isCompactSummary`). After a compaction not ONE `user` entry remains in
+the transcript — measured by the bench 2026-08-21 — and the human's
+directive survives only in the summary. So the summary is pinned with its
+own share (30% of the budget) and trimmed BY TEXT rather than discarded.
+Trust in it is asymmetric: a prohibition holds, a permission does not
+(the client writes the retelling and could have absorbed someone else's
+text; a false cancellation is cheaper than a silently passed
+prohibition).
 
-Разбор: первая строка вида `^(OK|BLOCK|STOP|DENY|WARN):` в `content`. Если
-`content` пуст, а рассуждение есть — берётся ПОСЛЕДНЯЯ такая строка из
-рассуждения: вердикт, отрепетированный посреди мысли, не должен перебить вывод.
+These three findings are one class: the client keeps putting new kinds of
+entries under the `user` role. Therefore an unknown wrapper in the `user`
+class now lands in the journal as the `uw` field: the class became
+measurable. Verified on the INSTALLED binary: the function was extracted
+from the image and run over 202 entries — the human's reply survived, 66
+others were evicted, transcript 59,546 characters against a budget of
+60,000.
 
-Исполнение:
+Every number in a transcript description names a FACT at the time of
+output, not a count of actions taken. This is a separate invariant,
+because it was violated three times in a row, always in its own favor:
+the marker undercounted pinned replies (it counted by deletion labels
+after reindexing), overcounted trims (it counted calls, not surviving
+entries — 39 against 4 on a real transcript), and the record itself
+undercounted what was cut (a re-trim counted from the previous cut point,
+not from the original: "123 cut" where 4 remained of 200,004 characters).
+The invariant is held by two rules: the counters are computed AFTER the
+final compaction over the live entries, and a trim of any depth cuts from
+the ORIGINAL text, which is kept alongside the transcript. The second
+also makes nested labels structurally impossible.
 
-| Вердикт | Что происходит |
+A rung's threshold also works on the pool path — this was checked
+separately, because all the judge's traffic now goes there: a rung with
+`timeout_ms: 1500` broke off at 1506 ms with "Request was aborted". Hence
+also the treatment for minute-long consultations: the first rung has its
+own threshold of 25 s, after which the full transcript yields to a short
+rung that answers in 2-3 s.
+
+---
+
+## 7. The verdict
+
+The verdict must be the FIRST line of the answer. Measured: with the
+explanation in front, a reasoning model spent the entire budget deciding
+to cancel and was cut off before printing the line — the call went
+through, because silence reads as consent. With this ordering, a cutoff
+costs the explanation, not the decision.
+
+Parsing: the first line of the form `^(OK|BLOCK|STOP|DENY|WARN):` in
+`content`. If `content` is empty but there is reasoning — the LAST such
+line is taken from the reasoning: a verdict rehearsed in the middle of a
+thought must not override the conclusion.
+
+Execution:
+
+| Verdict | What happens |
 |---------|----------------|
-| `OK:` | вызов идёт; строка в журнале |
-| `WARN:` | вызов идёт; строка в журнале; **до модели не доходит** |
-| `BLOCK:`/`STOP:`/`DENY:` при `enforce` | `throw` → `is_error` в модель, вызов не состоялся |
-| то же без `enforce` | вызов идёт, в журнале `block_not_enforced` |
-| вердикта нет ни на одной ступени, `fail_closed` | `throw` → вызов не состоялся, в журнале `block_no_verdict` |
-| судья отказал ДО вердикта (конфиг, тело, подрезка, повтор), `fail_closed` | `throw` → вызов не состоялся, в журнале `block_no_verdict` с `reason` |
-| настройки или промпт сломаны, `enforce` | `throw` → вызов не состоялся, в журнале `block_degraded` с `deg` |
-| то же без `fail_closed` | вызов идёт, в журнале `skip` с `reason` |
+| `OK:` | the call goes; a journal line |
+| `WARN:` | the call goes; a journal line; **never reaches the model** |
+| `BLOCK:`/`STOP:`/`DENY:` with `enforce` | `throw` → `is_error` to the model, the call did not happen |
+| same without `enforce` | the call goes, the journal says `block_not_enforced` |
+| no verdict on any rung, `fail_closed` | `throw` → the call did not happen, the journal says `block_no_verdict` |
+| the judge failed BEFORE a verdict (config, body, trimming, retry), `fail_closed` | `throw` → the call did not happen, the journal says `block_no_verdict` with `reason` |
+| settings or prompt broken, `enforce` | `throw` → the call did not happen, the journal says `block_degraded` with `deg` |
+| same without `fail_closed` | the call goes, the journal says `skip` with `reason` |
 
-Обязательство вынести решение живёт в отдельном флаге, а не выводится из
-вердикта: он взводится, как только известно, что вызов не отфильтрован и
-включены `enforce` + `fail_closed`, и снимается ПОСЛЕДНИМ действием успешного
-пути. Всё, что бросит раньше, отменяет вызов. Без этого «пропуск при поломке»
-и «пропуск при выключенном fail_closed» были одним и тем же исходом: повтор на
-короткой ленте не был обёрнут, его падение писалось как штатный `skip`, и вызов
-уходил — молчаливый пропуск ровно там, ради чего заведён `fail_closed`.
+The obligation to issue a decision lives in a separate flag, not derived
+from the verdict: it is armed as soon as it is known that the call is not
+filtered out and `enforce` + `fail_closed` are on, and is cleared by the
+LAST action of the successful path. Anything that throws earlier cancels
+the call. Without this, "pass on breakage" and "pass with fail_closed
+off" were the same outcome: the retry on the short transcript was not
+wrapped, its failure was written as a routine `skip`, and the call went
+through — a silent pass exactly where `fail_closed` exists to prevent
+one.
 
-Граница проходит не по «ENOENT против всего остального», а по «пути нет»
-(ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG) против «путь есть, доступа нет» (EACCES,
-EPERM); незнакомый код не отменяет ничего, но называется в журнале вместе с
-самим кодом. Обычный файл по имени `.claude` у любого предка даёт ENOTDIR — по
-прежней границе это отменяло ВСЁ поддерево при исправном судье. BOM снимается
-перед разбором: он невидим, и отмена по нему не поддавалась чтению. Пустой файл
-называется пустым, но остаётся отменой — ноль байт значит «настройки были и
-пропали», а не «настроек нет».
+The boundary is drawn not along "ENOENT versus everything else", but
+along "the path does not exist" (ENOENT, ENOTDIR, ELOOP, ENAMETOOLONG)
+versus "the path exists, no access" (EACCES, EPERM); an unfamiliar code
+cancels nothing but is named in the journal along with the code itself.
+An ordinary file named `.claude` at any ancestor yields ENOTDIR — under
+the former boundary this cancelled the ENTIRE subtree with a healthy
+judge. A BOM is stripped before parsing: it is invisible, and a
+cancellation over it was unreadable. An empty file is called empty but
+remains a cancellation — zero bytes means "the settings were there and
+vanished", not "there are no settings".
 
-Отсутствующий файл и НЕЧИТАЕМЫЙ файл — разные события, и одинаковая их
-обработка (`try{…}catch{}` без следа) выключала гейт целиком: битый файл настроек
-давал пустой объект, а с ним исчезали `enforce` и `fail_closed`, и судья с
-вынесенным `BLOCK` записывал `block_not_enforced` и пропускал вызов. Читалка
-слоёв теперь возвращает три исхода — «нет», «есть и прочитан», «есть, но не
-понят», — и третий значит, что правила НЕИЗВЕСТНЫ: `enforce` и `fail_closed`
-считаются включёнными, вызов отменяется с названием файла. Так же для
-нечитаемого проектного слоя: прежде он был неотличим от отсутствующего, обход
-ехал выше и мог подхватить чужой. Безобидные деградации (битый `body.json`)
-вызов не трогают, но попадают в журнал полем `deg` — оператор, положивший свой
-шаблон, обязан узнать, что тот не применён.
+A missing file and an UNREADABLE file are different events, and treating
+them identically (`try{…}catch{}` with no trace) switched the gate off
+entirely: a broken settings file yielded an empty object, and with it
+`enforce` and `fail_closed` disappeared, and a judge with a `BLOCK`
+issued would write `block_not_enforced` and pass the call. The layer
+reader now returns three outcomes — "absent", "present and read",
+"present but not understood" — and the third means the rules are UNKNOWN:
+`enforce` and `fail_closed` are treated as on, the call is cancelled with
+the file's name. The same for an unreadable project layer: before, it was
+indistinguishable from an absent one, the walk went higher and could pick
+up someone else's. Harmless degradations (a broken `body.json`) do not
+touch the call but land in the journal as the `deg` field — an operator
+who supplied their own template must learn that it was not applied.
 
-Запасной промпт (когда своего `prompt.md` нет) обязан уметь ОТМЕНЯТЬ. Прежний не
-содержал слова BLOCK вовсе и предлагал модели единственный не-OK исход `SWAP:`,
-который записывался как `ok`: гейт был формально жив и содержательно выключен.
-Из того же корня — разбор ответа: он возвращал сырой текст, если строки вердикта
-не нашлось, и любой ответ мимо словаря становился «ok». Ответ без распознанной
-строки — не вердикт.
+The fallback prompt (when there is no `prompt.md` of one's own) must be
+able to CANCEL. The previous one did not contain the word BLOCK at all
+and offered the model a single non-OK outcome, `SWAP:`, which was
+recorded as `ok`: the gate was formally alive and substantively off. From
+the same root — the response parsing: it returned the raw text if no
+verdict line was found, and any answer outside the dictionary became
+"ok". An answer without a recognized line is not a verdict.
 
-Из отмены обязан быть выход: каждая метка деградации несёт ПУТЬ файла, усечение
-списка объявляется (`[показаны не все: ещё N]`), а журнал заводит свой каталог
-при первой записи — иначе на свежей установке, где отмен больше всего, в журнале
-не оказывалось ни одной.
+A cancellation must have a way out: every degradation label carries the
+file PATH, list truncation is announced (`[not all shown: N more]`), and
+the journal creates its own directory on the first record — otherwise on
+a fresh install, where cancellations are most numerous, the journal would
+not contain a single one.
 
-Путь отказа исполняется ТОЛЬКО при поломке, поэтому проверять его надо нарочно:
-`__pdir` читался в `catch` из `let`, объявленного внутри `try`, и путь падал
-ReferenceError'ом до записи в журнал — диспатч получал «__pdir is not defined»,
-журнал не получал ничего. Отсюда правило: имена, которые читает `catch`,
-объявляются выше `try`, на это стоит структурная проверка конвейера, а после
-любой правки судьи путь отказа проверяется живым вызовом с мёртвым адресом
-(`CLAUDE_JUDGE_URL` на закрытый порт, `CLAUDE_PROBES_DIR` на отдельный каталог,
-чтобы не пачкать корпус).
+The refusal path runs ONLY on breakage, so it must be tested
+deliberately: `__pdir` was read in `catch` from a `let` declared inside
+the `try`, and the path died with a ReferenceError before reaching the
+journal — the dispatch got "__pdir is not defined", the journal got
+nothing. Hence the rule: names read by `catch` are declared above the
+`try`; there is a structural pipeline check for this, and after any judge
+edit the refusal path is tested with a live call against a dead address
+(`CLAUDE_JUDGE_URL` to a closed port, `CLAUDE_PROBES_DIR` to a separate
+directory, so as not to dirty the corpus).
 
-Две отмены разведены намеренно. `block` — дефект СУЖДЕНИЯ (судья ответил и
-ошибся), лечится промптом. `block_no_verdict` — дефект КАНАЛА (судья не ответил,
-отменил за него режим), в вердикте его не видно вовсе, разбирается по
-`attempts`. Снаружи оба выглядят одинаково — отменённый диспатч, — и пока оба
-писались как `empty`, они были неотличимы ещё и от ПРОПУЩЕННОГО вызова, то есть
-от противоположного исхода.
+The two cancellations are separated deliberately. `block` is a JUDGMENT
+defect (the judge answered and was wrong), treated by the prompt.
+`block_no_verdict` is a CHANNEL defect (the judge did not answer; the
+mode cancelled on its behalf); it is not visible in the verdict at all
+and is analyzed via `attempts`. From the outside both look the same — a
+cancelled dispatch — and while both were written as `empty`, they were
+also indistinguishable from a PASSED call, that is, from the opposite
+outcome.
 
-`WARN` — заметка человеку, а не канал до модели; инструкция это проговаривает,
-чтобы судья не писал в `WARN` указаний, которые физически некому исполнить.
+`WARN` is a note to the human, not a channel to the model; the
+instruction says this outright so the judge does not write into `WARN`
+directives that there is physically nobody to execute.
 
-`enforce` включается либо `CLAUDE_JUDGE=enforce`, либо `"enforce": true` в
-конфиге; в журнале поле `en` говорит, какой из двух источников сработал —
-раньше это было ненаблюдаемо.
+`enforce` is enabled either by `CLAUDE_JUDGE=enforce` or by `"enforce":
+true` in the config; the journal's `en` field says which of the two
+sources fired — previously this was unobservable.
 
 ---
 
-## 8. Отказоустойчивость и её цена
+## 8. Fault tolerance and its price
 
-Каждый путь отказа — fail-open: мёртвый прокси, сорванный порог, битый конфиг,
-отсутствующий файл — вызов уходит как раньше. Это правильный выбор (судья не
-должен ломать работу), но у него есть цена: **выключившийся судья в любом
-отчёте выглядит ровно как судья, который всё одобрил**.
+Every failure path is fail-open: a dead proxy, a blown threshold, a
+broken config, a missing file — the call goes through as before. This is
+the right choice (the judge must not break the work), but it has a price:
+**a judge that switched itself off looks in every report exactly like a
+judge that approved everything**.
 
-Цена компенсируется наблюдаемостью, а не отменой fail-open:
+The price is paid for with observability, not by cancelling fail-open:
 
-- журнал ведётся ВСЕГДА, а не только с включённой отладкой;
-- у каждой строки есть `outcome`: `ok | warn | block | block_not_enforced |
+- the journal is kept ALWAYS, not only with debugging on;
+- every line has an `outcome`: `ok | warn | block | block_not_enforced |
   block_no_verdict | empty | skip | filtered`;
-- `ms` — задержка (единственная реальная стоимость механизма), `sw` — значение
-  выключателя, `tries`/`jm` — на какой ступени и какой моделью получен ответ,
-  `err1` — все ошибки предыдущих ступеней, `cfg` — сработавший проектный слой
-  (стоит в КАЖДОЙ строке, включая отсев: раньше отсев слоя не называл, и какой
-  файл подействовал, приходилось выводить косвенно по поведению), `sid` и
-  `title` — сессия и её заголовок (`pid` для адресации не годится: система его
-  переиспользует), `model` с `msrc` — РАЗРЕШЁННАЯ модель диспатча и источник
-  разрешения (`call`/`agent`/`inherit`; раньше писалась только явная из вызова,
-  и треть записей уходила без модели вовсе),
-  `rec` — имя полной записи.
+- `ms` — latency (the mechanism's only real cost), `sw` — the switch's
+  value, `tries`/`jm` — on which rung and by which model the answer was
+  obtained, `err1` — all previous rungs' errors, `cfg` — the project
+  layer that took effect (it stands in EVERY line, including filtered-out
+  ones: previously the filter did not name the layer, and which file had
+  acted had to be inferred indirectly from behavior), `sid` and `title` —
+  the session and its title (`pid` is no good for addressing: the system
+  reuses it), `model` with `msrc` — the dispatch's ALLOWED model and the
+  source of the permission (`call`/`agent`/`inherit`; previously only the
+  one explicit in the call was written, and a third of the records went
+  out with no model at all), `rec` — the full record's name.
 
-Это прямо закрывает «выключен с обоих концов»: без записи и пропуск, и WARN
-неотличимы от судьи, которого никогда не спрашивали.
-
----
-
-## 9. Записи, повтор, сжатие
-
-Строка журнала — ИНДЕКС, а не доказательство: вердикт в ней подрезан, а
-материала, который судья видел, в ней нет вовсе. Поэтому рядом пишется полная
-запись, файл на консультацию: `{...строка журнала, http, url, pid, cwd,
-attempts[], request, response}`. `attempts` хранит по каждой ступени модель,
-размер ленты, порог, бюджет, длительность, код и ошибку.
-
-Две вещи, ради которых это делалось (формулировка юзера): (1) потом проверить,
-правильно ли он судил; (2) потом обучить на этом мелкую модель.
-
-Схема записи росла по ходу кампании: первые семь записей корпуса не имеют полей
-`url`, `cwd` и `attempts` — они появились позже. Всякий потребитель корпуса
-обязан это терпеть и говорить вслух, когда подставляет недостающее (валидатор
-помечает такие прогоны полем `url_from`): прогон по подставленному адресу — это
-другое условие опыта, и молча выдавать его за исходное нельзя.
-
-`replay.py` повторяет запись: тот же запрос, с подменой модели, инструкции,
-адреса, усилия. Канал выбирается ключом `--channel`:
-
-- `http` — байт-в-байт то же тело, что ушло в прокси. Единственный ТОЧНЫЙ
-  повтор, но живёт только для прокси-полосы.
-- `pool` — прогон через сам клиент (`claude -p --system-prompt … --tools ""`).
-  Так достижимы `claude-*`, но это НЕ тот же вход: измерено 2026-08-20 —
-  клиент кладёт свои ~22 тыс. токенов контекста (системный промпт, навыки,
-  вставки старта сессии), и на одной и той же записи вердикт менялся
-  `OK → BLOCK`. Обойти не удалось: `--bare` и отдельный `CLAUDE_CONFIG_DIR`
-  ломают авторизацию («Not logged in»), `--settings` с пустыми хуками контекст
-  не убирает, а отключение навыков через `CLAUDE_CODE_DISABLE_*` объём не
-  меняет (проверено дважды: те же 22 351 токена создания кэша).
-- `auto` — `pool` для `claude-*`, иначе `http`.
-
-Отсюда правило: сравнивать модели между собой можно только в ОДНОМ канале, а
-«повтор судейства» в строгом смысле возможен лишь по каналу `http`. Цена
-прогона через `pool` тоже другая: 21–116 с и 7–11 тыс. токенов вывода против
-секунд и сотен токенов по HTTP.
-
-`adjudicate.py` — разметка корпуса: сильная модель оценивает УЖЕ ВЫНЕСЕННЫЙ
-вердикт (`CORRECT` / `WRONG:<класс>` / `UNSURE`), а не судит вызов заново.
-Предложенные метки ложатся в `labels.jsonl` с `source: "model:<имя>"` и НИКОГДА
-не перезаписывают человеческие; `validate.py` считает точность по тем и другим
-РАЗДЕЛЬНО — предложенная метка это гипотеза, а не истина. Так проверяется правка промпта БЕЗ новой сессии — на записанном
-входе `--prompt` перевёл `OK` в `BLOCK`, что и доказало исправление. Запросу
-нужен узнаваемый `User-Agent`, иначе периметр отвечает 403.
-
-Записи копятся несжатыми (запись в горячем пути должна быть дешёвой) и
-сжимаются суточным проходом `compact.py` — идемпотентно, исходник удаляется
-только после перечитывания и разбора архива. Запускает агент launchd
-(`com.transmutelabs.judge-compact`, 04:07): пропущенный из-за сна запуск launchd
-отрабатывает после пробуждения, а crontab — нет.
+This directly closes off "disabled at both ends": without a record, both
+a pass and a WARN are indistinguishable from a judge who was never asked.
 
 ---
 
-## 9a. Чистота корпуса
+## 9. Records, replay, compression
 
-Записи до 2026-08-20 ~21:00 — это ПРОБЫ стенда и мои собственные: диспатчи в
-них продиктованы человеком дословно, и судья законно читает их как прямое
-распоряжение. Для свипа по моделям такой материал смещает выборку в сторону
-`OK`, поэтому при разметке и сравнении моделей его нужно либо исключать по
-времени, либо размечать отдельно.
+A journal line is an INDEX, not evidence: its verdict is trimmed, and the
+material the judge saw is not in it at all. So a full record is written
+alongside, one file per consultation: `{...journal line, http, url, pid,
+cwd, attempts[], request, response}`. `attempts` stores, per rung, the
+model, transcript size, threshold, budget, duration, code, and error.
 
-Отдельная ловушка того же рода: судейство собственной пробы недоказательно.
-Если диктуешь вызов сам, судья видит санкцию пользователя и отвечает `OK` там,
-где ждёшь отмену. Проверять отмену может только тот, кто формулирует диспатч
-сам и не читал плана проверки.
+Two things this was done for (the user's wording): (1) to later check
+whether it judged correctly; (2) to later train a small model on this.
 
-## 10. Соседние механизмы
+The record schema grew over the campaign: the corpus's first seven
+records lack the `url`, `cwd`, and `attempts` fields — these appeared
+later. Every consumer of the corpus must tolerate this and say so out
+loud when substituting what is missing (the validator marks such runs
+with a `url_from` field): a run against a substituted address is a
+different experimental condition, and passing it off silently as the
+original is not allowed.
 
-| Механизм | Отношение |
+`replay.py` replays a record: the same request, with substitution of the
+model, instruction, address, effort. The channel is chosen by the
+`--channel` key:
+
+- `http` — byte-for-byte the same body that went to the proxy. The only
+  EXACT replay, but it exists only for the proxy lane.
+- `pool` — a run through the client itself (`claude -p --system-prompt …
+  --tools ""`). This reaches `claude-*`, but it is NOT the same input:
+  measured 2026-08-20 — the client adds its own ~22 thousand tokens of
+  context (system prompt, skills, session-start insertions), and on the
+  same record the verdict changed `OK → BLOCK`. There was no way around
+  it: `--bare` and a separate `CLAUDE_CONFIG_DIR` break authorization
+  ("Not logged in"), `--settings` with empty hooks does not remove the
+  context, and disabling skills via `CLAUDE_CODE_DISABLE_*` does not
+  change the volume (checked twice: the same 22,351 cache-creation
+  tokens).
+- `auto` — `pool` for `claude-*`, otherwise `http`.
+
+Hence the rule: models can be compared with each other only within ONE
+channel, and a "judging replay" in the strict sense is possible only over
+the `http` channel. The price of a `pool` run is also different: 21–116 s
+and 7–11 thousand output tokens against seconds and hundreds of tokens
+over HTTP.
+
+`adjudicate.py` — corpus labeling: a strong model evaluates the verdict
+ALREADY ISSUED (`CORRECT` / `WRONG:<class>` / `UNSURE`), it does not
+judge the call anew. Proposed labels go into `labels.jsonl` with `source:
+"model:<name>"` and NEVER overwrite human ones; `validate.py` computes
+accuracy over both SEPARATELY — a proposed label is a hypothesis, not
+truth. This is how a prompt edit is checked WITHOUT a new session — on
+the recorded input, `--prompt` turned `OK` into `BLOCK`, which is what
+proved the fix. The request needs a recognizable `User-Agent`, otherwise
+the perimeter answers 403.
+
+Records accumulate uncompressed (writing in the hot path must be cheap)
+and are compressed by a daily pass of `compact.py` — idempotently; the
+source is deleted only after the archive is re-read and parsed. It is
+started by a launchd agent (`com.transmutelabs.judge-compact`, 04:07): a
+run missed due to sleep launchd works off after wakeup, whereas crontab
+does not.
+
+---
+
+## 9a. Corpus cleanliness
+
+Records before 2026-08-20 ~21:00 are BENCH probes and my own: the
+dispatches in them were dictated by a human verbatim, and the judge
+lawfully reads them as a direct order. For a sweep over models such
+material skews the sample toward `OK`, so when labeling and comparing
+models it must either be excluded by time or labeled separately.
+
+A separate trap of the same kind: judging one's own probe proves nothing.
+If you dictate the call yourself, the judge sees a user sanction and
+answers `OK` where you expect a cancellation. Only the one who formulates
+the dispatch themselves and has not read the test plan can test a
+cancellation.
+
+## 10. Neighboring mechanisms
+
+| Mechanism | Relation |
 |----------|-----------|
-| гейт маршрутизации (`routing-table.toml`, PreToolUse) | детерминирован, отрабатывает РАНЬШЕ; судья только сужает разрешённое |
-| система разрешений | отдельна; вклеенное правило прямо запрещает списывать отмену на неё |
-| серверный советник (`advisor`) | зовётся моделью на сервере, видит тело запроса, т.е. состояние ДО ответа модели; судья видит текущий ход, которого советник не получает никогда |
-| суточное сжатие | вне процесса, launchd |
+| routing gate (`routing-table.toml`, PreToolUse) | deterministic, runs EARLIER; the judge only narrows what is allowed |
+| permission system | separate; the glued-in rule explicitly forbids blaming a cancellation on it |
+| server-side advisor (`advisor`) | invoked by the model on the server, sees the request body, i.e. the state BEFORE the model's answer; the judge sees the current turn, which the advisor never gets |
+| daily compression | outside the process, launchd |
 
 ---
 
-## 11. Инварианты
+## 11. Invariants
 
-Ломать нельзя:
+Must not be broken:
 
-1. **Выключен — значит выключен.** Без `CLAUDE_JUDGE` не работает ни врезка 22,
-   ни накопитель 21, ни вклейка 26.
-2. **Только главный луп.** `agentType==="main"` в обеих врезках, 22 и 26.
-3. **Fail-open + обязательная запись.** Ни один путь отказа не рвёт диспатч, и
-   ни один не остаётся без строки в журнале.
-4. **Отмена, а не подмена.** Судья не выдаёт вызову ничего, чего гейт не
-   разрешил.
-4a. **Канал — общий контур.** Судья ходит пулом моделей клиента. Свой маршрут
-   к вендору мимо пула запрещён: он меняет и договор оплаты, и авторизацию, и
-   набор доступных моделей.
-5. **Один дом у настройки.** Значение, заданное в конфиге, должно доходить до
-   тела запроса; шаблон не вправе молча его перебить (было дважды: модель, а
-   затем бюджет в 1200 токенов, обрезавший отмену в молчание).
-6. **Происхождение — из конверта, не из текста.**
-7. **Вердикт — первая строка.**
-8. **ASCII на проводе.** tweakcc распаковывает и запаковывает бандл БАЙТАМИ:
-   не-ASCII символ, вписанный литералом, возвращается двойной кодировкой, а
-   настоящий перевод строки внутри строкового литерала бандла ломает разбор.
-   Только `\uXXXX` и `\n`.
-
----
-
-## 12. Слепые зоны
-
-- Судья видит ленту и вызов, но не файлы репозитория и не результат вызова:
-  он судит НАМЕРЕНИЕ, а не исход.
-- `model` в `tool_input` виден только тогда, когда назван в самом вызове; модель
-  из определения агента судье не видна.
-- Обрезка ленты выбрасывает старое: длинная сессия отдаёт судье хвост, и
-  основание, прозвучавшее в начале сессии, до него не доходит.
-- `WARN` не имеет канала до модели по устройству.
-- Судейство одно на вызов: пачка одновременных диспатчей судится поштучно, без
-  знания друг о друге (линза КОНЦЕНТРАЦИЯ работает только по ленте).
+1. **Off means off.** Without `CLAUDE_JUDGE`, neither injection 22, nor
+   accumulator 21, nor gluing 26 works.
+2. **Main loop only.** `agentType==="main"` in both injections, 22 and
+   26.
+3. **Fail-open + mandatory recording.** No failure path breaks a
+   dispatch, and none remains without a journal line.
+4. **Cancellation, not substitution.** The judge gives the call nothing
+   the gate has not allowed. 4a. **The channel is the shared circuit.**
+   The judge goes through the client's model pool. A route of its own to
+   a vendor bypassing the pool is forbidden: it changes both the billing
+   contract and the authorization, and the set of available models.
+5. **One home for a setting.** A value set in the config must reach the
+   request body; the template may not silently override it (happened
+   twice: the model, and then a 1200-token budget that cut a cancellation
+   into silence).
+6. **Provenance — from the envelope, not from the text.**
+7. **The verdict is the first line.**
+8. **ASCII on the wire.** tweakcc unpacks and packs the bundle BY BYTES:
+   a non-ASCII character written as a literal comes back double-encoded,
+   and a real newline inside a string literal of the bundle breaks
+   parsing. Only `\uXXXX` and `\n`.
 
 ---
 
-## 13. Точки расширения
+## 12. Blind spots
 
-- **Другие инструменты.** Условие врезки — `name==="Agent"||name==="Task"`;
-  расширение на иной инструмент не требует новых мест, только имени и линз.
-- **Другой ВЫЗЫВАЮЩИЙ** (ось, по которой расширение и пошло 2026-08-22).
-  Механизм разобран на ядро и описание пробы: каталог, данные, триггер,
-  словарь вердикта, реакция. Судья — первый потребитель, наблюдатель за
-  флотом — второй. Копия с исключениями была отвергнута: два расходящихся
-  куска по ~600 строк заставили бы платить каждый урок дважды. Контракт —
+- The judge sees the transcript and the call, but not the repository's
+  files and not the call's result: it judges the INTENT, not the outcome.
+- `model` in `tool_input` is visible only when named in the call itself;
+  the model from the agent's definition is not visible to the judge.
+- Transcript trimming discards the old: a long session hands the judge a
+  tail, and a ground stated at the session's start does not reach it.
+- `WARN` has no channel to the model by design.
+- One judging per call: a batch of simultaneous dispatches is judged one
+  by one, without knowledge of one another (the CONCENTRATION lens works
+  only over the transcript).
+
+---
+
+## 13. Extension points
+
+- **Other tools.** The injection's condition is
+  `name==="Agent"||name==="Task"`; extending to another tool needs no new
+  locations, only a name and lenses.
+- **Another CALLER** (the axis along which the extension actually went,
+  2026-08-22). The mechanism was split into a core and a probe
+  description: directory, data, trigger, verdict dictionary, reaction.
+  The judge is the first consumer, the fleet idle watcher the second. A
+  copy with exceptions was rejected: two diverging pieces of ~600 lines
+  each would make you pay for every lesson twice. The contract is
   `probe-core.md`.
-- **Селектор.** `filter` уже умеет списки регулярок по классу диспатча и по
-  имени агента, в обе стороны (`*_skip` / `*_judge`).
-- **Своя раскладка запроса.** `body.json` — полный шаблон; можно сменить
-  провайдера, роли и порядок сообщений, не трогая бинарник.
-- **Обучение мелкой модели.** `records/` — уже готовый корпус пар
-  «вход → вердикт»; `replay.py` — стенд для сравнения кандидатов на одном входе.
-- **Проектные правила.** `prompt.extra.md` в проекте — без правки глобальной
-  инструкции.
+- **The selector.** `filter` already supports regex lists by dispatch
+  class and by agent name, in both directions (`*_skip` / `*_judge`).
+- **Your own request layout.** `body.json` is the full template; you can
+  change the provider, roles, and message order without touching the
+  binary.
+- **Training a small model.** `records/` is an already-ready corpus of
+  "input → verdict" pairs; `replay.py` is the bench for comparing
+  candidates on one input.
+- **Project rules.** `prompt.extra.md` in the project — without editing
+  the global instruction.
 
 ---
 
-## 14. Уроки патчера (стоили по инциденту каждый)
+## 14. Patcher lessons (each cost one incident)
 
-1. **`ID` объявляется ЛОКАЛЬНО в каждом шаге.** Взятый из соседнего шага, он
-   даёт `ReferenceError`, и шаг тихо не применяется.
-2. **Гейт отказов стоит В САМОМ КОНЦЕ файла.** Однажды он стоял посередине, и
-   четыре шага после него исполнялись без охраны: сломанный локатор был записан
-   и никем не прочитан, сборка отчиталась успехом с отсутствующим патчем —
-   именно так шаг 26 впервые уехал пустышкой.
-3. **Проверка шаблона — не дымовая проба.** `ReferenceError: __res is not
-   defined` после переработки запроса превратил ВСЕ судейства в `skip`, при
-   этом все проверки шаблонов остались зелёными. Поймал журнал, а не сборка.
-   Отсюда жёсткий дымовой гейт: `--version` должен вернуть 0 и напечатать
-   «Claude Code», иначе лаунчер не перенаправляется.
-4. **Лаунчер перенаправляется ТОЛЬКО после зелёных проверок**
-   (`claude_patch.py --repoint` отказывается работать с непропатченным образом):
-   перенаправление вперёд оставляло окно, в котором новые сессии шли
-   непропатченными.
-5. **Своя батарея может оказаться пустой.** Продиктованные мной же диспатчи
-   читаются судьёй как санкция пользователя — настоящие находки дала живая
-   батарея на стенде, а не мои собственные прогоны.
-6. **Захваченное имя вклеивается в шаблон только через `rxEsc`.**
-   Минифицированное имя может содержать `$`: в 2.1.239 матчер сессии зовётся
-   `$jS`. В ИСХОДНИКЕ регулярки `$` — якорь конца строки, поэтому голое имя не
-   совпадает никогда, и локатор падает не потому, что сборка изменилась, а
-   потому что минификатор выбрал другую букву. В строке ЗАМЕНЫ тот же `$` —
-   ссылка на группу: там подстановка чужого захвата прошла бы МОЛЧА. Голыми
-   стояли 12 мест, укусило одно; чинится классом (`rxEsc`/`repEsc`), а проверка
-   «captured names are escaped into patterns» ловит следующее такое место на
-   источнике, до сборки.
-7. **Предикат может передаваться КОЛБЭКОМ.** Греп по `Имя(` показал ноль
-   потребителей у предиката иммунитета — и это едва не стало выводом «механизм
-   не подключён». Он передавался как `_B(reason, Имя)`: прибор не видел формы
-   вызова, а ноль на таком приборе неотличим от настоящего нуля. Считать
-   употребления именем БЕЗ скобки.
-8. **Форма вызова инструмента — не константа.** В 2.1.239 прямой
-   `e.call(w,ctx,…)` уехал за адаптер `hii(e).execute(w,ctx,…)`, где
-   `hii(e) = e.executor ?? {execute:(…)=>e.call(…)}`. Локатор судьи держит ОБЕ
-   формы и цепляется за САМ инструмент, а не за обёртку: `.name` есть у
-   инструмента, у адаптера его нет. Замена вклеивается по смещению (`m.index`),
-   а не через `String.replace`: номера групп между формами разъезжаются, и `$`
-   в замене читался бы как ссылка.
+1. **`ID` is declared LOCALLY in every step.** Taken from a neighboring
+   step, it gives a `ReferenceError`, and the step silently does not
+   apply.
+2. **The failure gate stands AT THE VERY END of the file.** Once it stood
+   in the middle, and the four steps after it ran unguarded: a broken
+   locator was recorded and read by nobody, and the build reported
+   success with a missing patch — that is exactly how step 26 first went
+   through as a stub.
+3. **A template check is not a smoke probe.** A `ReferenceError: __res is
+   not defined` after reworking the request turned ALL judgings into
+   `skip`, while all template checks stayed green. The journal caught it,
+   not the build. Hence the hard smoke gate: `--version` must return 0
+   and print "Claude Code", otherwise the launcher is not repointed.
+4. **The launcher is repointed ONLY after green checks**
+   (`claude_patch.py --repoint` refuses to work with an unpatched image):
+   repointing ahead of time left a window in which new sessions ran
+   unpatched.
+5. **Your own battery can turn out empty.** Dispatches dictated by me are
+   read by the judge as a user sanction — the real findings came from the
+   live battery on the bench, not from my own runs.
+6. **A captured name is glued into a pattern only through `rxEsc`.** A
+   minified name can contain `$`: in 2.1.239 the session matcher is
+   called `$jS`. In a regex SOURCE `$` is the end-of-string anchor, so
+   the bare name never matches, and the locator falls not because the
+   build changed but because the minifier picked a different letter. In
+   the REPLACEMENT string the same `$` is a group reference: there, a
+   substitution of someone else's capture would pass SILENTLY. Twelve
+   places stood bare; one bit. It is fixed as a class (`rxEsc`/`repEsc`),
+   and the check "captured names are escaped into patterns" catches the
+   next such place at the source, before the build.
+7. **A predicate can be passed as a CALLBACK.** A grep over `Name(`
+   showed zero consumers of the immunity predicate — and this nearly
+   became the conclusion "the mechanism is not wired up". It was passed
+   as `_B(reason, Name)`: the instrument did not see the call form, and a
+   zero on such an instrument is indistinguishable from a real zero.
+   Count usages by the name WITHOUT the parentheses.
+8. **The tool-call form is not a constant.** In 2.1.239 the direct
+   `e.call(w,ctx,…)` moved behind an adapter `hii(e).execute(w,ctx,…)`,
+   where `hii(e) = e.executor ?? {execute:(…)=>e.call(…)}`. The judge's
+   locator holds BOTH forms and hooks onto the TOOL itself, not the
+   wrapper: `.name` exists on the tool, not on the adapter. The
+   replacement is inserted by offset (`m.index`), not via
+   `String.replace`: group numbers diverge between the forms, and a `$`
+   in the replacement would be read as a reference.
 
 ---
 
-## 14a. Как посмотреть, что реально ушло в прокси
+## 14a. How to see what actually went to the proxy
 
-Диагностика канала на CliProxyAPI (проверено 2026-08-20; процедуру подтвердила
-сессия проекта прокси):
+Channel diagnostics on CliProxyAPI (verified 2026-08-20; the procedure
+was confirmed by the proxy project's session):
 
-- `~/.cli-proxy-api/logs/main.log` — только строки доступа: код, задержка, путь,
-  идентификатор запроса в квадратных скобках. Тел нет.
-- `~/.cli-proxy-api/logs/error-*.log` — полные дампы, но только для НЕуспешных.
-- Полные дампы успешных включает `request-log` (НЕ `debug`: тот меняет лишь
-  уровень логов). Живой тумблер без перезапуска, управляющий API на 8318:
+- `~/.cli-proxy-api/logs/main.log` — access lines only: code, latency,
+  path, request id in square brackets. No bodies.
+- `~/.cli-proxy-api/logs/error-*.log` — full dumps, but only for
+  UNsuccessful ones.
+- Full dumps of successful ones are enabled by `request-log` (NOT
+  `debug`: that only changes the log level). A live toggle without
+  restart, driving the API on 8318:
 
-      K='<mgmt-key из ~/.cli-proxy-api/config.yaml>'
-      curl -s -X PUT http://127.0.0.1:8318/v0/management/request-log \
-        -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
-        -d '{"value":true}'
-      # ровно ОДИН вызов из Claude Code
-      curl -s -X PUT http://127.0.0.1:8318/v0/management/request-log \
-        -H "Authorization: Bearer $K" -H 'Content-Type: application/json' \
-        -d '{"value":false}'
-      ls -t ~/.cli-proxy-api/logs/v1-messages-*
+      K='<mgmt-key from ~/.cli-proxy-api/config.yaml>' curl -s -X PUT
+      http://127.0.0.1:8318/v0/management/request-log \ -H
+      "Authorization: Bearer $K" -H 'Content-Type: application/json' \ -d
+      '{"value":true}'
+      # exactly ONE call from Claude Code
+      curl -s -X PUT http://127.0.0.1:8318/v0/management/request-log \ -H
+      "Authorization: Bearer $K" -H 'Content-Type: application/json' \ -d
+      '{"value":false}' ls -t ~/.cli-proxy-api/logs/v1-messages-*
 
-  Ключ в `config.yaml` — открытый; в `merged-config.yaml` лежит его bcrypt-хеш,
-  и с ним управляющий API отвечает `invalid management key`.
-- В дампе видны ОБЕ стороны: `REQUEST BODY` — что прислал клиент,
-  `API REQUEST N` — что ушло апстриму после перевода протокола (N>1 — повтор на
-  другом креденшеле), `API RESPONSE N`, `RESPONSE`.
-- Фильтра по сессии нет, гранулярность — идентификатор запроса (он же в имени
-  файла, он же в `main.log`); есть `GET /v0/management/request-log-by-id/:id`.
-- Окно держать секундами: тела пишутся целиком, у не-error дампов ротации нет, а
-  через бэкенд идёт весь остальной флот — в окно попадут и чужие тела.
+  The key in `config.yaml` is plaintext; `merged-config.yaml` holds its
+  bcrypt hash, and with that the management API answers `invalid
+  management key`.
+- Both sides are visible in the dump: `REQUEST BODY` — what the client
+  sent, `API REQUEST N` — what went upstream after the protocol
+  translation (N>1 — a retry on a different credential), `API RESPONSE
+  N`, `RESPONSE`.
+- There is no per-session filter; the granularity is the request id (it
+  is also in the file name, and also in `main.log`); there is `GET
+  /v0/management/request-log-by-id/:id`.
+- Keep the window to seconds: bodies are written in full, non-error dumps
+  have no rotation, and the rest of the fleet goes through the backend —
+  other people's bodies will fall into the window too.
 
-Отдельная ловушка: `ANTHROPIC_BASE_URL` из окружения шелла сессию НЕ
-перенаправляет — `env` в `~/.claude/settings.json` перебивает переменную.
-Проба, задуманная как «увести прокси-полосу в свой приёмник», ушла в настоящий
-прокси и молча выглядела успешной.
+A separate trap: `ANTHROPIC_BASE_URL` from the session's shell
+environment does NOT redirect the session — `env` in
+`~/.claude/settings.json` overrides the variable. A probe conceived as
+"route the proxy lane to its own receiver" went to the real proxy and
+silently looked successful.
 
-## 15. Перенос на новую версию
+## 15. Porting to a new version
 
-1. Распаковать образ новой версии, прогнать `claude-patch-all.sh` — локаторы
-   структурные, обычно применяются как есть.
-2. Проверок должно пройти 78/78; любой `fail` — читать локатор, а не обходить.
-   Локаторы пережили без правок 2.1.229–2.1.238 (переход 237→238 — с первого
-   прогона). На 2.1.239 сломались два: адаптер вокруг вызова инструмента и
-   имя `$jS`, вклеенное в шаблон без экранирования (уроки 6 и 7 в §14).
-   Оба — в патчере, а не в обходе: конвейер не пишет НИЧЕГО, если упал хоть
-   один патч, поэтому на 2.1.239 судьи в образе не было бы вовсе.
-3. Дымовой гейт (`--version`) обязан пройти ДО перенаправления лаунчера.
-4. Живая проба судьи: одна сессия с `CLAUDE_JUDGE=enforce`, один заведомо
-   завышенный диспатч; в журнале обязаны появиться `outcome:"block"`, `en`,
-   `tries`, `rec`, а в сессии — ошибка инструмента с текстом причины.
-5. Лестница и отмена: две оснастки в `judge/fixtures/` (см. её README) —
-   прогнать обе, сверить журнал с ожиданиями, записанными там же.
-6. Контроль проектного слоя: тот же диспатч из каталога с
-   `.claude/probes/judge/prompt.extra.md` — в журнале `cfg` указывает на проектный
-   каталог; вне проекта `cfg: null`.
+1. Unpack the new version's image, run `claude-patch-all.sh` — the
+   locators are structural and usually apply as is.
+2. 78/78 checks must pass; any `fail` — read the locator, do not work
+   around it. The locators survived 2.1.229–2.1.238 without edits (the
+   237→238 transition — on the first run). On 2.1.239 two broke: the
+   adapter around the tool call, and the `$jS` name glued into a pattern
+   unescaped (lessons 6 and 7 in §14). Both were in the patcher, not in
+   the workaround: the pipeline writes NOTHING if any patch fails, so on
+   2.1.239 there would have been no judge in the image at all.
+3. The smoke gate (`--version`) must pass BEFORE the launcher is
+   repointed.
+4. A live probe of the judge: one session with `CLAUDE_JUDGE=enforce`,
+   one deliberately overreaching dispatch; the journal must show
+   `outcome:"block"`, `en`, `tries`, `rec`, and the session must show a
+   tool error with the reason's text.
+5. Ladder and cancellation: two fixtures in `judge/fixtures/` (see its
+   README) — run both, compare the journal against the expectations
+   recorded there as well.
+6. Project-layer control: the same dispatch from a directory with
+   `.claude/probes/judge/prompt.extra.md` — in the journal `cfg` points
+   at the project directory; outside the project `cfg: null`.
