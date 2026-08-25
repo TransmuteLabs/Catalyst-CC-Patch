@@ -177,7 +177,7 @@ Merge rules: a probe's effective settings are `[defaults]`, overlaid with
 `[probe.judge]`, and then the same from the project's `probes.toml` on
 top (a shallow merge, by keys); a project's `prompt.md` and `body.json`
 REPLACE the global ones wholesale; `prompt.extra.md` is APPENDED to the
-prompt under the heading "RULES OF THIS PROJECT". An explicitly set
+prompt under the heading «ПРАВИЛА ЭТОГО ПРОЕКТА». An explicitly set
 `CLAUDE_PROBES_DIR` disables the project layer: a probe must receive
 exactly what was handed to it. The applied project directory is visible
 in the journal as the `cfg` field.
@@ -343,8 +343,8 @@ entry with `src` equal to `user`.
 
 Transcript trimming pins the HUMAN's replies. While trimming was FIFO,
 the user's instructions were discarded FIRST — they are the oldest.
-Measured by the bench 2026-08-21: after ~70 turns the prohibition "do not
-call opus in this session" left the transcript entirely (0 `src:"user"`
+Measured by the bench 2026-08-21: after ~70 turns the prohibition
+«в этой сессии не вызывай opus» left the transcript entirely (0 `src:"user"`
 entries out of 177), and the call was cancelled only by ECHO — a quote of
 the prohibition survived in the first 300 characters of a previous
 cancellation that had arrived as `tool-output`. Had the main loop been
@@ -388,7 +388,8 @@ the marker undercounted pinned replies (it counted by deletion labels
 after reindexing), overcounted trims (it counted calls, not surviving
 entries — 39 against 4 on a real transcript), and the record itself
 undercounted what was cut (a re-trim counted from the previous cut point,
-not from the original: "123 cut" where 4 remained of 200,004 characters).
+not from the original: «вырезано 123» where 4 remained of 200,004
+characters).
 The invariant is held by two rules: the counters are computed AFTER the
 final compaction over the live entries, and a trim of any depth cuts from
 the ORIGINAL text, which is kept alongside the transcript. The second
