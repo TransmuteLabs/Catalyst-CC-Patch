@@ -77,8 +77,15 @@ done
 for f in README.md; do
   cp "$ROOT/idle-watch/$f" "$STAGE/idle-watch/$f"
 done
-PLIST="$ROOT/judge/com.maratkarimov.judge-compact.plist"
-[[ -f "$PLIST" ]] && cp "$PLIST" "$STAGE/judge/$(basename "$PLIST")"
+# The name was pinned here and then CHANGED (com.maratkarimov ->
+# com.transmutelabs, commit 3303d36) without this line following it. Because the
+# copy was guarded by `[[ -f ]] &&`, the miss was silent: the kit simply shipped
+# without the plist. Glob instead of naming, so a rename cannot outrun this
+# line; the judge/ completeness guard below is what finally reported it.
+for f in "$ROOT"/judge/*.plist; do
+  [ -f "$f" ] || continue
+  cp "$f" "$STAGE/judge/$(basename "$f")"
+done
 
 # The tools/ completeness guard: walking the directory makes omission
 # impossible, but the check must also fail when the walk is swapped back for a

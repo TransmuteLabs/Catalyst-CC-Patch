@@ -33,10 +33,6 @@
 #   bundle id.
 set -euo pipefail
 
-# 4.3.3 minimum: 4.3.2's unpacker cannot read the container Claude Code ships
-# from 2.1.231 on (bun bumped; the binary grew ~5 MB) and aborts with "Failed to
-# extract JavaScript from native installation" before any patch is evaluated.
-TWEAKCC_VER="${TWEAKCC_VER:-4.3.3}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUR_PATCH="$HERE/tweakcc-patch.js"
 INSTALLER="$HERE/claude_patch.py"
@@ -98,46 +94,68 @@ echo "Target binary: $BIN"
 # this writing) extracts the entry ALONE, so all 25 locators search a 20 KB stub
 # and the whole set fails at once — a failure that reads like 25 broken patches
 # rather than one broken unpacker, which is exactly how it was first misread.
-# The local fork joins the entry with its chunks; on 2.1.241 and earlier its
-# selection is a single module and it behaves identically to the published one.
-TWEAKCC_LOCAL="${TWEAKCC_LOCAL:-$HERE/../Catalyst-tweakcc/dist/index.mjs}"
-BIN_VER="$("$BIN" --version 2>/dev/null | awk '{print $1}')"
-if [[ -f "$TWEAKCC_LOCAL" ]]; then
-  TWEAKCC=(node "$TWEAKCC_LOCAL")
-  echo "Unpacker: local fork ($TWEAKCC_LOCAL)"
-else
-  TWEAKCC=(npx -y "tweakcc@$TWEAKCC_VER")
-  echo "Unpacker: published tweakcc@$TWEAKCC_VER"
-  # Refuse rather than fall back silently: on a split bundle the published
-  # unpacker does not fail, it succeeds on a stub.
-  if [[ -n "$BIN_VER" ]] && ! printf '%s\n2.1.241\n' "$BIN_VER" | sort -V -C; then
-    echo "ERROR: $BIN_VER ships a split bundle and needs the fork. Build it:"
-    echo "       cd $(dirname "$(dirname "$TWEAKCC_LOCAL")") && pnpm install && pnpm build"
-    exit 1
+# Our fork joins the entry with its chunks; on 2.1.241 and earlier its selection
+# is a single module and it behaves identically to the published one.
+#
+# This is the second time the unpacker, not the patches, was the thing that
+# broke: 4.3.2 could not read the container Claude Code ships from 2.1.231 on
+# (bun bumped, the binary grew ~5 MB) and aborted with "Failed to extract
+# JavaScript from native installation" before any patch was evaluated. That one
+# was fixable by raising a version floor; this one was not, which is why there
+# is a fork.
+#
+# The fork is pinned BY COMMIT, never by branch. The unpacker decides what every
+# locator sees, so "whatever main happens to be today" would silently make two
+# runs of this script incomparable. A commit SHA is content-addressed, so the
+# pin is its own integrity check: GitHub cannot serve a different tree under it.
+# Bump it deliberately, the way any dependency is bumped.
+CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-1cf817c795663522a931ce231cdb2694070d261e}"
+CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
+
+# TWEAKCC_LOCAL is the development escape hatch: point it at a built
+# dist/index.mjs to try an unpacker change before it is pushed and pinned. It is
+# an EXPLICIT opt-in and it announces itself — an implicit "use the sibling
+# checkout if one happens to be there" would make the run depend on the shape of
+# somebody's disk.
+ensure_tweakcc() {
+  if [[ -n "${TWEAKCC_LOCAL:-}" ]]; then
+    [[ -f "$TWEAKCC_LOCAL" ]] || { echo "ERROR: TWEAKCC_LOCAL=$TWEAKCC_LOCAL does not exist"; exit 1; }
+    TWEAKCC=(node "$TWEAKCC_LOCAL")
+    echo "Unpacker: local build via TWEAKCC_LOCAL ($TWEAKCC_LOCAL)"
+    return
   fi
-fi
 
-# Keep our own pristine copy independent of tweakcc's backup.
-if [[ ! -f "$BIN.orig" ]]; then
-  cp -p "$BIN" "$BIN.orig"
-  echo "Backed up -> $BIN.orig"
-fi
+  local dir="$CATALYST_TWEAKCC_CACHE/$CATALYST_TWEAKCC_SHA"
+  if [[ ! -f "$dir/dist/index.mjs" ]]; then
+    echo "==> Fetching the unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
+    # Built in .tmp and renamed into place only once dist/index.mjs exists, so an
+    # interrupted fetch can never leave a cache entry that looks complete.
+    rm -rf "$dir.tmp"
+    mkdir -p "$dir.tmp"
+    # No `curl | tar`: a pipe reports the LAST stage's exit code, and a failed
+    # download would read as a successful extraction of nothing.
+    curl -fsSL -o "$dir.tmp/src.tar.gz" \
+      "https://codeload.github.com/$CATALYST_TWEAKCC_REPO/tar.gz/$CATALYST_TWEAKCC_SHA" \
+      || { echo "ERROR: could not fetch $CATALYST_TWEAKCC_REPO @ $CATALYST_TWEAKCC_SHA"; exit 1; }
+    tar -xzf "$dir.tmp/src.tar.gz" -C "$dir.tmp" --strip-components=1 \
+      || { echo "ERROR: could not unpack the unpacker tarball"; exit 1; }
+    rm -f "$dir.tmp/src.tar.gz"
+    ( cd "$dir.tmp" \
+      && npx -y pnpm@latest install --frozen-lockfile \
+      && npx -y pnpm@latest run build ) \
+      || { echo "ERROR: unpacker build failed in $dir.tmp"; exit 1; }
+    [[ -f "$dir.tmp/dist/index.mjs" ]] \
+      || { echo "ERROR: unpacker build produced no dist/index.mjs"; exit 1; }
+    rm -rf "$dir"
+    mv "$dir.tmp" "$dir"
+    echo "Unpacker cached in $dir"
+  fi
 
-# --- always start from pristine ----------------------------------------------
-# Both patch sets consume anchors: applied twice, the second run cannot find
-# them ("routing site not found"). tweakcc restores from ITS OWN backup before
-# applying, so if that backup was ever taken from an already-patched binary it
-# silently re-introduces the old edits and breaks the run. Reset both to the
-# pristine build, which makes this script deterministic and re-runnable.
-if ! cmp -s "$BIN" "$BIN.orig"; then
-  cp -p "$BIN.orig" "$BIN"
-  echo "Reset to pristine from $BIN.orig"
-fi
-TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
-if [[ -f "$TWEAKCC_BACKUP" ]] && ! cmp -s "$TWEAKCC_BACKUP" "$BIN.orig"; then
-  cp -p "$BIN.orig" "$TWEAKCC_BACKUP"
-  echo "Re-pointed tweakcc's backup at the pristine build"
-fi
+  TWEAKCC=(node "$dir/dist/index.mjs")
+  echo "Unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
+}
+ensure_tweakcc
 
 # --- 1. let the user pick tweakcc's patches ----------------------------------
 if [[ $CONFIGURE -eq 1 ]]; then
