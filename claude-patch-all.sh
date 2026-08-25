@@ -92,6 +92,31 @@ else
 fi
 echo "Target binary: $BIN"
 
+# --- which tweakcc unpacks the image -----------------------------------------
+# Claude Code 2.1.242 split the bundle from one 28 MB module into an ESM entry
+# plus ~1400 chunks. Published tweakcc (4.3.3 and every release after it as of
+# this writing) extracts the entry ALONE, so all 25 locators search a 20 KB stub
+# and the whole set fails at once — a failure that reads like 25 broken patches
+# rather than one broken unpacker, which is exactly how it was first misread.
+# The local fork joins the entry with its chunks; on 2.1.241 and earlier its
+# selection is a single module and it behaves identically to the published one.
+TWEAKCC_LOCAL="${TWEAKCC_LOCAL:-$HERE/../Catalyst-tweakcc/dist/index.mjs}"
+BIN_VER="$("$BIN" --version 2>/dev/null | awk '{print $1}')"
+if [[ -f "$TWEAKCC_LOCAL" ]]; then
+  TWEAKCC=(node "$TWEAKCC_LOCAL")
+  echo "Unpacker: local fork ($TWEAKCC_LOCAL)"
+else
+  TWEAKCC=(npx -y "tweakcc@$TWEAKCC_VER")
+  echo "Unpacker: published tweakcc@$TWEAKCC_VER"
+  # Refuse rather than fall back silently: on a split bundle the published
+  # unpacker does not fail, it succeeds on a stub.
+  if [[ -n "$BIN_VER" ]] && ! printf '%s\n2.1.241\n' "$BIN_VER" | sort -V -C; then
+    echo "ERROR: $BIN_VER ships a split bundle and needs the fork. Build it:"
+    echo "       cd $(dirname "$(dirname "$TWEAKCC_LOCAL")") && pnpm install && pnpm build"
+    exit 1
+  fi
+fi
+
 # Keep our own pristine copy independent of tweakcc's backup.
 if [[ ! -f "$BIN.orig" ]]; then
   cp -p "$BIN" "$BIN.orig"
@@ -117,7 +142,7 @@ fi
 # --- 1. let the user pick tweakcc's patches ----------------------------------
 if [[ $CONFIGURE -eq 1 ]]; then
   echo "==> Opening tweakcc's UI — pick the patches you want, save, and quit."
-  npx -y "tweakcc@$TWEAKCC_VER" || true
+  "${TWEAKCC[@]}" || true
 fi
 
 # --- 2. tweakcc's own patches (restores from its backup first!) ---------------
@@ -138,9 +163,9 @@ if cfg.get('ccInstallationPath') != target:
     print(f"Pinned tweakcc to {target}")
 PY
   fi
-  if npx -y "tweakcc@$TWEAKCC_VER" --list-patches >/dev/null 2>&1; then
+  if "${TWEAKCC[@]}" --list-patches >/dev/null 2>&1; then
     echo "==> Applying tweakcc's configured patches"
-    npx -y "tweakcc@$TWEAKCC_VER" --apply -y || {
+    "${TWEAKCC[@]}" --apply -y || {
       echo "NOTE: tweakcc --apply reported a problem (no config yet?); continuing with ours only."
     }
   fi
@@ -155,7 +180,7 @@ echo "==> Разбор вклеиваемого кода"
 node "$(dirname "$0")/tools/emit-check.js"
 
 echo "==> Applying our multi-provider patches"
-npx -y "tweakcc@$TWEAKCC_VER" adhoc-patch \
+"${TWEAKCC[@]}" adhoc-patch \
   --script "@$OUR_PATCH" \
   -p "$BIN" \
   --confirm-possible-dangerous-patch
@@ -263,13 +288,22 @@ def _bypass_no_immunity(d):
     # so its single remaining use is the proof that the branch, not the whole
     # mechanism, was removed. On an unpatched image there are two uses — the
     # check fails.
-    m = re.search(rb'isBypassImmuneCircuitBreaker:\(\)=>(' + ID + rb')', d)
-    if not m:
+    # The predicate used to be reachable BY NAME from its use site
+    # (`isBypassImmuneCircuitBreaker:()=><name>` in the CommonJS bundle), so
+    # counting its uses could prove that the BRANCH, not the mechanism, was
+    # removed. From 2.1.242 the bundle is code-split ESM: the definition
+    # exports `<i> as isBypassImmuneCircuitBreaker` under a chunk-local name
+    # and each consumer imports it under a name of its own, so no single name
+    # spans both sides and a count over the whole image proves nothing.
+    #
+    # The same two facts, asserted without leaning on a name: the immunity
+    # branch is gone in its exact shape, the removal signature stands in its
+    # place, and decision reasons still reach the predicate's other consumer.
+    if re.search(rb'\?' + ID + rb'\(' + ID + rb'\.decisionReason,' + ID + rb'\):void 0;', d):
         return False
-    immune = re.escape(m.group(1))
     if not re.search(rb'"bypassPermissions"\|\|.{0,240}?,' + ID + rb'=void 0;if\(', d, re.S):
         return False
-    return len(re.findall(rb'\.decisionReason,' + immune + rb'\)', d)) == 1
+    return len(re.findall(rb'\.decisionReason,', d)) >= 1
 
 checks = {
     'routing (claude-* -> subscription)': b'baseURL:/^claude/i.test(' in d,
@@ -346,10 +380,19 @@ checks = {
     # while the search UI is open the page request fires unconditionally, and
     # the growth signal comes from the LOADED list (the filtered one stops
     # growing as soon as a page contains no match, which is the deadlock)
+    # two shapes, because 2.1.242 rewrote the effect: upstream added the loaded
+    # length to the dependencies (closing the deadlock the same way) and then
+    # capped the scan with a give-up counter, which the patch now steps over
+    # while the search UI is open
     'resume search pages in the tail': bool(re.search(
                                               rb'if\((' + ID + rb')==="search"\|\|(' + ID + rb')\+(' + ID + rb')>='
                                               rb'(' + ID + rb')\.length\)(' + ID + rb')\((' + ID + rb')\*3\)\},'
-                                              rb'\[\2,\6,\4\.length,\5,\1,(' + ID + rb')\.length\]\),\7\.length===0', d)),
+                                              rb'\[\2,\6,\4\.length,\5,\1,(' + ID + rb')\.length\]\),\7\.length===0', d))
+                                          or bool(re.search(
+                                              rb'if\((' + ID + rb')==="search"\|\|\((' + ID + rb')\+(' + ID + rb')>='
+                                              rb'(' + ID + rb')\.length&&(' + ID + rb')\.current\.empty<' + ID + rb'\)\)'
+                                              rb'\5\.current\.empty\+\+,(' + ID + rb')\((' + ID + rb')\*3\)\},'
+                                              rb'\[\2,\7,\4\.length,(' + ID + rb'),\6,\1\]\),' + ID + rb'\.length===0', d)),
     # a NAMED dispatch becomes an in-process teammate, whose record is built
     # from a different literal than a plain local agent; the agent type has to
     # reach it through the spawn directive or the row shows only the model
@@ -365,7 +408,11 @@ checks = {
     # success: budgets raised to 300, the shared backoff on the wait, and the
     # exhaustion path throws instead of emitting "…may be incomplete"
     'broken stream retried, not halved': bool(re.search(
-                                              rb'=3,' + ID + rb'=\{value:0\},' + ID + rb'=300,' + ID + rb'=0,'
+                                              # 2.1.245 inserts two more declarations right after
+                                              # `{value:0}`; the tail run still identifies the two
+                                              # counters this patch raises
+                                              rb'=3,' + ID + rb'=\{value:0\},(?:' + ID + rb'=[^,;]{1,24},){0,8}'
+                                              rb'' + ID + rb'=300,' + ID + rb'=0,'
                                               rb'' + ID + rb'=0,' + ID + rb'=!1,' + ID + rb'=300,' + ID + rb'=0,', d))
                                           and bool(re.search(
                                               rb'if\((' + ID + rb')=null,!(' + ID + rb')\)await (' + ID + rb')\('
@@ -944,7 +991,14 @@ checks = {
     # so the check has to reach the debounce site first and then assert on the
     # constant that site actually names
     'statusline throttle raised': (lambda mm: bool(mm) and bool(re.search(
-                                              rb'var ' + mm.group(1) + rb'=500\b', d)))(
+                                              # the captured name may contain `$`, which is an
+                                              # ANCHOR in a pattern: the same class the patch
+                                              # script closes with rxEsc, missed here. On 2.1.245
+                                              # the constant is named `$Ke` and this check
+                                              # reported a false FAIL for a correctly patched
+                                              # binary. It is the only unescaped interpolation in
+                                              # this file — the other .group() uses are haystacks.
+                                              rb'var ' + re.escape(mm.group(1)) + rb'=500\b', d)))(
                                           re.search(rb'\.setTimeout\(\(\)=>\{this\.#' + ID
                                                     + rb'=null,this\.#' + ID + rb'\(\)\},('
                                                     + ID + rb')\)\}', d)),

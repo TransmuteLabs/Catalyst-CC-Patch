@@ -40,6 +40,28 @@ const failures = [];
 const rxEsc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const repEsc = s => String(s).replace(/\$/g, '$$$$');
 
+// From Claude Code 2.1.242 the bundle is not one module but an entry plus
+// ~1400 code-split chunks, handed to us joined with
+// `/*__tweakcc_module_boundary_<n>__*/` separators. Minified names are scoped
+// to a chunk, so THE SAME LETTER MEANS DIFFERENT THINGS IN DIFFERENT MODULES:
+// in 2.1.245 `I` is the fork flag in the agent-launch module and an unrelated
+// flag in the voice-stream module, where `I?void 0:{connectFailureCode:...}`
+// has nothing to do with forks. Any patch that reads a name at one site and
+// then uses it as a pattern must stay inside the module that defines it.
+// Before the split this could not happen — there was one module — so patches
+// written against 2.1.241 and earlier carry the assumption silently.
+const moduleSliceAround = (text, pos) => {
+  const boundary = /\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/g;
+  let start = 0;
+  let end = text.length;
+  let m;
+  while ((m = boundary.exec(text)) !== null) {
+    if (m.index < pos) start = m.index + m[0].length;
+    else { end = m.index; break; }
+  }
+  return [start, end];
+};
+
 // Each patch is run in isolation and its failure RECORDED rather than thrown,
 // so one run reports EVERY broken locator instead of only the first. That
 // matters because a new Claude Code release can break several at once, and each
@@ -187,9 +209,19 @@ step('6 input chevron colour', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   const IDLE_COLOR = 'success';   // mirrors settings.inputBox.chevronIdleThemeColor
 
+  // The JSX callee is `<ns>.jsx(` up to 2.1.241 and a bare `<f>(` from 2.1.242,
+  // where the ESM output binds the imported helper to a local name instead of
+  // reaching through a namespace object, so the namespace part is optional.
+  // What actually pins this site is the pair of backreferences in
+  // `{color:<themeColor>,dimColor:<isLoading>,children:` together with the
+  // memo guard just before it — the callee never carried the specificity.
+  //
+  // The gap between the two halves is bounded rather than open: the bundle is
+  // now a 36 MB join of ~1400 chunks, and an unbounded lazy span is free to
+  // pair a head in one module with a tail in another.
   const rx = new RegExp(
     `,\\{isLoading:(${ID}),(?:${ID}:${ID},)*themeColor:(${ID})\\}=${ID},(${ID})=\\2\\?\\?void 0[,;]` +
-    `[\\s\\S]*?if\\([^)]*!==\\3[^)]*\\|\\|[^)]*!==\\1[^)]*\\)${ID}=${ID}\\.jsxs?\\(${ID},\\{color:\\3,dimColor:\\1,children:`
+    `[\\s\\S]{0,600}?if\\([^)]*!==\\3[^)]*\\|\\|[^)]*!==\\1[^)]*\\)${ID}=${ID}(?:\\.${ID})?\\(${ID},\\{color:\\3,dimColor:\\1,children:`
   );
   const m = js.match(rx);
   if (!m) fail('input chevron component not found');
@@ -496,26 +528,53 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   const before = js.length;
 
   // (a) coordinator mode: `let <t>=Date.now(),<model>=<isCoordinator>()?void 0:<arg>,`
-  const coord = new RegExp(`(let ${ID}=Date\\.now\\(\\),(${ID})=)${ID}\\(\\)\\?void 0:(${ID}),`);
-  const coordMatch = js.match(coord);
-  if (!coordMatch) fail('coordinator-mode model suppression not found');
-  js = js.replace(coord, `$1$3,`);
+  //
+  //     Anchored on the depth-cap neighbourhood that follows
+  //     (`<n>=<f>(<l>.agentContext)`), not on the shape alone: the image holds
+  //     about thirty other `()?void 0:` sites and the bare shape does not tell
+  //     them apart.
+  //
+  //     The suppression itself is OPTIONAL in the pattern because from 2.1.242
+  //     the product no longer does it — the site already reads `<model>=<arg>`.
+  //     Making it optional turns that into a match, so the leg becomes a no-op
+  //     exactly where there is nothing left to remove, while an ABSENT site
+  //     still fails. Dropping the leg outright would instead leave 2.1.241 and
+  //     earlier silently unpatched.
+  const coord = new RegExp(
+    `(let ${ID}=Date\\.now\\(\\),${ID}=)(?:${ID}\\(\\)\\?void 0:)?(${ID},${ID}=${ID}\\(${ID}\\.agentContext\\))`,
+  );
+  if (!coord.test(js)) fail('coordinator-mode model suppression site not found');
+  js = js.replace(coord, `$1$2`);
 
   // (b) the fork flag is whatever the launch telemetry reports as is_fork
   const forkMatch = js.match(new RegExp(`is_fork:(${ID}),`));
   if (!forkMatch) fail('fork flag not found (is_fork telemetry)');
   const fork = forkMatch[1];
-  const dropped = `${rxEsc(fork)}\\?void 0:(${ID})`;
 
-  // resolve site: getAgentModel(<defModel>(<agent>,<main>),<main>,<override>,...)
-  const resolveRx = new RegExp(`(=${ID}\\(${ID}\\(${ID},(${ID})\\),\\2,)${dropped},`);
-  if (!resolveRx.test(js)) fail('fork model-resolution site not found');
-  js = js.replace(resolveRx, `$1$3,`);
-
-  // launch options: `model:<fork>?void 0:<override>,override:`
-  const launchRx = new RegExp(`(model:)${dropped}(,override:)`);
-  if (!launchRx.test(js)) fail('fork launch-options model site not found');
-  js = js.replace(launchRx, `$1$2$3`);
+  // Every `<fork>?void 0:<x>` is one place where a value is thrown away FOR
+  // BEING A FORK, which is precisely the defect this patch removes, so they
+  // are cleared as a class instead of one bespoke locator per site. The sites
+  // are not stable across releases: 2.1.239 has two (the model resolution and
+  // the launch options), 2.1.245 has three, because the resolution was split
+  // into a lambda plus a second direct call after the plugin hook may replace
+  // the model, and the launch options now read the variable that call
+  // produces. Chasing each shape separately is what broke here; clearing the
+  // class does not care how the calls are arranged.
+  //
+  // The bounds are the honesty check: an image that reshaped these sites out
+  // of existence, or grew a crop of unrelated ones, fails loudly rather than
+  // being silently half-patched. The lookbehind keeps `<fork>` from matching
+  // the tail of a longer minified name.
+  const droppedRx = new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?void 0:(${ID})`, 'g');
+  const [mStart, mEnd] = moduleSliceAround(js, js.search(new RegExp(`is_fork:${rxEsc(fork)},`)));
+  let body = js.slice(mStart, mEnd);
+  const droppedHits = body.match(droppedRx) ?? [];
+  if (droppedHits.length < 2 || droppedHits.length > 6)
+    fail(`fork value-drop sites: expected 2..6, found ${droppedHits.length}`);
+  body = body.replace(droppedRx, '$1');
+  if (new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?void 0:`).test(body))
+    fail('fork value-drop sites survived the sweep');
+  js = js.slice(0, mStart) + body + js.slice(mEnd);
 
   // (c) schema: add the two fields next to the existing `model`
   const strFnMatch = js.match(
@@ -824,24 +883,78 @@ step('17 /resume search loads the sessions it has not read yet', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   const before = js.length;
 
-  // ...&&<mode>!=="search",<head>=8+(<hasChips>?1:0),<pad>=2,
-  //    <rows>=Math.max(1,Math.floor((<height>-<head>-<pad>)/3));
-  // if(<React>.useEffect(()=>{if(!<more>)return;let <slack>=<rows>*2;
-  //      if(<focus>+<slack>>=<filtered>.length)<more>(<rows>*3)},
-  //      [<focus>,<rows>,<filtered>.length,<more>]),
-  //    <logs>.length===0&&!<loading>)return null;
-  const rx = new RegExp(
+  // Two shapes, because 2.1.242 rewrote the effect.
+  //
+  // OLD (<= 2.1.241) — the deadlock described above, in full:
+  //   ...&&<mode>!=="search",<head>=8+(<chips>?1:0),<pad>=2,
+  //      <rows>=Math.max(1,Math.floor((<height>-<head>-<pad>)/3));
+  //   if(<React>.useEffect(()=>{if(!<more>)return;let <slack>=<rows>*2;
+  //        if(<focus>+<slack>>=<filtered>.length)<more>(<rows>*3)},
+  //        [<focus>,<rows>,<filtered>.length,<more>]),
+  //      <logs>.length===0&&!<loading>)return null;
+  //
+  // NEW (>= 2.1.242) — upstream closed the deadlock the same way this patch
+  // did, by adding the LOADED length to the dependencies, and then bounded the
+  // scan: a ref counts consecutive requests that brought no new match and the
+  // effect gives up after five. The counter resets whenever the focus or the
+  // filtered length moves, so a steady trickle of matches keeps it going; what
+  // still fails is the case this patch exists for — one session sitting more
+  // than five fruitless pages deep, which the search reports as "no results"
+  // while the file is on disk.
+  //
+  // So the edit is no longer "add the growth signal" (upstream has it) but
+  // "do not let the give-up counter stop a scan the user explicitly asked
+  // for". Outside search mode the cap is left exactly as upstream wrote it.
+  // Termination is unchanged and does not rely on the counter: onRequestMore
+  // returns immediately once it reaches the end of the file list, so the
+  // loaded length stops changing, no dependency moves, and the effect stops.
+  const rxNew = new RegExp(
+    `&&(${ID})!=="search",(${ID})=8\\+\\((${ID})\\?1:0\\),(${ID})=2,` +
+      `(${ID})=Math\\.max\\(1,Math\\.floor\\(\\((${ID})-\\2-\\4\\)/3\\)\\),` +
+      `(${ID})=(${ID})\\.length,(${ID})=(${ID})\\(\\{focusedIndex:-1,visible:-1,empty:0\\}\\);` +
+      `if\\((${ID})\\(\\(\\)=>\\{if\\(!(${ID})\\)return;let (${ID})=\\9\\.current;` +
+      `if\\(\\13\\.focusedIndex!==(${ID})\\|\\|\\13\\.visible!==(${ID})\\.length\\)` +
+      `\\9\\.current=\\{focusedIndex:\\14,visible:\\15\\.length,empty:0\\};` +
+      `let (${ID})=\\5\\*2;` +
+      `if\\(\\14\\+\\16>=\\15\\.length&&\\9\\.current\\.empty<(${ID})\\)` +
+      `\\9\\.current\\.empty\\+\\+,\\12\\(\\5\\*3\\)\\},` +
+      `\\[\\14,\\5,\\15\\.length,\\7,\\12\\]\\),\\8\\.length===0&&!(${ID})\\)return null;`,
+  );
+  const mNew = js.match(rxNew);
+  if (mNew) {
+    js = js.replace(
+      rxNew,
+      '&&$1!=="search",$2=8+($3?1:0),$4=2,' +
+        '$5=Math.max(1,Math.floor(($6-$2-$4)/3)),' +
+        '$7=$8.length,$9=$10({focusedIndex:-1,visible:-1,empty:0});' +
+        'if($11(()=>{if(!$12)return;let $13=$9.current;' +
+        'if($13.focusedIndex!==$14||$13.visible!==$15.length)' +
+        '$9.current={focusedIndex:$14,visible:$15.length,empty:0};' +
+        'let $16=$5*2;' +
+        'if($1==="search"||($14+$16>=$15.length&&$9.current.empty<$17))' +
+        '$9.current.empty++,$12($5*3)},' +
+        '[$14,$5,$15.length,$7,$12,$1]),$8.length===0&&!$18)return null;',
+    );
+    applied.push(
+      `/resume search loads the sessions it has not read yet, past the ` +
+        `give-up counter (mode var '${mNew[1]}', filtered list '${mNew[15]}', ` +
+        `loaded list '${mNew[8]}', cap '${mNew[17]}', +${js.length - before} bytes)`,
+    );
+    return;
+  }
+
+  const rxOld = new RegExp(
     `&&(${ID})!=="search",(${ID})=8\\+\\((${ID})\\?1:0\\),(${ID})=2,` +
       `(${ID})=Math\\.max\\(1,Math\\.floor\\(\\((${ID})-\\2-\\4\\)/3\\)\\);` +
       `if\\((${ID})\\.useEffect\\(\\(\\)=>\\{if\\(!(${ID})\\)return;let (${ID})=\\5\\*2;` +
       `if\\((${ID})\\+\\9>=(${ID})\\.length\\)\\8\\(\\5\\*3\\)\\},` +
       `\\[\\10,\\5,\\11\\.length,\\8\\]\\),(${ID})\\.length===0&&!(${ID})\\)return null;`,
   );
-  const m = js.match(rx);
-  if (!m) fail('/resume auto-load-more effect not found');
+  const m = js.match(rxOld);
+  if (!m) fail('/resume auto-load-more effect not found (neither shape)');
 
   js = js.replace(
-    rx,
+    rxOld,
     '&&$1!=="search",$2=8+($3?1:0),$4=2,$5=Math.max(1,Math.floor(($6-$2-$4)/3));' +
       'if($7.useEffect(()=>{if(!$8)return;let $9=$5*2;' +
       'if($1==="search"||$10+$9>=$11.length)$8($5*3)},' +
@@ -976,12 +1089,19 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   // 1. The per-request counters, declared in one long `let` run:
   //    <qo>=3,<un>={value:0},<staleMax>=2,<stale>=0,<connRetry>=0,<flag>=!1,
   //    <idleMax>=1,<idle>=0,
+  //
+  //    The run grows between releases — 2.1.245 inserts `<alias>=<qo>` and
+  //    `<map>=new Map` right after `{value:0}` — so a bounded stretch of extra
+  //    simple declarations is allowed in the middle and carried through
+  //    untouched. The two counters this patch raises are still identified by
+  //    their position in the tail run, which has kept its shape.
   const rxBudget = new RegExp(
-    `(${ID})=3,(${ID})=\\{value:0\\},(${ID})=2,(${ID})=0,(${ID})=0,(${ID})=!1,(${ID})=1,(${ID})=0,`,
+    `(${ID})=3,(${ID})=\\{value:0\\},((?:${ID}=[^,;]{1,24},){0,8})` +
+      `(${ID})=2,(${ID})=0,(${ID})=0,(${ID})=!1,(${ID})=1,(${ID})=0,`,
   );
   const mBudget = js.match(rxBudget);
   if (!mBudget) fail('streaming retry budgets not found');
-  js = js.replace(rxBudget, '$1=3,$2={value:0},$3=300,$4=0,$5=0,$6=!1,$7=300,$8=0,');
+  js = js.replace(rxBudget, '$1=3,$2={value:0},$3$4=300,$5=0,$6=0,$7=!1,$8=300,$9=0,');
 
   // 2. The linear wait on the stale-connection retry inside the finalize
   //    branch: `if(<req>=null,!<idle>)await <sleep>(100*<stale>,<signal>)`
