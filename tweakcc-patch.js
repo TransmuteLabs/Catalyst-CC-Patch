@@ -62,6 +62,23 @@ const moduleSliceAround = (text, pos) => {
   return [start, end];
 };
 
+// A pattern that embeds a CAPTURED name may only be applied inside the module
+// that defined the name. The whole-text form takes whichever match comes first,
+// and in a split bundle that can be another chunk where the same letters mean
+// something else. It is not a theoretical hazard: on 2.1.246 `var <name>=300` --
+// the exact shape patch 22 rewrites -- occurs 13 times across the bundle under
+// various names, so which one gets rewritten would be the minifier's call, not
+// ours. Every such site hands its own capture position to these, and both the
+// search and the edit stay inside that one module.
+const moduleTextAt = pos => {
+  const [start, end] = moduleSliceAround(js, pos);
+  return js.slice(start, end);
+};
+const editModuleAt = (pos, fn) => {
+  const [start, end] = moduleSliceAround(js, pos);
+  js = js.slice(0, start) + fn(js.slice(start, end)) + js.slice(end);
+};
+
 // Each patch is run in isolation and its failure RECORDED rather than thrown,
 // so one run reports EVERY broken locator instead of only the first. That
 // matters because a new Claude Code release can break several at once, and each
@@ -668,8 +685,10 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
   if (!exportMatch) fail('isCoordinatorMode export not found');
   const isCoordinator = exportMatch[1];
 
+  const scope13 = moduleTextAt(exportMatch.index);
+
   const aliasRx = new RegExp(`function ${rxEsc(isCoordinator)}\\(\\)\\{return (${ID})\\(\\)\\}`);
-  const aliasMatch = js.match(aliasRx);
+  const aliasMatch = scope13.match(aliasRx);
   if (!aliasMatch) fail(`coordinator predicate ${isCoordinator}() is not a plain alias`);
   const gate = aliasMatch[1];
 
@@ -686,12 +705,14 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
     `(function ${rxEsc(gate)}\\(\\)\\{if\\(!(${ID})\\(process\\.env\\.CLAUDE_CODE_COORDINATOR_MODE\\)\\)return!1;` +
       `if\\(${ID}\\(\\)&&!${ID}\\(\\)&&!${ID}\\.CLAUDE_CODE_REMOTE)(\\)return!1;return!0\\})`,
   );
-  const gateMatch = js.match(gateRx);
+  const gateMatch = scope13.match(gateRx);
   if (!gateMatch) fail('coordinator interactive veto not found');
   const envTruthy = gateMatch[2];
-  js = js.replace(
-    gateRx,
-    `$1&&!${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_INTERACTIVE)$3`,
+  editModuleAt(exportMatch.index, body =>
+    body.replace(
+      gateRx,
+      `$1&&!${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_INTERACTIVE)$3`,
+    ),
   );
 
   // (b) stop the mode from disabling fork.
@@ -784,12 +805,14 @@ step('14 environment overrides a resumed session mode', () => {
     `(function ${rxEsc(matcher)}\\((${ID})\\)\\{if\\(!\\2\\)return;)` +
       `(let ${ID}=${rxEsc(isCoordinator)}\\(\\),${ID}=\\2==="coordinator";)`,
   );
-  if (!matcherRx.test(js)) {
+  if (!matcherRx.test(moduleTextAt(matcherMatch.index))) {
     fail(`resume mode matcher ${matcher}() does not have the expected shape`);
   }
-  js = js.replace(
-    matcherRx,
-    `$1if(${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_FORCE))return;$3`,
+  editModuleAt(matcherMatch.index, body =>
+    body.replace(
+      matcherRx,
+      `$1if(${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_FORCE))return;$3`,
+    ),
   );
 
   applied.push(
@@ -2232,8 +2255,10 @@ step('23 statusline update throttle', () => {
   if (!m) fail('statusline debounce call site not found');
   const constName = m[5];
   const decl = new RegExp(`var ${rxEsc(constName)}=300\\b`);
-  if (!decl.test(js)) fail(`statusline throttle constant '${constName}' is not the expected 300`);
-  js = js.replace(decl, `var ${repEsc(constName)}=${THROTTLE_MS}`);
+  if (!decl.test(moduleTextAt(m.index))) {
+    fail(`statusline throttle constant '${constName}' is not the expected 300`);
+  }
+  editModuleAt(m.index, body => body.replace(decl, `var ${repEsc(constName)}=${THROTTLE_MS}`));
   applied.push(`statusline throttle 300 -> ${THROTTLE_MS}ms (constant '${constName}')`);
 });
 
