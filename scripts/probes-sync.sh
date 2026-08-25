@@ -1,37 +1,37 @@
 #!/usr/bin/env bash
-# Синхронизация файлов проб между КАНОНОМ (этот проект) и РАЗВЁРТЫВАНИЕМ.
+# Syncing probe files between the CANON (this project) and the DEPLOYMENT.
 #
-# Направление называется явно и всегда: односторонняя копия «куда придётся»
-# уже один раз развела архив с исходником, и найдено это было случайно.
-#   --to-home    канон -> дом   (раскатать правку)
-#   --from-home  дом   -> канон (забрать правку, сделанную на месте)
-#   --diff       показать расхождения, ничего не трогая (по умолчанию)
+# The direction is named explicitly, always: a one-way copy "wherever it lands"
+# once already diverged the archive from the source, and it was found by accident.
+#   --to-home    canon -> home  (roll out an edit)
+#   --from-home  home  -> canon (pick up an edit made in place)
+#   --diff       show divergences, touching nothing (default)
 #
-# Домов ДВА, и это не небрежность, а сегодняшний факт установки:
-#   настройки и промты  -> $CLAUDE_PROBES_DIR (умолчание ~/.claude/probes)
-#   инструменты (.py)   -> ~/.claude/judge — оттуда их запускает launchd,
-#                          путь записан в plist агента
-# Скрипт, знавший только один дом, раскатывал промты в каталог, который ядро
-# перестало читать после переезда на реестр: правка «уезжала» молча.
+# There are TWO homes, and that is not sloppiness but today's install fact:
+#   settings and prompts  -> $CLAUDE_PROBES_DIR (default ~/.claude/probes)
+#   tools (.py)           -> ~/.claude/judge — launchd runs them from there,
+#                           the path is written in the agent plist
+# A script that knew only one home rolled prompts into a directory the core
+# stopped reading after the move to the registry: the edit "went away" silently.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROBES_HOME="${CLAUDE_PROBES_DIR:-$HOME/.claude/probes}"
 TOOLS_HOME="$HOME/.claude/judge"
 
-# пары «путь в каноне : путь в доме», дом подставляется по группе
+# pairs of "path in the canon : path in the home", the home is filled in by group
 PROBE_FILES=(probes.toml judge/prompt.md judge/body.json idle-watch/prompt.md)
 TOOL_FILES=(replay.py compact.py validate.py channel.py adjudicate.py README.md)
 
-# У plist свой дом: его читает launchd из ~/Library/LaunchAgents, а не проба.
-# Сравнивать его с несуществующим файлом в доме проб — вечное «расходится»
-# на пустом месте.
+# The plist has its own home: launchd reads it from ~/Library/LaunchAgents,
+# not the probe. Comparing it against a nonexistent file in the probes home is
+# a perpetual "diverges" out of nowhere.
 PLIST_NAME=com.transmutelabs.judge-compact.plist
 PLIST_HOME="$HOME/Library/LaunchAgents/$PLIST_NAME"
 
 MODE="${1:---diff}"
 case "$MODE" in --to-home|--from-home|--diff) ;; *) echo "не понял режим: $MODE" >&2; exit 1 ;; esac
 
-sync_one() {  # $1 канон, $2 дом, $3 отображаемое имя
+sync_one() {  # $1 canon, $2 home, $3 display name
   local A="$1" B="$2" name="$3"
   case "$MODE" in
     --to-home)   [[ -f "$A" ]] && { mkdir -p "$(dirname "$B")"; cp "$A" "$B"; echo "-> $name"; } ;;
@@ -43,9 +43,9 @@ sync_one() {  # $1 канон, $2 дом, $3 отображаемое имя
 
 for f in "${PROBE_FILES[@]}";  do sync_one "$ROOT/probes/$f" "$PROBES_HOME/$f" "probes/$f"; done
 for f in "${TOOL_FILES[@]}";   do sync_one "$ROOT/judge/$f"  "$TOOLS_HOME/$f"  "judge/$f";  done
-# plist в каноне — ОБРАЗЕЦ с плейсхолдерами путей. Раскатать его как есть
-# значит зарегистрировать в launchd агент, указывающий на /Users/YOUR-USER:
-# он молча не отработает ни разу. Копируем только заполненный под себя.
+# The plist in the canon is a SAMPLE with path placeholders. Rolling it out
+# as-is means registering in launchd an agent pointing at /Users/YOUR-USER:
+# it would silently never run. We copy only one filled in for this machine.
 if grep -q 'YOUR-USER' "$ROOT/judge/$PLIST_NAME" 2>/dev/null; then
   [[ "$MODE" == "--to-home" ]] && \
     echo "!! $PLIST_NAME не раскатан: в каноне образец с /Users/YOUR-USER — заполните пути под себя"

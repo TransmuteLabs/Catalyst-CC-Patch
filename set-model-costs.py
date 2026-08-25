@@ -277,13 +277,13 @@ def load_proxy_catalogue():
         return {}
     out = {}
     for provider_id, rows in data.items():
-        # Прокси публикует запись провайдера двумя формами: голым списком
-        # моделей и обёрткой {"models": [...], "priority": N}. Обход словаря
-        # даёт СТРОКИ-ключи, а не записи, и читатель, знающий одну форму,
-        # падает на первой же обёртке — унося с собой весь шаг синхронизации
-        # цен и окон, а не одного провайдера. Поле "priority" здесь намеренно
-        # не используется: старшинство провайдеров задаётся своим списком ниже,
-        # и подменять его числом неизвестной полярности значит гадать.
+        # The proxy publishes a provider entry in two shapes: a bare list of
+        # models and a wrapper {"models": [...], "priority": N}. Iterating the
+        # dict yields STRING keys, not entries, and a reader that knows only one
+        # shape crashes on the very first wrapper — taking down the entire price
+        # and window sync step, not just one provider. The "priority" field is
+        # deliberately unused here: provider seniority is set by its own list
+        # below, and substituting a number of unknown polarity for it is guessing.
         if isinstance(rows, dict):
             rows = rows.get("models")
         for row in rows or []:

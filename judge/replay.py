@@ -7,9 +7,9 @@ import os
 import re
 import sys
 
-# Дом словаря вердиктов — образ: там он и применяется. Копия литералом
-# разъезжается с образом молча, а неверный словарь даёт неверную разметку
-# корпуса, по которой потом выбирают модель.
+# The home of the verdict dictionary is the image: that is where it is applied.
+# A literal copy drifts from the image silently, and a wrong dictionary gives a
+# wrong corpus annotation, which model selection then relies on.
 DEFAULT_IMAGE = '~/.local/bin/claude'
 _VOCAB_CACHE = {}
 
@@ -38,8 +38,9 @@ def verdict_vocabulary(image_path=None, probe='judge'):
 
 
 class _VerdictPattern:
-    # Ленивое построение: словарь берётся из образа при первом же поиске, а не
-    # при импорте — иначе любой импорт replay требовал бы наличия образа.
+    # Lazy construction: the dictionary is taken from the image on the very
+    # first lookup, not at import time — otherwise any import of replay would
+    # require the image to be present.
     def findall(self, text):
         return verdict_pattern().findall(text)
 
@@ -64,8 +65,9 @@ def _verdict_in_text(text):
 
 
 def verdict_of(raw):
-    """Первая строка content/result — решение; без content берётся последняя
-    строка вердикта из reasoning, чтобы промежуточный вариант не перебил вывод."""
+    """The first line of content/result is the decision; without content the
+    last verdict line from reasoning is taken, so an intermediate variant does
+    not override the conclusion."""
     try:
         data = json.loads(raw)
     except Exception:
@@ -88,8 +90,8 @@ def verdict_of(raw):
     return (matches[-1] if matches else str(content or '')).strip()
 
 
-# Канал отклоняет urllib User-Agent заглушкой периметра; внешний повтор обязан
-# представляться тем же узнаваемым агентом, что и клиент.
+# The channel rejects the urllib User-Agent with a perimeter stub; an external
+# replay must identify itself with the same recognizable agent as the client.
 UA = 'claude-cli/2.1.237 (external, cli)'
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -50,9 +50,9 @@ function parseArgs(argv) {
   return { binary, json };
 }
 
-// Образ — однофайловый исполняемый bun, и вырезанный блок исполняется его
-// движком. Под node другой движок: тексты ошибок TOML-разбора отличаются, API
-// Bun.* отсутствует — стенд измерял бы не тот рантайм.
+// The image is a single-file executable bun, and the carved-out block runs on
+// its engine. Under node the engine is different: TOML-parse error texts differ,
+// the Bun.* API is absent — the bench would be measuring the wrong runtime.
 function assertRuntime() {
   const version = globalThis.Bun?.version;
   if (version) return version;
@@ -63,8 +63,8 @@ function assertRuntime() {
   );
 }
 
-// Версия рантайма пишется самим bun в шаблон npm-агента; запасная форма —
-// адрес самообновления.
+// The runtime version is written by bun itself into the npm-agent template;
+// the fallback form is the self-update address.
 function imageBunVersion(source) {
   const match =
     /bun\/(\d+\.\d+\.\d+) npm\//.exec(source) || /bun-v(\d+\.\d+\.\d+)/.exec(source);
@@ -103,14 +103,14 @@ function locateNames(carved) {
   if (!slots) throw new Error('free names not found: tool, input, context, key');
   const pool = /let __pool=typeof ([A-Za-z_$][\w$]*)==="function"/.exec(carved);
   if (!pool) throw new Error('free name not found: pool');
-  // Форма реакции менялась (стала асинхронной) — локатор не должен падать на
-  // том, что для него несущественно.
+  // The reaction shape changed (became asynchronous) — the locator must not
+  // crash over something immaterial to it.
   const notify = /onAct:(?:async)?\(__r\)=>\{try\{([A-Za-z_$][\w$]*)\(\{value:"\[fleet-idle\] "/.exec(carved);
   if (!notify) throw new Error('free name not found: notify');
   const agent = /mode:"task-notification",agentId:([A-Za-z_$][\w$]*)\(\)/.exec(carved);
   if (!agent) throw new Error('free name not found: agentId');
-  // Аксессор заголовка — свободное имя, чьё связывание в образе НЕ доказано.
-  // Стенд обязан уметь подать и правильную форму, и неправильную.
+  // The title accessor is a free name whose binding in the image is NOT proven.
+  // The bench must be able to feed both the correct shape and the wrong one.
   const title = /let __v=([A-Za-z_$][\w$]*)\(__i\)/.exec(carved);
   if (!title) throw new Error('free name not found: sessionTitle');
   return [slots[1], slots[2], slots[3], slots[4], pool[1], notify[1], agent[1], title[1]];
@@ -201,14 +201,16 @@ const scenarios = [
     expected: { passed: true, outcome: 'ok', sid: 'a1' },
   },
   {
-    // Модель названа в вызове — источник call, определения не спрашиваются.
+    // The model is named in the call — source is call; definitions are not
+    // consulted.
     name: 'model-from-call',
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', jmodel: 'glm-5.3', msrc: 'call', title: 'починка наблюдателя' },
   },
   {
-    // Вызов молчит — модель берётся из определения агента. Ровно этот случай
-    // и терялся: треть записей уходила в журнал без модели.
+    // The call is silent — the model comes from the agent definition. This is
+    // exactly the case that was lost: a third of the records went into the
+    // journal without a model.
     name: 'model-from-agent',
     omitModel: true,
     subagentType: 'glm-critic',
@@ -217,8 +219,9 @@ const scenarios = [
     expected: { passed: true, outcome: 'ok', jmodel: 'glm-5.3', msrc: 'agent' },
   },
   {
-    // Определение говорит inherit — фактическая модель это модель лупа, и
-    // источник обязан это назвать: наследование и явный выбор разные факты.
+    // The definition says inherit — the effective model is the loop's model,
+    // and the source must say so: inheritance and an explicit choice are
+    // different facts.
     name: 'model-inherited',
     omitModel: true,
     subagentType: 'glm-critic',
@@ -228,7 +231,7 @@ const scenarios = [
     expected: { passed: true, outcome: 'ok', jmodel: 'opus', msrc: 'inherit' },
   },
   {
-    // Определения нет вовсе — это НЕ «модель неизвестна», это названный случай.
+    // No definition at all — this is NOT "model unknown", it is a named case.
     name: 'model-no-definition',
     omitModel: true,
     subagentType: 'glm-critic',
@@ -237,24 +240,25 @@ const scenarios = [
     expected: { passed: true, outcome: 'ok', jmodel: null, msrc: 'no-def' },
   },
   {
-    // Аксессор заголовка связался не с тем: вернул не строку. Поля нет,
-    // мусора в журнале нет.
+    // The title accessor bound to the wrong thing: returned a non-string. No
+    // field, no garbage in the journal.
     name: 'title-wrong-binding',
     titleValue: [{ fn: 'x', file: null }],
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', title: null },
   },
   {
-    // Добытчик идентификатора бросил: строка журнала обязана уцелеть, а поле
-    // стать пустым. Потерять запись из-за поля хуже, чем потерять поле.
+    // The id getter threw: the journal line must survive and the field become
+    // empty. Losing a record over a field is worse than losing the field.
     name: 'sid-unavailable',
     agentIdThrows: true,
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', sid: null },
   },
   {
-    // Диспатч длиннее потолка: подрезка объявляется в ШАПКЕ, нагрузка режется
-    // ровно по потолку. Без этого случая объявление доказано только байтами.
+    // A dispatch longer than the cap: the trim is declared in the HEADER, the
+    // payload is cut exactly at the cap. Without this case the declaration is
+    // proven only by bytes.
     name: 'dispatch-truncated',
     config: { dispatch_chars: 200 },
     dispatchPrompt: '[' + 'dispatch-class' + ':1e] ' + 'я'.repeat(600),
@@ -266,7 +270,7 @@ const scenarios = [
     },
   },
   {
-    // Влезающий диспатч не трогается и подрезанным не объявляется.
+    // A dispatch that fits is not touched and not declared trimmed.
     name: 'dispatch-whole',
     config: { dispatch_chars: 4000 },
     response: 'OK: бриф полон',
@@ -276,8 +280,8 @@ const scenarios = [
     },
   },
   {
-    // Нагрузка, кончающаяся строкой-подделкой, шапку не двигает: объявить свой
-    // бриф подрезанным НАМИ вызывающий не может.
+    // A payload ending in a forged line does not move the header: the caller
+    // cannot declare its own brief truncated BY US.
     name: 'dispatch-forged-notice',
     config: { dispatch_chars: 4000 },
     dispatchPrompt: '[' + 'dispatch-class' + ':1e] сделай X\n'
@@ -389,40 +393,42 @@ const scenarios = [
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
                 by: 'cooldown' } },
-  // Отсев по памяти: ни канала, ни СТРОКИ В ЖУРНАЛЕ — пропущенный проход это
-  // отсутствие консультации, а не её исход.
+  // The memory-only filter: no channel, no JOURNAL LINE — a skipped pass is
+  // the absence of a consultation, not one of its outcomes.
   { name: 'watch-not-yet', probe: 'watch', toolName: 'Read',
     watchState: () => ({ last: 0, start: Date.now() - 3600000, nextAt: Date.now() + 600000 }),
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: null, poolCalls: 0, nudges: 0 } },
-  // Живой субагент: сессия занята ФАКТИЧЕСКИ, даже если диспатч был давно и
-  // из окна отметок уже выпал.
-  // Строка ОТСЕВА обязана назвать применённый слой наравне с консультацией:
-  // именно на отсеве поле молчало, и слой приходилось выводить по поведению.
+  // A live subagent: the session is busy IN FACT, even if the dispatch was
+  // long ago and has already fallen out of the marks window.
+  // The FILTER line must name the applied layer on par with a consultation:
+  // it was exactly on the filter that the field stayed silent, and the layer
+  // had to be inferred from behavior.
   { name: 'watch-live-work', probe: 'watch', toolName: 'Read', watchState: OLD,
     projectLayer: {},
     tasks: { t1: { id: 't1', type: 'local_agent', status: 'running' } },
     response: 'SILENT: —',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'live-work:1', nudges: 0,
                 cfg: '<temp>/proj/.claude/probes/idle-watch' } },
-  // Снятая фоновость — работа НЕ живая (признак взят из образа).
+  // Un-backgrounded — the work is NOT live (the trait is taken from the
+  // image).
   { name: 'watch-live-backgrounded-off', probe: 'watch', toolName: 'Read', watchState: OLD,
     tasks: { t1: { id: 't1', type: 'local_agent', status: 'running', isBackgrounded: false } },
     response: 'SILENT: причина',
     expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0 } },
-  // Не агентский вид работы в счёт занятости по умолчанию не идёт.
+  // A non-agent kind of work does not count toward busyness by default.
   { name: 'watch-live-other-kind', probe: 'watch', toolName: 'Read', watchState: OLD,
     tasks: { t1: { id: 't1', type: 'local_bash', status: 'running' } },
     response: 'SILENT: причина',
     expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0 } },
-  // Пустой регистр: работ нет, достижимость объявлена ИСТИНОЙ.
+  // An empty registry: no work, readability declared TRUE.
   { name: 'watch-registry-empty', probe: 'watch', toolName: 'Read', watchState: OLD,
     tasks: {},
     response: 'SILENT: причина',
     expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
                 dispatchIncludes: '"task_registry_readable":true' } },
-  // Регистра нет вовсе: механизм не падает и НЕ выдаёт слепоту за тишину —
-  // недостижимость объявлена в нагрузке.
+  // No registry at all: the mechanism does not crash and does NOT pass
+  // blindness off as silence — unreachability is declared in the payload.
   { name: 'watch-registry-absent', probe: 'watch', toolName: 'Read', watchState: OLD,
     response: 'SILENT: причина',
     expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
@@ -434,10 +440,10 @@ const scenarios = [
                 degExact: BROKEN_TOML_DEG } },
 ];
 
-// HOME входит в сохранение, но НЕ в список удаляемых: слоёный сценарий его
-// подменяет (корень настроек считается от HOME), а неслоёный обязан видеть
-// настоящий — стирать его на всех значило бы менять условия там, где их не
-// проверяют.
+// HOME is included in the save set but NOT in the delete list: a layered
+// scenario overrides it (the settings root is derived from HOME), while an
+// unlayered one must see the real one — wiping it for everyone would mean
+// changing conditions where they are not being tested.
 const SAVE_ONLY_KEYS = ['HOME'];
 
 function saveEnvironment() {
@@ -460,19 +466,21 @@ function homeName(scenario) {
   return scenario.probe === 'watch' ? 'idle-watch' : 'judge';
 }
 
-// Явный CLAUDE_PROBES_DIR отключает проектное наслоение. Слоёные
-// сценарии обязаны задавать дом через HOME, чтобы пройти боевой поиск от cwd.
+// An explicit CLAUDE_PROBES_DIR turns the project layering off. Layered
+// scenarios must set the home through HOME, to exercise the production search
+// from cwd.
 function rootDir(tempDir, scenario) {
   return scenario.projectLayer === undefined
     ? tempDir
     : path.join(tempDir, '.claude', 'probes');
 }
 
-// HOME подменяется ВСЕГДА, а не только в слоёных сценариях. Дом проб ядро
-// берёт из переменной среды ИЛИ из $HOME — и пока HOME оставался настоящим,
-// любое расхождение в имени переменной уводило запись сценария в живой
-// ~/.claude/probes. Это не гипотеза: 144 поддельные записи с сессией "a1"
-// оказались в боевом журнале, пока стенд задавал старое имя переменной.
+// HOME is overridden ALWAYS, not only in layered scenarios. The probes home
+// the core takes from the environment variable OR from $HOME — and while HOME
+// stayed real, any divergence in the variable's name routed the scenario's
+// record into the live ~/.claude/probes. Not a hypothesis: 144 forged records
+// with session "a1" landed in the production journal while the bench set the
+// old variable name.
 function setScenarioEnvironment(tempDir, scenario) {
   for (const key of ENV_KEYS) delete process.env[key];
   process.env.HOME = tempDir;
@@ -481,9 +489,9 @@ function setScenarioEnvironment(tempDir, scenario) {
   else process.env.CLAUDE_JUDGE = '1';
 }
 
-// Вторая линия: подмена HOME делает утечку невозможной по построению, но
-// проверка обязана падать и тогда, когда построение изменят. Живой дом
-// снимается ДО прогона и сверяется ПОСЛЕ.
+// The second line: overriding HOME makes a leak impossible by construction,
+// but the check must also fail when the construction is changed. The live home
+// is fingerprinted BEFORE the run and compared AFTER.
 function homeFingerprint(realHome) {
   const dir = path.join(realHome, '.claude', 'probes');
   const walk = (d) => {
@@ -501,10 +509,11 @@ function homeFingerprint(realHome) {
   return walk(dir).join('\n');
 }
 
-// Каталог приходит в двух написаниях: логическом (/var/...) и физическом
-// (/private/var/...). Ядро видит физическое, потому что путь ему даёт сама
-// система, и подстановка только логического оставляла в снимке хвост
-// «/private» — ожидание не сходилось из-за формы пути, а не из-за поведения.
+// The directory arrives in two spellings: logical (/var/...) and physical
+// (/private/var/...). The core sees the physical one, because the path is
+// handed to it by the system itself, and substituting only the logical one
+// left a "/private" tail in the fingerprint — the expectation failed over the
+// path's form, not over behavior.
 function realForm(dir) {
   try { return fs.realpathSync(dir); } catch { return dir; }
 }
@@ -579,14 +588,15 @@ function checkMismatch(result, expected) {
   if (expected.msrc !== undefined && result.msrc !== expected.msrc) return true;
   if (expected.cfg !== undefined && result.cfg !== expected.cfg) return true;
   if (expected.poolCalls !== undefined && result.poolCalls !== expected.poolCalls) return true;
-  // Три отказа дешёвого счёта дают ОДИН И ТОТ ЖЕ outcome; различает их только
-  // причина, и без неё перепутанная ветка прошла бы зелёной.
+  // The three cheap-count refusals give ONE AND THE SAME outcome; only the
+  // reason tells them apart, and without it a confused branch would pass
+  // green.
   if (expected.by !== undefined && result.by !== expected.by) return true;
   if (expected.nudges !== undefined && result.nudges !== expected.nudges) return true;
   if (expected.nudgeIncludes !== undefined && !result.nudgeText.includes(expected.nudgeIncludes)) return true;
   if (expected.errorIncludes !== undefined && !result.error.includes(expected.errorIncludes)) return true;
-  // Шапку пишем мы, нагрузку — вызывающий: проверяются обе стороны, иначе
-  // подделка из нагрузки прошла бы зелёной.
+  // We write the header, the caller writes the payload: both sides are
+  // checked, otherwise a forgery from the payload would pass green.
   if (expected.headerIncludes !== undefined && !result.sentHeader.includes(expected.headerIncludes)) return true;
   if (expected.headerExcludes !== undefined && result.sentHeader.includes(expected.headerExcludes)) return true;
   if (expected.dispatchLen !== undefined && result.sentDispatchLen !== expected.dispatchLen) return true;
@@ -618,9 +628,10 @@ async function runScenario(probe, scenario) {
     fs.mkdirSync(probeDir, { recursive: true });
     setScenarioEnvironment(tempDir, scenario);
     if (scenario.withoutTomlParser) globalThis.Bun.TOML = undefined;
-    // Проектный слой воспроизводится ТОЛЬКО сменой рабочего каталога: ядро
-    // ищет ближайший .claude/probes над cwd, и переменная среды отключила бы
-    // именно тот путь, который обязан проверять этот сценарий.
+    // The project layer is reproduced ONLY by changing the working directory:
+    // the core searches for the nearest .claude/probes above cwd, and the
+    // environment variable would disable the very path this scenario must
+    // test.
     if (scenario.projectLayer !== undefined) {
       const proj = path.join(tempDir, 'proj');
       const home = path.join(proj, '.claude', 'probes');
@@ -650,8 +661,9 @@ async function runScenario(probe, scenario) {
     const tool = { name: scenario.toolName || 'Agent' };
     const input = {
       subagent_type: scenario.subagentType ?? 'glm-executor',
-      // Вызов без модели — не редкость, а треть диспатчей: сценарий обязан
-      // уметь её опустить, иначе разрешение по определению не проверяется.
+      // A call without a model is not a rarity but a third of dispatches: the
+      // scenario must be able to omit it, otherwise resolution through the
+      // definition goes untested.
       ...(scenario.omitModel ? {} : { model: 'glm-5.3' }),
       prompt: stubPrompt,
     };
@@ -661,9 +673,9 @@ async function runScenario(probe, scenario) {
       agentContext: { agentType: 'main' },
       getAppState: () => ({ toolPermissionContext: {} }),
     };
-    // Регистр задач — источник «живых работ». Отсутствие регистра и пустой
-    // регистр это РАЗНЫЕ состояния: первое слепота, второе тишина, и стенд
-    // обязан уметь воспроизвести оба.
+    // The task registry is the source of "live work". An absent registry and
+    // an empty registry are DIFFERENT states: the first is blindness, the
+    // second silence, and the bench must be able to reproduce both.
     if (scenario.tasks !== undefined) {
       context.taskRegistry = { all: () => scenario.tasks };
     }
@@ -673,9 +685,9 @@ async function runScenario(probe, scenario) {
         mainLoopModel: scenario.mainLoopModel,
       };
     }
-    // Узор в байтах доказывает лишь наличие кода. Что объявление доезжает до
-    // модели и что шапку нельзя подделать из нагрузки — доказывает только
-    // перехваченный запрос.
+    // A byte pattern proves only that the code is present. That the
+    // declaration reaches the model and that the header cannot be forged from
+    // the payload — only an intercepted request proves.
     let sentUser = '';
     let requestMaxTokens = null;
     const pool = async (args) => {
@@ -711,10 +723,11 @@ async function runScenario(probe, scenario) {
 
     const cutAt = sentUser.lastIndexOf('\n\n=== ');
     const headEnd = cutAt < 0 ? -1 : sentUser.indexOf('\n', cutAt + 2);
-    // carveBlock читает образ в latin1, поэтому нерусские по букве литералы
-    // самого карва приходят сырыми байтами UTF-8. Обратное преобразование
-    // делается ЗДЕСЬ, а не в ядре: в живом образе строка лежит корректной, и
-    // править под артефакт стенда пришлось бы работающий код.
+    // carveBlock reads the image as latin1, so the carve's own literals that
+    // are non-ASCII by letter arrive as raw UTF-8 bytes. The inverse
+    // conversion is done HERE, not in the core: in the live image the string
+    // lies correctly, and adapting working code to a bench artifact is out of
+    // the question.
     const undoLatin1 = (t) => Buffer.from(t, 'latin1').toString('utf8');
     const sentHeader = cutAt < 0 ? '' : undoLatin1(sentUser.slice(cutAt + 2, headEnd));
     const sentDispatch = headEnd < 0 ? '' : sentUser.slice(headEnd + 1);

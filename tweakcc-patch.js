@@ -28,14 +28,15 @@ const fail = msg => {
 const applied = [];
 const failures = [];
 
-// Минифицированное имя может содержать `$`: в 2.1.239 сессионный матчер
-// зовётся `$jS`. В ИСХОДНИКЕ регулярки `$` — якорь конца строки, и имя,
-// вклеенное без экранирования, не совпадает НИКОГДА: локатор падает не потому,
-// что сборка изменилась, а потому что минификатор выбрал другую букву. В СТРОКЕ
-// ЗАМЕНЫ `$` — ссылка на группу, и то же имя молча превратится в чужой захват.
-// Всякое ЗАХВАЧЕННОЕ имя проходит через rxEsc перед вклейкой в шаблон и через
-// repEsc перед вклейкой в замену. Групповые ссылки ($1, $2 …), которые мы
-// пишем сами, не экранируются — они и должны остаться ссылками.
+// A minified name can contain `$`: in 2.1.239 the session matcher is called
+// `$jS`. In a regex SOURCE `$` is the end-of-line anchor, and a name injected
+// without escaping NEVER matches: the locator fails not because the build
+// changed but because the minifier picked a different letter. In the REPLACEMENT
+// STRING `$` is a group reference, and the same name would silently turn into
+// someone else's capture. Every CAPTURED name goes through rxEsc before being
+// spliced into a template and through repEsc before being spliced into a
+// replacement. Group references ($1, $2 ...) that we write ourselves are not
+// escaped — they are meant to stay references.
 const rxEsc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const repEsc = s => String(s).replace(/\$/g, '$$$$');
 
@@ -1137,16 +1138,16 @@ step('21 current turn reachable at tool dispatch', () => {
 step('22 judge consulted before a subagent dispatch', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   // se=await e.call(E,{...n,toolUseId:t,userModified:X.userModified??!1},o,i,p)
-  // Форма вызова инструмента сменилась в 2.1.239: прямой `e.call(w,ctx,…)`
-  // уехал за адаптер `hii(e).execute(w,ctx,…)`, где
-  // `hii(e) = e.executor ?? {execute:(…)=>e.call(…)}`. Держатся ОБЕ формы:
-  // сборки с прямым вызовом ещё в ходу, и локатор, знающий только новую,
-  // сломался бы на них ровно так же.
+  // The tool-call shape changed in 2.1.239: the direct `e.call(w,ctx,…)` moved
+  // behind an adapter `hii(e).execute(w,ctx,…)`, where
+  // `hii(e) = e.executor ?? {execute:(…)=>e.call(…)}`. BOTH shapes are kept:
+  // builds with the direct call are still in use, and a locator knowing only
+  // the new one would break on them in exactly the same way.
   //
-  // Судья цепляется за САМ инструмент, а не за адаптер: `.name` есть у `e`,
-  // у обёртки его нет. В прямой форме имя инструмента ловится группой 2, в
-  // адаптерной — группой 3; дальше обе сводятся к одному имени, и номера групп
-  // наружу не торчат.
+  // The judge latches onto the TOOL ITSELF, not the adapter: `e` has `.name`,
+  // the wrapper does not. In the direct shape the tool name is caught by group
+  // 2, in the adapter shape by group 3; both then reduce to one name, and the
+  // group numbers do not stick out.
   const rx = new RegExp(
     `(${ID})=await (?:(${ID})\\.call|${ID}\\((${ID})\\)\\.execute)` +
       `\\((${ID}),\\{\\.\\.\\.(${ID}),toolUseId:(${ID}),` +
@@ -1156,22 +1157,23 @@ step('22 judge consulted before a subagent dispatch', () => {
   if (!m) fail('tool dispatch call site not found');
   const TOOL = m[2] ?? m[3];
   const SLOT = { $1: m[1], $2: TOOL, $3: m[4], $4: m[5], $5: m[6], $6: m[7] };
-  // Судья едет НА СОБСТВЕННОМ одиночном запросе клиента
-  // (queryModelWithoutStreaming), а не на своём HTTP-вызове: эта функция идёт
-  // через ту же фабрику клиента, что и любой другой запрос, поэтому пул
-  // моделей и обе его полосы — клиентские. `claude-*` остаётся на подписочной
-  // полосе (патч 1), всё остальное уходит в прокси. Свой HTTP-путь увёл бы
-  // claude-модели на api.anthropic.com по цене API — другой договор и другой
-  // счёт. Имя находится структурно по сигнатуре, а не по минифицированному
-  // написанию: оно меняется от сборки к сборке.
+  // The judge rides the client's OWN single-shot query
+  // (queryModelWithoutStreaming), not its own HTTP call: this function goes
+  // through the same client factory as any other request, so the model pool
+  // and both of its lanes are the client's. `claude-*` stays on the
+  // subscription lane (patch 1), everything else goes to the proxy. A dedicated
+  // HTTP path would route claude-models to api.anthropic.com at API prices —
+  // a different contract and a different bill. The name is located
+  // structurally by signature, not by its minified spelling: it changes from
+  // build to build.
   const qrx = new RegExp(
     `async function (${ID})\\(\\{messages:${ID},systemPrompt:${ID},thinkingConfig:${ID},` +
       `tools:${ID},signal:${ID},options:${ID}\\}\\)`,
   );
   const qm = js.match(qrx);
   if (!qm) fail('single-shot query engine not found');
-  // Минифицированное имя может содержать `$`, а строка замены трактует `$` как
-  // ссылку на группу — экранируем прежде, чем вклеивать в замену.
+  // A minified name can contain `$`, and the replacement string reads `$` as
+  // a group reference — escape it before splicing into the replacement.
   const QM = repEsc(qm[1]);
   // Everything the operator tunes lives in files read ON EVERY CALL, not in the
   // binary: a judge whose wording can only change by re-patching cannot be
@@ -1180,18 +1182,18 @@ step('22 judge consulted before a subagent dispatch', () => {
   // editable; prompt.md is the shorthand when only the instruction changes.
   // Substituted text goes through JSON.stringify minus its outer quotes, so a
   // quote or newline in the transcript cannot break the template's JSON.
-  // Локатор очереди уведомлений стоит ВЫШЕ ядра, потому что имя источника
-  // идентификатора сессии нужно самому ядру: журнал ведут оба потребителя, и
-  // pid, которым запись адресовалась раньше, после смерти процесса не
-  // указывает ни на что — операционная система переиспользует его, а
-  // транскрипт сессии лежит под её собственным именем. Раньше блок стоял
-  // ниже, и ядро не могло на него сослаться.
-  // Канал наблюдателя: очередь ожидающих уведомлений — та же, которой посреди
-  // хода приходят результаты фоновых задач. Она НЕ отменяет исполнение, а
-  // вкладывает текст в ход, и это единственная форма, годная для напоминания:
-  // изнутри исполняющегося инструмента массив сообщений недостижим вовсе
-  // (вложения собираются только ПОСЛЕ всего батча), поэтому судейский бросок
-  // здесь не подходит по устройству, а не по вкусу.
+  // The notification-queue locator stands ABOVE the core, because the core
+  // itself needs the session-id source name: both consumers write the journal,
+  // and the pid a record used to be addressed by points at nothing after the
+  // process dies — the OS reuses it, while the session transcript lives under
+  // the session's own name. The block used to sit lower, and the core could
+  // not reference it.
+  // The watcher's channel: the pending-notification queue is the same one
+  // mid-thread background-task results arrive through. It does NOT cancel
+  // execution but inserts text into the thread, and that is the only form fit
+  // for a reminder: from inside the executing tool the message array is
+  // unreachable at all (injections are collected only AFTER the whole batch),
+  // so a judge-style throw is wrong here by construction, not by taste.
   const nrx = new RegExp(
     `(?:^|[^.\\w$])(${ID})\\(\\{mode:"task-notification",agentId:(${ID})\\(\\)`,
   );
@@ -1200,11 +1202,12 @@ step('22 judge consulted before a subagent dispatch', () => {
   const TV = repEsc(nm[1]);
   const DI = repEsc(nm[2]);
 
-  // Аксессор заголовка сессии. Локатор требует АРГУМЕНТ: в схемах хуков то же
-  // имя свойства несёт zod-строку (`session_title:H().optional()`), и локатор
-  // без аргумента цеплялся бы за неё. Само имя в образе объявлено в нескольких
-  // областях, поэтому связывание в точке врезки НЕ доказано — вызов ниже
-  // защищён проверкой формы, а не верой в имя.
+  // The session-title accessor. The locator requires an ARGUMENT: in the hook
+  // schemas the same property name carries a zod string
+  // (`session_title:H().optional()`), and a locator without an argument would
+  // latch onto that. The name itself is declared in several scopes in the
+  // image, so the binding at the injection point is NOT proven — the call
+  // below is guarded by a shape check, not by faith in a name.
   const trx = new RegExp(`session_title:(${ID})\\([\\w$]+[.\\w$]*\\)`);
   const tm = js.match(trx);
   if (!tm) fail('session title accessor not found');
@@ -1212,13 +1215,13 @@ step('22 judge consulted before a subagent dispatch', () => {
 
   const core =
     '/*__ccProbe0*/globalThis.__ccProbe??=async function(__o){' +
-    // Отсев ДО всякого ввода-вывода. Пробу, которую зовут на каждом вызове
-    // инструмента, «дешёвый счёт после чтения настроек» разоряет дважды:
-    // обход дерева вверх стоит до 96 обращений к файловой системе на вызов, а
-    // отказ пишется строкой в журнал — тот самый, который читает человек.
-    // Предикат работает только по памяти и НЕ пишет ничего: пропущенный проход
-    // это не исход консультации, а её отсутствие. Бросок предиката ведёт к
-    // полному проходу, а не к пропуску: сбой отсева не должен ослеплять пробу.
+    // The filter runs BEFORE any I/O. For a probe called on every tool call,
+    // a "cheap count after reading settings" bankrupts it twice: walking up
+    // the tree costs up to 96 filesystem accesses per call, and the refusal is
+    // written as a line into the journal — the very one a human reads. The
+    // predicate works purely from memory and writes NOTHING: a skipped pass is
+    // not a consultation outcome but its absence. A predicate throw leads to a
+    // full pass, not to a skip: a filter failure must not blind the probe.
     'if(__o.pre){let __pr=null;try{__pr=__o.pre()}catch{__pr=null}if(__pr)return}' +
     // Every consultation is journaled, not just the ones run with debug on:
     // a WARN has no channel to the model (the dispatch proceeds, and the
@@ -1228,30 +1231,32 @@ step('22 judge consulted before a subagent dispatch', () => {
     // the "switched off at both ends" failure. Declared OUTSIDE the try so
     // the catch can still record why a consultation was skipped.
     'let __t0=Date.now(),__jfs=null,__jrec=!0,__jgz=!1,__jreq=null,__jres=null,__jst=null,' +
-    // __jtry=0, а не 1: до первой попытки попыток НОЛЬ. Единица заявляла
-    // попытку там, где бросило ДО лестницы.
-    // __pdir объявлен ЗДЕСЬ, а не внутри try: catch — соседний блок, и
-    // let из try в нём не виден. Измерено на живом вызове: путь пропуска
-    // падал с ReferenceError ДО записи в журнал, диспатч получал
-    // "__pdir is not defined", а журнал не получал ничего.
-    // __jarm: судейство обязано вынести решение. Взводится, когда вызов
-    // не отфильтрован и включены enforce+fail_closed; снимается, когда
-    // решение вынесено. Если управление уходит в catch со взведённым
-    // флагом — это молчаливый пропуск, и он отменяется.
+    // __jtry=0, not 1: before the first attempt there are ZERO attempts. A one
+    // claimed an attempt where the throw happened BEFORE the ladder.
+    // __pdir is declared HERE, not inside the try: the catch is a neighboring
+    // block, and a let from the try is not visible in it. Measured on a live
+    // call: the skip path crashed with ReferenceError BEFORE the journal write,
+    // the dispatch got "__pdir is not defined", and the journal got nothing.
+    // __jarm: the judgment must reach a decision. Armed when the call is not
+    // filtered out and enforce+fail_closed are on; released once the decision
+    // is made. If control reaches the catch with the flag still armed — that is
+    // a silent pass, and it gets cancelled.
     '__jtry=0,__jerr1=null,__jm=null,__jurl=null,__jatt=[],__pdir=null,__jarm=!1,' +
-    // Любой catch{} без следа превращает поломку в тихую деградацию: битый
-    // конфиг молча снимал enforce и fail_closed, а журнал показывал штатную
-    // работу. Деградации собираются и попадают в журнал полем deg; те, что
-    // задевают САМО СУЖДЕНИЕ, копятся отдельно и отменяют вызов.
+    // Any catch{} without a trace turns a breakage into quiet degradation: a
+    // broken config silently removed enforce and fail_closed while the journal
+    // showed routine operation. Degradations are collected and land in the
+    // journal as the deg field; the ones touching THE JUDGMENT ITSELF are
+    // gathered separately and cancel the call.
     '__deg=[],__degb=[],' +
-    // Список деградаций режется с объявлением: молча отброшенная шестая
-    // строка означает, что человек чинит пять файлов, перезапускает и
-    // получает отмену снова.
+    // The degradation list is cut with a declaration: a silently dropped sixth
+    // line means the human fixes five files, restarts, and gets the
+    // cancellation again.
     '__dcut=(__l,__k)=>__l.length<=__k?__l:__l.slice(0,__k).concat('+
       '"[\\u043f\\u043e\\u043a\\u0430\\u0437\\u0430\\u043d\\u044b \\u043d\\u0435 \\u0432\\u0441\\u0435: \\u0435\\u0449\\u0451 "+(__l.length-__k)+"]"),' +
-    // Всякое усечение в журнале и записи объявляется — той же конвенцией,
-    // что и подрезка ленты: обрыв вердикта посреди слова читается как
-    // полный вердикт, а обрезанный ответ упавшей попытки — как весь её след.
+    // Every truncation in the journal and the record is declared — by the same
+    // convention as trimming the transcript: a verdict cut mid-word reads as a
+    // complete verdict, and a truncated failed-attempt reply as its whole
+    // trace.
     '__clip=(__s,__k)=>{let __x=String(__s??"");return __x.length<=__k?__x:'+
       '__x.slice(0,__k)+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+'+
       '(__x.length-__k)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432]"},' +
@@ -1261,21 +1266,21 @@ step('22 judge consulted before a subagent dispatch', () => {
     // "did it judge correctly" nor "train a smaller model on these" can be
     // answered from it. The full request/response pair is written beside it,
     // one file per consultation, and the journal line carries its name.
-    // Идентификатор сессии добывается тем же способом, каким наблюдатель
-    // адресует напоминание: `Di()` в образе возвращает ровно `sessionId`
-    // (обёртка `Pd` — тождество), а в отсутствие сессии — идентификатор
-    // главного агента. Он же именует файл транскрипта, поэтому строка
-    // журнала становится соединимой с перепиской, чего pid не давал.
-    // Бросок гасится: журнальная строка — единственное, по чему человек
-    // судит о работе механизма, и потерять её из-за поля хуже, чем поле.
+    // The session id is obtained the same way the watcher addresses its
+    // reminder: `Di()` in the image returns exactly `sessionId` (the `Pd`
+    // wrapper is the identity), and absent a session, the main agent's id. It
+    // also names the transcript file, so the journal line becomes joinable
+    // with the correspondence — something pid never gave. The throw is
+    // swallowed: the journal line is the only thing a human judges the
+    // mechanism by, and losing it over a field is worse than losing the field.
     'let __sid=()=>{try{return ' + DI + '()}catch{return null}};' +
-    // Модель диспатча РАЗРЕШАЕТСЯ, а не переписывается из вызова: треть
-    // диспатчей не называет модель явно — она приходит из определения
-    // агента или наследуется от главного лупа. Журнал, писавший только
-    // явную, недосчитывал эту треть, и перепись «кто чем работал» врала.
-    // Источник разрешения кладётся рядом (msrc): диспатч по наследованию
-    // и диспатч с явной моделью — разные факты, и различать их должен
-    // читатель журнала, а не догадка.
+    // The dispatch model is RESOLVED, not copied from the call: a third of
+    // dispatches name no model explicitly — it comes from the agent definition
+    // or is inherited from the main loop. A journal writing only the explicit
+    // ones undercounted that third, and the "who worked with what" census lied.
+    // The resolution source is placed alongside (msrc): a dispatch by
+    // inheritance and a dispatch with an explicit model are different facts,
+    // and telling them apart is the journal reader's job, not a guess.
     'let __mdl=()=>{try{let __m=__o.input?.model;if(__m)return{m:__m,s:"call"};' +
       'let __a=__o.input?.subagent_type;if(!__a)return{m:void 0,s:void 0};' +
       'let __d=(__o.ctx?.options?.agentDefinitions?.activeAgents||[])' +
@@ -1285,10 +1290,11 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __im=__o.ctx?.options?.mainLoopModel;' +
       'if(__im)return{m:__im,s:__dm==="inherit"?"inherit":"main"};' +
       'return{m:void 0,s:__d?"unresolved":"no-def"}}catch{return{m:void 0,s:"error"}}};' +
-    // Заголовок сессии: имя аксессора в образе объявлено в нескольких
-    // областях, и неверное связывание вернуло бы разбор стека вместо
-    // строки — молча. Проверка формы превращает недоказуемое допущение в
-    // измеримое: не строка значит поля нет, а не мусор в журнале.
+    // Session title: the accessor's name is declared in several scopes in the
+    // image, and a wrong binding would return a stack parse instead of a
+    // string — silently. The shape check turns an unprovable assumption into a
+    // measurable one: not a string means the field is absent, not garbage in
+    // the journal.
     'let __ttl=()=>{try{let __i=__sid();if(!__i)return void 0;' +
       'let __v=' + TTL + '(__i);' +
       'return typeof __v==="string"&&__v?__v:void 0}catch{return void 0}};' +
@@ -1296,11 +1302,12 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __n=__ts.replace(/[:.]/g,"-")+"-"+String(__o.key).slice(-8)+".json"+(__jgz?".gz":"");' +
       'try{await __jfs.mkdir(__jdir+"/records",{recursive:!0});' +
         'let __rq;try{__rq=JSON.parse(__jreq)}catch{__rq=__jreq}' +
-        // rx/act — только здесь, а не в общей основе: основа кормит и журнальную
-        // строку. Разборщику корпуса словарь нужен, чтобы не зашивать судейские
-        // OK/WARN/BLOCK в инструменты: у наблюдателя классы свои, и выразить его
-        // разметку судейскими словами нельзя. Источник словаря один — вызывающий
-        // в бинарнике; копия в config.json разъехалась бы с ним молча.
+        // rx/act — only here, not in the shared base: the base also feeds the
+        // journal line. The corpus parser needs the vocabulary so as not to
+        // hardcode the judge's OK/WARN/BLOCK into the tools: the watcher's
+        // classes are its own, and its annotation cannot be expressed in the
+        // judge's words. The vocabulary has one source — the caller in the
+        // binary; a copy in config.json would drift from it silently.
         'let __data=JSON.stringify({...__base,rx:__o.rx,act:__o.act,' +
           'http:__jst,url:__jurl,pid:process.pid,' +
           'cwd:process.cwd(),attempts:__jatt,request:__rq,response:__jres},null,1);' +
@@ -1321,9 +1328,10 @@ step('22 judge consulted before a subagent dispatch', () => {
         'ms:Date.now()-__t0,sw:__o.sw||null,...__oc};' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +
-      // На свежей установке каталога судьи ещё нет, а отмен там больше всего:
-      // дописка без mkdir теряла в журнале ровно те строки, по которым человек
-      // и должен понять, что чинить (в stderr они уходили, в журнал — нет).
+      // On a fresh install the judge's directory does not exist yet, and that
+      // is where cancellations are most numerous: an append without mkdir lost
+      // exactly the lines by which the human was supposed to understand what to
+      // fix (they went to stderr, not to the journal).
       'try{if(!__jfs)throw new Error("fs unavailable");' +
         'try{await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}' +
         'catch(__ae){if(__ae?.code!=="ENOENT")throw __ae;' +
@@ -1340,14 +1348,16 @@ step('22 judge consulted before a subagent dispatch', () => {
       // dispatch was waved through because the main loop had written "this is
       // a sanctioned probe" a second earlier. Only a turn that is neither a
       // tool result nor an injected block keeps the "user" label.
-      // Три дефекта подряд (вывод локальной команды, аргументы слэш-команды,
-      // резюме компакции) были одним и тем же классом: Claude Code кладёт под
-      // роль "user" всё новые виды записей, и каждый находился ПО ИНЦИДЕНТУ.
-      // Поэтому неизвестная обёртка, уцелевшая в классе "user", попадает в
-      // журнал полем uw — класс становится измеримым, а не сюрпризом.
+      // Three defects in a row (local command output, slash-command arguments,
+      // the compaction summary) were one and the same class: Claude Code keeps
+      // filing new kinds of entries under the "user" role, and each was found
+      // THROUGH AN INCIDENT. Therefore an unknown wrapper surviving in the
+      // "user" class lands in the journal as the uw field — the class becomes
+      // measurable instead of a surprise.
       'let __fs=await import("node:fs/promises");__jfs=__fs;' +
-      // Один дом на все пробы: настройки всех — в probes.toml рядом, у пробы
-      // остаётся каталог для промта, шаблона, журнала и записей.
+      // One home for all probes: everyone's settings live in the probes.toml
+      // next door; each probe keeps a directory for its prompt, template,
+      // journal and records.
       'let __phome=__o.dirEnv||((process.env.HOME||".")+"/.claude/probes");' +
       'let __dir=__phome+"/"+__o.dirName;' +
       // The judge stays project-agnostic on purpose: it rules on the event, the
@@ -1358,16 +1368,18 @@ step('22 judge consulted before a subagent dispatch', () => {
       // CLAUDE_JUDGE_DIR turns layering off: a probe must get exactly what it
       // was handed.
       '__pdir=null;let __phomeP=null;' +
-      // Отсутствие слоя и НЕЧИТАЕМЫЙ слой — разные события: первое значит
-      // "правил нет", второе "правила есть, но я их не прочёл". Пока оба
-      // давали одно и то же (access().catch(()=>!1)), проектные правила
-      // исчезали молча, а обход ехал выше и подхватывал ЧУЖОЙ слой.
-      // Различать надо не ENOENT против всего прочего, а "пути нет" против
-      // "путь есть, доступа нет". Обычный файл по имени .claude у предка
-      // даёт ENOTDIR, петля ссылок — ELOOP; оба значат "такого каталога
-      // нет" и к "слой есть, но я его не прочёл" отношения не имеют, а
-      // отменяли ВСЁ поддерево при исправном судье. Незнакомый код не
-      // отменяет ничего, но и не исчезает: он называется в журнале.
+      // An absent layer and an UNREADABLE layer are different events: the
+      // first means "no rules", the second "there are rules but I could not
+      // read them". While both produced the same thing
+      // (access().catch(()=>!1)), project rules vanished silently and the walk
+      // went higher and picked up a FOREIGN layer.
+      // The distinction is not ENOENT versus everything else, but "no such
+      // path" versus "the path exists, no access". A plain file named .claude
+      // at an ancestor gives ENOTDIR, a symlink loop gives ELOOP; both mean
+      // "no such directory", have nothing to do with "the layer exists but I
+      // could not read it", yet they cancelled the WHOLE subtree with a healthy
+      // judge. An unfamiliar code cancels nothing but does not vanish either:
+      // it is named in the journal.
       'let __pcode=(__er)=>{let __c=String(__er?.code||"");' +
         'return __c==="EACCES"||__c==="EPERM"?2:' +
         '(__c==="ENOENT"||__c==="ENOTDIR"||__c==="ELOOP"||__c==="ENAMETOOLONG"?0:3)};' +
@@ -1384,10 +1396,10 @@ step('22 judge consulted before a subagent dispatch', () => {
           'if(__un)__deg.push("layer-unknown:"+__c+" ("+__un.e+")");' +
           'if(__has.some((__x)=>__x.c===1)){if(__c!==__dir){__pdir=__c;__phomeP=__ch}break}' +
           'let __up=__p.replace(/\\/[^\\/]*$/,"");if(!__up||__up===__p)break;__p=__up}}catch{}' +
-      // Читалка объявляет исход: null — файла нет, !1 — файл есть, но не
-      // прочитан или не разобран. Молчаливый разбор превращал битый конфиг
-      // в пустой объект, а с ним терялись enforce, fail_closed, лестница и
-      // max_tokens — судья выглядел работающим и пропускал всё подряд.
+      // The reader declares its outcome: null — no file, !1 — the file exists
+      // but was not read or not parsed. A silent parse turned a broken config
+      // into an empty object, and with it enforce, fail_closed, the ladder and
+      // max_tokens were lost — the judge looked alive and passed everything.
       'let __rdj=async(__f)=>{try{return await __fs.readFile(__f,"utf8")}' +
         'catch(__er){let __k=__pcode(__er);' +
           'if(__k===2){__deg.push("unreadable:"+__f+" ("+String(__er?.code)+")");' +
@@ -1395,20 +1407,21 @@ step('22 judge consulted before a subagent dispatch', () => {
           'else if(__k===3)__deg.push("unread-unknown:"+__f+" ("+' +
             'String(__er?.code||__er?.message)+")");' +
           'return null}};' +
-      // BOM невидим, а JSON.parse его не принимает: человек получал отмену
-      // с сообщением, где сломавший символ не виден, и выйти из неё чтением
-      // было нельзя. Пустой файл называется пустым, а не "неожиданным
-      // концом ввода": это обычное промежуточное состояние записи, и
-      // человек должен узнать причину с первого взгляда.
+      // A BOM is invisible and JSON.parse rejects it: the human got a
+      // cancellation with a message where the breaking character cannot be
+      // seen, and there was no way out of it by reading. An empty file is
+      // called empty, not "unexpected end of input": it is an ordinary
+      // intermediate state of a record, and the human must recognize the cause
+      // at first glance.
       'let __ldj=async(__f)=>{let __x=await __rdj(__f);if(__x===null)return null;' +
         'if(__x.charCodeAt(0)===65279)__x=__x.slice(1);' +
         'if(!__x.trim()){__deg.push("empty:"+__f);__degb.push("empty:"+__f);return !1}' +
         'try{return JSON.parse(__x)}catch(__pe){__deg.push("unparsed:"+__f+": "+' +
           '__clip(__pe?.message??__pe,60));' +
           '__degb.push("unparsed:"+__f+": "+__clip(__pe?.message??__pe,60));return !1}};' +
-      // Разборщик TOML принадлежит рантайму образа (bun). Его отсутствие —
-      // событие для журнала, а не пустой объект: пустые настройки молча
-      // снимают enforce, лестницу и бюджеты.
+      // The TOML parser belongs to the image's runtime (bun). Its absence is a
+      // journal event, not an empty object: empty settings silently remove
+      // enforce, the ladder and the budgets.
       'let __ldt=async(__f)=>{let __x=await __rdj(__f);if(__x===null)return null;' +
         'if(__x.charCodeAt(0)===65279)__x=__x.slice(1);' +
         'if(!__x.trim()){__deg.push("empty:"+__f);__degb.push("empty:"+__f);return !1}' +
@@ -1418,9 +1431,9 @@ step('22 judge consulted before a subagent dispatch', () => {
         'try{return __tp(__x)}catch(__pe){__deg.push("unparsed:"+__f+": "+' +
           '__clip(__pe?.message??__pe,60));' +
           '__degb.push("unparsed:"+__f+": "+__clip(__pe?.message??__pe,60));return !1}};' +
-      // Действующие настройки пробы: [defaults] под своей таблицей, проектный
-      // слой сверху в том же порядке. Проба, не названная в файле, получает
-      // одни defaults — это не ошибка, а отсутствие своих правок.
+      // A probe's effective settings: [defaults] under its own table, the
+      // project layer on top in the same order. A probe not named in the file
+      // gets bare defaults — not an error but the absence of its own edits.
       'let __eff=(__t,__id)=>__t&&typeof __t==="object"' +
         '?{...(__t.defaults||{}),...((__t.probe||{})[__id]||{})}:{};' +
       'let __cfg={},__cfgbad=!1;' +
@@ -1428,8 +1441,8 @@ step('22 judge consulted before a subagent dispatch', () => {
       'if(__c0===!1)__cfgbad=!0;else if(__c0)__cfg=__eff(__c0,__o.dirName);' +
       'if(__phomeP){let __c1=await __ldt(__phomeP+"/probes.toml");' +
         'if(__c1===!1)__cfgbad=!0;else if(__c1)__cfg={...__cfg,...__eff(__c1,__o.dirName)}}' +
-      // Выключение пробы — настройка, а не отсутствие файла: реестр обязан
-      // уметь погасить одного потребителя, не трогая остальных.
+      // Disabling a probe is a setting, not a missing file: the registry must
+      // be able to silence one consumer without touching the others.
       'if(__cfg.enabled===!1){await __jlog({outcome:"skip_disabled"});return}' +
       'if(__cfg.record===!1)__jrec=!1;' +
       'if(__cfg.record_gzip===!0)__jgz=!0;' +
@@ -1446,18 +1459,19 @@ step('22 judge consulted before a subagent dispatch', () => {
           'if(!(__mt(__f.classes_judge,__cl)||__mt(__f.agents_judge,__ag)))' +
             '__by=__cl?"not_in_judge_list":"no_class_marker"}' +
         'if(__by){__ask=!1;await __jlog({outcome:"filtered",by:__by,cls:__cl||null})}}' +
-      // Собственный дешёвый счёт пробы: получает УЖЕ прочитанные настройки и
-      // возвращает причину не звать модель. Судья его не задаёт — у него
-      // консультация безусловна; наблюдателю без него консультация стала бы
-      // постоянной статьёй расхода на каждом вызове инструмента.
+      // The probe's own cheap count: receives the ALREADY-read settings and
+      // returns a reason not to call the model. The judge does not set one —
+      // its consultation is unconditional; without it the watcher's
+      // consultation would become a permanent expense line on every tool call.
       'if(__ask&&__o.gate){let __g=null;try{__g=await __o.gate(__cfg)}catch(__ge){' +
         '__g="gate-failed:"+String(__ge?.message??__ge)}' +
         'if(__g){__ask=!1;await __jlog({outcome:"filtered",by:String(__g),cls:null})}}' +
-      // Лента строится ПОСЛЕ фильтра и дешёвого счёта, а не до них: наблюдатель
-      // зовётся на каждом вызове инструмента, и разбор всей истории ради
-      // немедленного отказа был бы платой за работу, которая не нужна. Снятие
-      // снимка хода осталось выше — иначе отфильтрованный вызов оставлял бы
-      // запись в таблице ходов навсегда.
+      // The transcript is built AFTER the filter and the cheap count, not
+      // before them: the watcher is called on every tool call, and parsing the
+      // whole history for the sake of an immediate refusal would be paying for
+      // work that is not needed. Taking the thread snapshot stayed above —
+      // otherwise a filtered-out call would leave an entry in the turns table
+      // forever.
       'let __uw=[];' +
       'let __arr=[...(__o.ctx.messages||[]),...__t].map((__M)=>{let __m=__M?.message;if(!__m)return null;' +
         'let __c=Array.isArray(__m.content)?__m.content:[{type:"text",text:String(__m.content??"")}];' +
@@ -1471,21 +1485,22 @@ step('22 judge consulted before a subagent dispatch', () => {
         // apart) and only falls back to sniffing wrapper markers.
         'let __role=__m.role||__M.type||"?";' +
         'if(__role==="user")__role=(__M?.toolUseResult!==void 0||__c.some((__x)=>__x?.type==="tool_result"))' +
-          // Вывод локальной команды приходит под ролью "user" — это ОТВЕТ
-          // ПРОГРАММЫ на действие человека, а не его слова. Измерено стендом
-          // 2026-08-21: блоки <local-command-stdout> оседали в единственном
-          // происхождении, которому судья даёт вес санкции, и после
-          // закрепления оседали НАВСЕГДА. Сам вызов команды — действие
-          // человека, но не указание судье, поэтому у него своя метка.
+          // Local command output arrives under the "user" role — it is a
+          // PROGRAM's answer to a human action, not the human's words. Measured
+          // on the bench 2026-08-21: <local-command-stdout> blocks settled into
+          // the single provenance the judge gives sanction weight to, and after
+          // pinning they settled FOREVER. Invoking the command itself is a human
+          // action but not an instruction to the judge, so it gets its own
+          // label.
           '?"tool-output":__M?.isCompactSummary?"compaction-summary":' +
           '(__bt.includes("<local-command-stdout")||' +
             '__bt.includes("<local-command-stderr"))?"tool-output":' +
-          // <command-args> несёт СОБСТВЕННЫЕ слова человека («веди полосу
-          // lane-16, без агентов и без скриптов»), а не имя команды. Измерено
-          // стендом 2026-08-21 по стенограммам проекта: 24 непустых блока, все
-          // — распоряжения. Значит запись с непустыми аргументами это речь
-          // человека со всеми правами санкции; голый вызов вроде /model —
-          // действие человека, но не указание судье.
+          // <command-args> carries the human's OWN words ("keep lane-16
+          // going, no agents, no scripts"), not the command name. Measured on
+          // the bench 2026-08-21 over the project's transcripts: 24 non-empty
+          // blocks, all directives. So an entry with non-empty arguments is
+          // human speech with full sanction rights; a bare invocation like
+          // /model is a human action but not an instruction to the judge.
           '(/<command-args>\\s*[^\\s<]/.test(__bt))?"user":' +
           '(__bt.includes("<command-name>")||__bt.includes("<command-message>")||' +
             '__bt.includes("<command-args>"))?"user-command":' +
@@ -1497,12 +1512,12 @@ step('22 judge consulted before a subagent dispatch', () => {
           'if(__wm&&["command-name","command-message","command-args"].indexOf(__wm[1].toLowerCase())<0' +
             '&&__uw.indexOf(__wm[1])<0)__uw.push(__wm[1])}' +
         'return{src:__role,text:__bt}}).filter(Boolean);' +
-      // enforce/fail_closed вычисляются ДО консультации: обязательство
-      // вынести решение должно быть известно и на пути отказа, где ни
-      // вердикта, ни __cfg уже не прочитать.
-      // Непонятый конфиг = enforce и fail_closed НЕИЗВЕСТНЫ. Считать их
-      // выключенными значит выключать гейт одним битым файлом, поэтому
-      // здесь они считаются включёнными: ложная отмена дешевле пропуска.
+      // enforce/fail_closed are computed BEFORE the consultation: the
+      // obligation to reach a decision must also be known on the failure path,
+      // where neither the verdict nor __cfg can be read anymore.
+      // An unparsed config = enforce and fail_closed UNKNOWN. Treating them as
+      // off would mean one broken file switches the gate off, so here they
+      // count as on: a false cancellation is cheaper than a silent pass.
       'let __en=__o.sw==="enforce"||__cfg.enforce===!0||__cfgbad;' +
       'let __fcl=__cfgbad||__cfg.fail_closed===!0;' +
       'if(__ask){__jarm=!!__o.arm&&__en&&__fcl;' +
@@ -1514,48 +1529,51 @@ step('22 judge consulted before a subagent dispatch', () => {
       // As a JSON value the same text is escaped into `text` and can never
       // become a sibling `src` key. Trimming drops whole oldest entries —
       // slicing the serialised string would hand over broken JSON.
-      // Подрезка ленты. Требования, каждое куплено инцидентом:
-      // (1) носители распоряжений человека — его реплики и резюме компакции —
-      //     не выбрасываются целиком, а режутся: выброшенный носитель это молча
-      //     потерянное распоряжение;
-      // (2) доля считается на КЛАСС, а не на запись (поштучный потолок резюме
-      //     давал 64% ленты при задуманных 30%, и ход работы вытеснялся весь);
-      // (3) незакреплённая запись, удаление которой увело бы ленту НИЖЕ бюджета,
-      //     укорачивается под зазор — иначе лента обнулялась, а судья выносил
-      //     обычный вердикт вслепую;
-      // (4) все пороги в ДЛИНЕ JSON, а не текста: экранирование раздувает
-      //     управляющий символ вшестеро, и текстовые пороги промахивались в обе
-      //     стороны. Маркер добавляется последним и оплачивается точно;
-      // (5) стоимость — линейная. Сначала ушла квадратичность по СЕРИАЛИЗАЦИИ
-      //     (stringify всего массива на каждое удаление), затем квадратичность
-      //     по ЧИСЛУ УДАЛЕНИЙ: splice двух массивов и повторный поиск самой
-      //     длинной записи на каждый шаг давали 5-10 секунд на ленте в 40-60
-      //     тысяч записей — и это на КАЖДУЮ ступень лестницы, до запроса.
-      //     Поэтому удаление помечает, а не вырезает; массив уплотняется один
-      //     раз; выбрасывание внутри доли идёт одним курсором с головы.
+      // Trimming the transcript. Requirements, each paid for by an incident:
+      // (1) the carriers of human directives — the human's own turns and the
+      //     compaction summary — are cut, never dropped whole: a dropped carrier
+      //     is a silently lost directive;
+      // (2) the share is counted per CLASS, not per entry (a per-item summary
+      //     cap gave 64% of the transcript against the intended 30%, and the
+      //     whole work thread got displaced);
+      // (3) an unpinned entry whose removal would take the transcript BELOW the
+      //     budget is shortened to fit the gap — otherwise the transcript
+      //     emptied out and the judge issued an ordinary verdict blind;
+      // (4) all thresholds in JSON LENGTH, not text: escaping inflates a control
+      //     character sixfold, and text thresholds missed in both directions.
+      //     The marker is added last and paid for exactly;
+      // (5) the cost is linear. First the SERIALIZATION quadratic went
+      //     (stringify of the whole array on every removal), then the
+      //     REMOVAL-COUNT quadratic: splicing two arrays and re-searching for
+      //     the longest entry on every step gave 5-10 seconds on a 40-60
+      //     thousand-entry transcript — and that on EVERY rung of the ladder,
+      //     before the request. Hence removal marks instead of cutting out; the
+      //     array is compacted once; discarding within a share goes with a
+      //     single cursor from the head.
       'let __cut=(__n)=>{' +
         'let __b=Math.max(60,__n),__pb=Math.floor(__b*0.35),__sb=Math.floor(__b*0.3);' +
         'let __d=0,__dp=0;' +
         'let __cs=(__x)=>JSON.stringify(__x).length+1;' +
         'let __a=__arr.slice(),__w=__a.map(__cs),__dd=new Array(__a.length).fill(!1),__tot=2;' +
-        // Исходный текст записи хранится отдельно: подрезанная запись может
-        // быть подрезана ВТОРОЙ раз, и считать вырезанное от прошлого среза
-        // значит называть в метке лишь последний шаг.
+        // The entry's original text is stored separately: a trimmed entry may
+        // be trimmed a SECOND time, and counting the cut from the previous cut
+        // would name only the last step in the label.
         'let __ot=new Array(__a.length).fill(null);' +
         'for(let __k=0;__k<__w.length;__k++)__tot+=__w[__k];' +
         'let __pr=(__x)=>__x&&(__x.src==="user"||__x.src==="compaction-summary");' +
         'let __isu=(__x)=>__x&&__x.src==="user";' +
         'let __iss=(__x)=>__x&&__x.src==="compaction-summary";' +
-        // Текст режется с ОБОИХ концов: начало несёт распоряжение, хвост резюме —
-        // разделы «все сообщения пользователя» и «незакрытые задачи». Цель задаётся
-        // в JSON-длине; текстовый предел подбирается по фактической цене, потому
-        // что коэффициент экранирования у разного содержимого разный.
+        // The text is cut from BOTH ends: the head carries the directive, the
+        // summary tail carries the "all user messages" and "open tasks" sections.
+        // The target is set in JSON length; the text limit is fitted to the actual
+        // cost, because the escaping ratio differs per content.
         'let __fit=(__i,__tc)=>{if(__w[__i]<=__tc)return 0;' +
-          // Вторая подрезка идёт от ИСХОДНОГО текста, а не от прошлого среза:
-          // иначе метка называет вырезанное только последним шагом (мерено:
-          // "вырезано 123 знаков" там, где от 200004 знаков осталось 4), а
-          // прошлая метка выпадает из текста вместе со следом первой подрезки.
-          // Заодно исчезает и сама возможность вложенных меток.
+          // The second trim works from the ORIGINAL text, not the previous
+          // cut: otherwise the label names only what the last step cut
+          // (measured: "123 characters cut out" where 4 remained of 200004),
+          // and the previous label falls out of the text together with the
+          // first trim's trace. Nested labels become impossible as a side
+          // effect.
           'let __t=__ot[__i]!==null?__ot[__i]:String(__a[__i].text);' +
           'let __lim=Math.max(8,__tc-60),__nx=null,__c=0;' +
           'for(let __z=0;__z<10;__z++){' +
@@ -1573,15 +1591,17 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __cnt=(__f)=>{let __r=0;for(let __k=0;__k<__a.length;__k++)if(__al(__k)&&__f(__a[__k]))__r++;return __r};' +
         'let __del=(__i,__p)=>{if(__dd[__i])return 0;__dd[__i]=!0;__tot-=__w[__i];__d++;if(__p)__dp++;return __w[__i]};' +
         'let __head=()=>{for(let __k=0;__k<__a.length;__k++)if(__al(__k))return __k;return -1};' +
-        // Подрезанных считается столько, сколько их ОСТАЛОСЬ в ленте: счёт
-        // вызовов __fit завышал (одна запись режется дважды, а подрезанную
-        // потом может вытеснить) — на реальной ленте 39 против 4 живых.
+        // The trimmed are counted as many as REMAIN in the transcript:
+        // counting __fit calls overcounted (one entry is cut twice, and a
+        // trimmed one may later be displaced) — 39 against 4 live on a real
+        // transcript.
         'let __ctd=()=>{let __r=0;for(let __k=0;__k<__a.length;__k++)'+
           'if(__al(__k)&&__ot[__k]!==null)__r++;return __r};' +
-        // Внутри доли класса сначала укорачивается САМАЯ ДЛИННАЯ запись (это
-        // сходится за считанные шаги), а добор идёт выбрасыванием с головы одним
-        // курсором: размер не признак важности, но и повторный поиск длиннейшей
-        // на каждое удаление — это N² на марафонской ленте.
+        // Within a class share the LONGEST entry is shortened first (it
+        // converges in a few steps), and the remainder is filled by discarding
+        // from the head with a single cursor: size is not a sign of importance,
+        // but re-searching for the longest on every removal is N² on a marathon
+        // transcript.
         'let __cap=(__f,__lim)=>{let __s1=__sum(__f);' +
           'for(let __g=0;__g<64&&__s1>__lim;__g++){' +
             'let __i=__long(__f);if(__i<0||__w[__i]<=240)break;' +
@@ -1595,8 +1615,9 @@ step('22 judge consulted before a subagent dispatch', () => {
           'if(!__al(__k)||__pr(__a[__k]))continue;' +
           'if(__tot-__w[__k]>=__b){__del(__k,!1);continue}' +
           'if(__w[__k]>120)__fit(__k,__w[__k]-(__tot-__b));else __del(__k,!1)}' +
-        // Последний рубеж: незакреплённого не осталось. Режется самая длинная
-        // запись; голова выбрасывается, только если резать больше нечего.
+        // The last line of defense: nothing unpinned is left. The longest
+        // entry is cut; the head is discarded only when there is nothing left
+        // to cut.
         'for(let __g=0;__g<20000&&__tot>__b;__g++){' +
           'let __i=__long(()=>!0);if(__i<0)break;' +
           'if(__w[__i]>120&&__fit(__i,Math.max(60,__w[__i]-(__tot-__b))))continue;' +
@@ -1604,10 +1625,11 @@ step('22 judge consulted before a subagent dispatch', () => {
         '__a=__a.filter((__x,__k)=>__al(__k));__w=__a.map(__cs);' +
         '__ot=__ot.filter((__x,__k)=>__al(__k));' +
         '__dd=new Array(__a.length).fill(!1);' +
-        // Маркер обязан называть и ПОТЕРЯННОЕ среди закреплённого: счёт одних
-        // выживших выглядит благополучно ровно тогда, когда распоряжение ушло.
-        // Он добавляется последним и оплачивается ужиманием ленты на свою цену;
-        // на крошечном бюджете переходит в краткую форму, иначе не помещается сам.
+        // The marker must also name what was LOST among the pinned: a count of
+        // survivors alone looks healthy exactly when a directive has gone. It
+        // is added last and paid for by shrinking the transcript by its own
+        // cost; on a tiny budget it degrades to the short form, otherwise it
+        // does not fit itself.
         'if(__d>0||__ctd()>0){' +
           'let __cd=0;let __mt=()=>"[\\u043b\\u0435\\u043d\\u0442\\u0430 \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u0430: \\u0432\\u044b\\u0442\\u0435\\u0441\\u043d\\u0435\\u043d\\u043e "+__d+" \\u0437\\u0430\\u043f\\u0438\\u0441\\u0435\\u0439; \\u0437\\u0430\\u043a\\u0440\\u0435\\u043f\\u043b\\u0435\\u043d\\u043e \\u0440\\u0435\\u043f\\u043b\\u0438\\u043a \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0430: "+__cnt(__isu)+", \\u0440\\u0435\\u0437\\u044e\\u043c\\u0435 \\u043a\\u043e\\u043c\\u043f\\u0430\\u043a\\u0446\\u0438\\u0438: "+__cnt(__iss)' +
             '+(__dp?"; \\u0412\\u042b\\u0422\\u0415\\u0421\\u041d\\u0415\\u041d\\u041e \\u0417\\u0410\\u041a\\u0420\\u0415\\u041f\\u041b\\u0401\\u041d\\u041d\\u042b\\u0425: "+__dp:"")+((__cd=__ctd())?"; \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e \\u043f\\u043e \\u0442\\u0435\\u043a\\u0441\\u0442\\u0443: "+__cd:"")+"]";' +
@@ -1627,39 +1649,42 @@ step('22 judge consulted before a subagent dispatch', () => {
         'return JSON.stringify(__a)};' +
       'let __max=Number(__cfg.context_chars||60000);' +
       'let __ctx=__cut(__max);' +
-      // Подрезка диспатча объявляется той же конвенцией, что подрезка ленты.
-      // Диспатч — единственный объект, о полноте которого судья и судит, и
-      // немой обрыв посреди слова он обязан прочесть как незаконченный бриф.
-      // Измерено 2026-08-23: в потолок упирались 29% диспатчей, один BLOCK
-      // отменил исправный вызов по нашему же обрубку.
+      // Dispatch trimming is declared by the same convention as transcript
+      // trimming. The dispatch is the one object whose completeness the judge
+      // actually judges, and a mute cut mid-word must be read by it as an
+      // unfinished brief. Measured 2026-08-23: 29% of dispatches hit the cap,
+      // and one BLOCK cancelled a sound call over our own truncation.
       'let __dsrc=String(__o.payload!==void 0?(typeof __o.payload==="function"?' +
         'await __o.payload():__o.payload):JSON.stringify(__o.input));' +
       'let __dmax=Number(__cfg.dispatch_chars||16000);' +
       'let __dtr=__dsrc.length>__dmax;' +
       'let __disp=__dtr?__dsrc.slice(0,__dmax):__dsrc;' +
-      // Объявление стоит в ШАПКЕ блока, а не в хвосте: хвост — текст
-      // вызывающего, и бриф, кончающийся такой строкой, объявил бы себя
-      // подрезанным НАМИ и выпросил снисхождение, которое судья по промпту
-      // обязан дать. Та же подмена происхождения, от которой ленту защищает
-      // поле src. Шапку пишем мы, и она печатается ПЕРЕД нагрузкой.
+      // The declaration sits in the block's HEADER, not its tail: the tail is
+      // the caller's text, and a brief ending in such a line would declare
+      // itself truncated BY US and beg for leniency the judge is bound by its
+      // prompt to give. The same provenance forgery the src field protects the
+      // transcript from. We write the header, and it is printed BEFORE the
+      // payload.
       'let __lbl=String(__o.label||"DISPATCH")+(__dtr?" — подрезан: показано "' +
         '+__dmax+" из "+__dsrc.length+" знаков":"");' +
       'let __emb=(__s)=>JSON.stringify(String(__s)).slice(1,-1);' +
       'let __sys=__o.promptEnv;' +
       'if(!__sys&&__pdir)__sys=await __rdj(__pdir+"/prompt.md");' +
       'if(!__sys)__sys=await __rdj(__dir+"/prompt.md");' +
-      // Дописка проекта читается той же читалкой: её немое исчезновение —
-      // ровно тот случай, что и немое исчезновение проектного конфига.
+      // The project's appendix is read by the same reader: its silent
+      // disappearance is exactly the same case as the silent disappearance of
+      // the project config.
       'if(__pdir){let __ex=await __rdj(__pdir+"/prompt.extra.md");' +
         'if(__ex&&__ex.trim())__sys=(__sys||"")+"\\n\\n=== \\u041f\\u0420\\u0410\\u0412\\u0418\\u041b\\u0410 ' +
           '\\u042d\\u0422\\u041e\\u0413\\u041e \\u041f\\u0420\\u041e\\u0415\\u041a\\u0422\\u0410 ===\\n"+__ex}' +
-      // Запасной промпт обязан уметь ОТМЕНЯТЬ: в прежнем слова BLOCK не было
-      // вовсе, а единственный не-OK исход, который он предлагал (SWAP),
-      // записывался как ok и пропускал вызов. Гейт был формально жив и
-      // содержательно выключен, а журнал полон "ok".
-      // Метка называет путь, как и все остальные: на свежей установке это
-      // ЕДИНСТВЕННЫЙ отказ, который человек увидит, и из "prompt-missing"
-      // без пути не следует, что создать надо ~/.claude/judge/prompt.md.
+      // The fallback prompt must be able to CANCEL: the old one had no word
+      // BLOCK at all, and the only non-OK outcome it offered (SWAP) was
+      // recorded as ok and let the call through. The gate was formally alive
+      // and substantively off, and the journal was full of "ok".
+      // The label names the path, like all the others: on a fresh install this
+      // is the ONLY refusal the human will see, and from a "prompt-missing"
+      // without a path it does not follow that ~/.claude/judge/prompt.md is
+      // what needs creating.
       'if(!__sys){let __pmm="prompt-missing:"+__dir+"/prompt.md"+' +
         '(__pdir?" | "+__pdir+"/prompt.md":"");' +
         '__deg.push(__pmm);__degb.push(__pmm);' +
@@ -1686,8 +1711,9 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __tplr=null;' +
       'if(__pdir)__tplr=await __rdj(__pdir+"/body.json");' +
       'if(!__tplr)__tplr=await __rdj(__dir+"/body.json");' +
-      // Битый шаблон тела на исход не влияет (встроенное тело работает), но
-      // положивший свой шаблон обязан узнать, что тот не применён.
+      // A broken body template does not change the outcome (the built-in body
+      // works), but whoever dropped in their own template must learn that it
+      // was not applied.
       'if(__tplr){try{JSON.parse(__tplr.replace(/\\{\\{[A-Z]+\\}\\}/g,"x"))}' +
         'catch(__be){__deg.push("unparsed-body:"+__clip(__be?.message??__be,60));__tplr=null}}' +
       'let __mkb=(__cx,__e)=>{let __mdl=__e.model;try{if(!__tplr)throw new Error("no template");' +
@@ -1706,10 +1732,10 @@ step('22 judge consulted before a subagent dispatch', () => {
           '{role:"user",content:"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp}]})}};' +
       'let __pool=typeof ' + QM + '==="function"?' + QM + ':null;' +
       'let __purl=(()=>{let __u=__o.urlEnv||__cfg.url||process.env.ANTHROPIC_BASE_URL||"http://127.0.0.1:8317";__u=String(__u).replace(/\\/+$/,"");return /\\/v1$/.test(__u)?__u+"/chat/completions":__u+"/v1/chat/completions"})();' +
-      // Пул — путь по умолчанию. Сырой HTTP остаётся ТОЛЬКО как явно названный
-      // адрес (проба стенда бьёт в свой приёмник) или как страховка, если
-      // связывания с пулом в этой сборке не нашлось: судья, потерявший канал,
-      // обязан деградировать, а не молчать.
+      // The pool is the default path. Raw HTTP remains ONLY as an explicitly
+      // named address (the bench probe hits its own receiver) or as a fallback
+      // if no pool binding was found in this build: a judge that lost its
+      // channel must degrade, not go silent.
       'let __http=!!(__o.urlEnv||__cfg.url||__cfg.raw_http===!0)||!__pool;' +
       '__jurl=__http?__purl:"pool";' +
       'let __tmo=Number(__o.tmoEnv||__cfg.timeout_ms||8000);' +
@@ -1719,9 +1745,10 @@ step('22 judge consulted before a subagent dispatch', () => {
           'effort:__e.effort||null};__jatt.push(__a);' +
         'let __ac=new AbortController(),__mine=!1,' +
         '__to=setTimeout(()=>{__mine=!0;__ac.abort()},__ms);' +
-        // Ответ и статус гасятся в НАЧАЛЕ попытки: запрос писался каждой
-        // попыткой, а ответ только удачной, и запись склеивала запрос
-        // последней попытки с ответом ранней, молча.
+        // The response and status are cleared at the START of the attempt: the
+        // request was written by every attempt but the response only by a
+        // successful one, and the record silently glued the last attempt's
+        // request to an early one's response.
         '__jres=null;__jst=null;' +
         'try{' +
           'if(__http){let __b=__mkb(__cx,__e);__jreq=__b;' +
@@ -1731,9 +1758,9 @@ step('22 judge consulted before a subagent dispatch', () => {
             'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.resp=__clip(__t,800);' +
             '__a.ms=Date.now()-__s0;__a.http=__r.status;' +
             'if(!__r.ok)throw new Error("HTTP "+__r.status);return __t}' +
-          // Усилие едет полем options, а не полем тела: тело здесь не наше, его
-          // собирает клиент. Ограничение вывода — maxOutputTokensOverride, оно
-          // же единственный дом бюджета на этом пути.
+          // Effort rides in the options field, not the body: the body here is
+          // not ours, the client assembles it. The output limit is
+          // maxOutputTokensOverride, also the single budget home on this path.
           'let __ut="=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp;' +
           '__jreq=JSON.stringify({via:"pool",model:__e.model,effort:__e.effort||null,' +
             'max_tokens:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
@@ -1750,27 +1777,30 @@ step('22 judge consulted before a subagent dispatch', () => {
           'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__clip(__t2,800);' +
           '__a.ms=Date.now()-__s0;' +
           '__jst=__r2?.isApiErrorMessage?"api_error":200;__a.http=__jst;' +
-          // Текст ошибки пула ОБЯЗАН доехать до журнала: без него в ledger висит
-          // «api error from the pool» без причины, а причина (лимит темпа, отказ
-          // апстрима, неизвестная модель) требует разного лечения. Реальный
-          // случай: три отказа подряд на одной ступени, и разобрать их было нечем.
+          // The pool's error text MUST reach the journal: without it the ledger
+          // hangs on "api error from the pool" with no cause, and the cause (a
+          // rate limit, an upstream refusal, an unknown model) calls for
+          // different treatment. Real case: three refusals in a row on one rung,
+          // and there was nothing to analyze them with.
           'if(__r2?.isApiErrorMessage){let __et="";' +
             'try{__et=(__r2.message?.content||[]).filter((__b)=>__b?.type==="text")' +
               '.map((__b)=>__b.text).join(" ").slice(0,300)}catch{}' +
             'throw new Error("api error from the pool: "+(__et||"(\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430)"))}' +
           'return __t2}' +
         'catch(__xe){__a.ms=Date.now()-__s0;__a.timed_out=__mine||void 0;' +
-          // Свой потолок и чужой сбой приходят одной строкой "Request was aborted".
-          // Измерено 2026-08-23: ступень три дня умирала на СВОЁМ таймауте, а в
-          // журнале это читалось как флаки модели. Причина обязана называться на
-          // месте: разное лечение (потолок правится, апстрим — нет).
-          // Свой потолок ВЫВОДА приходит текстом пула ("api error from the
-          // pool"), как свой таймаут приходил словами "Request was aborted":
-          // в журнале то и другое читается сбоем провайдера, а лечится
-          // настройкой. Причина называется на месте — лечение разное.
-          // Сообщение режется ОБЪЯВЛЯЮЩИМ клипом: голый slice(0,120) обрубал
-          // фразу "To configure this behavior…", то есть именно ту часть,
-          // которая называет средство (измерено 2026-08-24).
+          // Our own cap and a foreign failure arrive as one line, "Request was
+          // aborted". Measured 2026-08-23: a rung spent three days dying on ITS
+          // OWN timeout while the journal read it as model flakiness. The cause
+          // must be named on the spot: the treatment differs (the cap is
+          // adjustable, the upstream is not).
+          // Our own OUTPUT cap arrives in the pool's text ("api error from the
+          // pool"), the way our own timeout used to arrive as the words
+          // "Request was aborted": in the journal both read as a provider
+          // failure while the cure is a setting. The cause is named on the spot
+          // — the treatment differs.
+          // The message is cut by a DECLARING clip: a bare slice(0,120) chopped
+          // off the phrase "To configure this behavior…", that is, exactly the
+          // part naming the tool (measured 2026-08-24).
           'let __em=String(__xe?.message??__xe);' +
           'let __ob=/exceeded the (\\d+) output token/.exec(__em);' +
           '__a.budget=__ob?Number(__ob[1]):void 0;' +
@@ -1791,9 +1821,10 @@ step('22 judge consulted before a subagent dispatch', () => {
       // dispatch then sailed through, because silence reads as consent. A
       // reasoning-only reply keeps the old rule (take the LAST such line) so a
       // verdict merely rehearsed mid-thought cannot outrank the conclusion.
-      // Две формы ответа, потому что канала два: у прокси это choices[].message,
-      // у пула — AssistantMessage с массивом блоков. Разбор один, чтобы правило
-      // «вердикт первой строкой» не разошлось между каналами.
+      // Two reply shapes because there are two channels: the proxy gives
+      // choices[].message, the pool an AssistantMessage with an array of blocks.
+      // One parser, so the "verdict on the first line" rule does not diverge
+      // between channels.
       'let __pv=(__r0)=>{let __j;try{__j=JSON.parse(__r0)}catch{__j=null}' +
         'let __mm=__j?.choices?.[0]?.message||{};' +
         'let __rx=new RegExp("^\\\\s*(?:"+__o.rx+"):.*$","gm");' +
@@ -1806,23 +1837,25 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __rr=[__mm.reasoning,__mm.reasoning_content,__bl?__bl.filter((__b)=>' +
           '__b?.type==="thinking").map((__b)=>__b.thinking).join("\\n"):""]' +
           '.filter(Boolean).join("\\n");' +
-        // Ответ без строки вердикта — НЕ вердикт. Прежде сюда падал сырой
-        // текст модели, и любой ответ мимо словаря (например SWAP: из старого
-        // запасного промпта) записывался как ok и пропускал вызов.
+        // A reply without a verdict line is NOT a verdict. Raw model text used
+        // to fall through here, and any answer outside the vocabulary (SWAP:
+        // from the old fallback prompt, for example) was recorded as ok and let
+        // the call through.
         'return ((String(__rr).match(__rx)||[]).pop()||"").trim()};' +
-        // Поломка настроек или промпта — это не «работай по умолчанию», а
-        // «я не знаю, по каким правилам судить». Под enforce такой вызов
-        // отменяется с названием файла, а не пропускается молча.
+        // Broken settings or a broken prompt is not "fall back to defaults"
+        // but "I do not know what rules to judge by". Under enforce such a call
+        // is cancelled with the file named, not silently passed.
         'if(__degb.length&&__en){' +
-          // Проба, которая не отменяет вызов, ничего и не заблокировала —
-          // писать ей «block_degraded» значит одним словом называть отмену и
-          // молчание.
+          // A probe that does not cancel the call blocked nothing either —
+          // writing "block_degraded" for it would name both a cancellation and
+          // a silence with one word.
           'try{await __jlog({outcome:__o.arm?"block_degraded":"skip_degraded",' +
             'tries:__jtry,jm:null,deg:__dcut(__deg,5)})}catch{}' +
           'await __o.onBroken(__dcut(__degb,3).join("; "));' +
-          // Судья отсюда не возвращается — его onBroken бросает. Вернувшаяся
-          // проба не знает своих правил, и запасной промпт её словаря не
-          // содержит: консультация была бы платой за заведомое молчание.
+          // The judge does not return from here — its onBroken throws. A probe
+          // that returns does not know its own rules, and the fallback prompt
+          // contains none of its vocabulary: the consultation would be payment
+          // for a guaranteed silence.
           'return}' +
       'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
@@ -1843,9 +1876,9 @@ step('22 judge consulted before a subagent dispatch', () => {
       'if(!__v&&Number(__cfg.retry_context_chars??8000)>0){' +
         'let __e=__mdls[__mdls.length-1];' +
         '__jtry=__mdls.length+1;__jm=__e.model;__jerr1=__errs.join(" | ")||null;' +
-        // Повтор обёрнут так же, как ступень: без обёртки его падение
-        // уходило во внешний catch, тот писал "skip" и НЕ отменял вызов —
-        // молчаливый пропуск ровно там, ради чего заведён fail_closed.
+        // The retry is wrapped the same way as a rung: unwrapped, its failure
+        // went to the outer catch, which wrote "skip" and did NOT cancel the
+        // call — a silent pass exactly where fail_closed exists to prevent one.
         'try{__raw=await __call(__cut(Number(__cfg.retry_context_chars??8000)),' +
           'Number(__e.timeout_ms||__tmo),__e);__v=__pv(__raw);' +
           'if(!__v)__errs.push(__jm+": empty verdict")}' +
@@ -1863,18 +1896,20 @@ step('22 judge consulted before a subagent dispatch', () => {
       // surfaces to the model as an error tool_result, which is exactly
       // "stop, and here is what is wrong" — and it couples to no minified name.
       'let __bl=new RegExp("^(?:"+__o.act+"):\\\\s*([\\\\s\\\\S]+)$","m").exec(__v);' +
-      // Отмена по исчерпанию лестницы — дефект КАНАЛА, отмена по вердикту —
-      // дефект СУЖДЕНИЯ, и лечатся они разным. Пока обе писались как "empty"
-      // (то же слово, что у пропущенного вызова при fail_closed:false), снаружи
-      // они были неотличимы ни друг от друга, ни от пропуска.
+      // A cancellation from ladder exhaustion is a CHANNEL defect, a
+      // cancellation by verdict is a JUDGMENT defect, and they are treated
+      // differently. While both were written as "empty" (the same word as a
+      // skipped call under fail_closed:false), from the outside they were
+      // indistinguishable from each other and from a pass.
       'let __fc=!__v&&__en&&__fcl;' +
-      // Журнал не смеет увести управление мимо решений ниже: сбой записи
-      // при готовом BLOCK ушёл бы во внешний catch и стал бы пропуском.
-      // Слово исхода — тот самый класс, который назвала модель, а не судейское
-      // «block». Ядро словаря не знает: он приходит от вызывающего в __o.rx, и
-      // зашитое здесь «block» писало бы в журнал наблюдателя, что тот отменил
-      // диспатч, — одним словом с настоящей отменой судьи, неотличимо.
-      // Для судейских OK/WARN/BLOCK слово выходит прежним, знак в знак.
+      // The journal must not steer control past the decisions below: a write
+      // failure with a BLOCK ready would go to the outer catch and become a
+      // pass. The outcome word is the very class the model named, not the
+      // judge's "block". The core does not know the vocabulary: it comes from
+      // the caller in __o.rx, and a "block" hardcoded here would write into the
+      // watcher's journal that it cancelled a dispatch — one and the same word
+      // as a real judge cancellation, indistinguishable. For the judge's
+      // OK/WARN/BLOCK the word comes out as before, character for character.
       'let __ocw=String((/^\\s*([A-Za-z]+):/.exec(__v||"")||[])[1]||"ok").toLowerCase();' +
       'try{await __jlog({http:__jst,outcome:__bl?(__en?__ocw:__ocw+"_not_enforced"):' +
         '(__v?__ocw:(__fc?"block_no_verdict":"empty")),' +
@@ -1883,42 +1918,45 @@ step('22 judge consulted before a subagent dispatch', () => {
         '...(__deg.length?{deg:__dcut(__deg,5)}:{}),' +
         'tries:__jtry,jm:__jm,err1:__jerr1,' +
         'verdict:__clip(__v,400)||null})}catch{}' +
-      // Принцип юзера (2026-08-20): «лучше ложная отмена, чем молчаливый
-      // пропуск». Провал ВСЕЙ лестницы — это и есть молчаливый пропуск: судья
-      // не сказал ничего, а вызов ушёл. При `fail_closed` он вместо этого
-      // отменяется. Ставка осознанная: отказ канала останавливает диспатчи, но
-      // ступень по подписке лежит только вместе с самим клиентом, так что
-      // полный провал означает, что сессии и так нечем работать. Выключается
-      // одним ключом конфига, без пересборки бинарника.
+      // The user's principle (2026-08-20): "a false cancellation is better
+      // than a silent pass". A failure of the WHOLE ladder is precisely a
+      // silent pass: the judge said nothing and the call went through. Under
+      // `fail_closed` it is cancelled instead. The trade-off is deliberate: a
+      // channel failure stops dispatches, but the subscription rung exists only
+      // together with the client itself, so a total failure means the sessions
+      // have nothing to work with anyway. Switched off by one config key, no
+      // rebuild of the binary.
       'if(__fc)await __o.onNoVerdict(String(__jerr1||"").slice(0,200));' +
       'if(__bl&&__en)await __o.onAct(__bl[1].trim());' +
-      // Решение вынесено — обязательство снято. Снимается ПОСЛЕДНИМ: всё,
-      // что бросит раньше, обязано отменить вызов, а не пропустить его.
+      // The decision has been made — the obligation is released. Released
+      // LAST: anything that throws earlier must cancel the call, not pass it.
       '__jarm=!1;' +
     '}}catch(__e){if(__e&&__e.__ccJudgeBlock)throw __e;' +
       'let __rs=String(__e?.name||"Error")+": "+__clip(__e?.message??__e,200);' +
       'try{await __jlog({outcome:__jarm?"block_no_verdict":"skip",tries:__jtry,jm:__jm,' +
         'err1:__jerr1,reason:__rs})}catch{}' +
-      // Отказ судьи при взведённом обязательстве — не пропуск, а отмена:
-      // сюда приходит и падение до лестницы (конфиг, тело, подрезка), где
-      // вердикта нет и быть не может.
+      // A judge failure with the obligation armed is a cancellation, not a
+      // pass: what arrives here is also a crash before the ladder (config,
+      // body, trimming), where there is and can be no verdict.
       'if(__jarm)await __o.onFail(__rs);' +
       'if(__o.dbg)console.error(__o.tag+" skipped: "+(__e?.message??__e));}};';
 
-  // Судья — первый потребитель ядра. Судейское живёт ЗДЕСЬ и только здесь:
-  // когда звать, что показывать, каким словарём судить и чем отвечать на
-  // вердикт. Тексты отказов перенесены ДОСЛОВНО: они приходят в модель как
-  // ошибка инструмента, и правка их формулировок меняет то, что модель
-  // прочтёт, — это отдельное решение, а не побочный эффект разбора на ядро.
+  // The judge is the core's first consumer. What is judge-specific lives HERE
+  // and only here: when to call, what to show, which vocabulary to judge by,
+  // and what to answer a verdict with. The refusal texts were carried over
+  // VERBATIM: they reach the model as a tool error, and editing their wording
+  // changes what the model will read — that is a separate decision, not a side
+  // effect of the split into a core.
   //
-  // Реакция судьи — бросок. Он не привязан ни к одному минифицированному имени:
-  // инструмент, бросивший исключение, и так возвращается модели ошибкой.
+  // The judge's reaction is a throw. It is tied to no minified name: a tool
+  // that throws an exception already comes back to the model as an error.
   const judgeCall =
     'if(process.env.CLAUDE_JUDGE&&($2.name==="Agent"||$2.name==="Task")' +
       '&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Judge]",dirName:"judge",arm:!0,' +
-      // Словарь вердикта — параметр, а не свойство ядра: у наблюдателя он свой.
+      // The verdict vocabulary is a parameter, not a property of the core: the
+      // watcher has its own.
       'rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",' +
       'sw:process.env.CLAUDE_JUDGE,dirEnv:process.env.CLAUDE_PROBES_DIR,' +
       'promptEnv:process.env.CLAUDE_JUDGE_PROMPT,modelEnv:process.env.CLAUDE_JUDGE_MODEL,' +
@@ -1933,30 +1971,33 @@ step('22 judge consulted before a subagent dispatch', () => {
 
 
 
-  // Наблюдатель — второй потребитель того же ядра. Отличий ровно четыре:
-  // когда звать, что показывать, каким промтом судить и как отвечать.
+  // The watcher is the second consumer of the same core. There are exactly
+  // four differences: when to call, what to show, which prompt to judge by,
+  // and how to answer.
   const watchCall =
-    // Счётчик флота ведётся на КАЖДОМ вызове инструмента, а не только при
-    // диспатче: без общей отметки времени «диспатчей за окно» неоткуда взять.
-    // Текущий диспатч учитывается ДО счёта — ход, в котором субагент запущен,
-    // молчалив по построению, и отдельного условия на это не нужно.
+    // The fleet counter runs on EVERY tool call, not only on a dispatch:
+    // without a shared timestamp there is nowhere to take "dispatches within
+    // the window" from. The current dispatch is counted BEFORE the count — the
+    // thread a subagent was started in is silent by construction, and no
+    // separate condition for that is needed.
     'globalThis.__ccFleet??=[];' +
     'if($2.name==="Agent"||$2.name==="Task"){globalThis.__ccFleet.push(Date.now());' +
       'if(globalThis.__ccFleet.length>256)globalThis.__ccFleet=globalThis.__ccFleet.slice(-256)}' +
     'if(process.env.CLAUDE_IDLE&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Watch]",dirName:"idle-watch",arm:!1,label:"FLEET",' +
-      // Словарь свой: наблюдателю нечего разрешать или запрещать, он либо
-      // молчит, либо называет предмет.
+      // Its own vocabulary: the watcher has nothing to permit or forbid; it
+      // either stays silent or names the subject.
       'rx:"SILENT|NUDGE",act:"NUDGE",' +
       'sw:process.env.CLAUDE_IDLE,dirEnv:process.env.CLAUDE_PROBES_DIR,' +
       'promptEnv:process.env.CLAUDE_IDLE_PROMPT,modelEnv:process.env.CLAUDE_IDLE_MODEL,' +
       'urlEnv:process.env.CLAUDE_IDLE_URL,tmoEnv:process.env.CLAUDE_IDLE_TIMEOUT_MS,' +
       'dbg:process.env.CLAUDE_IDLE_DEBUG,' +
       'tool:$2,input:$3,ctx:$4,key:$5,' +
-      // Дешёвый счёт: окно, порог, период покоя. Окно должно сперва набраться —
-      // сессии моложе окна упрекнуть не в чем, она ещё ничего не пропустила.
-      // Предикат отсева знает ровно одно число и ни одного файла.
+      // The cheap count: window, threshold, cooldown. The window must fill
+      // first — a session younger than the window has nothing to be reproached
+      // with, it has not missed anything yet. The filter predicate knows
+      // exactly one number and not a single file.
       'pre:()=>{let __s=globalThis.__ccWatch;' +
         'return __s&&__s.nextAt>Date.now()?"not-yet":null},' +
       'gate:(__c)=>{let __now=Date.now(),' +
@@ -1977,12 +2018,12 @@ step('22 judge consulted before a subagent dispatch', () => {
           'return "live-work:"+__lv.length}' +
         'let __f=(globalThis.__ccFleet||[]).filter((__x)=>__now-__x<__w);' +
         'let __n=__f.length;__s.n=__n;' +
-        // Каждый отказ называет МИГ, раньше которого он не может смениться:
-        // окно истекает у своей отметки, покой у своей, а счёт флота падает
-        // ниже порога, когда из окна выйдет (n-порог+1)-я по старшинству
-        // отметка. Отметки лежат в порядке появления, поэтому это индекс.
-        // Новый диспатч только отодвигает этот миг, значит ранняя оценка
-        // безопасна: она стоит одного лишнего полного прохода, не пропуска.
+        // Every refusal names the MOMENT before which it cannot change: the
+        // window expires at its own mark, the cooldown at its own, and the
+        // fleet count drops below the threshold when the (n-threshold+1)-th
+        // mark by seniority leaves the window. The marks lie in arrival order,
+        // so that is an index. A new dispatch only pushes that moment back, so
+        // an early estimate is safe: it costs one extra full pass, not a miss.
         'if(__n>=__th){__s.nextAt=__f[__n-__th]+__w;return "fleet-busy:"+__n}' +
         'if(__now-__s.start<__w){__s.nextAt=__s.start+__w;return "window-not-filled"}' +
         'if(__now-__s.last<__cd){__s.nextAt=__s.last+__cd;return "cooldown"}' +
@@ -1992,32 +2033,35 @@ step('22 judge consulted before a subagent dispatch', () => {
         'live_works:globalThis.__ccWatch?.lv??0,' +
         'task_registry_readable:globalThis.__ccWatch?.reg??!1,' +
         'current_tool:$2.name}),' +
-      // Реакция: постановка в очередь. Ошибка постановки гасится — напоминание,
-      // уронившее рабочий вызов, было бы хуже пропущенного напоминания.
-      // Оба поля ИЗМЕРЕНЫ по установленному образу, а не взяты из реконструкции
-      // typescript-src — она в этом месте разошлась с 2.1.239 и стоила отдельного
-      // прогона. В образе отсев главного лупа — `dA(e)=e.agentId===Di()`, то есть
-      // запись адресуется идентификатором СЕССИИ, а не отсутствием поля.
-      // Приоритет "next": порог слива равен "later" только в ход, где сработал
-      // Sleep, поэтому запись с "later" ждала бы Sleep неопределённо долго —
-      // журнал писал бы "nudge", очередь принимала запись, а доставки не было.
+      // The reaction: queueing. A queueing error is swallowed — a reminder
+      // that crashed a working call would be worse than a missed reminder.
+      // Both fields were MEASURED against the installed image, not taken from
+      // the typescript-src reconstruction — it diverged at this spot since
+      // 2.1.239 and cost a separate run. In the image the main-loop filter is
+      // `dA(e)=e.agentId===Di()`, that is, the entry is addressed by the SESSION
+      // id, not by the absence of a field.
+      // Priority "next": the drain threshold equals "later" only in a thread
+      // where Sleep fired, so an entry with "later" would wait for Sleep
+      // indefinitely — the journal would write "nudge", the queue would accept
+      // the entry, and there would be no delivery.
       'onAct:async(__r)=>{try{' + TV + '({value:"[fleet-idle] "+__r+"\\n(\\u041d\\u0430\\u043f\\u043e\\u043c\\u0438\\u043d\\u0430\\u043d\\u0438\\u0435 \\u043d\\u0430\\u0431\\u043b\\u044e\\u0434\\u0430\\u0442\\u0435\\u043b\\u044f \\u0437\\u0430 \\u0444\\u043b\\u043e\\u0442\\u043e\\u043c, \\u0430 \\u043d\\u0435 \\u0433\\u0435\\u0439\\u0442: \\u0440\\u0435\\u0448\\u0430\\u0435\\u0448\\u044c \\u0442\\u044b.)",' +
         'mode:"task-notification",agentId:' + DI + '(),priority:"next"})}' +
-        // Сбой постановки НЕ гасится молча. Молчаливый catch здесь означал бы
-        // «журнал пишет nudge, доставки нет» — та самая форма, когда механизм
-        // формально жив и содержательно выключен. Ронять рабочий вызов из-за
-        // напоминания по-прежнему нельзя, поэтому исход уходит в журнал.
+        // A queueing failure is NOT swallowed silently. A silent catch here
+        // would mean "the journal writes nudge, there is no delivery" — the
+        // very shape of a mechanism formally alive and substantively off.
+        // Crashing a working call over a reminder is still forbidden, so the
+        // outcome goes to the journal.
         'catch(__ne){try{await __jlog({outcome:"nudge_undelivered",' +
           'reason:__clip(String(__ne?.message??__ne),200)})}catch{}}},' +
-      // Наблюдатель fail-open: нет вердикта, сломаны настройки, отказал канал —
-      // всё это остаётся в журнале и НИЧЕГО не останавливает.
+      // The watcher is fail-open: no verdict, broken settings, a channel
+      // failure — all of it stays in the journal and stops NOTHING.
       'onNoVerdict:()=>{},onBroken:()=>{},onFail:()=>{}' +
     '});/*__ccProbe1*/';
 
-  // Вклейка по СМЕЩЕНИЮ, а не через String.replace: номера групп разъезжаются
-  // между двумя формами вызова, а строка замены ещё и читает `$` как ссылку.
-  // Срез по m.index не трактует ничего, а сам вызов возвращается на место
-  // дословно (m[0]) — переписывать его нам незачем.
+  // Injection by OFFSET, not via String.replace: group numbers diverge between
+  // the two call shapes, and the replacement string additionally reads `$` as
+  // a reference. The slice at m.index interprets nothing, and the call itself
+  // goes back in place verbatim (m[0]) — we have no business rewriting it.
   const judgeResolved = (core + judgeCall + watchCall).replace(/\$([1-9])/g, (t, d) => {
     const v = SLOT['$' + d];
     if (!v) fail(`judge body references ${t}, which this call shape does not bind`);
@@ -2150,24 +2194,24 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
 
 
 // --------------------------------------------------------------------------
-// 27. РЕЖИМ ПОЛНОГО ПРОПУСКА ПРОПУСКАЕТ ВСЁ.
-//     Решение «спросить» несёт поле circuitBreaker; часть предохранителей
-//     помечена в реестре как bypassImmune, и на них режим полного пропуска не
-//     действует — запрос доходит до человека. Практический случай: удаление,
-//     чей путь не разрешается статически (glob, `~`, рабочий каталог и его
-//     предки), помечено `dangerousRemoval` с иммунитетом, и сессия, запущенная
-//     с ключом полного пропуска, всё равно останавливается на нём.
-//     Правится ТОЛЬКО ветка полного пропуска: в остальных режимах предохранитель
-//     работает как прежде, и второй потребитель предиката (выбор представителя
-//     среди нескольких результатов одной команды) не затрагивается.
+// 27. THE FULL-BYPASS MODE BYPASSES EVERYTHING.
+//     The "ask" decision carries the circuitBreaker field; some circuit
+//     breakers are marked bypassImmune in the registry, and the full-bypass mode
+//     has no effect on them — the request reaches the human. Practical case:
+//     removal whose path does not resolve statically (glob, `~`, the working
+//     directory and its ancestors) is marked `dangerousRemoval` with immunity,
+//     and a session started with a full-bypass key still stops on it.
+//     Only the full-bypass branch is patched: in the other modes the circuit
+//     breaker works as before, and the predicate's second consumer (picking a
+//     representative among several results of one command) is untouched.
 // --------------------------------------------------------------------------
 step('27 full-bypass mode admits no immunity', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   const before = js.length;
 
   // f=p&&l?.behavior==="ask"?_B(l.decisionReason,FMn):void 0;
-  // Якорится на форме, а не на именах: p — предикат режима, вычисленный строкой
-  // выше, l — накопленное решение, FMn — предикат иммунитета.
+  // Anchored on shape, not on names: p is the mode predicate computed a line
+  // above, l the accumulated decision, FMn the immunity predicate.
   const rx = new RegExp(
     `(${ID})=(${ID})&&(${ID})\\?\\.behavior==="ask"\\?` +
       `(${ID})\\(\\3\\.decisionReason,(${ID})\\):void 0;`,
@@ -2175,8 +2219,9 @@ step('27 full-bypass mode admits no immunity', () => {
   const m = js.match(rx);
   if (!m) fail('bypass-immunity site not found');
 
-  // Соседняя строка обязана оказаться веткой режима полного пропуска: без этой
-  // сверки локатор мог бы сесть на однотипную форму в другом гейте.
+  // The neighboring line must turn out to be the full-bypass-mode branch:
+  // without this cross-check the locator could land on a same-shaped form in a
+  // different gate.
   const head = js.slice(Math.max(0, m.index - 260), m.index);
   if (!head.includes('"bypassPermissions"')) {
     fail('bypass-immunity site is not the permission-mode branch');

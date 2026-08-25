@@ -1,6 +1,6 @@
-# Проектный слой оснастки: первая ступень заведомо несуществующая модель,
-# вторая живая. Список ступеней задаётся ЦЕЛИКОМ — при слиянии слоёв значение
-# ключа заменяется, а не дополняется, иначе домашняя лестница поехала бы первой.
+# Project layer of the fixture: the first rung is a deliberately nonexistent model,
+# the second is live. The rung list is specified IN FULL — when layers merge the key
+# value is replaced, not appended to, otherwise the home ladder would shift first.
 [probe.judge]
 timeout_ms = 60000
 max_tokens = 3000

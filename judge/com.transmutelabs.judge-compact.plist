@@ -11,9 +11,9 @@
         <string>--older-than-hours</string>
         <string>24</string>
     </array>
-    <!-- 04:07, а не 04:00: круглые минуты — общее место для всей машины.
-         Пропущенный из-за сна запуск launchd отрабатывает после пробуждения,
-         поэтому суточный проход не теряется. -->
+    <!-- 04:07, not 04:00: round minutes are a shared slot for the whole machine.
+         A launchd run missed due to sleep is executed after wake-up,
+         so the daily pass is not lost. -->
     <key>StartCalendarInterval</key>
     <array>
         <dict>
@@ -21,8 +21,8 @@
             <key>Minute</key><integer>7</integer>
         </dict>
     </array>
-    <!-- Запуск при загрузке НЕ нужен: проход сжимает записи старше суток,
-         запускать его на каждый вход в систему смысла нет, а лог он засоряет. -->
+    <!-- Run at load is NOT needed: the pass compacts records older than a day,
+         there is no point running it on every login, and it clutters the log. -->
     <key>RunAtLoad</key>
     <false/>
     <key>EnvironmentVariables</key>

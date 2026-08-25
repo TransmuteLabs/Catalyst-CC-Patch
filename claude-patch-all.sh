@@ -147,10 +147,10 @@ PY
 fi
 
 # --- 3. our patches, ALWAYS after tweakcc -------------------------------------
-# Вклеиваемый код разбирается ДО сборки: патчер синтаксически цел сам по себе,
-# а склеенная из сотен строковых кусков программа может не разбираться вовсе.
-# Проверка обязана ЗВАТЬСЯ: пока её только клали в комплект, она была сломана
-# двумя коммитами и молчала.
+# The injected code is parsed BEFORE the build: the patcher is syntactically
+# intact on its own, while a program glued from hundreds of string pieces may
+# not parse at all. The check must be CALLED: while it was merely shipped in
+# the kit, it was broken by two commits and stayed silent.
 echo "==> Разбор вклеиваемого кода"
 node "$(dirname "$0")/tools/emit-check.js"
 
@@ -189,17 +189,18 @@ def _same_env_helper(d):
     return bool(re.search(re.escape(m.group(1)) + rb'\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)', d))
 
 def _judge_catch_scope(d):
-    # Путь отказа судьи исполняется только при поломке, поэтому опечатка в нём
-    # живёт незамеченной: имя __pdir читалось из соседнего блока и падало
-    # ReferenceError'ом ДО записи в журнал — диспатч получал "__pdir is not
-    # defined", журнал не получал ничего. Проверка структурная: каждое имя,
-    # которое читает catch, обязано быть объявлено ВЫШЕ try.
+    # The judge's failure path runs only when something is broken, so a typo in
+    # it lives unnoticed: the name __pdir was read from a neighboring block and
+    # crashed with ReferenceError BEFORE the journal write — the dispatch got
+    # "__pdir is not defined", the journal got nothing. The check is
+    # structural: every name the catch reads must be declared ABOVE the try.
     m = re.search(rb'let __t0=Date\.now\(\),(.{0,900}?)__jdir=', d, re.S)
     if not m:
         return False
-    # __o — параметр самой функции ядра, а не объявление внутри тела: он в
-    # области видимости всегда, и требовать его объявления значило бы требовать
-    # невозможного. Берётся из сигнатуры, а не вписывается константой.
+    # __o is a parameter of the core function itself, not a declaration inside
+    # the body: it is always in scope, and requiring its declaration would mean
+    # requiring the impossible. It is taken from the signature, not written in
+    # as a constant.
     sig = re.search(rb'globalThis\.__ccProbe\?\?=async function\((__\w+)\)', d)
     declared = set(re.findall(rb'(__\w+)\s*=', m.group(1))) | {b'__jdir', b'__cut'}
     if sig:
@@ -213,7 +214,7 @@ def _judge_catch_scope(d):
     return not (used - declared - local)
 
 def _captured_names(src):
-    # Имена, снятые с захвата регуляркой, и всё, что из них собрано.
+    # Names captured by a regex, and everything built from them.
     n = set(re.findall(r'const (\w+) = [^;\n]*\[\d+\]', src))
     for _ in range(3):
         for m in re.finditer(r'const (\w+) =\s*(`[^`]*`)', src):
@@ -222,13 +223,14 @@ def _captured_names(src):
     return n
 
 def _escaped_interpolations(src):
-    # Минифицированное имя может содержать `$`: в 2.1.239 матчер сессии зовётся
-    # `$jS`. В ИСХОДНИКЕ регулярки `$` — якорь конца строки, поэтому имя,
-    # вклеенное голым, не совпадает НИКОГДА, и локатор падает не потому, что
-    # сборка изменилась, а потому что минификатор выбрал другую букву. В строке
-    # ЗАМЕНЫ тот же `$` читается как ссылка на группу и подставляет чужой
-    # захват — уже молча. Проверяется КЛАСС: ни одно захваченное имя не стоит в
-    # шаблоне или замене без rxEsc/repEsc. На источнике до фикса ловится 12 мест.
+    # A minified name can contain `$`: in 2.1.239 the session matcher is called
+    # `$jS`. In a regex SOURCE `$` is the end-of-line anchor, so a name injected
+    # bare never matches, and the locator fails not because the build changed
+    # but because the minifier picked a different letter. In the REPLACEMENT
+    # string the same `$` reads as a group reference and substitutes someone
+    # else's capture — silently. The CLASS is checked: no captured name may
+    # stand in a template or replacement without rxEsc/repEsc. On the pre-fix
+    # source this catches 12 places.
     names, lines, bad = _captured_names(src), src.split('\n'), []
     for i, ln in enumerate(lines):
         hits = [x for x in names if '${%s}' % x in ln]
@@ -244,23 +246,23 @@ def _escaped_interpolations(src):
     return not bad
 
 def _judge_both_shapes(src):
-    # 2.1.239 увёл вызов инструмента за адаптер: `e.call(w,ctx,…)` стал
-    # `hii(e).execute(w,ctx,…)`, где `hii(e) = e.executor ?? {execute:…}`.
-    # Локатор судьи обязан держать ОБЕ формы и цепляться за сам инструмент, а
-    # не за обёртку: `.name` есть у инструмента, у адаптера его нет.
+    # 2.1.239 moved the tool call behind an adapter: `e.call(w,ctx,…)` became
+    # `hii(e).execute(w,ctx,…)`, where `hii(e) = e.executor ?? {execute:…}`.
+    # The judge locator must hold BOTH shapes and latch onto the tool itself,
+    # not the wrapper: the tool has `.name`, the adapter does not.
     i = src.find("step('22 judge consulted")
     j = src.find("step('23", i)
     blk = src[i:j] if i >= 0 and j > i else ''
     return (r'\\.call|' in blk) and (r'\\)\\.execute' in blk) and ('m[2] ?? m[3]' in blk)
 
 def _bypass_no_immunity(d):
-    # Реестр помечает часть предохранителей иммунными к режиму полного пропуска,
-    # и на них сессия с ключом полного пропуска всё равно останавливается.
-    # Правится ТОЛЬКО режимная ветка: предикат иммунитета остаётся жив для
-    # второго потребителя (выбор представителя среди нескольких результатов
-    # одной команды), поэтому его единственное оставшееся употребление и есть
-    # доказательство, что снята именно ветка, а не механизм целиком.
-    # На непропатченном образе употреблений два — проверка падает.
+    # The registry marks some circuit breakers immune to the full-bypass mode,
+    # and a session holding a full-bypass key still stops on them. Only the
+    # mode branch is patched: the immunity predicate stays alive for its second
+    # consumer (picking a representative among several results of one command),
+    # so its single remaining use is the proof that the branch, not the whole
+    # mechanism, was removed. On an unpatched image there are two uses — the
+    # check fails.
     m = re.search(rb'isBypassImmuneCircuitBreaker:\(\)=>(' + ID + rb')', d)
     if not m:
         return False
@@ -404,83 +406,88 @@ checks = {
                                               rb'\|\|' + ID + rb'\.name==="Task"\)&&' + ID +
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{', d)),
-    # Ядро объявляется ОДИН раз и обоими потребителями зовётся по имени: два
-    # определения разошлись бы правками, а разошедшееся ядро — это ровно то,
-    # ради чего копия с исключениями и была отвергнута.
+    # The core is declared ONCE and called by name by both consumers: two
+    # definitions would drift apart through edits, and a drifted core is
+    # exactly what the copy-with-exceptions was rejected over.
     'probe core defined once': bool(re.search(
                                               rb'globalThis\.__ccProbe\?\?=async function\(__o\)\{', d)),
-    # Словарь вердикта задаёт ВЫЗЫВАЮЩИЙ: у судьи и наблюдателя он разный, и
-    # зашитый в ядро словарь молча судил бы наблюдателя судейскими словами.
+    # The verdict vocabulary is set by the CALLER: the judge and the watcher
+    # have different ones, and a vocabulary hardcoded into the core would
+    # silently judge the watcher in the judge's words.
     'probe verdict vocabulary comes from the caller': bool(re.search(
                                               rb'let __rx=new RegExp\("\^\\\\s\*\(\?:"\+__o\.rx\+"\):\.\*\$","gm"\)', d))
                                           and bool(re.search(
                                               rb'rx:"OK\|BLOCK\|STOP\|DENY\|WARN",act:"BLOCK\|STOP\|DENY"', d)),
-    # Регулярка, собранная из СТРОКИ, требует двойного слэша: одинарный тихо
-    # вырождает класс (`"\s"` в строке JS — это буква s, `"[\s\S]"` — это [sS]),
-    # и словарь вердикта перестаёт совпадать, оставаясь синтаксически верным.
-    # Измерено стендом: BLOCK записывался как ok, и судья не отменял ничего.
+    # A regex built from a STRING needs a double backslash: a single one
+    # quietly degenerates the class (`"\s"` in a JS string is the letter s,
+    # `"[\s\S]"` is [sS]), and the verdict vocabulary stops matching while
+    # staying syntactically valid. Measured on the bench: BLOCK was recorded as
+    # ok, and the judge cancelled nothing.
     'probe verdict classes survive string escaping': bool(re.search(
                                               rb'new RegExp\("\^\(\?:"\+__o\.act\+"\):\\\\s\*'
                                               rb'\(\[\\\\s\\\\S\]\+\)\$","m"\)', d))
                                           and not re.search(
                                               rb'new RegExp\("\^\(\?:"\+__o\.act\+"\):\\s\*\(\[\\s\\S\]\+\)', d),
-    # Наблюдатель — второй потребитель ТОГО ЖЕ ядра. Отдельное определение
-    # здесь означало бы, что разбор на ядро не состоялся.
+    # The watcher is the second consumer of the SAME core. A separate
+    # definition here would mean the decomposition into a core never happened.
     'watcher rides the same core': bool(re.search(
                                               rb'if\(process\.env\.CLAUDE_IDLE&&' + ID +
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{'
                                               rb'tag:"\[Watch\]",dirName:"idle-watch",arm:!1,'
                                               rb'label:"FLEET",rx:"SILENT\|NUDGE",act:"NUDGE",', d)),
-    # Реакция наблюдателя — вкладка в ход, а не отмена вызова. Бросок здесь
-    # ронял бы работающий инструмент ради напоминания; `arm:!1` вдобавок
-    # запирает путь отказа, по которому судья отменяет вызов.
-    # Отсев главного лупа в ОБРАЗЕ — `dA(e)=e.agentId===Di()`; реконструкция
-    # typescript-src в этом месте говорит `undefined` и с 2.1.239 разошлась.
-    # Порог слива равен "later" только в ход со Sleep, поэтому "later" ждал бы
-    # Sleep неопределённо долго: журнал с "nudge" и ноль доставки.
+    # The watcher's reaction is a tab in the thread, not a dispatch
+    # cancellation. A throw here would crash a working tool for the sake of a
+    # reminder; `arm:!1` additionally locks the failure path through which the
+    # judge cancels a dispatch.
+    # The main-loop filter in the IMAGE is `dA(e)=e.agentId===Di()`; the
+    # typescript-src reconstruction says `undefined` at this spot and has
+    # diverged since 2.1.239.
+    # The drain threshold equals "later" only in a thread with Sleep, so
+    # "later" would wait for Sleep indefinitely: a journal with "nudge" and
+    # zero delivery.
     'watcher nudges through the notification queue': bool(re.search(
                                               rb'onAct:async\(__r\)=>\{try\{' + ID +
                                               rb'\(\{value:"\[fleet-idle\] "\+__r\+"[^"]*",'
                                               rb'mode:"task-notification",agentId:' + ID +
                                               rb'\(\),priority:"next"\}\)\}', d))
-                                          # молчаливый catch здесь = журнал с nudge и ноль доставки
+                                          # a silent catch here = a journal with nudge and zero delivery
                                           and bool(re.search(
                                               rb'outcome:"nudge_undelivered"', d))
-                                          # адресат обязан совпадать с тем, что требует сам отсев
+                                          # the recipient must match what the filter itself requires
                                           and bool(re.search(
                                               rb'function (\w+)\(\w+\)\{return \w+\.agentId===(\w+)\(\)\}', d))
                                           and bool(re.search(
                                               rb'onNoVerdict:\(\)=>\{\},onBroken:\(\)=>\{\},'
                                               rb'onFail:\(\)=>\{\}\}\)', d)),
-    # Счёт флота ведётся на КАЖДОМ вызове инструмента: считать только там, где
-    # зовут наблюдателя, значит никогда не увидеть уже запущенных субагентов.
-    # Список ограничен сверху — иначе он растёт всю сессию.
+    # The fleet count happens on EVERY tool call: counting only where the
+    # watcher is invoked means never seeing already-started subagents. The
+    # list is capped from above — otherwise it grows the whole session.
     'watcher counts every dispatch': bool(re.search(
                                               rb'globalThis\.__ccFleet\?\?=\[\];if\(' + ID +
                                               rb'\.name==="Agent"\|\|' + ID + rb'\.name==="Task"\)\{'
                                               rb'globalThis\.__ccFleet\.push\(Date\.now\(\)\);', d))
                                           and bool(re.search(
                                               rb'if\(globalThis\.__ccFleet\.length>256\)', d)),
-    # Дешёвый счёт стоит ПЕРЕД моделью: занятый флот, ненабранное окно и период
-    # покоя отсекают консультацию бесплатно. Без этого наблюдатель стал бы
-    # постоянной статьёй расхода на каждом вызове инструмента.
+    # The cheap count stands BEFORE the model: a busy fleet, an unfilled window
+    # and a cooldown cut off the consultation for free. Without it the watcher
+    # would become a permanent expense line on every tool call.
     'watcher spends nothing before the cheap count': bool(re.search(
                                               rb'if\(__ask&&__o\.gate\)\{let __g=null;', d))
-                                          # три отказа счёта; точный миг каждого проверяется
-                                          # отдельно ниже
+                                          # three count refusals; the exact moment of each is
+                                          # checked separately below
                                           and bool(re.search(rb'return "fleet-busy:"\+__n\}', d))
                                           and bool(re.search(rb'return "window-not-filled"\}', d))
                                           and bool(re.search(rb'return "cooldown"\}', d)),
-    # Пробу зовут на каждом вызове инструмента, поэтому отсев обязан стоять
-    # ДО чтения настроек: обход дерева вверх стоит десятки обращений к файловой
-    # системе, а журналируемый отказ утопил бы журнал человека.
+    # The probe is called on every tool call, so the filter must run BEFORE
+    # reading settings: walking up the tree costs tens of filesystem accesses,
+    # and a journaled refusal would drown the human's journal.
     'probe skips before touching the disk': bool(re.search(
                                               rb'globalThis\.__ccProbe\?\?=async function\(__o\)\{'
                                               rb'if\(__o\.pre\)\{let __pr=null;try\{__pr=__o\.pre\(\)\}'
                                               rb'catch\{__pr=null\}if\(__pr\)return\}', d)),
-    # Отсев должен знать МИГ, а не интервал опроса: каждый отказ дешёвого счёта
-    # называет время, раньше которого он не может смениться.
+    # The filter must know the MOMENT, not the polling interval: every cheap-count
+    # refusal names a time before which it cannot change.
     'watcher names the next possible moment': bool(re.search(
                                               rb'pre:\(\)=>\{let __s=globalThis\.__ccWatch;'
                                               rb'return __s&&__s\.nextAt>Date\.now\(\)\?"not-yet":null\}', d))
@@ -492,17 +499,19 @@ checks = {
                                               rb'__s\.nextAt=__s\.last\+__cd;', d))
                                           and bool(re.search(
                                               rb'__s\.last=__now;__s\.nextAt=__now\+__cd;return null', d)),
-    # Отказ дешёвого счёта попадает в журнал с ПРИЧИНОЙ: иначе «не звали» и
-    # «позвали и промолчал» неразличимы, а это два разных исхода.
+    # A cheap-count refusal lands in the journal with a REASON: otherwise "never
+    # called" and "called and stayed silent" are indistinguishable, and those
+    # are two different outcomes.
     'watcher journals why it stayed cheap': bool(re.search(
                                               rb'await __jlog\(\{outcome:"filtered",by:String\(__g\),'
                                               rb'cls:null\}\)', d)),
-    # Слово исхода в журнале — класс, названный моделью, а не судейское
-    # «block»: словарь приходит от вызывающего, и зашитое слово писало бы
-    # молчание наблюдателя теми же знаками, что настоящую отмену судьи.
+    # The outcome word in the journal is the class named by the model, not the
+    # judge's "block": the vocabulary comes from the caller, and a hardcoded
+    # word would write the watcher's silence with the same characters as a real
+    # judge cancellation.
     'outcome word comes from the verdict class': bool(re.search(
-                                              # регулярка-ЛИТЕРАЛ: один слэш, в отличие от
-                                              # собранной из строки словарной выше
+                                              # a regex LITERAL: one backslash, unlike the
+                                              # string-built vocabulary one above
                                               rb'let __ocw=String\(\(/\^\\s\*\(\[A-Za-z\]\+\):/'
                                               rb'\.exec\(__v\|\|""\)\|\|\[\]\)\[1\]\|\|"ok"\)'
                                               rb'\.toLowerCase\(\);', d))
@@ -511,12 +520,13 @@ checks = {
                                               rb'\(__v\?__ocw:', d))
                                           and not re.search(
                                               rb'outcome:__bl\?\(__en\?"block"', d),
-    # Корпус записей — материал для выбора модели и обучения своей, и разбирать
-    # его придётся снаружи. Словарь вердикта поэтому лежит В САМОЙ записи: копия
-    # в config.json была бы вторым источником правды и разъехалась бы молча, а
-    # без словаря инструменты разбора зашивают судейские OK/WARN/BLOCK и не
-    # выражают наблюдательские SILENT/NUDGE вовсе. В журнальной строке словаря
-    # нет намеренно — её читает человек.
+    # The corpus of records is the material for model selection and for
+    # training our own, and it will have to be parsed from the outside. The
+    # verdict vocabulary therefore lives IN THE RECORD ITSELF: a copy in
+    # config.json would be a second source of truth and would drift silently,
+    # while without the vocabulary the parsing tools hardcode the judge's
+    # OK/WARN/BLOCK and cannot express the watcher's SILENT/NUDGE at all. The
+    # journal line carries no vocabulary deliberately — a human reads it.
     'records carry their own verdict vocabulary': bool(re.search(
                                               rb'JSON\.stringify\(\{\.\.\.__base,rx:__o\.rx,act:__o\.act,'
                                               rb'http:__jst,url:__jurl,pid:process\.pid,', d))
@@ -534,7 +544,7 @@ checks = {
                                           and bool(re.search(
                                               rb'en:__en\?\(__o\.sw==="enforce"\?'
                                               rb'"env":"config"\):null', d))
-                                          # переключателем судьи остаётся именно env: ядро его не знает
+                                          # the judge's switch remains env: the core does not know it
                                           and bool(re.search(
                                               rb'sw:process\.env\.CLAUDE_JUDGE,', d)),
     # the journal line clips the verdict and holds none of the material the
@@ -595,133 +605,144 @@ checks = {
                                               rb'response:__jres\}', d))
                                           and bool(re.search(
                                               rb'__jatt\.push\(__a\)', d)),
-    # судья обязан ехать на пуле моделей клиента, а не на своём HTTP-вызове:
-    # свой путь увёл бы claude-модели на api.anthropic.com по цене API
+    # the judge must ride the client model pool, not its own HTTP call: a
+    # dedicated path would route claude-models to api.anthropic.com at API
+    # prices
     'judge rides the client model pool': bool(re.search(
                                               rb'via:__http\?"http":"pool"', d))
                                           and bool(re.search(
                                               rb'querySource:"hook_prompt",toolChoice:void 0', d))
                                           and bool(re.search(
                                               rb'effortValue:__e\.effort\|\|void 0', d)),
-    # провал всей лестницы при fail_closed = отмена, а не молчаливый пропуск
+    # a whole-ladder failure under fail_closed = cancellation, not a silent pass
     'judge can fail closed': bool(re.search(
                                               rb'__fc=!__v&&__en&&__fcl', d))
                                           and bool(re.search(
                                               rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
                                           and bool(re.search(rb'if\(__fc\)await __o\.onNoVerdict\(', d))
-                                          # ...и реакция судьи на неё обязана быть броском, иначе
-                                          # fail_closed превращается в fail-open одной правкой вызова
+                                          # ...and the judge's reaction to it must be a throw,
+                                          # otherwise fail_closed turns into fail-open with a one-line edit at the call site
                                           and bool(re.search(
                                               rb'onNoVerdict:\(__r\)=>\{let __e=new Error\([\s\S]{0,4000}?'
                                               rb'__e\.__ccJudgeBlock=!0;throw __e\}', d)),
-    # отмена по каналу и отмена по вердикту — разные дефекты, разные имена
+    # a channel cancellation and a verdict cancellation are different defects,
+    # different names
     'judge names a fail-closed cancellation': bool(re.search(
                                               rb'__fc\?"block_no_verdict":"empty"', d)),
-    # подрезка ленты не смеет выбрасывать напечатанное человеком раньше прочего
+    # trimming the transcript must not drop what the human typed before
+    # anything else
     'judge keeps the human turns when trimming': bool(re.search(
                                               rb'__pr=\(__x\)=>__x&&\(__x\.src==="user"\|\|'
                                               rb'__x\.src==="compaction-summary"\)', d))
                                           and bool(re.search(
                                               rb'if\(!__al\(__k\)\|\|__pr\(__a\[__k\]\)\)continue;'
                                               rb'if\(__tot-__w\[__k\]>=__b\)', d))
-                                          # доля считается на КЛАСС (поштучный потолок резюме давал
-                                          # 64% ленты), носитель режется по тексту, а не выбрасывается
+                                          # the share is counted per CLASS (a per-item summary cap
+                                          # gave 64% of the transcript), the carrier is cut by text, not dropped
                                           and bool(re.search(
                                               rb'__cap\(__iss,__sb\);__cap\(__isu,__pb\)', d))
                                           and bool(re.search(
                                               rb'__dp\?"; \\u0412\\u042b\\u0422\\u0415\\u0421', d)),
-    # последняя незакреплённая запись укорачивается под зазор, а не
-    # выбрасывается: иначе лента обнуляется, а судья судит вслепую
+    # the last unpinned entry is shortened to fit the gap rather than dropped:
+    # otherwise the transcript empties out and the judges blind
     'judge fills the budget instead of emptying the tape': bool(re.search(
                                               rb'if\(__tot-__w\[__k\]>=__b\)\{__del\(__k,!1\);continue\}', d))
                                           and bool(re.search(
                                               rb'if\(__w\[__k\]>120\)__fit\(__k,__w\[__k\]-\(__tot-__b\)\);'
                                               rb'else __del\(__k,!1\)', d)),
-    # пороги подрезки и цена маркера считаются в ДЛИНЕ JSON: текстовые пороги
-    # промахивались на экранировании в обе стороны (переполнение и недобор)
+    # trimming thresholds and the marker cost are counted in JSON LENGTH:
+    # text thresholds missed on escaping in both directions (overflow and
+    # undershoot)
     'judge measures trimming in JSON length': bool(re.search(
                                               rb'let __fit=\(__i,__tc\)=>\{if\(__w\[__i\]<=__tc\)return 0;', d))
                                           and bool(re.search(
                                               rb'__lim=Math\.max\(8,Math\.floor\(__lim\*__tc/__c\*0\.9\)\)', d))
                                           and bool(re.search(
                                               rb'__tot\+__mc>__n', d)),
-    # подрезка обязана быть ЛИНЕЙНОЙ: повторная сериализация всего массива на
-    # каждое удаление давала 8.3 с локального счёта при пороге ступени 25 с
+    # trimming must be LINEAR: re-serialising the whole array on every removal
+    # gave 8.3 s of local compute against the rung's 25 s threshold
     'judge trims without re-serialising': bool(re.search(
                                               rb'__cs=\(__x\)=>JSON\.stringify\(__x\)\.length\+1', d))
                                           and bool(re.search(
                                               rb'__del=\(__i,__p\)=>\{if\(__dd\[__i\]\)return 0;__dd\[__i\]=!0', d))
-                                          # удаление помечает, а не вырезает: splice на каждое
-                                          # удаление давал 5-10 с на марафонской ленте
+                                          # removal marks instead of cutting out: a splice per
+                                          # removal gave 5-10 s on a marathon transcript
                                           and len(re.findall(rb'__a\.splice\(', d)) == 0
-                                          # метки сбрасываются после КАЖДОГО уплотнения: иначе
-                                          # счёт для маркера идёт по старым меткам и занижает
-                                          # число закреплённых реплик вплоть до нуля при живых
-                                          # три вхождения: заведение массива меток и сброс
-                                          # после каждого из двух уплотнений
+                                          # the marks are reset after EVERY compaction: otherwise
+                                          # the marker count runs on stale marks and undercounts
+                                          # the pinned human turns, down to zero with three live
+                                          # occurrences: introducing the mark array and the reset
+                                          # after each of the two compactions
                                           and len(re.findall(rb'__dd=new Array\(__a\.length\)\.fill\(!1\)', d)) == 3
                                           and len(re.findall(rb'__fit\(0,', d)) == 0
                                           and len(re.findall(rb'__s=JSON\.stringify\(__a\)', d)) == 0
                                           and bool(re.search(rb'__mt=\(\)=>"\[\\u043b', d))
                                           and bool(re.search(rb'__pb=Math\.floor\(__b\*0\.35\)', d)),
-    # числа в маркере и в самой записи обязаны называть ФАКТ, а не число
-    # вызовов: счёт вызовов __fit давал 39 подрезок против 4 живых, а счёт
-    # от прошлого среза — «вырезано 123» там, где вырезано 200000
+    # the numbers in the marker and in the record itself must state the FACT,
+    # not the call count: counting __fit calls gave 39 trims against 4 live
+    # ones, and counting from the previous cut gave "123 cut out" where
+    # 200000 were cut
     'judge counts trimmed records honestly': bool(re.search(
                                               rb'let __ot=new Array\(__a\.length\)\.fill\(null\)', d))
-                                          # подрезка всегда идёт от ИСХОДНОГО текста
+                                          # a trim always works from the ORIGINAL text
                                           and bool(re.search(
                                               rb"let __t=__ot\[__i\]!==null\?__ot\[__i\]:String\(__a\[__i\]\.text\)", d))
                                           and bool(re.search(
                                               rb'__ot\[__i\]=__t;__a\[__i\]=__nx', d))
-                                          # массив исходников переносится через ОБА уплотнения
+                                          # the originals array is carried across BOTH compactions
                                           and len(re.findall(rb'__ot=__ot\.filter\(', d)) == 2
-                                          # счётчик вызовов удалён из кода целиком
+                                          # the call counter is removed from the code entirely
                                           and len(re.findall(rb'__c2', d)) == 0
                                           and bool(re.search(
                                               rb'__ctd=\(\)=>\{let __r=0;.{0,80}__ot\[__k\]!==null', d))
                                           and bool(re.search(rb'\(__cd=__ctd\(\)\)\?', d)),
-    # путь отказа читает только имена, объявленные выше try (см. хелпер)
+    # the failure path reads only names declared above the try (see the helper)
     'judge fail-open path stays in scope': _judge_catch_scope(d),
-    # отказ канала при fail_closed = ОТМЕНА, а не пропуск: повтор на короткой
-    # ленте не был обёрнут, его падение писалось как штатный skip и вызов шёл
+    # a channel failure under fail_closed = CANCELLATION, not a pass: the retry
+    # on a short transcript was not wrapped, its crash was written up as a
+    # regular skip and the dispatch went through
     'judge cancels when it cannot decide': bool(re.search(
                                               rb'if\(__ask\)\{__jarm=!!__o\.arm&&__en&&__fcl;', d))
-                                          # повтор обёрнут так же, как ступень
+                                          # the retry is wrapped the same way as a rung
                                           and bool(re.search(
                                               rb'try\{__raw=await __call\(__cut\(Number\('
                                               rb'__cfg\.retry_context_chars\?\?8000\)\)', d))
-                                          # обязательство снимается ПОСЛЕДНИМ
+                                          # the obligation is released LAST
                                           and bool(re.search(
                                               rb'await __o\.onAct\(__bl\[1\]\.trim\(\)\);__jarm=!1;\}\}catch', d))
                                           and bool(re.search(
                                               rb'outcome:__jarm\?"block_no_verdict":"skip"', d))
                                           and bool(re.search(
                                               rb'if\(__jarm\)await __o\.onFail\(__rs\);', d))
-                                          # запись журнала не уводит управление мимо решений
+                                          # the journal write does not steer control past decisions
                                           and bool(re.search(
                                               rb'try\{await __jlog\(\{http:__jst,outcome:__bl\?', d))
                                           and bool(re.search(
                                               rb'verdict:__clip\(__v,400\)\|\|null\}\)\}catch\{\}', d)),
-    # всякое усечение в журнале и записи объявляется, как и подрезка ленты.
-    # Перечень запрещённых мест поимённо запрещает только уже придуманное:
-    # подрезка САМОГО ДИСПАТЧА в него не входила, и голый slice на главном
-    # объекте суда держал 69/69, пока судья возвращал исправные вызовы за
-    # обрыв, сделанный нами (измерено 2026-08-23). Диспатч пинуется отдельно.
-    # Запись журнала адресуется СЕССИЕЙ, а не только pid: pid переиспользуется
-    # операционной системой, и после смерти процесса запись не указывает ни на
-    # что. Пин классовый: поле обязано стоять в общей основе (её наследует и
-    # файл записи), добытчик обязан гасить бросок — журнальная строка не имеет
-    # права пропасть из-за поля, — и голого вызова в основе быть не должно.
-    # Занятость сессии берётся из РЕГИСТРА задач, а не выводится из отметок
-    # времени диспатчей: субагент, работающий дольше окна, из отметок выпадал,
-    # и сессия выглядела простаивающей ровно тогда, когда веер шёл. Пин
-    # классовый: чтение регистра, признак живости ровно как в образе (_L),
-    # объявление достижимости в нагрузке и перепроверка НЕ через окно.
-    # Модель диспатча РАЗРЕШАЕТСЯ (вызов -> определение агента -> наследование),
-    # источник называется полем msrc. Треть записей уходила без модели, и
-    # перепись «кто чем работал» недосчитывала эту треть. Пин классовый:
-    # запрещена и прежняя форма — модель прямо из вызова в основу записи.
+    # every truncation in the journal and the record is declared, like
+    # trimming the transcript. A name-by-name list of forbidden places forbids
+    # only what has already been thought of: trimming THE DISPATCH ITSELF was
+    # not in it, and a bare slice on the main object of the judgment held
+    # 69/69 while the judge returned corrected dispatches for a truncation we
+    # had made ourselves (measured 2026-08-23). The dispatch is pinned
+    # separately.
+    # A journal record is addressed by SESSION, not by pid alone: the OS
+    # reuses pids, and after the process dies the record points at nothing.
+    # The pin is class-level: the field must sit in the shared base (the record
+    # file inherits it too), the getter must swallow the throw — a journal line
+    # has no right to disappear over a field — and there must be no bare call
+    # in the base.
+    # Session busyness is taken from the task REGISTRY, not inferred from
+    # dispatch timestamps: a subagent working longer than the window fell out
+    # of the marks, and the session looked idle exactly while the fan-out was
+    # running. The pin is class-level: reading the registry, a liveness check
+    # exactly as in the image (_L), a readability declaration in the payload,
+    # and a recheck NOT through the window.
+    # The dispatch model is RESOLVED (call -> agent definition -> inheritance),
+    # the source is named by the msrc field. A third of the records went out
+    # without a model, and the "who worked with what" census undercounted that
+    # third. The pin is class-level: the old form is forbidden too — the model
+    # straight from the call into the record base.
     'journal resolves the dispatch model': bool(re.search(
                                               rb'__mdl=\(\)=>\{try\{let __m=__o\.input\?\.model;', d))
                                           and bool(re.search(
@@ -730,13 +751,14 @@ checks = {
                                           and bool(re.search(rb's:__dm==="inherit"\?"inherit":"main"', d))
                                           and bool(re.search(rb'model:__mv\.m,msrc:__mv\.s', d))
                                           and len(re.findall(rb'model:__o\.input\?\.model,', d)) == 0,
-    # Заголовок сессии берётся аксессором, чьё связывание в образе НЕ доказано:
-    # неверное имя вернуло бы разбор стека вместо строки МОЛЧА. Проверка формы
-    # обязательна — без неё в журнал попадал бы мусор, выглядящий как данные.
-    # Применённый слой настроек называется в КАЖДОЙ строке журнала, а не
-    # только в строках консультации: раньше отсев слоя не называл, и какой
-    # config.json подействовал, приходилось выводить косвенно по поведению.
-    # Источник поля ровно один — общая основа записи.
+    # The session title is taken through an accessor whose binding in the image
+    # is NOT proven: a wrong name would return a stack parse instead of a
+    # string, SILENTLY. The shape check is mandatory — without it the journal
+    # would collect garbage that looks like data.
+    # The applied settings layer is named in EVERY journal line, not only in
+    # consultation lines: before, the layer filter named nothing, and which
+    # config.json took effect had to be inferred indirectly from behavior. The
+    # field has exactly one source — the shared record base.
     'every journal line names the applied config layer': bool(re.search(
                                               rb'msrc:__mv\.s,cfg:__pdir\|\|null,', d))
                                           and len(re.findall(rb'cfg:__pdir\|\|null', d)) == 1,
@@ -755,22 +777,22 @@ checks = {
                                               rb'return "live-work:"\+', d))
                                           and bool(re.search(
                                               rb'task_registry_readable:', d))
-                                          # недостижимый регистр НЕ выдаётся за «работ нет»
+                                          # an unreachable registry is NOT reported as "no work"
                                           and bool(re.search(rb'__s\.reg=!!__tr', d))
                                           and bool(re.search(rb'if\(__tr&&__lv\.length>=__lth\)', d)),
     'journal line carries the session id': bool(re.search(
                                               rb'__base=\{t:__ts,sid:__sid\(\)', d))
                                           and bool(re.search(
                                               rb'__sid=\(\)=>\{try\{return [\w$]+\(\)\}catch\{return null\}\}', d))
-                                          # голый вызов образа мимо гасителя:
-                                          # сам гаситель под запрет не попадает
+                                          # a bare image call outside the swallower:
+                                          # the swallower itself is not under the ban
                                           and len(re.findall(
                                               rb'sid:(?!__sid\(\))[\w$]+\(\),tool:', d)) == 0,
     'judge declares every truncation': len(re.findall(
                                               rb'__clip\(', d)) >= 6
                                           and len(re.findall(rb'__v\.slice\(0,400\)', d)) == 0
                                           and len(re.findall(rb'\.resp=__t2?\.slice\(0,800\)', d)) == 0
-                                          # диспатч режется ТОЛЬКО с объявлением
+                                          # the dispatch is cut ONLY with a declaration
                                           and bool(re.search(
                                               rb'__dtr=__dsrc\.length>__dmax;', d))
                                           and bool(re.search(
@@ -779,41 +801,43 @@ checks = {
                                               rb'__lbl=String\(__o\.label\|\|"DISPATCH"\)\+\(__dtr\?', d))
                                           and len(re.findall(
                                               rb'\.slice\(0,Number\(__cfg\.dispatch_chars', d)) == 0
-                                          # сообщение упавшей попытки: голый slice
-                                          # обрубал фразу, называющую средство
+                                          # the failed attempt's message: a bare slice
+                                          # chopped off the phrase naming the tool
                                           and len(re.findall(rb'__xe\?\.message\?\?__xe\)\.slice\(', d)) == 0
                                           and bool(re.search(rb'__clip\(__em,200\)', d))
-                                          # свой потолок ВЫВОДА называется своим именем
+                                          # our own OUTPUT ceiling is called by its own name
                                           and bool(re.search(rb'our output budget "\+__ob\[1\]\+" exhausted', d))
-                                          # до первой попытки попыток НОЛЬ
+                                          # before the first attempt there are ZERO attempts
                                           and bool(re.search(rb'__jtry=0,__jerr1=null', d)),
-    # битый конфиг молча снимал enforce и fail_closed: судья выглядел
-    # работающим и пропускал всё, включая собственный вердикт BLOCK
-    # один дом на все пробы: id — подкаталог, а не отдельный корень настроек
+    # a broken config silently removed enforce and fail_closed: the judge
+    # looked alive and let everything through, including its own BLOCK verdict
+    # one home for all probes: the id is a subdirectory, not a separate
+    # settings root
     'settings live in one probes home': bool(re.search(
                                               rb'let __phome=__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
                                               rb'\+"/\.claude/probes"\);let __dir=__phome\+"/"\+__o\.dirName', d))
-                                          # журнал пробы живёт в её подкаталоге того же дома
+                                          # a probe's journal lives in its subdirectory of the same home
                                           and bool(re.search(
                                               rb'__jdir=\(__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
                                               rb'\+"/\.claude/probes"\)\)\+"/"\+__o\.dirName', d))
-                                          # переменная среды ОДНА на все пробы
+                                          # ONE environment variable for all probes
                                           and len(re.findall(rb'dirEnv:process\.env\.CLAUDE_PROBES_DIR', d)) == 2
                                           and len(re.findall(rb'CLAUDE_JUDGE_DIR', d)) == 0
                                           and len(re.findall(rb'CLAUDE_IDLE_DIR', d)) == 0,
-    # [defaults] под таблицей пробы; проба, не названная в файле, получает
-    # одни defaults — это отсутствие своих правок, а не ошибка
+    # [defaults] under the probe table; a probe not named in the file gets
+    # bare defaults — that is the absence of its own edits, not an error
     'probe settings merge defaults under the probe table': bool(re.search(
                                               rb'let __eff=\(__t,__id\)=>__t&&typeof __t==="object"'
                                               rb'\?\{\.\.\.\(__t\.defaults\|\|\{\}\),'
                                               rb'\.\.\.\(\(__t\.probe\|\|\{\}\)\[__id\]\|\|\{\}\)\}:\{\}', d)),
-    # выключение пробы — настройка; реестр обязан гасить одного потребителя,
-    # не трогая остальных, и гашение обязано быть ВИДНО в журнале
+    # disabling a probe is a setting; the registry must silence one consumer
+    # without touching the others, and the silencing must be VISIBLE in the
+    # journal
     'a disabled probe says so in the journal': bool(re.search(
                                               rb'if\(__cfg\.enabled===!1\)\{await __jlog\('
                                               rb'\{outcome:"skip_disabled"\}\);return\}', d)),
-    # отсутствие разборщика TOML — событие, а не пустые настройки: пустые
-    # молча снимают enforce, лестницу и бюджеты
+    # a missing TOML parser is an event, not empty settings: empty ones
+    # silently remove enforce, the ladder and the budgets
     'a missing TOML parser is declared, not silently empty': bool(re.search(
                                               rb'let __tp=globalThis\.Bun\?\.TOML\?\.parse;'
                                               rb'if\(typeof __tp!=="function"\)\{'
@@ -825,14 +849,14 @@ checks = {
                                               rb'let __c0=await __ldt\(__phome\+"/probes\.toml"\);'
                                               rb'if\(__c0===!1\)__cfgbad=!0;else if\(__c0\)'
                                               rb'__cfg=__eff\(__c0,__o\.dirName\)', d))
-                                          # неизвестные enforce/fail_closed считаются ВКЛЮЧЁННЫМИ
+                                          # unknown enforce/fail_closed count as ON
                                           and bool(re.search(
                                               rb'__cfg\.enforce===!0\|\|__cfgbad', d))
                                           and bool(re.search(
                                               rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
-                                          # нечитаемый слой отличается от отсутствующего
-                                          # "пути нет" (ENOENT/ENOTDIR/ELOOP) против
-                                          # "путь есть, доступа нет" (EACCES/EPERM)
+                                          # an unreadable layer is distinct from a missing one:
+                                          # "no such path" (ENOENT/ENOTDIR/ELOOP) versus
+                                          # "the path exists, no access" (EACCES/EPERM)
                                           and bool(re.search(
                                               rb'__c==="EACCES"\|\|__c==="EPERM"\?2:', d))
                                           and bool(re.search(
@@ -840,74 +864,78 @@ checks = {
                                               rb'__c==="ELOOP"\|\|__c==="ENAMETOOLONG"\?0:3', d))
                                           and bool(re.search(
                                               rb'__deg\.push\("layer-unreadable:"', d))
-                                          # BOM невидим, а разбор его не принимает
+                                          # a BOM is invisible and the parser rejects it
                                           and bool(re.search(
                                               rb'if\(__x\.charCodeAt\(0\)===65279\)__x=__x\.slice\(1\)', d))
                                           and bool(re.search(
                                               rb'__deg\.push\("empty:"\+__f\)', d)),
-    # поломка правил — не «работай по умолчанию», а отмена с названием файла
+    # broken rules are not "fall back to defaults" but a cancellation naming
+    # the file
     'judge cancels when its rules are broken': bool(re.search(
                                               rb'if\(__degb\.length&&__en\)\{', d))
                                           and bool(re.search(
                                               rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\)\)', d))
                                           and bool(re.search(
                                               rb'outcome:__o\.arm\?"block_degraded":"skip_degraded"', d))
-                                          # проба, которая не отменяет вызов, не платит за консультацию
-                                          # по правилам, которых у неё нет
+                                          # a probe that does not cancel the dispatch does not pay
+                                          # for a consultation by rules it does not have
                                           and bool(re.search(
                                               rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\)\);return\}', d))
                                           and bool(re.search(
                                               rb'\.\.\.\(__deg\.length\?\{deg:__dcut\(__deg,5\)\}:\{\}\)', d))
                                           and bool(re.search(
                                               rb'onBroken:\(__r\)=>\{let __e=new Error[\s\S]{0,4000}?__e\.__ccJudgeBlock=!0;throw __e\}', d)),
-    # запасной промпт обязан уметь отменять, иначе гейт формально жив и
-    # содержательно выключен: в прежнем слова BLOCK не было вовсе
+    # the fallback prompt must be able to cancel, otherwise the gate is
+    # formally alive and substantively off: the old one had no word BLOCK at
+    # all
     'fallback prompt can cancel': b'BLOCK cancels the dispatch' in d
                                           and b'SWAP:<model>:<why>' not in d
                                           and bool(re.search(
                                               rb'let __pmm="prompt-missing:"\+__dir', d)),
-    # ответ мимо словаря — не вердикт: прежде он записывался как ok
+    # an answer outside the vocabulary is not a verdict: it used to be
+    # recorded as ok
     'an unrecognised answer is not a verdict': bool(re.search(
                                               rb'return \(\(String\(__rr\)\.match\(__rx\)\|\|\[\]\)\.pop\(\)\|\|""\)\.trim\(\)', d))
                                           and len(re.findall(rb'\.pop\(\)\)\|\|__ct\)\.trim\(\)', d)) == 0,
-    # из отмены обязан быть выход: какой файл чинить и не отброшено ли
-    # молча ещё несколько таких же
+    # a cancellation must have a way out: which file to fix, and whether
+    # several more like it were silently dropped
     'a cancelled dispatch names the file to fix': bool(re.search(
                                               rb'"prompt-missing:"\+__dir\+"/prompt\.md"', d))
-                                          # списки деградаций режутся с объявлением
+                                          # degradation lists are cut with a declaration
                                           and bool(re.search(
                                               rb'__dcut=\(__l,__k\)=>__l\.length<=__k\?__l:'
                                               rb'__l\.slice\(0,__k\)\.concat\(', d))
                                           and len(re.findall(rb'__deg\.slice\(0,5\)', d)) == 0
                                           and len(re.findall(rb'__degb\.slice\(0,3\)', d)) == 0
                                           and bool(re.search(rb'deg:__dcut\(__deg,5\)', d))
-                                          # на свежей установке журнал заводит свой каталог
+                                          # on a fresh install the journal creates its own directory
                                           and bool(re.search(
                                               rb'catch\(__ae\)\{if\(__ae\?\.code!=="ENOENT"\)throw __ae;'
                                               rb'await __jfs\.mkdir\(__jdir,\{recursive:!0\}\)', d)),
-    # вывод локальной команды — ответ ПРОГРАММЫ, он не смеет носить метку
-    # человека: иначе закрепление сохраняет его навсегда как санкцию
+    # local command output is a PROGRAM's answer; it must not carry the human
+    # label: otherwise pinning keeps it forever as an authorization
     'judge does not read command output as the human': bool(re.search(
                                               rb'__bt\.includes\("<local-command-stdout"\)', d))
                                           and bool(re.search(
                                               rb'\?"user-command":', d))
                                           and bool(re.search(
                                               rb'<command-args>\\s\*\[\^\\s<\]/\.test\(__bt\)\)\?"user"', d)),
-    # неизвестная обёртка под ролью user обязана быть ВИДНА в журнале:
-    # три дефекта подряд были одним классом, найденным по инциденту
+    # an unknown wrapper under the user role must be VISIBLE in the journal:
+    # three defects in a row were one class, found through an incident
     'judge reports unknown user-role wrappers': bool(re.search(
                                               rb'\{uw:__uw\.slice\(0,5\)\}', d))
                                           and bool(re.search(
                                               rb'"command-name","command-message","command-args"', d)),
-    # после компакции резюме — ЕДИНСТВЕННЫЙ носитель стоячих распоряжений;
-    # оно закрепляется своей долей и подрезается по тексту, а не выбрасывается
+    # after compaction the summary is the ONLY carrier of standing directives;
+    # it is pinned with its own share and trimmed by text, not dropped
     'judge pins the compaction summary': bool(re.search(
                                               rb'__M\?\.isCompactSummary\?"compaction-summary"', d))
                                           and bool(re.search(
                                               rb'__x\.src==="compaction-summary"\)', d))
                                           and bool(re.search(
                                               rb'__sb=Math\.floor\(__b\*0\.3\)', d)),
-    # отказ ступени обязан нести причину и свой ответ, иначе разбирать нечем
+    # a rung failure must carry the reason and its own reply, otherwise there
+    # is nothing to analyze
     'judge keeps the reason of a failed rung': bool(re.search(
                                               rb'api error from the pool: ', d))
                                           and len(re.findall(rb'__a\.resp=', d)) == 2,
@@ -964,11 +992,11 @@ fi
 # Config backups: keep only the 3 most recent.
 if [[ $DO_UPDATE -eq 1 ]]; then
   VERSIONS_DIR="$(dirname "$BIN")"
-  # Список сохраняемого строится по НАСТОЯЩЕМУ имени версии, а не по имени
-  # мишени: при сборке в staging (--target X.staging) basename дал бы
-  # "2.1.237.staging", и уборка снесла бы живой 2.1.237 вместе с его чистым
-  # .orig — всё, кроме промежуточного файла. Уцелел бы только тот бинарник,
-  # который в этот момент исполняет живая сессия.
+  # The keep-list is built from the REAL version name, not the target name:
+  # when building into staging (--target X.staging) basename would give
+  # "2.1.237.staging", and the cleanup would wipe the live 2.1.237 along with
+  # its pristine .orig — everything except the intermediate file. Only the
+  # binary a live session was executing at that moment would survive.
   CURRENT_VER="$(basename "$BIN")"
   CURRENT_VER="${CURRENT_VER%.staging}"
   CURRENT_VER="${CURRENT_VER%.orig}"

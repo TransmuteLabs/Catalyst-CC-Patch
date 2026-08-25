@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Сборка комплекта патчей ИЗ ЖИВЫХ ФАЙЛОВ.
+# Building the patch kit FROM THE LIVE FILES.
 #
-# Пишется потому, что комплект дважды собирался распаковкой ПРЕДЫДУЩЕГО
-# архива с правкой на месте: единственным домом README и спеки был сам архив,
-# и обе отстали незаметно (README говорил про 25 проверок, когда их было 34).
-# Дом каждого файла теперь на диске, а архив — производная.
+# This exists because the kit was twice built by unpacking the PREVIOUS
+# archive with edits made in place: the only home of the README and the spec
+# was the archive itself, and both fell behind unnoticed (the README spoke of
+# 25 checks when there were 34). Every file now lives on disk, and the archive
+# is a derivative.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Версия берётся у УСТАНОВЛЕННОГО образа, а не из умолчания в скрипте:
-# зашитое умолчание отстало на версию и молча клеило на комплект чужой
-# ярлык — ровно тот класс, что и лживое число в маркере ленты.
+# The version is taken from the INSTALLED image, not from a default in the
+# script: a hardcoded default fell a version behind and silently glued a
+# foreign label onto the kit — exactly the same class as a false number in the
+# transcript marker.
 VER="${1:-}"
 if [ -z "$VER" ]; then
   VER="$(ls -1 "$HOME/.local/share/claude/versions" 2>/dev/null \
@@ -21,9 +23,10 @@ STAMP="$(date +%Y%m%d)"
 NAME="claude-patch-kit-$VER"
 OUT="$ROOT/dist/$NAME-$STAMP.tar.gz"
 STAGE="$(mktemp -d)/$NAME"
-# Канон судьи — в проекте, дом ~/.claude/judge это РАЗВЁРТЫВАНИЕ.
-# Комплект собирается из канона: иначе в архив уедет то, что кто-то
-# правил на живой машине, и проект снова разойдётся с архивом.
+# The judge canon lives in the project; ~/.claude/judge is the DEPLOYMENT.
+# The kit is built from the canon: otherwise whatever someone edited on the
+# live machine would ride into the archive, and the project would diverge from
+# the archive again.
 JUDGE="$ROOT/judge"
 
 mkdir -p "$STAGE/judge" "$STAGE/idle-watch" "$STAGE/docs" "$STAGE/tools"
@@ -34,20 +37,21 @@ for f in claude-patch-all.sh tweakcc-patch.js claude_patch.py set-model-costs.py
 done
 cp "$ROOT/README.md"                        "$STAGE/README.md"
 cp "$ROOT/AGENTS.md"                        "$STAGE/AGENTS.md"
-# Документы кладутся ПЕРЕЧИСЛЕНИЕМ каталога, а не поимённым списком: список
-# молча отстаёт от дерева. Так и вышло — новая спека реестра наблюдателей не
-# попала в комплект, а сборка при этом отработала успешно. Брифы задач
-# (brief-*) в комплект не идут: это наряды на разовую работу, а не описание
-# механизма.
+# Documents are placed by ENUMERATING the directory, not by a name list: a
+# list falls behind the tree silently. It happened — the new probe registry
+# spec did not make it into the kit while the build still succeeded. Task
+# briefs (brief-*) do not go into the kit: they are one-off work orders, not a
+# description of the mechanism.
 for f in "$ROOT/docs"/*.md; do
   [ -f "$f" ] || continue
   b="$(basename "$f")"
   case "$b" in brief-*) continue;; esac
   cp "$f" "$STAGE/docs/$b"
 done
-# Перечень ИМЁН отставал от дерева уже дважды (наблюдатель выпадал из архива
-# двое суток; probes-migrate.py не попал в комплект в день своего появления).
-# Поэтому tools/ кладётся обходом каталога, а не списком.
+# The NAME list fell behind the tree twice already (the watcher was missing
+# from the archive for two days; probes-migrate.py did not make it into the kit
+# on the day it appeared). So tools/ is placed by walking the directory, not by
+# a list.
 for f in "$ROOT/tools"/*; do
   [ -f "$f" ] || continue
   cp "$f" "$STAGE/tools/$(basename "$f")"
@@ -56,7 +60,8 @@ for f in README.md NOTES.md replay.py compact.py validate.py \
          channel.py adjudicate.py; do
   [ -f "$JUDGE/$f" ] && cp "$JUDGE/$f" "$STAGE/judge/$f"
 done
-# Дом проб: один файл настроек на все пробы плюс каталог артефактов у каждой.
+# The probes home: one settings file for all probes plus an artifacts
+# directory for each.
 mkdir -p "$STAGE/probes"
 for f in "$ROOT/probes"/*; do
   [ -f "$f" ] && cp "$f" "$STAGE/probes/$(basename "$f")"
@@ -65,17 +70,19 @@ for f in "$ROOT/probes"/*; do
     cp "$f"/* "$STAGE/probes/$(basename "$f")/" 2>/dev/null || true
   fi
 done
-# Наблюдатель за флотом — вторая проба того же ядра. В комплект он не попадал
-# двое суток: рецепт перечисляет ИМЕНА, и появившийся механизм в перечень
-# никто не дописал. Ниже стоит сторож, чтобы это не повторилось молча.
+# The fleet idle watcher is the second probe of the same core. It was missing
+# from the kit for two days: the recipe lists NAMES, and nobody added the new
+# mechanism to the list. A guard below exists so this does not happen silently
+# again.
 for f in README.md; do
   cp "$ROOT/idle-watch/$f" "$STAGE/idle-watch/$f"
 done
 PLIST="$ROOT/judge/com.maratkarimov.judge-compact.plist"
 [[ -f "$PLIST" ]] && cp "$PLIST" "$STAGE/judge/$(basename "$PLIST")"
 
-# Сторож полноты tools/: обход каталога делает пропуск невозможным, но
-# проверка обязана падать и тогда, когда обход заменят обратно на список.
+# The tools/ completeness guard: walking the directory makes omission
+# impossible, but the check must also fail when the walk is swapped back for a
+# list.
 miss_tools=0
 for f in "$ROOT/tools"/*; do
   [ -f "$f" ] || continue
@@ -84,22 +91,28 @@ for f in "$ROOT/tools"/*; do
 done
 [ "$miss_tools" = 0 ] || exit 1
 
-# Число проверок в README обязано совпадать с числом проверок в конвейере:
-# именно это расхождение и было симптомом отставшей документации.
+# The number of checks in the README must match the number of checks in the
+# pipeline: that exact divergence was the symptom of the stale documentation.
 N="$(sed -n '/^checks = {/,/^}/p' "$ROOT/claude-patch-all.sh" | grep -cE "^    '")"
-# Формы числительного разные («35 проверок», «34 проверки») — префикс
-# «проверк» не покрывает родительный падеж и давал ложную тревогу.
-grep -qE "$N (проверок|проверки|проверка)" "$STAGE/README.md" || {
+# The pattern follows the README's LANGUAGE, and that is the trap: while the
+# README was Russian the numeral had three inflected forms, a shared stem
+# prefix missed one of them, and the gate cried wolf. Translating the README
+# to English broke it the other way round — the Russian alternation matched
+# nothing at all, so the gate failed on every single build instead. A pattern
+# that matches nothing is indistinguishable here from a genuine mismatch, so
+# whoever changes the README's language re-checks this line in the same edit.
+grep -qE "$N checks?" "$STAGE/README.md" || {
   echo "ОШИБКА: в конвейере $N проверок, README говорит иначе" >&2; exit 1; }
 
-# Сторож полноты: всякий файл, живущий в доме пробы, обязан либо попасть в
-# комплект, либо быть назван в исключениях ЗДЕСЬ. Перечень имён без сторожа
-# теряет новое молча — так из архива и выпал наблюдатель.
+# The completeness guard: every file living in a probe home must either make
+# it into the kit or be named in the exceptions HERE. A name list without a
+# guard loses new files silently — that is how the watcher fell out of the
+# archive.
 SKIP=" fixtures "
 miss=0
-# Каталог docs проверяется по тому же правилу, что и дома проб: файл на диске,
-# которого нет в комплекте, — ошибка сборки, а не мелочь. Без этой ветви
-# отставание списка от дерева не замечалось вовсе.
+# The docs directory is checked by the same rule as the probe homes: a file
+# on disk missing from the kit is a build error, not a trifle. Without this
+# branch the list falling behind the tree was not noticed at all.
 for f in "$ROOT/docs"/*.md; do
   [ -f "$f" ] || continue
   b="$(basename "$f")"

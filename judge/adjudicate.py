@@ -52,8 +52,8 @@ def url_for(record):
     return normalize_url(os.environ.get('ANTHROPIC_BASE_URL') or DEFAULT_BASE_URL)
 
 
-# Словарь вердиктов живёт в образе; validate.verdict_vocabulary — единственная
-# читалка. Копия литералом разъезжалась бы с образом молча.
+# The verdict dictionary lives in the image; validate.verdict_vocabulary is
+# its only reader. A literal copy would drift from the image silently.
 DEFAULT_IMAGE = '~/.local/bin/claude'
 RX_VALUES, ACT_VALUES = replay.verdict_vocabulary(
     os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE,

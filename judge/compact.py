@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Суточное сжатие записей судейств.
+"""Daily compaction of judgment records.
 
-Записи пишутся несжатыми: свежую запись надо читать и грепать. Ценность они
-теряют не сразу, а объём растут заметный — около сотни килобайт на судейство,
-почти всё это лента. Поэтому сжимаются они отдельным проходом, по возрасту.
+Records are written uncompressed: a fresh record must be readable and greppable.
+They lose value gradually, while the volume grows noticeably — about a hundred
+kilobytes per judgment, almost all of it the transcript. So they are compacted
+by a separate pass, by age.
 
   compact.py [--dir D] [--older-than-hours N] [--dry-run]
 
-Идемпотентен: уже сжатые пропускаются, исходник удаляется только после того,
-как архив записан и прочитан обратно.
+Idempotent: already-compacted ones are skipped, the source is deleted only
+after the archive has been written and read back.
 """
 import argparse, glob, gzip, json, os, shutil, time
 
@@ -43,8 +44,8 @@ def main():
             continue
         with open(f, 'rb') as src, gzip.open(gz, 'wb', compresslevel=9) as dst:
             shutil.copyfileobj(src, dst)
-        # запись удаляется только если архив читается и разбирается обратно —
-        # иначе сжатие превратилось бы в потерю материала
+        # the record is deleted only if the archive reads and parses back —
+        # otherwise compaction would turn into loss of material
         try:
             with gzip.open(gz, 'rt', encoding='utf-8') as fh:
                 json.load(fh)

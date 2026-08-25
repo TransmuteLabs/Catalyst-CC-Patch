@@ -1,5 +1,5 @@
-# Проектный слой оснастки: отмена, доехавшая до модели. enforce делает вердикт
-# действующим, а правило проекта в judge/prompt.extra.md даёт причину отменить.
+# Project layer of the fixture: a cancellation that reached the model. enforce makes
+# the verdict take effect, and the project rule in judge/prompt.extra.md gives the reason to cancel.
 [probe.judge]
 timeout_ms = 60000
 max_tokens = 3000

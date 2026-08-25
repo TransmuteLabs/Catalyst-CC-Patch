@@ -16,8 +16,9 @@ sys.path.insert(0, HERE)
 import channel
 import replay
 
-# Дом проб один на все пробы; настройки берутся из общего probes.toml, а промт,
-# записи и метки — из подкаталога пробы.
+# The probes home is one for all probes; settings come from the shared
+# probes.toml, while the prompt, records and labels come from the probe
+# subdirectory.
 DEFAULT_HOME = os.environ.get('CLAUDE_PROBES_DIR') or '~/.claude/probes'
 DEFAULT_PROBE = 'judge'
 DEFAULT_IMAGE = '~/.local/bin/claude'
@@ -51,8 +52,8 @@ def probe_settings(settings_path=None, probe=None):
     return merged
 
 
-# Читалка словаря живёт в replay: его импортируют оба инструмента, и второй
-# копии функции быть не должно.
+# The dictionary reader lives in replay: both tools import it, and there must
+# be no second copy of the function.
 verdict_vocabulary = replay.verdict_vocabulary
 
 
@@ -267,7 +268,8 @@ def run_one(task):
 
 
 def effective_class(value):
-    # Какие ответы считаются отменой, решает образ, а не литерал здесь.
+    # Which answers count as a cancellation is decided by the image, not by a
+    # literal here.
     return ACT_VALUES[0] if value in ACT_VALUES else value
 
 
