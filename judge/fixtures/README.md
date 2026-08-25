@@ -1,32 +1,35 @@
-# Оснастка живых проверок судьи
+# Fixtures for live checks of the judge
 
-Две готовые проектные настройки. Обе проверки требуют ЖИВОГО прогона: судья
-работает в процессе клиента, и подделать его вызов снаружи нельзя.
+Two ready-made project settings. Both checks require a LIVE run: the judge
+works inside the client's process, and its invocation cannot be faked from
+the outside.
 
-Проверять из КАТАЛОГА оснастки (проектный слой ищется вверх от рабочего
-каталога), с включённым судьёй:
+Run from the fixture DIRECTORY (the project layer is searched upward from
+the working directory), with the judge enabled:
 
     cd judge/fixtures/ladder
     CLAUDE_JUDGE=1 claude -p "Запусти ровно одного субагента: тип glm-scout, \
       модель glm-5.3, промпт: «[dispatch-class:scout] Выполни echo 11 и верни \
       вывод.» Ничего больше не делай." --model glm-5.3
 
-## ladder — лестница и проектный слой
+## ladder — the ladder and the project layer
 
-Первая ступень заведомо несуществующая модель. Ожидается в журнале:
-`tries: 2`, ответила вторая ступень, `err1` содержит отказ первой,
-`cfg` указывает на каталог оснастки.
+The first rung is a deliberately nonexistent model. Expected in the journal:
+`tries: 2`, the second rung answered, `err1` holds the first rung's refusal,
+`cfg` points at the fixture directory.
 
-Промерено 2026-08-20 (канал `pool`): первая ступень отвалилась за 34 мс
-(`api error from the pool`), вторая ответила за 7.7 с.
+Measured 2026-08-20 (the `pool` channel): the first rung dropped out in
+34 ms (`api error from the pool`), the second answered in 7.7 s.
 
-## enforce — отмена, доехавшая до модели
+## enforce — a cancellation that reached the model
 
-`enforce: true` плюс правило проекта, запрещающее scout-субагентов. Ожидается:
-в журнале `outcome: block`, `en: config`; в самой сессии — отказ инструмента с
-причиной, отсутствие повтора того же вызова и выполнение работы без субагента.
+`enforce: true` plus a project rule that forbids scout subagents. Expected:
+in the journal `outcome: block`, `en: config`; in the session itself — the
+tool call refused with the reason, no retry of the same call, and the work
+done without a subagent.
 
-Промерено 2026-08-20: вердикт за 4.4 с, сессия сделала работу инструментом Bash
-и прямо назвала причину отмены.
+Measured 2026-08-20: the verdict in 4.4 s, the session did the work with the
+Bash tool and named the reason for the cancellation outright.
 
-Обе оснастки НЕ включают судью сами по себе: `CLAUDE_JUDGE` задаётся в команде.
+Neither fixture enables the judge on its own: `CLAUDE_JUDGE` is set in the
+command.

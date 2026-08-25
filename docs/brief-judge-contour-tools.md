@@ -1,112 +1,120 @@
-# Бриф: инструменты судьи — общий контур и разметка
+# Brief: judge tools — the shared channel and labelling
 
-> **Статус: ХРОНИКА.** Это задание волны в том виде, в каком оно выдавалось
-> исполнителю; пути и имена файлов названы так, как назывались тогда
-> (`~/.claude/judge/`, `config.json`). Действующая раскладка — один
-> `~/.claude/probes/probes.toml` и каталог пробы рядом с ним; см.
-> `judge-architecture.md` и `probe-registry-spec.md`. Бриф не переписывается:
-> он документирует, что было поручено, а не что стало.
+> **Status: CHRONICLE.** This is the wave assignment in the exact form it was
+> given to the executor; paths and file names are spelled as they were called
+> back then (`~/.claude/judge/`, `config.json`). The current layout is a single
+> `~/.claude/probes/probes.toml` with the probe directory next to it; see
+> `judge-architecture.md` and `probe-registry-spec.md`. The brief is not
+> rewritten: it documents what was ordered, not what came to be.
 
-Цель. Инструменты судьи (`replay.py`, `validate.py`) ходят сырым HTTP в прокси.
-Из-за этого запись, сделанную через пул моделей клиента на модели `claude-*`,
-они воспроизвести не могут вовсе — а именно так теперь работает сам судья.
-Плюс нет инструмента разметки: сверять вердикты не с чем.
+Goal. The judge tools (`replay.py`, `validate.py`) talk raw HTTP to the proxy.
+Because of that, a record made through the client's model pool on a `claude-*`
+model cannot be replayed by them at all — and that is exactly how the judge
+itself works now. Plus there is no labelling tool: there is nothing to check
+verdicts against.
 
-Делаем три вещи: общий канал для инструментов, перевод обоих инструментов на
-него, и скрипт разметки. Дизайн ниже принят целиком, решений принимать не нужно.
+We do three things: a shared channel for the tools, moving both tools onto it,
+and a labelling script. The design below is accepted in full; no decisions are
+yours to make.
 
-## Файлы
+## Files
 
-- ПИШЕШЬ: `~/.claude/judge/channel.py` (новый), `~/.claude/judge/adjudicate.py`
-  (новый), правки в `~/.claude/judge/replay.py` и `~/.claude/judge/validate.py`.
-- НЕ трогаешь: `compact.py`, `config.json`, `prompt.md`, `body.json`, бинарник,
-  файлы репозитория. Коммитов не делаешь.
-- Комментарии в коде — только констрейнты («почему не иначе», границы), не
-  пересказ кода и не история правки.
+- YOU WRITE: `~/.claude/judge/channel.py` (new), `~/.claude/judge/adjudicate.py`
+  (new), edits in `~/.claude/judge/replay.py` and `~/.claude/judge/validate.py`.
+- YOU DO NOT TOUCH: `compact.py`, `config.json`, `prompt.md`, `body.json`, the
+  image, repository files. You make no commits.
+- Code comments are constraints only («почему не иначе», boundaries), not a
+  retelling of the code and not an edit history.
 
-## Промеренные факты (не проверять заново, опираться)
+## Measured facts (do not re-measure, rely on them)
 
-Одиночный вызов через сам клиент (это и есть «общий контур»):
+A single call through the client itself (this is the «общий контур»):
 
-    claude -p "<текст пользователя>" --model <модель> [--effort <уровень>] \
-      --system-prompt "<инструкция>" --tools "" \
+    claude -p "<user text>" --model <model> [--effort <level>] \
+      --system-prompt "<instruction>" --tools "" \
       --no-session-persistence --output-format json
 
-- Ответ — JSON с полями `result` (текст ответа), `modelUsage`, `num_turns`,
-  `duration_api_ms`, `total_cost_usd`, `is_error`, `stop_reason`.
-- Проверено живьём: вердикт приходит в `result` первой строкой.
-- Задержка: 14–26 с настенных, из них большая часть — запуск CLI. Это дороже
-  сырого HTTP по времени и приемлемо для офлайновой разметки и свипов, но не
-  для горячего пути.
-- `--bare` НЕ ИСПОЛЬЗОВАТЬ: он ломает авторизацию, ответ становится
-  «Not logged in · Please run /login» (промерено).
-- `--settings` с пустыми хуками контекст старта сессии НЕ убирает: модель
-  по-прежнему видит правила маршрутизации проекта (промерено — на прямой вопрос
-  отвечает «Да»). Значит вход канала `pool` НЕ совпадает байт-в-байт с тем, что
-  видел судья; это свойство канала, его надо печатать в отчётах, а не прятать.
-- Рабочий каталог для вызова — пустой временный (`tempfile.mkdtemp()`), чтобы не
-  подмешивался `CLAUDE.md` проекта, из которого запущен инструмент.
+- The answer is JSON with fields `result` (answer text), `modelUsage`,
+  `num_turns`, `duration_api_ms`, `total_cost_usd`, `is_error`, `stop_reason`.
+- Verified live: the verdict arrives in `result` on the first line.
+- Latency: 14–26 s wall clock, most of it CLI startup. This is slower than
+  raw HTTP in time and acceptable for offline labelling and sweeps, but not
+  for the hot path.
+- Do NOT use `--bare`: it breaks authorisation, the answer becomes
+  "Not logged in · Please run /login" (measured).
+- `--settings` with empty hooks does NOT remove the session-start context:
+  the model still sees the project's routing rules (measured — asked a direct
+  question, it answers «Да»). So the `pool` channel's input does not match
+  byte-for-byte what the judge saw; that is a property of the channel, and it
+  must be printed in reports, not hidden.
+- The working directory for the call is an empty temporary one
+  (`tempfile.mkdtemp()`), so the `CLAUDE.md` of the project the tool was
+  launched from does not leak in.
 
-## 1. `channel.py` — один дом для отправки
+## 1. `channel.py` — one home for sending
 
     send(system: str, user: str, model: str, *, effort: str|None,
          max_tokens: int|None, channel: str, url: str|None,
          timeout: float, body_template: dict|None) -> dict
 
-Возвращает словарь: `{"text": <ответ модели>, "via": "pool"|"http",
-"ms": <мс>, "http": <код или None>, "raw": <сырой ответ>, "error": <str|None>,
+Returns a dictionary: `{"text": <model answer>, "via": "pool"|"http",
+"ms": <ms>, "http": <code or None>, "raw": <raw answer>, "error": <str|None>,
 "tokens_in": int|None, "tokens_out": int|None, "cost_usd": float|None}`.
 
-- `channel="http"` — как сегодня: POST на `url` телом OpenAI-формы
+- `channel="http"` — as today: POST to `url` with an OpenAI-form body
   (`{model,max_tokens,messages:[{role:"system"},{role:"user"}],reasoning_effort}`),
-  User-Agent обязателен (канал отбивает запрос без узнаваемого агента 403-й
-  заглушкой) — брать `replay.UA`.
-- `channel="pool"` — вызов CLI как выше, `subprocess.run` с `cwd` = пустой
-  временный каталог, `timeout`, разбор JSON, текст из `result`.
-  `max_tokens` в этом канале не задаётся (флага нет) — вернуть его в ответе как
-  `None`, а не подставлять придуманное.
-- `channel="auto"` — `pool`, если имя модели начинается с `claude` (регистр не
-  важен), иначе `http`. Причина: `claude-*` через сырой HTTP в прокси не живёт,
-  а прокси-модели через CLI гонять дороже без выигрыша.
-- Ошибка любого рода (ненулевой код возврата, таймаут, неразобранный JSON,
-  не-2xx) — НЕ исключение наружу, а заполненное поле `error` и `text=""`.
+  User-Agent is mandatory (the channel answers a request without a recognised
+  agent with a 403 stub) — take `replay.UA`.
+- `channel="pool"` — invoke the CLI as above, `subprocess.run` with `cwd` =
+  an empty temporary directory, `timeout`, parse the JSON, take the text from
+  `result`. `max_tokens` cannot be set on this channel (there is no flag) —
+  return it in the answer as `None`, do not invent a value.
+- `channel="auto"` — `pool` if the model name starts with `claude` (case does
+  not matter), otherwise `http`. Reason: `claude-*` does not live through raw
+  HTTP to the proxy, and driving proxy models through the CLI costs more with
+  no gain.
+- An error of any kind (non-zero exit code, timeout, unparseable JSON,
+  non-2xx) — NOT an exception to the caller, but a filled `error` field and
+  `text=""`.
 
-Разбор вердикта не дублировать: он живёт в `replay.verdict_of` / `replay.klass`.
+Verdict parsing is not duplicated: it lives in `replay.verdict_of` /
+`replay.klass`.
 
-## 2. `replay.py` — на общий канал
+## 2. `replay.py` — onto the shared channel
 
-- Отправку заменить на `channel.send`, оставив прежнее поведение по умолчанию
-  (`--channel auto`; добавить `--channel pool|http|auto`).
-- Для канала `pool` система и пользовательский текст берутся из записи:
-  сообщения `request.messages` с ролями `system`/`user` (в записи пула
-  `request` — это `{via:"pool",model,effort,max_tokens,messages:[...]}`,
-  в записи сырого канала — тело OpenAI-формы; обе формы разобрать).
-- В строку вывода добавить, каким каналом шёл повтор.
-- Прежние ключи CLI (`--model/--prompt/--url/--effort/--limit/--timeout`)
-  сохранить.
+- Replace the send with `channel.send`, keeping the previous default behaviour
+  (`--channel auto`; add `--channel pool|http|auto`).
+- For the `pool` channel the system and user texts are taken from the record:
+  the messages of `request.messages` with roles `system`/`user` (in a pool
+  record `request` is `{via:"pool",model,effort,max_tokens,messages:[...]}`,
+  in a raw-channel record it is the OpenAI-form body; parse both forms).
+- Add to the output line which channel the replay went through.
+- Keep the previous CLI keys (`--model/--prompt/--url/--effort/--limit/
+  --timeout`) intact.
 
-## 3. `validate.py` — тоже на общий канал
+## 3. `validate.py` — onto the shared channel too
 
-- Добавить `--channel pool|http|auto` (умолчание `auto`), отправку вести через
+- Add `--channel pool|http|auto` (default `auto`), route the send through
   `channel.send`.
-- В строку результата прогона добавить поля `via` и `cost_usd`.
-- В сводке: колонка «канал» и строка о том, сколько прогонов шло каналом `pool`
-  с пометкой, что у него вход не совпадает с исходным (контекст старта сессии).
-- В `--models` разрешить `claude-*` модели: именно ради них всё и делается.
+- Add the `via` and `cost_usd` fields to the run's result line.
+- In the summary: a "channel" column and a line saying how many runs went
+  through the `pool` channel, with a note that its input does not match the
+  original one (the session-start context).
+- Allow `claude-*` models in `--models`: this whole thing is done for them.
 
-## 4. `adjudicate.py` — разметка корпуса сильной моделью
+## 4. `adjudicate.py` — labelling the corpus with a strong model
 
-    adjudicate.py <каталог записей|файл> [--model M] [--effort E]
+    adjudicate.py <records directory|file> [--model M] [--effort E]
                   [--channel auto|pool|http] [--limit N] [--jobs K]
                   [--timeout S] [--out FILE] [--dry-run]
 
-Для каждой записи собирается ПРОВЕРОЧНЫЙ запрос: судье-проверяющему даётся
-(а) инструкция судьи, под которой выносился вердикт — из записи
-(`request.messages` с ролью `system`), (б) лента и диспатч — оттуда же
-(роль `user`), (в) сам вынесенный вердикт. Вопрос — оценить РЕШЕНИЕ, а не
-судить заново.
+For each record a CHECK request is assembled: the checking judge is given
+(a) the judge instruction under which the verdict was issued — from the record
+(`request.messages` with role `system`), (b) the transcript and the dispatch —
+from the same place (role `user`), (c) the verdict itself that was issued.
+The question is to assess the DECISION, not to judge anew.
 
-Инструкция проверяющего (вшить в файл как константу, по-русски):
+The checking instruction (embed into the file as a constant, in Russian):
 
     Тебе показывают инструкцию судьи вызовов субагентов, вход, который он
     видел, и вердикт, который он вынес. Оцени ВЕРДИКТ, а не вызов.
@@ -117,56 +125,59 @@
     Подробности — следующими строками. Помни: пропущенная отмена хуже лишней;
     ссылка на разрешение имеет вес только из записи с src=user.
 
-Результат каждой проверки — строка в `--out`
-(умолчание `~/.claude/judge/adjudications/<ISO>-<модель>.jsonl`):
+The result of each check is a line in `--out`
+(default `~/.claude/judge/adjudications/<ISO>-<model>.jsonl`):
 `{rec, model, channel, klass_recorded, verdict_recorded, adjudication,
-truth_suggested, agree, ms, cost_usd, error}`, где `truth_suggested` — класс
-из `WRONG:<класс>:` либо класс записанного вердикта при `CORRECT`, либо `null`
-при `UNSURE`/ошибке.
+truth_suggested, agree, ms, cost_usd, error}`, where `truth_suggested` is the
+class from `WRONG:<class>:`, or the class of the recorded verdict on
+`CORRECT`, or `null` on `UNSURE`/error.
 
-Предложенные метки дописываются в `~/.claude/judge/labels.jsonl` строками
-`{"rec","truth","note","t","source":"model:<имя>"}` — и ТОЛЬКО если для этой
-записи ещё нет строки с `"source"` отсутствующим или равным `"human"`:
-человеческая метка сильнее и не перезаписывается никогда. При `--dry-run`
-ничего не дописывать, только напечатать.
+Suggested labels are appended to `~/.claude/judge/labels.jsonl` as lines
+`{"rec","truth","note","t","source":"model:<name>"}` — and ONLY if that record
+does not yet have a line whose `"source"` is absent or equal to `"human"`:
+a human label is stronger and is never overwritten. On `--dry-run` append
+nothing, only print.
 
-Печатается сводка: сколько проверено, `CORRECT`/`WRONG`/`UNSURE`, по каким
-записям вердикт признан неверным (имя записи + предложенный класс), сколько
-меток дописано и сколько пропущено из-за человеческой метки.
+A summary is printed: how many checked, `CORRECT`/`WRONG`/`UNSURE`, for which
+records the verdict was found wrong (record name + suggested class), how many
+labels were appended and how many skipped because of a human label.
 
-## 5. `validate.py` учитывает происхождение метки
+## 5. `validate.py` accounts for label provenance
 
-При подсчёте точности человеческие метки и предложенные моделью считаются
-РАЗДЕЛЬНО: две колонки («по человеческим», «по предложенным моделью») и явная
-строка о числе тех и других. Смешивать их в одно число запрещено — предложенная
-метка это гипотеза, а не истина.
+When counting accuracy, human labels and model-suggested ones are counted
+SEPARATELY: two columns («по человеческим», «по предложенным моделью») and
+an explicit line with the count of each. Mixing them into one number is
+forbidden — a suggested label is a hypothesis, not truth.
 
-## Гардрейлы
+## Guardrails
 
-- Ноль сетевых обращений мимо канала записи/`--url`/CLI.
-- Никаких коммитов, правок вне названных четырёх файлов.
-- Стоп-правило: неожиданное падение или расхождение с брифом → одна честная
-  попытка → доклад BLOCKED с сырым выводом, без глубокой диагностики.
-- Право отказа: ложная посылка → доказательство (grep/diff/прогон) и стоп.
+- Zero network access outside the record's channel/`--url`/the CLI.
+- No commits, no edits outside the four named files.
+- Stop rule: unexpected failure or a mismatch with the brief → one honest
+  attempt → report BLOCKED with raw output, no deep diagnosis.
+- Right to refuse: a false premise → proof (grep/diff/a run) and stop.
 
-## Приёмка (прогнать самому, сырой вывод в отчёт)
+## Acceptance (run it yourself, raw output into the report)
 
-1. `channel.py` в одиночку: короткий вызов через `pool` на
-   `claude-haiku-4-5-20251001` и через `http` на `deepseek-v4-flash` — оба
-   возвращают заполненный `text` и `via`.
-2. `replay.py <самая свежая запись> --channel http` — работает как раньше.
-3. `replay.py <та же запись> --channel pool --model claude-haiku-4-5-20251001`
-   — повтор через клиент, в выводе виден канал.
+1. `channel.py` on its own: a short call through `pool` on
+   `claude-haiku-4-5-20251001` and through `http` on `deepseek-v4-flash` —
+   both return a filled `text` and `via`.
+2. `replay.py <freshest record> --channel http` — works as before.
+3. `replay.py <same record> --channel pool --model claude-haiku-4-5-20251001`
+   — a replay through the client, the channel is visible in the output.
 4. `validate.py run --limit 2 --models "claude-haiku-4-5-20251001" --channel pool`
-   — таблица с колонкой канала и предупреждением о несовпадении входа.
-5. `adjudicate.py ~/.claude/judge/records --limit 2 --model claude-haiku-4-5-20251001 --dry-run`
-   — печатает разбор, в `labels.jsonl` ничего не дописано (показать, что файла
-   нет или он не изменился).
-6. Тот же вызов без `--dry-run` — метки дописаны с `source:"model:…"`;
-   затем вручную добавь строку с `"source":"human"` для одной записи, повтори
-   вызов и покажи, что человеческая метка НЕ перезаписана. После проверки
-   удали добавленную человеческую строку и скажи об этом в отчёте.
-7. Отрицательная проба канала: `--channel http --url http://127.0.0.1:9/v1/chat/completions`
-   — строка с `error`, процесс не падает.
+   — a table with a channel column and the input-mismatch warning.
+5. `adjudicate.py ~/.claude/judge/records --limit 2
+   --model claude-haiku-4-5-20251001 --dry-run`
+   — prints the analysis, nothing appended to `labels.jsonl` (show that the
+   file is absent or unchanged).
+6. The same call without `--dry-run` — labels appended with
+   `source:"model:…"`; then manually add a line with `"source":"human"` for
+   one record, repeat the call and show that the human label is NOT
+   overwritten. After the check, delete the human line you added and say so
+   in the report.
+7. Negative channel probe:
+   `--channel http --url http://127.0.0.1:9/v1/chat/completions`
+   — a line with `error`, the process does not crash.
 
 <!-- BRIEF COMPLETE -->

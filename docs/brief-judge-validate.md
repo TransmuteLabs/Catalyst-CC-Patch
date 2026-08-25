@@ -1,167 +1,182 @@
-# Бриф: `~/.claude/judge/validate.py` — валидатор корпуса судейств
+# Brief: `~/.claude/judge/validate.py` — the judging-corpus validator
 
-> **Статус: ХРОНИКА.** Это задание волны в том виде, в каком оно выдавалось
-> исполнителю; пути и имена файлов названы так, как назывались тогда
-> (`~/.claude/judge/`, `config.json`). Действующая раскладка — один
-> `~/.claude/probes/probes.toml` и каталог пробы рядом с ним; см.
-> `judge-architecture.md` и `probe-registry-spec.md`. Бриф не переписывается:
-> он документирует, что было поручено, а не что стало.
+> **Status: CHRONICLE.** This is the wave assignment in the exact form it was
+> given to the executor; paths and file names are spelled as they were called
+> back then (`~/.claude/judge/`, `config.json`). The current layout is a single
+> `~/.claude/probes/probes.toml` with the probe directory next to it; see
+> `judge-architecture.md` and `probe-registry-spec.md`. The brief is not
+> rewritten: it documents what was ordered, not what came to be.
 
-Цель. Есть корпус записанных судейств (`~/.claude/judge/records/*.json[.gz]`) и
-повторялка одной записи (`replay.py`). Нет отдельного инструмента, который
-(1) сверяет вердикты с РАЗМЕЧЕННОЙ истиной, (2) прогоняет по одному и тому же
-корпусу НЕСКОЛЬКО моделей и показывает, какая минимальная годится,
-(3) учитывает проектные слои настройки, под которыми судейство происходило.
-Пишем ровно этот инструмент. Дизайн ниже принят; решений принимать не нужно.
+Goal. There is a corpus of recorded judgements (`~/.claude/judge/records/
+*.json[.gz]`) and a single-record replay tool (`replay.py`). There is no
+separate tool that (1) checks verdicts against a LABELLED truth, (2) runs
+SEVERAL models over the same corpus and shows which minimal one is good
+enough, (3) accounts for the project settings layers the judging happened
+under. We write exactly that tool. The design below is accepted; no decisions
+are yours to make.
 
-## Файлы
+## Files
 
-- ПИШЕШЬ только: `~/.claude/judge/validate.py` (новый файл, исполняемый).
-- ЧИТАЕШЬ: `~/.claude/judge/replay.py`, `~/.claude/judge/config.json`,
-  `~/.claude/judge/prompt.md`, записи в `~/.claude/judge/records/`.
-- НЕ трогаешь `replay.py`, `compact.py`, конфиги, бинарник, git (никаких
-  коммитов — изменения остаются в рабочем дереве).
-- Комментарии в коде — только констрейнты («почему не иначе», границы), не
-  пересказ кода и не история правки.
+- YOU WRITE only: `~/.claude/judge/validate.py` (a new file, executable).
+- YOU READ: `~/.claude/judge/replay.py`, `~/.claude/judge/config.json`,
+  `~/.claude/judge/prompt.md`, records in `~/.claude/judge/records/`.
+- YOU DO NOT TOUCH `replay.py`, `compact.py`, configs, the image, git (no
+  commits — changes stay in the working tree).
+- Code comments are constraints only («почему не иначе», boundaries), not a
+  retelling of the code and not an edit history.
 
-## Что уже есть и переиспользуется (НЕ дублировать)
+## What already exists and is reused (do NOT duplicate)
 
-`replay.py` импортируется как модуль (его `main()` закрыт `if __name__`, импорт
-безопасен):
+`replay.py` is imported as a module (its `main()` is guarded by
+`if __name__`, the import is safe):
 
     import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import replay   # load, verdict_of, post, klass, UA
 
-Правила разбора вердикта должны иметь ОДИН дом: класс вердикта и разбор ответа
-берутся из `replay.verdict_of` / `replay.klass`, своих копий не заводить.
+Verdict-parsing rules must have ONE home: the verdict class and the answer
+parsing come from `replay.verdict_of` / `replay.klass`; no own copies.
 
-## Формат записи (промерено на живых записях)
+## Record format (measured on live records)
 
-Ключи верхнего уровня: `t, tool, agent, model, ms, sw, http, outcome, en,
+Top-level keys: `t, tool, agent, model, ms, sw, http, outcome, en,
 tries, jm, cfg, err1, verdict, url, pid, cwd, attempts, request, response`.
-`request` — ПОЛНОЕ тело запроса (`model, max_tokens, temperature, messages,
+`request` is the FULL request body (`model, max_tokens, temperature, messages,
 reasoning_effort`), `messages` = `[{role:"system"},{role:"user"}]`.
-`cfg` — путь применённого ПРОЕКТНОГО каталога `.claude/judge` или `null`.
-`cwd` — рабочий каталог сессии в момент вызова.
+`cfg` is the path of the applied PROJECT `.claude/judge` directory, or `null`.
+`cwd` is the session's working directory at the moment of the call.
 
 ## CLI
 
     validate.py run     [--records DIR] [--models "m:effort,m:effort"] [--repeat N]
                         [--limit N] [--jobs K] [--timeout S] [--prompt FILE]
                         [--project-layer record|recompose|off] [--url U] [--out FILE]
-    validate.py label   <файл-записи|имя> --truth OK|WARN|BLOCK [--note "…"]
+    validate.py label   <record file|name> --truth OK|WARN|BLOCK [--note "…"]
     validate.py list    [--records DIR] [--unlabelled]
-    validate.py report  <файл прогона>...
+    validate.py report  <run file>...
 
-Умолчания: `--records ~/.claude/judge/records`, `--models` из
-`~/.claude/judge/config.json` (поле `models`: элементы `{"model","effort"}` или
-строка), `--repeat 1`, `--jobs 4`, `--timeout 180`, `--project-layer record`.
+Defaults: `--records ~/.claude/judge/records`, `--models` from
+`~/.claude/judge/config.json` (field `models`: elements `{"model","effort"}`
+or a string), `--repeat 1`, `--jobs 4`, `--timeout 180`,
+`--project-layer record`.
 
-## Разметка истины
+## Truth labelling
 
-Файл `~/.claude/judge/labels.jsonl`, строка на разметку:
+The file `~/.claude/judge/labels.jsonl`, one line per label:
 
-    {"rec":"<имя файла записи>","truth":"BLOCK","note":"…","t":"<ISO>"}
+    {"rec":"<record file name>","truth":"BLOCK","note":"…","t":"<ISO>"}
 
-Дописывается (append-only); при нескольких строках на одну запись действует
-ПОСЛЕДНЯЯ. `label` дописывает строку, `list` печатает записи с их записанным
-вердиктом и меткой (или «нет метки»), `--unlabelled` — только неразмеченные.
-Метки НЕ придумывать: их ставит человек. Инструмент обязан работать и на
-полностью неразмеченном корпусе.
+It is append-only; when several lines exist for one record, the LAST one
+applies. `label` appends a line, `list` prints records with their recorded
+verdict and label (or «нет метки»), `--unlabelled` — only unlabelled ones.
+Do NOT invent labels: a human sets them. The tool must also work on a fully
+unlabelled corpus.
 
-## Слои проекта (`--project-layer`)
+## Project layers (`--project-layer`)
 
-- `record` (умолчание): системное сообщение и параметры берутся из записи как
-  есть — так судейство и происходило.
-- `recompose`: системное сообщение собирается заново, ТЕМИ ЖЕ правилами, что и
-  в самом судье:
-  1. база = `--prompt FILE`, иначе `~/.claude/judge/prompt.md`;
-  2. если `cfg` записи не null и в нём есть `prompt.md` — он ЗАМЕНЯЕТ базу;
-  3. если в `cfg` есть `prompt.extra.md` и он непустой — дописывается к
-     результату строкой `"\n\n=== ПРАВИЛА ЭТОГО ПРОЕКТА ===\n" + текст`.
-  Кроме того при `recompose` из `<cfg>/config.json` берутся `max_tokens` и
-  `context_chars`, если они там названы (перекрывают глобальные); модель и
-  усилие всегда из строки прогона `--models`, а не из конфига.
-  Если `cfg` указывает на несуществующий каталог — строка результата помечается
-  `layer_missing: true` и прогон по ней всё равно идёт (по базовому промпту).
-- `off`: системное сообщение = `--prompt FILE` (обязателен при `off`), проектные
-  слои игнорируются целиком.
+- `record` (default): the system message and parameters are taken from the
+  record as they are — that is how the judging happened.
+- `recompose`: the system message is assembled anew, by the SAME rules as in
+  the judge itself:
+  1. base = `--prompt FILE`, otherwise `~/.claude/judge/prompt.md`;
+  2. if the record's `cfg` is not null and contains `prompt.md` — it REPLACES
+     the base;
+  3. if `cfg` contains `prompt.extra.md` and it is non-empty — it is appended
+     to the result with the line `"\n\n=== ПРАВИЛА ЭТОГО ПРОЕКТА ===\n"` +
+     the text.
+  Also, on `recompose`, `max_tokens` and `context_chars` are taken from
+  `<cfg>/config.json` if named there (they override the global ones); the
+  model and the effort always come from the `--models` run string, not from
+  the config.
+  If `cfg` points to a nonexistent directory — the result line is marked
+  `layer_missing: true` and the run over it still happens (on the base
+  prompt).
+- `off`: the system message = `--prompt FILE` (mandatory with `off`), the
+  project layers are ignored entirely.
 
-## Прогон
+## The run
 
-Для каждой пары (модель × запись) × `--repeat`:
-тело = копия `request` записи, с подменой `model`, `reasoning_effort` (из строки
-`--models`), системного сообщения (по `--project-layer`), `max_tokens` (если
-пришёл из проектного конфига). Адрес: `--url`, иначе `url` записи. Отправка —
-`replay.post` (его User-Agent обязателен: канал отбивает запрос без узнаваемого
-агента 403-й заглушкой).
+For each pair (model × record) × `--repeat`:
+the body = a copy of the record's `request`, with `model`, `reasoning_effort`
+(from the `--models` string), the system message (per `--project-layer`) and
+`max_tokens` (if it came from the project config) replaced. Address: `--url`,
+otherwise the record's `url`. Sending is `replay.post` (its User-Agent is
+mandatory: the channel answers a request without a recognised agent with a
+403 stub).
 
-Строка результата (в `--out`, JSONL, по умолчанию
+The result line (into `--out`, JSONL, default
 `~/.claude/judge/bench/<ISO>-run.jsonl`):
 
     {"rec","model","effort","rep","klass","verdict","ms","http","error",
      "truth","layer","cfg","tokens_in","tokens_out","layer_missing"}
 
-`tokens_*` — из `usage` ответа, если он есть, иначе null. Ошибка запроса —
-строка с `error` и `klass:"ERROR"`; такие строки НИКОГДА не выбрасываются
-молча.
+`tokens_*` are from the response's `usage` if present, otherwise null. A
+request error is a line with `error` and `klass:"ERROR"`; such lines are
+NEVER dropped silently.
 
-## Сводка (печатается после `run` и командой `report`)
+## Summary (printed after `run` and by the `report` command)
 
-Таблица, строка на модель:
+A table, one row per model:
 
     модель  прогонов  ошибок  EMPTY  медиана_мс  p90_мс  ток_вх/вых
             пропусков  ложных_отмен  совпало_с_меткой  нестабильных
 
-- «пропусков» = метка `BLOCK`, получено `OK|WARN|EMPTY|ERROR`. Это ХУДШИЙ класс:
-  судья, пропустивший то, что должен был отменить, неотличим от выключенного.
-- «ложных отмен» = метка `OK`, получено `BLOCK`.
-- «совпало_с_меткой» — только по размеченным; число размеченных печатается
-  отдельно, чтобы точность на трёх метках не выглядела как точность на ста.
-- «нестабильных» (только при `--repeat>1`) = записей, где повторы одной модели
-  дали РАЗНЫЙ класс.
-- Если меток нет вовсе — вместо точности печатается согласие с записанным
-  вердиктом, с явной пометкой, что записанный вердикт истиной не является.
+- «пропусков» = label `BLOCK`, received `OK|WARN|EMPTY|ERROR`. This is the
+  WORST class: a judge that let through what it should have cancelled is
+  indistinguishable from one that is off.
+- «ложных отмен» = label `OK`, received `BLOCK`.
+- «совпало_с_меткой» — labelled records only; the number of labelled records
+  is printed separately, so that accuracy over three labels does not look
+  like accuracy over a hundred.
+- «нестабильных» (only with `--repeat>1`) = records where repeats of one
+  model gave a DIFFERENT class.
+- If there are no labels at all — agreement with the recorded verdict is
+  printed instead of accuracy, with an explicit note that the recorded
+  verdict is not the truth.
 
-После таблицы — строка рекомендации с НАЗВАННЫМ критерием, например:
-`минимальная годная: <модель> (пропусков 0, нестабильных 0, медиана 4.6 с);
-отвергнуты: <модель> — 2 пропуска, <модель> — нестабильна`.
-Если ни одна не проходит — так и написать, кандидата не выдумывать.
+After the table — a recommendation line with the NAMED criterion, for
+example: `минимальная годная: <model> (пропусков 0, нестабильных 0,
+медиана 4.6 с); отвергнуты: <model> — 2 пропуска, <model> — нестабильна`. If none pass —
+say exactly that; do not invent a candidate.
 
-## Стоимость (если данные есть)
+## Cost (if the data exists)
 
-Если в `~/.claude.json` есть `customModelCosts` с ключом модели — посчитать и
-напечатать цену 100 консультаций по средним токенам. Нет ключа — колонка `—`.
-Арифметику не подгонять и «примерно» не писать: нет данных — прочерк.
+If `~/.claude.json` has `customModelCosts` with a key for the model — compute
+and print the price of 100 consultations at the average tokens. No key — the
+`—` column. Do not bend the arithmetic and do not write "approximately":
+no data — a dash.
 
-## Гардрейлы
+## Guardrails
 
-- Ноль сетевых обращений куда-либо, кроме адреса из записи/`--url`.
-- Никаких коммитов, никаких правок вне `validate.py`.
-- Стоп-правило: неожиданное расхождение с брифом → одна честная попытка →
-  доклад BLOCKED с сырым выводом, без глубокой диагностики.
-- Право отказа: если что-то из брифа уже сделано или посылка ложна — покажи
-  доказательство (grep/diff/прогон) и остановись; выдумывать дифф запрещено.
+- Zero network access anywhere except the address from the record/`--url`.
+- No commits, no edits outside `validate.py`.
+- Stop rule: an unexpected mismatch with the brief → one honest attempt →
+  report BLOCKED with raw output, no deep diagnosis.
+- Right to refuse: if part of the brief is already done or the premise is
+  false — show proof (grep/diff/a run) and stop; inventing a diff is
+  forbidden.
 
-## Приёмка (прогнать самому и приложить сырой вывод)
+## Acceptance (run it yourself and attach raw output)
 
-1. `validate.py list` — печатает все 9 записей с классом записанного вердикта и
-   «нет метки».
+1. `validate.py list` — prints all 9 records with the recorded verdict's
+   class and «нет метки».
 2. `validate.py run --limit 3 --models "deepseek-v4-flash:high" --jobs 2` —
-   три записи прогоняются, таблица печатается, файл прогона создан.
-3. `validate.py run --limit 3 --models "deepseek-v4-flash:high,glm-5.3:max"` —
-   две модели в одной таблице.
+   three records are run, the table prints, the run file is created.
+3. `validate.py run --limit 3 --models "deepseek-v4-flash:high,glm-5.3:max"`
+   — two models in one table.
 4. `validate.py run --limit 2 --project-layer recompose --models "deepseek-v4-flash:high"`
-   — работает на записях с `cfg: null` (берётся база) без исключений.
-5. `validate.py report <файл из п.3>` — та же таблица без обращений в сеть.
-6. `validate.py label <любая запись> --truth OK --note "проверка"` затем
-   `validate.py list --unlabelled` — размеченная запись из списка ушла.
-   После проверки СТРОКУ ИЗ `labels.jsonl` УДАЛИТЬ (метки ставит человек), в
-   отчёте это назвать.
-7. Отрицательная проба: `--url http://127.0.0.1:9/v1/chat/completions` на одной
-   записи — строка с `error`, `klass:"ERROR"`, в таблице «ошибок 1», процесс не
-   падает.
+   — works on records with `cfg: null` (the base is taken) without
+   exceptions.
+5. `validate.py report <file from item 3>` — the same table without network
+   access.
+6. `validate.py label <any record> --truth OK --note "check"`, then
+   `validate.py list --unlabelled` — the labelled record is gone from the
+   list. After the check DELETE THE LINE FROM `labels.jsonl` (labels are set
+   by a human); name this in the report.
+7. Negative probe: `--url http://127.0.0.1:9/v1/chat/completions` on one
+   record — a line with `error`, `klass:"ERROR"`, the table shows «ошибок 1»,
+   the process does not crash.
 
-В отчёте: что сделано, сырой вывод пунктов 1–7, что НЕ сделано и почему.
+In the report: what was done, the raw output of items 1–7, what was NOT done
+and why.
 
 <!-- BRIEF COMPLETE -->
