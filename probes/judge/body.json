@@ -9,7 +9,7 @@
     },
     {
       "role": "user",
-      "content": "=== ИСТОРИЯ СЕССИИ ===\n{{CONTEXT}}\n\n=== ДИСПАТЧ ===\n{{DISPATCH}}"
+      "content": "=== SESSION SO FAR ===\n{{CONTEXT}}\n\n=== {{LABEL}} ===\n{{DISPATCH}}"
     }
   ],
   "reasoning_effort": "low"

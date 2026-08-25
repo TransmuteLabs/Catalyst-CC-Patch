@@ -1718,7 +1718,18 @@ step('22 judge consulted before a subagent dispatch', () => {
         'catch(__be){__deg.push("unparsed-body:"+__clip(__be?.message??__be,60));__tplr=null}}' +
       'let __mkb=(__cx,__e)=>{let __mdl=__e.model;try{if(!__tplr)throw new Error("no template");' +
         'let __tpl=__tplr.replace(/\\{\\{PROMPT\\}\\}/g,__emb(__sys)).replace(/\\{\\{MODEL\\}\\}/g,__emb(__mdl))' +
-          '.replace(/\\{\\{CONTEXT\\}\\}/g,__emb(__cx)).replace(/\\{\\{DISPATCH\\}\\}/g,__emb(__disp));' +
+          '.replace(/\\{\\{CONTEXT\\}\\}/g,__emb(__cx)).replace(/\\{\\{DISPATCH\\}\\}/g,__emb(__disp))' +
+          // {{LABEL}} is not decoration: the header is where the truncation
+          // notice lives, and __lbl is the only thing carrying it. A template
+          // without this substitution silently dropped BOTH the probe's own
+          // name (the watcher signs itself FLEET, not DISPATCH) and the
+          // "trimmed: showing N of M" notice — so on the template path a
+          // trimmed payload reached the model looking whole. The built-in
+          // frames below always interpolated __lbl; only the template path
+          // lost it, and the bench never covered that path, which is why it
+          // survived. Frame text here and in both built-ins must stay
+          // byte-identical.
+          '.replace(/\\{\\{LABEL\\}\\}/g,__emb(__lbl));' +
         // One home per setting. The template carries its own model and budget,
         // so without this override `models` and `max_tokens` from config.json
         // are silent no-ops — measured twice: first with the model, then with

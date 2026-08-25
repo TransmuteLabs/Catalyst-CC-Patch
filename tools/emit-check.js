@@ -11,11 +11,17 @@ const src = fs.readFileSync(
 // adjacent declarations, they change together with the code and do not drift
 // apart silently. A COMMENT anchor does not have this property: moving the
 // comment elsewhere in the file leaves the check without its piece, and exit 2
-// goes unnoticed while nobody calls it. That happened both times.
+// goes unnoticed while nobody calls it. That happened three times. The third
+// was the plainest: the last anchor here still pointed at a comment, the
+// comment was translated to English, and the anchor stopped matching text that
+// no longer existed. Rewording is not a code change, so nothing warned. Every
+// anchor below is now a declaration, and a comment must never become one
+// again — a comment is prose and prose gets edited for reasons that have
+// nothing to do with this file.
 const parts = [
   ['core', '  const core =', '  const judgeCall ='],
   ['judgeCall', '  const judgeCall =', '  const watchCall ='],
-  ['watchCall', '  const watchCall =', '  // Вклейка по СМЕЩЕНИЮ'],
+  ['watchCall', '  const watchCall =', '  const judgeResolved ='],
 ];
 
 let total = '';
@@ -83,3 +89,34 @@ if (stray) {
   console.error('ЗАМЕЩАЮЩИЕ ПОСЛЕДОВАТЕЛЬНОСТИ В ТЕЛЕ: ' + stray.join(' '));
   process.exit(1);
 }
+
+// The frame is what the model actually reads, and it has THREE producers: the
+// pool path builds it inline, the template path's fallback builds it again,
+// and body.json carries it as a template. They drifted once and it was not
+// caught by anything: body.json said "=== ДИСПАТЧ ===" while both built-ins
+// said "=== DISPATCH ===", and worse, the template had no {{LABEL}} at all —
+// so the truncation notice, which lives in the header and nowhere else, was
+// dropped on that path. A trimmed payload reached the model looking whole.
+// The bench cannot see this: it drives the pool path only, and standing up an
+// HTTP receiver to reach the template path costs more than the invariant is
+// worth. So the invariant is asserted as text, here, where the pipeline
+// already calls us.
+const BUILTIN_FRAME = '"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ==='
+  + '\\n"+__disp';
+const builtins = total.split(BUILTIN_FRAME).length - 1;
+if (builtins !== 2) {
+  console.error('РАМКА: встроенных вхождений ' + builtins + ', ожидалось 2 '
+    + '(pool и запасное тело обязаны нести один текст)');
+  process.exit(1);
+}
+const TEMPLATE_FRAME =
+  '=== SESSION SO FAR ===\n{{CONTEXT}}\n\n=== {{LABEL}} ===\n{{DISPATCH}}';
+const bodyPath = path.join(__dirname, '..', 'probes', 'judge', 'body.json');
+const bodyUser = JSON.parse(fs.readFileSync(bodyPath, 'utf8'))
+  .messages.find((m) => m.role === 'user');
+if (!bodyUser || bodyUser.content !== TEMPLATE_FRAME) {
+  console.error('РАМКА: шаблон в probes/judge/body.json разошёлся со встроенным;'
+    + ' получено ' + JSON.stringify(bodyUser && bodyUser.content));
+  process.exit(1);
+}
+console.log('РАМКА ОДИНАКОВА НА ВСЕХ ТРЁХ ПУТЯХ');
