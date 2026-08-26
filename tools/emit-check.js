@@ -21,7 +21,7 @@ const src = fs.readFileSync(
 const parts = [
   ['core', '  const core =', '  const judgeCall ='],
   ['judgeCall', '  const judgeCall =', '  const watchCall ='],
-  ['watchCall', '  const watchCall =', '  const judgeResolved ='],
+  ['watchCall', '  const watchCall =', '  const resolveFor ='],
 ];
 
 let total = '';

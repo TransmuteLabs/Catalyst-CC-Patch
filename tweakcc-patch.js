@@ -197,9 +197,17 @@ step('4 model badge', () => {
   if (!m) fail('model badge site not found');
 
   const [, input, resolved, list, main, getMain, requested, parse] = m;
+  // `"inherit"` is a SENTINEL, not a model name -- the stock guard tests for it
+  // explicitly. Dropping that test from the widened branch left only a
+  // truthiness check, and `"inherit"` is truthy: the string was handed to the
+  // model-name parser instead of meaning "take the parent's model", so an
+  // inheriting agent got a badge built from a parse of the sentinel. The
+  // fallback for both "no model" and "inherit" is the agent's resolved model,
+  // which is exactly what the badge should name.
   const replacement =
     `else{let ${resolved}=${list}[0];if(${resolved})` +
-    `{let ${main}=${getMain}(),${requested}=${input}.model?${parse}(${input}.model):${resolved};`;
+    `{let ${main}=${getMain}(),${requested}=${input}.model&&${input}.model!=="inherit"` +
+    `?${parse}(${input}.model):${resolved};`;
 
   js = js.slice(0, m.index) + replacement + js.slice(m.index + m[0].length);
   applied.push('model badge (always show when it differs from the main model)');
@@ -321,10 +329,25 @@ step('7 session memory', () => {
   // 2. Each half is APPLIED when its gate is present and VERIFIED when it is
   //    not. tweakcc's own session-memory patch runs before us and writes the
   //    byte-identical edits, so "already gone" is the normal case, not an
-  //    anomaly. What this step owes the user is the postcondition -- nothing
-  //    gates extraction any more -- not the authorship of the edit. A gate
+  //    anomaly. What this step owes the user is the postcondition -- no FEATURE
+  //    FLAG gates extraction any more -- not the authorship of the edit. A gate
   //    that survives in a form neither of us recognises is a stop: session
   //    memory silently staying off is the failure this step exists to prevent.
+  //
+  //    The postcondition is deliberately NOT "nothing gates extraction". The
+  //    extract-mode predicate is `flag && (isInteractive() || escapeFlag)`, and
+  //    only the flag half is ours to force. Collapsing the whole body to
+  //    `return!0` -- which both this step and tweakcc used to do -- also turned
+  //    extraction on in NON-interactive sessions (print mode, background agents,
+  //    SDK), spending a model call per extraction cycle in exactly the contexts
+  //    that run unattended. The interactivity term is preserved by carrying the
+  //    matched return expression over verbatim rather than re-spelling it.
+  //
+  //    Absence of the gated shape is therefore no longer accepted on its own:
+  //    it cannot tell "already forced" from "reshaped upstream", and the second
+  //    reads as success while session memory stays off. The step now asserts the
+  //    POSITIVE end state -- exactly one function of the forced shape. Measured
+  //    on pristine 2.1.233 / 240 / 242 / 246: gated shape 1, forced shape 0.
   const anchor = 'querySource:"extract_memories",forkLabel:"extract_memories"';
   const anchorIdx = js.indexOf(anchor);
   if (anchorIdx === -1) fail('session-memory extraction anchor not found');
@@ -365,10 +388,27 @@ step('7 session memory', () => {
   if (modeDone) {
     const modeAt = js.indexOf(modes[0]);
     const head = modes[0].slice(0, modes[0].indexOf('{'));
-    js = js.slice(0, modeAt) + `${head}{return!0}` + js.slice(modeAt + modes[0].length);
+    // Keep everything the predicate returns once its flag guard is gone. Slicing
+    // it out of the match keeps the minified names of the interactivity helper
+    // and the escape-hatch flag reader out of this locator entirely.
+    const GUARD_END = 'return!1;';
+    const body = modes[0].slice(modes[0].indexOf(GUARD_END) + GUARD_END.length, -1);
+    js = js.slice(0, modeAt) + `${head}{${body}}` + js.slice(modeAt + modes[0].length);
   }
   if (new RegExp(modeRx.source).test(js)) {
     fail('session-memory extract-mode predicate still consults its feature flags');
+  }
+  const forcedRx = new RegExp(
+    `function ${ID}\\(\\)\\{return!${ID}\\(\\)\\|\\|${ID}\\("tengu_[a-z0-9_]+",!1\\)\\}`,
+    'g'
+  );
+  const forced = js.match(forcedRx) || [];
+  if (forced.length !== 1) {
+    fail(
+      `session-memory extract-mode predicate is not in the forced shape ` +
+        `(${forced.length} matches; expected exactly 1) -- it was neither patched ` +
+        `here nor left in the shape tweakcc writes, so extraction may still be off`
+    );
   }
 
   const did = [gateDone ? 'extraction gate' : null, modeDone ? 'extract-mode predicate' : null].filter(Boolean);
@@ -490,13 +530,67 @@ step('10 per-model context window', () => {
   if (!m) fail('context-window default not found');
 
   const [, canonical, parse, model, envValue, fallback] = m;
-  const lookup = `${cfg}().customModelContextWindows`;
-  const replacement =
-    `&&!${canonical}(${parse}(${model})).startsWith("claude-"))return ${envValue};` +
-    `return ${lookup}?.[${model}]??${lookup}?.[${canonical}(${parse}(${model}))]??${fallback}}`;
-  js = js.slice(0, m.index) + replacement + js.slice(m.index + m[0].length);
 
-  applied.push(`per-model context window (config key 'customModelContextWindows')`);
+  // The override belongs at the TOP of this function, not at its bottom.
+  // On 2.1.246 the function reads:
+  //
+  //   function PE(e,t){
+  //     if(xe(e))return 1e6;                                  // /\[1m\]/i on the id
+  //     if(t?.includes(sr.header)&&Uf(e))return 1e6;
+  //     if(Vo(e))return 1e6;
+  //     let n=oM(e);if(n!==null)return n;
+  //     let r=c.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+  //     if(r!==void 0&&r>0&&!P(X(e)).startsWith("claude-"))return r;
+  //     return wE }
+  //
+  // Appending the lookup to the tail put it BEHIND four earlier returns, so an
+  // explicit per-model window was silently ignored for every id those
+  // heuristics claim -- including any id carrying the `[1m]` suffix. A value the
+  // user wrote down by hand is not a fallback for heuristics; it outranks them.
+  //
+  // The config read is also guarded now. `k()` is
+  //   function k(){if(jn())return m.testGlobalConfig;let e=m.readCache();
+  //                if(e)return e;
+  //                if(!m.enableSettled)throw Error("Config accessed before allowed.");
+  //                return Js(je())}
+  // -- it THROWS before the config settles. The stock tail was `return wE`, a
+  // path that could not throw; appending a config read introduced one on a
+  // function the context accounting calls early. A settle-time read now yields
+  // no override rather than an exception, which is the same outcome as having
+  // no override configured.
+  //
+  // The value is type-checked: a hand-written config can hold a string or a
+  // negative, and returning that from a token-budget function poisons every
+  // arithmetic downstream instead of failing where it was written.
+  const headWindow = js.slice(Math.max(0, m.index - 900), m.index);
+  const headRx = new RegExp(`function (${ID})\\(${rxEsc(model)},(${ID})\\)\\{`, 'g');
+  let headMatch = null;
+  for (const h of headWindow.matchAll(headRx)) headMatch = h;
+  if (!headMatch) {
+    fail(
+      'context-window function head not found above its default -- refusing to ' +
+        'append the override to the tail, where four earlier returns shadow it',
+    );
+  }
+  const insertAt = m.index - headWindow.length + headMatch.index + headMatch[0].length;
+
+  // Tail first: editing from the end keeps the head offset valid.
+  js =
+    js.slice(0, m.index) +
+    `&&!${canonical}(${parse}(${model})).startsWith("claude-"))return ${envValue};` +
+    `return ${fallback}}` +
+    js.slice(m.index + m[0].length);
+
+  const prelude =
+    `let __ccw;try{__ccw=${cfg}().customModelContextWindows}catch{}` +
+    `let __ccv=__ccw?.[${model}]??__ccw?.[${canonical}(${parse}(${model}))];` +
+    `if(typeof __ccv==="number"&&__ccv>0)return __ccv;`;
+  js = js.slice(0, insertAt) + prelude + js.slice(insertAt);
+
+  applied.push(
+    `per-model context window (config key 'customModelContextWindows', ` +
+      `override placed at the head of '${headMatch[1]}', config read guarded)`,
+  );
 });
 
 // --------------------------------------------------------------------------
@@ -708,7 +802,11 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   const callRx = new RegExp(`(async call\\(\\{prompt:${ID},subagent_type:${ID},[^}]{0,400}?)(\\},${ID},)`);
   const callMatch = js.match(callRx);
   if (!callMatch) fail('agent tool call handler not found');
+  // Both names are checked here, before EITHER is written: `__ccEffort` is
+  // inserted a few lines below, and a later `includes('__ccE…')` test would
+  // then match its own prefix and refuse on a clean build.
   if (js.includes('__ccEffort')) fail('__ccEffort already present — refusing to shadow it');
+  if (js.includes('__ccLvl')) fail('__ccLvl already present — refusing to shadow it');
   js = js.replace(callRx, `$1,effort:__ccEffort$2`);
 
   // (c) attach it to the definition handed to the launch — the field the
@@ -719,7 +817,30 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   //     Anchoring on the assignment picks the caller's object literal.
   const defRx = new RegExp(`(=\\{agentDefinition:)(${ID})(,promptMessages:)`);
   if (!defRx.test(js)) fail('launch agentDefinition site not found');
-  js = js.replace(defRx, `$1__ccEffort?{...$2,effort:__ccEffort}:$2$3`);
+  // The schema field is a free string, so whatever the model types arrives here
+  // verbatim and used to be attached to the definition unchecked -- an
+  // unvalidated model-supplied value reaching an internal effort layer.
+  //
+  // The vocabulary is the product's own, read off 2.1.246:
+  //   R  = ["low","medium","high","xhigh","max"]
+  //   ze = {med:"medium"}        <- aliases the product itself normalises
+  //   Xe = {ultracode:"xhigh"}
+  // Those aliases are accepted and folded here rather than rejected, because
+  // the product accepts them everywhere else; anything outside the vocabulary
+  // is dropped, which lands the dispatch on the definition's own effort exactly
+  // as if none had been passed.
+  //
+  // The field TYPE is deliberately left a string. Swapping it for an enum
+  // schema would reject a bad value more loudly, but a wrong guess about which
+  // local is the enum builder hard-fails the whole Agent tool, and this list is
+  // duplicated from the image rather than shared with it. Dropping is the
+  // failure mode that cannot take the tool down with it.
+  const EFFORTS = '["low","medium","high","xhigh","max"]';
+  js = js.replace(
+    defRx,
+    `$1((()=>{let __ccLvl=__ccEffort==="med"?"medium":__ccEffort==="ultracode"?"xhigh":__ccEffort;` +
+      `return __ccLvl&&${EFFORTS}.includes(__ccLvl)?{...$2,effort:__ccLvl}:$2})())$3`,
+  );
 
   // (d) the prompt text still told the model the override was pointless
   const schemaDoc = 'Ignored for subagent_type: "fork" \\u2014 forks always inherit the parent model.';
@@ -852,17 +973,34 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
 //     Every session records `{"type":"mode","mode":"normal"|"coordinator"}`,
 //     and on resume `matchSessionMode(session.mode)` drags the PROCESS back to
 //     whatever the session was started in — printing "Exited coordinator mode
-//     to match resumed session." and silently undoing #13's opt-in. The five
-//     call sites (interactive resume, the picker, --continue, -p --resume, and
-//     the CLI resume path) all funnel through that one function and do nothing
-//     but surface its return value as a warning, so returning early from it is
-//     the whole behaviour change: no mode flip, no message.
+//     to match resumed session." and silently undoing #13's opt-in. All five
+//     call sites funnel through that one function, and it returns a message
+//     ONLY when it actually flipped the mode, so returning early from it is the
+//     whole behaviour change: no mode flip, no message.
 //
-//     Dropping the session's mode is safe to leave permanent — after resume the
-//     record is rewritten from the LIVE predicate (`saveMode(isCoordinatorMode()
-//     ?"coordinator":"normal")` at the interactive sites, `eHt(...)` at the
-//     print ones), so the file ends up agreeing with the process rather than
-//     being left stale.
+//     Four of the five do more than surface that message, and an earlier
+//     version of this comment claimed otherwise. Measured on pristine 2.1.246:
+//     five call sites, and the two print-path ones, the interactive resume and
+//     the picker each also rebuild `agentDefinitions` from a fresh load inside
+//     the same `if(returned)`; only the `modeApi?.matchSessionMode` site does
+//     nothing but push the warning. That reload exists to re-sync the agent set
+//     with the mode the flip just imposed. With no flip there is nothing to
+//     re-sync — the definitions loaded at startup already match the process's
+//     own mode — so skipping it is part of the same single behaviour change
+//     rather than a side effect of it.
+//
+//     What the session FILE ends up holding differs by entry point, and only
+//     the interactive ones rewrite it. `saveMode(isCoordinatorMode()
+//     ?"coordinator":"normal")` has three call sites on 2.1.246 — /clear, the
+//     interactive resume and the picker — so there the record is rewritten from
+//     the LIVE predicate and ends up agreeing with the process. The print path
+//     (`-p --resume`) has NO mode writer: its window holds neither a `saveMode`
+//     call nor a `type:"mode"` write, so the recorded mode stays as it was.
+//     (The same earlier comment named `eHt(...)` as that writer; in 2.1.246
+//     `eHt` is `dirname` imported from `path` — a directory walk, unrelated.)
+//     Leaving it stale is the deliberate half: the key declares the ENVIRONMENT
+//     authoritative for this run only, and a later resume without the key is
+//     meant to fall back to the session's own record.
 //
 //     Opt-in only, and via its own key: an unconditional bail would strand
 //     anyone who relies on a resumed session keeping its mode, and the point of
@@ -1261,30 +1399,93 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   //    emitting the synthetic "may be incomplete" message; the request loop
   //    and the model fallback then get their turn, and a turn that cannot
   //    be completed fails honestly.
+  // 2.1.246 added `truncatedAfterOutput:<hasOutput>&&!<isToolUse>?!0:void 0` to
+  // this marker, and with it a RECOVERY the earlier releases had no equivalent
+  // of. The field has exactly one producer -- this yield -- and one meaningful
+  // reader:
+  //
+  //   function GJn(e,t,n){return e?.type==="assistant"&&e.isApiErrorMessage===!0
+  //     &&e.truncatedAfterOutput===!0&&t.options.isNonInteractiveSession
+  //     &&wl(n)==="main"&&we("tengu_truncated_response_recovery",!0)}
+  //
+  // whose consumer nudges the model with "Your response above was cut off
+  // mid-stream. Resume directly from where it stops" and re-runs the turn, up to
+  // WJn=3 attempts -- PRESERVING the partial answer instead of discarding it.
+  // In that same case the marker is suppressed from the output stream, so it
+  // never reaches the user as a half answer.
+  //
+  // Deleting the yield outright therefore killed a strictly better recovery in
+  // the sessions it was written for, while doing the right thing everywhere
+  // else: for an INTERACTIVE session GJn is false, nothing suppresses the
+  // marker, and "The response above may be incomplete." is exactly the half
+  // answer this leg exists to prevent.
+  //
+  // So the leg now splits on the same conditions the reader uses, expressed with
+  // values in scope at this site: the session flag, the main-loop lane (the
+  // product spells the same test `l.startsWith("repl_main_thread")` elsewhere),
+  // and the marker's own truthiness. Where they hold, the stock yield and break
+  // run untouched and the recovery gets its turn; everywhere else the throw
+  // stands. If any of them is missing from a build the expression is falsy and
+  // the behaviour is exactly what it was before this change.
+  //
+  // Measured: the field exists on 2.1.246 and on NO earlier build in range
+  // (233/240/242 carry zero occurrences), so the capture is optional and older
+  // builds keep the unconditional throw -- there is no recovery there to
+  // preserve.
   const rxFinal = new RegExp(
-    // 2.1.246 appends `truncatedAfterOutput:<x>&&!<y>?!0:void 0` after the
-    // error field — upstream now MARKS a truncated turn while still finalizing
-    // it as a success, which is the very thing this leg removes. The whole
-    // yield is dropped by the replacement, so trailing fields need only be
-    // tolerated, not captured.
-    `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"(?:,[^;]{0,300}?)?\\}\\),(${ID})!=="credited"\\)` +
-      `\\3="credited",(${ID})\\+=([^;]{0,300}?);break (${ID})\\}` +
+    `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"` +
+      `(?:,truncatedAfterOutput:([^,;{}]{0,80}))?((?:,[^;]{0,300}?)?)\\}\\),(${ID})!=="credited"\\)` +
+      `\\5="credited",(${ID})\\+=([^;]{0,300}?);break (${ID})\\}` +
       `throw (${ID})\\("tengu_streaming_fallback_to_non_streaming",\\{model:(${ID})\\.model,` +
       `error:(${ID}) instanceof Error\\?`,
   );
   const mFinal = js.match(rxFinal);
   if (!mFinal) fail('streaming partial-finalize site not found');
-  js = js.replace(
-    rxFinal,
-    ',$3!=="credited")$3="credited",$4+=$5;throw $9}' +
-      'throw $7("tengu_streaming_fallback_to_non_streaming",{model:$8.model,' +
-      'error:$9 instanceof Error?',
-  );
+  const [
+    ,
+    arFn,
+    content,
+    truncExpr,
+    extraTail,
+    credited,
+    acc,
+    accExpr,
+    label,
+    throwFn,
+    opts,
+    errVar,
+  ] = mFinal;
+
+  const tail =
+    `throw ${throwFn}("tengu_streaming_fallback_to_non_streaming",` +
+    `{model:${opts}.model,error:${errVar} instanceof Error?`;
+
+  if (truncExpr === undefined) {
+    // No truncation marker in this build: nothing downstream can recover from
+    // it, so the half answer is simply not finalized.
+    js = js.replace(
+      rxFinal,
+      `,${credited}!=="credited")${credited}="credited",${acc}+=${accExpr};` +
+        `throw ${errVar}}${repEsc(tail)}`,
+    );
+  } else {
+    const recoverable =
+      `(${opts}.isNonInteractiveSession&&` +
+      `${opts}.querySource?.startsWith("repl_main_thread")&&(${truncExpr}))`;
+    js = js.replace(
+      rxFinal,
+      `,${repEsc(recoverable)}?yield ${arFn}({content:${repEsc(content)},` +
+        `error:"server_error",truncatedAfterOutput:${repEsc(truncExpr)}${repEsc(extraTail)}})` +
+        `:void 0,${credited}!=="credited")${credited}="credited",${acc}+=${accExpr};` +
+        `if(!${repEsc(recoverable)})throw ${errVar};break ${label}}${repEsc(tail)}`,
+    );
+  }
 
   applied.push(
     `a broken stream is retried, never finalized as a half answer ` +
       `(backoff '${backoff}', budgets ${mBudget[3]}/${mBudget[7]} -> 300, ` +
-      `dropped content gate on '${mGate[1]}', error var '${mFinal[9]}', ` +
+      `dropped content gate on '${mGate[1]}', error var '${errVar}', ` +
+      `${truncExpr === undefined ? 'no truncation marker in this build' : `truncation marker kept for the recoverable lane ('${truncExpr}')`}, ` +
       `+${js.length - before} bytes)`,
   );
 });
@@ -1398,6 +1599,54 @@ step('22 judge consulted before a subagent dispatch', () => {
   if (!m) fail('tool dispatch call site not found');
   const TOOL = m[2] ?? m[3];
   const SLOT = { $1: m[1], $2: TOOL, $3: m[4], $4: m[5], $5: m[6], $6: m[7] };
+
+  // THE SECOND DISPATCH SITE. The one above is the main tool dispatcher; it is
+  // not the only place a tool gets invoked. The REPL tool runs model-written
+  // JavaScript in a vm sandbox and hands that code a callable wrapper for every
+  // other tool:
+  //
+  //   POt(e.filter((g)=>!Xn(g,ya)), …)   // ya = "REPL", Xn(e,t) = e.name===t ||
+  //                                      //     (e.aliases?.includes(t) ?? !1)
+  //
+  // -- the ONLY tool excluded from that map is REPL itself, so the dispatch
+  // tool is in it, and `zss` (the wrapper factory) runs the whole permission
+  // chain and then calls the tool directly. Measured on pristine 2.1.233, 240,
+  // 242 and 246: `tengu_repl_inner_executing` and `[Stall] tool_dispatch_start`
+  // occur exactly once each, in the SAME bundle module (361 on 2.1.246), so
+  // every name this step resolves is in scope at both.
+  //
+  // Consequence before this hook existed: a subagent dispatched from inside a
+  // REPL program reached neither the judge nor the fleet counter. In a
+  // mechanism that is meant to fail CLOSED, that is the worst possible shape --
+  // not a refusal, a silent pass. Hooking one site and calling the mechanism
+  // enforced was the claim; hooking both is what makes it true.
+  //
+  // No dispatch is judged twice. The REPL tool itself goes through the main
+  // site under the name "REPL", where the judge's own `name==="Agent"||
+  // name==="Task"` condition is false; the inner Agent call is seen only here.
+  // An ordinary dispatch never passes through the sandbox at all.
+  //
+  // The shape differs from the main site in two ways that the locator must
+  // carry: the REPL path adds `fileReadingLimits`/`globLimits` to the context
+  // literal (which is also what keeps the two patterns from matching each
+  // other's site), and it passes two trailing arguments instead of three.
+  const rxRepl = new RegExp(
+    `(?:let )?(${ID})=await (?:(${ID})\\.call|${ID}\\((${ID})\\)\\.execute)` +
+      `\\((${ID}),\\{\\.\\.\\.(${ID}),toolUseId:(${ID}),` +
+      `userModified:(${ID})\\.userModified\\?\\?!1,` +
+      `fileReadingLimits:\\{maxTokens:1\\/0,maxSizeBytes:268435456\\},` +
+      `globLimits:\\{maxResults:25000\\}\\},(${ID}),(${ID})\\)`,
+  );
+  const mRepl = js.match(rxRepl);
+  if (!mRepl) fail('REPL inner tool dispatch call site not found');
+  const SLOT_REPL = {
+    $1: mRepl[1],
+    $2: mRepl[2] ?? mRepl[3],
+    $3: mRepl[4],
+    $4: mRepl[5],
+    $5: mRepl[6],
+    $6: mRepl[7],
+  };
   // The judge rides the client's OWN single-shot query
   // (queryModelWithoutStreaming), not its own HTTP call: this function goes
   // through the same client factory as any other request, so the model pool
@@ -2314,14 +2563,51 @@ step('22 judge consulted before a subagent dispatch', () => {
   // the two call shapes, and the replacement string additionally reads `$` as
   // a reference. The slice at m.index interprets nothing, and the call itself
   // goes back in place verbatim (m[0]) — we have no business rewriting it.
-  const judgeResolved = (core + judgeCall + watchCall).replace(/\$([1-9])/g, (t, d) => {
-    const v = SLOT['$' + d];
-    if (!v) fail(`judge body references ${t}, which this call shape does not bind`);
-    return v;
-  });
-  js = js.slice(0, m.index) + judgeResolved + m[0] + js.slice(m.index + m[0].length);
+  const resolveFor = (slots, where) =>
+    (core + judgeCall + watchCall).replace(/\$([1-9])/g, (t, digit) => {
+      const v = slots['$' + digit];
+      if (!v) fail(`judge body references ${t}, which the ${where} call shape does not bind`);
+      return v;
+    });
+
+  // The block is a sequence of STATEMENTS, so the byte it is spliced in front
+  // of has to begin one. That is not the same question at the two sites: the
+  // main site's match starts right after a `try{` (the result variable was
+  // declared earlier), while the REPL one starts at `let X=await …`, and
+  // dropping statements between `let` and its binding would produce a build
+  // that fails to parse. The locator therefore swallows the `let ` and the
+  // boundary is CHECKED rather than assumed -- a future build that moves
+  // either call into an expression position must stop here loudly instead of
+  // emitting something that cannot parse.
+  const sites = [
+    { name: 'main dispatch', mm: m, slots: SLOT },
+    { name: 'REPL inner dispatch', mm: mRepl, slots: SLOT_REPL },
+  ];
+  for (const site of sites) {
+    const prev = js.slice(0, site.mm.index).trimEnd().slice(-1);
+    if (!(prev === ';' || prev === '{' || prev === '}')) {
+      fail(
+        `${site.name} call site is not in statement position (preceded by ` +
+          `'${prev}') -- refusing to splice statements there`,
+      );
+    }
+    site.block = resolveFor(site.slots, site.name);
+  }
+
+  // Later offset first: splicing the earlier one would move every index after
+  // it, and the second site's match index was taken from the same string.
+  for (const site of [...sites].sort((a, b) => b.mm.index - a.mm.index)) {
+    js =
+      js.slice(0, site.mm.index) +
+      site.block +
+      site.mm[0] +
+      js.slice(site.mm.index + site.mm[0].length);
+  }
+
   applied.push(
-    `judge: consulted before dispatch (tool '${TOOL}', input '${m[4]}', context '${m[5]}')`,
+    `judge: consulted before dispatch at ${sites.length} sites — main (tool ` +
+      `'${TOOL}', input '${m[4]}', context '${m[5]}') and the REPL sandbox's ` +
+      `inner executor (input '${mRepl[4]}', context '${mRepl[5]}')`,
   );
 });
 
@@ -2554,7 +2840,7 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
 //     breaker works as before, and the predicate's second consumer (picking a
 //     representative among several results of one command) is untouched.
 // --------------------------------------------------------------------------
-step('27 full-bypass mode admits no immunity', () => {
+step('27 full-bypass mode keeps only the peer-machine immunity', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   const before = js.length;
 
@@ -2576,11 +2862,39 @@ step('27 full-bypass mode admits no immunity', () => {
     fail('bypass-immunity site is not the permission-mode branch');
   }
 
-  js = js.slice(0, m.index) + `${m[1]}=void 0;` + js.slice(m.index + m[0].length);
+  // The registry on 2.1.246 marks exactly two breakers bypassImmune:
+  //   dangerousRemoval:      {bypassImmune:!0, classifierRouted:!0}
+  //   isolatePeerMachines:   {bypassImmune:!0, classifierRouted:!1}
+  //   backgroundOperator / suspiciousWindowsPath: bypassImmune:!1
+  //
+  // Writing `void 0` here dropped BOTH. isolatePeerMachines is the guard that
+  // keeps one machine's session from acting on another machine through a peer
+  // channel -- it is not the friction this step exists to remove, and a session
+  // holding a full-bypass key is exactly the session that should still stop
+  // there. Only dangerousRemoval's immunity is lifted now.
+  //
+  // The narrowing goes into the PREDICATE, not around the call: whatever
+  // traversal the helper does over composite decision reasons is preserved
+  // unchanged, and the only difference is which breaker the predicate admits.
+  // The parameter name is deliberately long-ish -- a one-letter name could
+  // shadow a binding the surrounding minified scope relies on.
+  if (!js.includes('dangerousRemoval')) {
+    fail(
+      'bypass-immunity narrowing targets `dangerousRemoval`, which is absent ' +
+        'from this build -- the breaker was renamed and this step would strip nothing',
+    );
+  }
+  js =
+    js.slice(0, m.index) +
+    `${m[1]}=${m[2]}&&${m[3]}?.behavior==="ask"?` +
+      `${m[4]}(${m[3]}.decisionReason,(__ccbr)=>` +
+      `__ccbr.circuitBreaker!=="dangerousRemoval"&&${m[5]}(__ccbr)):void 0;` +
+    js.slice(m.index + m[0].length);
 
   applied.push(
-    `full-bypass mode admits no circuit-breaker immunity ` +
-      `(flag '${m[1]}', mode predicate '${m[2]}', decision '${m[3]}', ${js.length - before} bytes)`,
+    `full-bypass mode lifts only the dangerousRemoval immunity, peer-machine ` +
+      `isolation still stops (flag '${m[1]}', mode predicate '${m[2]}', ` +
+      `decision '${m[3]}', immunity predicate '${m[5]}', ${js.length - before} bytes)`,
   );
 });
 

@@ -150,7 +150,7 @@ echo "Target binary: $BIN"
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-e309c80cdc984ae06dc20f30e30eb3a7d8ee6d56}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-d5ced06304cf537ebee7204e72fcc62acada9d0e}"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
 # TWEAKCC_LOCAL is the development escape hatch: point it at a built
@@ -377,6 +377,14 @@ def _session_memory_ungated(d):
     vscode_feedback_survey are unrelated), and inside the window it is unique.
     The extract-mode predicate shape is unique bundle wide, so it needs no
     scope.
+
+    The predicate half is checked POSITIVELY. Absence of the gated shape alone
+    cannot tell "forced" from "reshaped upstream", and the second reads as
+    success while session memory stays off -- the same one-sided weakness this
+    docstring warns about for flag names. The end state is exactly one function
+    of the forced shape `function X(){return!Y()||Z("tengu_...",!1)}`: the flag
+    guard gone, the product's own interactivity condition kept. Measured on
+    pristine 2.1.233 / 240 / 242 / 246: gated shape 1, forced shape 0.
     """
     anchor = b'querySource:"extract_memories",forkLabel:"extract_memories"'
     at = d.find(anchor)
@@ -387,42 +395,156 @@ def _session_memory_ungated(d):
         return False
     predicate = (rb'function ' + ID + rb'\(\)\{if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)return!1;'
                  rb'return!' + ID + rb'\(\)\|\|' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\}')
-    return not re.search(predicate, d)
+    if re.search(predicate, d):
+        return False
+    forced = (rb'function ' + ID + rb'\(\)\{return!' + ID + rb'\(\)\|\|'
+              + ID + rb'\("tengu_[a-z0-9_]+",!1\)\}')
+    return len(re.findall(forced, d)) == 1
+
+
+def _stream_finalize_ok(d):
+    """The exhaustion path must never finalize a half answer as a success.
+
+    Which shape proves that depends on the build, because 2.1.246 added a
+    recovery the earlier releases have no equivalent of:
+
+      - no truncation marker in the image (233..242 in range): there is nothing
+        downstream that could recover from the marker, so the yield is gone and
+        the original error is thrown unconditionally.
+      - marker present (246): the yield survives ONLY for the lane whose reader
+        can act on it -- a non-interactive main-loop session, where the product
+        suppresses the marker from the output and nudges the model to resume
+        from the truncation. Every other lane still throws.
+
+    Asserting only the first shape would fail the second, and asserting only
+    "no marker is emitted" would pass a build where the yield came back
+    unguarded, which is the stock half answer.
+    """
+    cond = (rb'\((' + ID + rb')\.isNonInteractiveSession&&\1\.querySource\?\.startsWith\('
+            rb'"repl_main_thread"\)&&\([^()]{0,80}\)\)')
+    if b'truncatedAfterOutput' not in d:
+        if re.search(rb',error:"server_error"\}\),' + ID + rb'!=="credited"', d):
+            return False
+        return bool(re.search(
+            rb'tengu_streaming_partial_finalized.{0,240}?!=="credited"\)'
+            + ID + rb'="credited",.{0,300}?;throw ' + ID + rb'\}'
+            rb'throw ' + ID + rb'\("tengu_streaming_fallback_to_non_streaming"', d, re.S))
+    # An UNGUARDED marker yield is the stock half answer -- check first, so a
+    # build that merely kept the stock site cannot pass on the clauses below.
+    if re.search(rb',yield ' + ID + rb'\(\{content:[^;]{0,1400}?,error:"server_error"', d):
+        return False
+    if not re.search(rb'tengu_streaming_partial_finalized.{0,240}?,' + cond + rb'\?yield ', d, re.S):
+        return False
+    if not re.search(rb';if\(!' + cond + rb'\)throw ' + ID + rb';break ' + ID + rb'\}throw '
+                     + ID + rb'\("tengu_streaming_fallback_to_non_streaming"', d):
+        return False
+    return True
 
 
 def _bypass_no_immunity(d):
-    # The registry marks some circuit breakers immune to the full-bypass mode,
-    # and a session holding a full-bypass key still stops on them. Only the
-    # mode branch is patched: the immunity predicate stays alive for its second
-    # consumer (picking a representative among several results of one command),
-    # so its single remaining use is the proof that the branch, not the whole
-    # mechanism, was removed. On an unpatched image there are two uses — the
-    # check fails.
-    # The predicate used to be reachable BY NAME from its use site
-    # (`isBypassImmuneCircuitBreaker:()=><name>` in the CommonJS bundle), so
-    # counting its uses could prove that the BRANCH, not the mechanism, was
-    # removed. From 2.1.242 the bundle is code-split ESM: the definition
-    # exports `<i> as isBypassImmuneCircuitBreaker` under a chunk-local name
-    # and each consumer imports it under a name of its own, so no single name
-    # spans both sides and a count over the whole image proves nothing.
+    # The registry marks two circuit breakers immune to full-bypass mode:
+    #   dangerousRemoval:    {bypassImmune:!0, classifierRouted:!0}
+    #   isolatePeerMachines: {bypassImmune:!0, classifierRouted:!1}
+    # Step 27 lifts ONLY the first. isolatePeerMachines keeps one machine's
+    # session from acting on another through a peer channel; a session holding a
+    # full-bypass key is exactly the session that should still stop there.
     #
-    # The same two facts, asserted without leaning on a name: the immunity
-    # branch is gone in its exact shape, the removal signature stands in its
-    # place, and decision reasons still reach the predicate's other consumer.
+    # Three facts, none of them leaning on a minified name. From 2.1.242 the
+    # bundle is code-split ESM: the predicate exports under a chunk-local name
+    # and every consumer imports it under a name of its own, so no single name
+    # spans both sides and counting uses across the image proves nothing.
+    #
+    # 1. The STOCK two-argument call must be gone in its exact shape.
     if re.search(rb'\?' + ID + rb'\(' + ID + rb'\.decisionReason,' + ID + rb'\):void 0;', d):
         return False
-    if not re.search(rb'"bypassPermissions"\|\|.{0,240}?,' + ID + rb'=void 0;if\(', d, re.S):
+    # 2. The narrowed predicate must stand in its place -- absence of the stock
+    #    shape alone cannot tell "narrowed" from "branch deleted outright", and
+    #    the second is what this check previously accepted.
+    if not re.search(
+        rb'\?' + ID + rb'\(' + ID + rb'\.decisionReason,\(__ccbr\)=>'
+        rb'__ccbr\.circuitBreaker!=="dangerousRemoval"&&' + ID + rb'\(__ccbr\)\):void 0;', d):
+        return False
+    # 3. The breaker the narrowing names must still exist, and the one whose
+    #    immunity is deliberately kept must still be marked immune. A rename
+    #    upstream would otherwise turn this step into a silent no-op (case 1) or
+    #    silently drop the guard we chose to keep (case 2).
+    if b'dangerousRemoval:{bypassImmune:!0' not in d:
+        return False
+    if b'isolatePeerMachines:{bypassImmune:!0' not in d:
         return False
     return len(re.findall(rb'\.decisionReason,', d)) >= 1
+
+
+def _probe_hooks_both_sites(d):
+    """The probe block must sit in front of EVERY tool-dispatch site.
+
+    There are two on 2.1.233 / 240 / 242 / 246, both in the same bundle module:
+    the main dispatcher, and the inner executor the REPL sandbox hands to
+    model-written JavaScript. The REPL's tool map excludes exactly one tool --
+    REPL itself -- so the dispatch tool is reachable from inside a REPL program,
+    and for as long as only the main site was hooked, a subagent started that
+    way reached neither the judge nor the fleet counter. In a mechanism that
+    fails CLOSED, an unhooked path is not a gap in coverage, it is a silent
+    pass, so the site count is asserted rather than assumed.
+
+    Counting blocks alone would accept two blocks in front of the SAME site, so
+    each block is identified by the call that follows it: the REPL one carries
+    the sandbox's `fileReadingLimits`, the main one closes its context literal
+    straight after `userModified`.
+
+    The cores must also be byte-identical. They are emitted from one string and
+    reference no call-site name, so any difference means an edit reached one
+    copy and not the other -- the drift the single-core decomposition exists to
+    prevent.
+    """
+    ends = [mm.end() for mm in re.finditer(rb'/\*__ccProbe1\*/', d)]
+    starts = [mm.start() for mm in re.finditer(rb'/\*__ccProbe0\*/', d)]
+    if len(ends) != 2 or len(starts) != 2:
+        return False
+    cores = [d[st:d.index(b'if(process.env.CLAUDE_JUDGE', st)] for st in starts]
+    if len(set(cores)) != 1 or len(cores[0]) < 15000:
+        return False
+    repl = main = 0
+    for e in ends:
+        tail = d[e:e + 400]
+        if re.match(rb'(?:let )?' + ID + rb'=await [\s\S]{0,160}?'
+                    rb'fileReadingLimits:\{maxTokens:1/0,maxSizeBytes:268435456\}', tail):
+            repl += 1
+        elif re.match(rb'' + ID + rb'=await [\s\S]{0,160}?userModified:' + ID
+                      + rb'\.userModified\?\?!1\},', tail):
+            main += 1
+    return repl == 1 and main == 1
+
+
+# Every check below that COUNTS occurrences counts them per emitted block: the
+# numbers were measured when the block existed once, and they say something
+# about the shape of one probe, not about how many dispatch sites it guards.
+# Emitting it at a second site would double each of them, and a doubled `== 6`
+# no longer tells 3+3 from 2+4. So the site count is proved above, once, and
+# the duplicate blocks are dropped here -- the checks keep both their numbers
+# and their meaning. Removal only takes text away, so every "is absent" check
+# is unaffected by it.
+_probe_full = d
+_probe_dup = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', d)
+for _b in _probe_dup[1:]:
+    d = d.replace(_b, b'', 1)
 
 checks = {
     'routing (claude-* -> subscription)': b'baseURL:/^claude/i.test(' in d,
     'captured names are escaped into patterns': _escaped_interpolations(src),
     'judge anchors both tool-call shapes':      _judge_both_shapes(src),
-    'full bypass admits no immunity':          _bypass_no_immunity(d),
+    'full bypass keeps peer-machine immunity': _bypass_no_immunity(d),
     'agent model schema relaxed':         b'.enum(["sonnet","opus","haiku","fable"])' not in d,
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
-    'subagent model badge':               not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d),
+    # Two-sided: the stock branch must be gone AND the widened one must still
+    # test the "inherit" sentinel. The negative alone passed a build where the
+    # sentinel test had been dropped from the ternary -- `"inherit"` is truthy,
+    # so it reached the model-name parser and produced a badge from a parse of
+    # the sentinel.
+    'subagent model badge':               not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d)
+                                          and bool(re.search(
+                                              rb',' + ID + rb'=(' + ID + rb')\.model&&\1\.model!=="inherit"\?'
+                                              + ID + rb'\(\1\.model\):' + ID + rb';', d)),
     # The postcondition is that the chevron's colour is CONDITIONAL on the
     # loading state -- which colour is the user's config. Pinning "success"
     # made this check stricter than the step it verifies: step 6 became
@@ -436,8 +558,17 @@ checks = {
     # every gateway-model filter must be followed by the de-disguise map
     'gateway model de-disguise':          len(re.findall(rb'\.map\(\(' + ID + rb'\)=>' + ID + rb'\.id\.startsWith\("claude-fable-5-dd-"\)', d))
                                           == len(re.findall(rb'/\(claude\|anthropic\)/i\.test\(', d)) > 0,
-    # one site, two lookups (raw id, then canonical name)
-    'per-model context window':           len(re.findall(rb'\(\)\.customModelContextWindows\?\.\[', d)) == 2,
+    # One site, two lookups (raw id, then canonical name), read through a
+    # guarded local at the HEAD of the function. Counting `().customModelContext
+    # Windows?.[` was satisfied by the old tail placement, where four earlier
+    # returns shadowed the override, and by an unguarded config read that throws
+    # before the config settles -- so it proved neither of the things that matter.
+    'per-model context window':           bool(re.search(
+                                              rb'\{let __ccw;try\{__ccw=' + ID + rb'\(\)\.customModelContextWindows\}catch\{\}'
+                                              rb'let __ccv=__ccw\?\.\[(' + ID + rb')\]\?\?__ccw\?\.\['
+                                              + ID + rb'\(' + ID + rb'\(\1\)\)\];'
+                                              rb'if\(typeof __ccv==="number"&&__ccv>0\)return __ccv;', d))
+                                          and not re.search(rb'\?\?' + ID + rb'\(\)\.customModelContextWindows', d),
     # the expired-login bail must be reachable only for the subscription lane,
     # and the proxy lane that now survives it must null both auth headers or
     # the SDK rejects the request itself
@@ -455,9 +586,19 @@ checks = {
     # effort must be DECLARED (schema), CARRIED (call handler) and USED (spliced
     # into the definition the runtime reads) — declaring it alone would satisfy
     # a routing gate while the request still went at the vendor default
-    'dispatch carries effort':            len(re.findall(rb'effort:__ccEffort', d)) == 2
-                                          and bool(re.search(rb'=\{agentDefinition:__ccEffort\?\{\.\.\.(' + ID
-                                                             + rb'),effort:__ccEffort\}:\1,promptMessages:', d))
+    # The model-supplied effort must be DECLARED (schema), CARRIED (destructured
+    # once in the call handler) and VALIDATED before it reaches the definition.
+    # Counting two `effort:__ccEffort` passed the version that attached the raw
+    # string straight through, which is the defect: an unvalidated model-supplied
+    # value reaching an internal effort layer. Now the only bare use is the
+    # destructure, and the attach site must normalise the product's own aliases
+    # and drop anything outside its vocabulary.
+    'dispatch carries effort':            len(re.findall(rb'effort:__ccEffort', d)) == 1
+                                          and bool(re.search(
+                                              rb'=\{agentDefinition:\(\(\(\)=>\{let __ccLvl=__ccEffort==="med"\?"medium":'
+                                              rb'__ccEffort==="ultracode"\?"xhigh":__ccEffort;return __ccLvl&&'
+                                              rb'\["low","medium","high","xhigh","max"\]\.includes\(__ccLvl\)\?'
+                                              rb'\{\.\.\.(' + ID + rb'),effort:__ccLvl\}:\1\}\)\(\)\),promptMessages:', d))
                                           and bool(re.search(rb'dispatch_class:' + ID + rb'\(\)\.optional\(\)', d)),
     # coordinator mode must be reachable interactively via its own opt-in (never
     # by borrowing CLAUDE_CODE_REMOTE, which also moves the auth token), and it
@@ -534,8 +675,6 @@ checks = {
                                               rb'(' + ID + rb')\((' + ID + rb')\),(' + ID + rb')\);continue ', d))
                                           and bool(re.search(
                                               rb'&&' + ID + rb'===null&&' + ID + rb'<Math\.max\(' + ID + rb',300\)\)\{', d))
-                                          # the synthetic "may be incomplete" message is no longer
-                                          # emitted at the finalize site; the original error is thrown
                                           # the content-gate that blocked retry after a real block is gone
                                           and bool(re.search(
                                               rb'if\(' + ID + rb'===null&&\(' + ID + rb'\?' + ID + rb'<' + ID + rb':'
@@ -543,11 +682,8 @@ checks = {
                                           and not re.search(
                                               rb'if\(!' + ID + rb'&&' + ID + rb'===null&&\(' + ID + rb'\?'
                                               rb'' + ID + rb'<' + ID + rb':' + ID + rb'<' + ID + rb'\)\)\{', d)
-                                          and not re.search(rb',error:"server_error"\}\),' + ID + rb'!=="credited"', d)
-                                          and bool(re.search(
-                                              rb'tengu_streaming_partial_finalized.{0,200}?!=="credited"\)'
-                                              rb'' + ID + rb'="credited",.{0,300}?;throw (' + ID + rb')\}'
-                                              rb'throw ' + ID + rb'\("tengu_streaming_fallback_to_non_streaming"', d, re.S)),
+                                          # the exhaustion path, whichever shape this build calls for
+                                          and _stream_finalize_ok(d),
     # a session that ran on a proxy model must come back on it: the stock
     # verdict chain classifies every non-first-party id as unknown_family
     'session model restore keeps a proxy model': bool(re.search(
@@ -568,11 +704,15 @@ checks = {
                                               rb'\|\|' + ID + rb'\.name==="Task"\)&&' + ID +
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{', d)),
-    # The core is declared ONCE and called by name by both consumers: two
-    # definitions would drift apart through edits, and a drifted core is
-    # exactly what the copy-with-exceptions was rejected over.
-    'probe core defined once': bool(re.search(
-                                              rb'globalThis\.__ccProbe\?\?=async function\(__o\)\{', d)),
+    'probe hooks both dispatch sites': _probe_hooks_both_sites(_probe_full),
+    # One core per site, and the count is CHECKED. The previous form of this
+    # entry was `bool(re.search(...))` under the name "defined once" -- a
+    # presence test wearing a count's name, which would have gone green on any
+    # number of copies including the drifted ones it was written to forbid.
+    # (Copies across sites are compared byte for byte by the entry above; this
+    # one is what keeps a single site from accumulating two.)
+    'probe core defined once per site': len(re.findall(
+                                              rb'globalThis\.__ccProbe\?\?=async function\(__o\)\{', d)) == 1,
     # The verdict vocabulary is set by the CALLER: the judge and the watcher
     # have different ones, and a vocabulary hardcoded into the core would
     # silently judge the watcher in the judge's words.
