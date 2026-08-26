@@ -150,7 +150,7 @@ echo "Target binary: $BIN"
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-871b8b33b0ae40126340fb33c211faa64ee6dfa4}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-15f7a21b725255d1402ec6d9212d9d90fa7574bb}"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
 # TWEAKCC_LOCAL is the development escape hatch: point it at a built
@@ -1118,6 +1118,132 @@ if [[ $SMOKE_RC -ne 0 || "$SMOKE_OUT" != *"Claude Code"* ]]; then
   echo "FATAL: the patched image does not run — leaving the launcher alone" >&2
   exit 1
 fi
+
+# --- 5a2. the interface must actually come up ---------------------------------
+# `--version` never executes a single React render. A patch that emits a name
+# which is not in scope where it lands therefore passes every byte check AND
+# the version smoke, and then kills the product the moment the interface is
+# drawn: 2.1.246 shipped that way twice in one morning ("l0 is not defined",
+# then "sR is not defined"), each time with 78/78 green above this line.
+#
+# So drive the real interface on a pty with a pre-submitted prompt. The API
+# points at a dead port -- the session draws its OWN message before any
+# response, so the render path is exercised without a request going anywhere.
+#
+# Two things this gate learned the hard way:
+#  * it needs a directory the CLI already trusts, or it stops at "is this a
+#    project you trust?" and never renders -- which greps identically to a
+#    clean run. Hence the positive marker: no marker, no pass.
+#  * the marker cannot be grepped out of the raw pty stream. The interface
+#    writes cursor moves and colour codes BETWEEN the words, so a literal
+#    "auto mode on" is not present as bytes even when it is on the screen.
+#    Everything is matched on an escape-stripped copy instead.
+TUI_PROMPT="tweakcc interface gate"
+TUI_DIR="$(python3 - <<'PYGATE'
+import json, os
+try:
+    cfg = json.load(open(os.path.expanduser("~/.claude.json")))
+except Exception:
+    cfg = {}
+home = os.path.expanduser("~")
+cands = [
+    p
+    for p, v in (cfg.get("projects") or {}).items()
+    if isinstance(v, dict) and v.get("hasTrustDialogAccepted") and os.path.isdir(p)
+]
+# "/" is trusted on this machine and a session started there never gets as far
+# as a render, so it produced a false failure. A trusted project inside the
+# home directory behaves like the ones a person actually uses.
+good = [p for p in cands if p.startswith(home + os.sep)]
+print(good[0] if good else (cands[0] if cands else ""))
+PYGATE
+)"
+if [[ -z "$TUI_DIR" ]]; then
+  echo "FATAL: no trusted project directory to run the interface gate in." >&2
+  echo "       Accept the trust prompt once in any directory, then re-run." >&2
+  exit 1
+fi
+
+TUI_LOG="$(mktemp)"
+# Reads the capture and answers in one word: RENDERED, PENDING, or the error.
+tui_state() {
+  python3 - "$TUI_LOG" "$TUI_PROMPT" <<'PYSTATE'
+import re, sys
+raw = open(sys.argv[1], "rb").read().decode("utf8", "replace")
+txt = re.sub(r"\x1b\][^\x07]*\x07", "", raw)
+txt = re.sub(r"\x1b[\[\(][0-9;?<>=]*[a-zA-Z]", "", txt)
+txt = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", txt)
+flat = re.sub(r"\s+", "", txt)
+# The screen prints its own "ERROR" label next to the message and flattening
+# glues the two together, so the label is consumed explicitly -- otherwise the
+# captured identifier reads "ERRORl0" instead of "l0".
+err = re.search(
+    r"unrecoverableinterfaceerror\(([^)]*)\)"
+    r"|(?:ERROR)?([A-Za-z_$][A-Za-z0-9_$]*)isnotdefined"
+    r"|(ReferenceError|TypeError|SyntaxError)",
+    flat,
+)
+if err:
+    # The screen text has to be matched with the whitespace removed (the
+    # interface writes cursor moves where a person sees spaces), so the report
+    # is rebuilt into something readable rather than echoing "l0isnotdefined".
+    if err.group(2):
+        print(f"ERROR {err.group(2)} is not defined")
+    elif err.group(1):
+        print(f"ERROR unrecoverable interface error ({err.group(1)})")
+    else:
+        print(f"ERROR {err.group(0)}")
+elif re.sub(r"\s+", "", sys.argv[2]) in flat:
+    # The prompt echoed back IS the user-message renderer having run, which is
+    # the exact path both 2.1.246 crashes died on.
+    print("RENDERED")
+else:
+    print("PENDING")
+PYSTATE
+}
+
+(
+  cd "$TUI_DIR" || exit 1
+  ANTHROPIC_BASE_URL="http://127.0.0.1:9" ANTHROPIC_AUTH_TOKEN=x \
+    script -q /dev/null "$BIN" "$TUI_PROMPT" >"$TUI_LOG" 2>&1
+) &
+TUI_PID=$!
+TUI_STATE=PENDING
+for _ in $(seq 1 40); do
+  sleep 1
+  TUI_STATE="$(tui_state)"
+  case "$TUI_STATE" in
+    ERROR*) break ;;
+    RENDERED)
+      # Give a late render error its chance to appear before declaring victory.
+      sleep 3
+      TUI_STATE="$(tui_state)"
+      break
+      ;;
+  esac
+  kill -0 $TUI_PID 2>/dev/null || break
+done
+kill -TERM $TUI_PID 2>/dev/null || true
+wait $TUI_PID 2>/dev/null || true
+
+case "$TUI_STATE" in
+  RENDERED)
+    echo "Interface: came up in $TUI_DIR and drew a message, no name or type errors"
+    rm -f "$TUI_LOG"
+    ;;
+  ERROR*)
+    echo "FATAL: the interface does not come up — leaving the launcher alone" >&2
+    echo "  ${TUI_STATE#ERROR }" >&2
+    echo "  full capture kept at $TUI_LOG" >&2
+    exit 1
+    ;;
+  *)
+    echo "FATAL: the interface gate never reached a render in $TUI_DIR, so it" >&2
+    echo "       proves nothing — refusing to call this build good." >&2
+    echo "  full capture kept at $TUI_LOG" >&2
+    exit 1
+    ;;
+esac
 
 # --- 5b. only now may the launcher point at the new build ----------------------
 # The installer deliberately leaves ~/.local/bin/claude on the PREVIOUS version:
