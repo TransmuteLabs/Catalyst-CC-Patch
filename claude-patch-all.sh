@@ -325,6 +325,32 @@ def _judge_both_shapes(src):
     blk = src[i:j] if i >= 0 and j > i else ''
     return (r'\\.call|' in blk) and (r'\\)\\.execute' in blk) and ('m[2] ?? m[3]' in blk)
 
+def _session_memory_ungated(d):
+    """Both session-memory gates are gone, checked WITHOUT naming the flags.
+
+    Patch step 7 matches these gates by shape rather than by flag name, so a
+    check pinned to "tengu_passport_quail" would go green on a bundle whose
+    renamed flag still gates extraction -- weaker than the step it verifies,
+    which is the wrong way round for a check.
+
+    The extraction gate is scoped to the entry point the anchor names: bundle
+    wide this exact form has three instances on 2.1.246 (hawthorn_steeple and
+    vscode_feedback_survey are unrelated), and inside the window it is unique.
+    The extract-mode predicate shape is unique bundle wide, so it needs no
+    scope.
+    """
+    anchor = b'querySource:"extract_memories",forkLabel:"extract_memories"'
+    at = d.find(anchor)
+    if at == -1:
+        return False
+    window = d[at:at + 8000]
+    if re.search(rb'if\(!' + ID + rb'\("tengu_[a-z_]+",!1\)\)\s*return[^;]*;', window):
+        return False
+    predicate = (rb'function ' + ID + rb'\(\)\{if\(!' + ID + rb'\("tengu_[a-z_]+",!1\)\)return!1;'
+                 rb'return!' + ID + rb'\(\)\|\|' + ID + rb'\("tengu_[a-z_]+",!1\)\}')
+    return not re.search(predicate, d)
+
+
 def _bypass_no_immunity(d):
     # The registry marks some circuit breakers immune to the full-bypass mode,
     # and a session holding a full-bypass key still stops on them. Only the
@@ -359,7 +385,7 @@ checks = {
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
     'subagent model badge':               not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d),
     'input chevron colour':               bool(re.search(rb'color:' + ID + rb'\?' + ID + rb':"success",dimColor:!1', d)),
-    'session memory forced on':           not re.search(rb'if\(!' + ID + rb'\("tengu_passport_quail",!1\)\)return;', d),
+    'session memory forced on':           _session_memory_ungated(d),
     # every override read must now be a merge: `{...X().additionalModelCostsCache,...X().customModelCosts}`
     'custom model costs':                 len(re.findall(rb'\{\.\.\.' + ID + rb'\(\)\.additionalModelCostsCache,\.\.\.' + ID + rb'\(\)\.customModelCosts\}', d))
                                           == len(re.findall(ID + rb'\(\)\.additionalModelCostsCache', d)) > 0,
