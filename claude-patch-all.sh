@@ -57,23 +57,37 @@ prune_config_backups() {
 # lost: an entry is a content-addressed fetch of a commit GitHub still serves,
 # rebuilt on demand by ensure_tweakcc.
 prune_tweakcc_cache() {
-  local keep="$1" stale entry
+  local keep="$1" entry
   [[ -d "$CATALYST_TWEAKCC_CACHE" ]] || return 0
-  # The pin in use is excluded BY NAME, not by position: an unchanged pin is not
-  # re-fetched, so its mtime keeps ageing while newer bumps come and go, and a
-  # purely mtime-ordered keep-list would eventually delete the one entry this
-  # run depends on. `.tmp` entries belong to a fetch in flight, possibly another
-  # run's, and are never touched.
-  stale=$(ls -t "$CATALYST_TWEAKCC_CACHE" 2>/dev/null \
-            | grep -v '\.tmp$' \
-            | grep -vx "$CATALYST_TWEAKCC_SHA" \
-            | tail -n +$((keep + 1)) || true)
-  [[ -n "$stale" ]] || return 0
+  # Iterated by GLOB, not by parsing `ls`. A cache entry whose name contains a
+  # newline splits into two lines of `ls` output, and those two lines then name
+  # two OTHER real entries -- so the malformed directory survives and two good
+  # ones are deleted. Restricting the domain to what ensure_tweakcc actually
+  # creates (a 40-character hex commit id) closes that and the `..` class at
+  # once: anything else in this directory is left alone rather than guessed at.
+  #
+  # The in-use pin is touched first so that mtime order reflects USE. Excluding
+  # it by name protects this run; touching it also protects a CONCURRENT run,
+  # which excludes its own pin but would otherwise be free to select ours.
+  if [[ -d "$CATALYST_TWEAKCC_CACHE/$CATALYST_TWEAKCC_SHA" ]]; then
+    touch "$CATALYST_TWEAKCC_CACHE/$CATALYST_TWEAKCC_SHA"
+  fi
+  local -a entries=()
+  while IFS= read -r entry; do
+    entries+=("$entry")
+  done < <(
+    cd "$CATALYST_TWEAKCC_CACHE" 2>/dev/null || exit 0
+    for entry in [0-9a-f][0-9a-f]*; do
+      [[ -d "$entry" && ${#entry} -eq 40 && "$entry" =~ ^[0-9a-f]{40}$ ]] || continue
+      [[ "$entry" == "$CATALYST_TWEAKCC_SHA" ]] && continue
+      printf '%s\t%s\n' "$(stat -f '%m' "$entry" 2>/dev/null || echo 0)" "$entry"
+    done | sort -rn | cut -f2-
+  )
+  (( ${#entries[@]} > keep )) || return 0
   echo "==> Cleaning old unpacker builds (keeping the pin in use + $keep most recent)"
-  while read -r entry; do
-    [[ -n "$entry" ]] || continue
+  for entry in "${entries[@]:keep}"; do
     rm -rf "${CATALYST_TWEAKCC_CACHE:?}/$entry" && echo "    removed ${entry:0:12}"
-  done <<< "$stale"
+  done
 }
 
 CONFIGURE=0
@@ -136,7 +150,7 @@ echo "Target binary: $BIN"
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-b7d2ead9ce8bd5399e54d6c3486636241d36f9a6}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-871b8b33b0ae40126340fb33c211faa64ee6dfa4}"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
 # TWEAKCC_LOCAL is the development escape hatch: point it at a built
@@ -344,10 +358,10 @@ def _session_memory_ungated(d):
     if at == -1:
         return False
     window = d[at:at + 8000]
-    if re.search(rb'if\(!' + ID + rb'\("tengu_[a-z_]+",!1\)\)\s*return[^;]*;', window):
+    if re.search(rb'if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)\s*return[^;]*;', window):
         return False
-    predicate = (rb'function ' + ID + rb'\(\)\{if\(!' + ID + rb'\("tengu_[a-z_]+",!1\)\)return!1;'
-                 rb'return!' + ID + rb'\(\)\|\|' + ID + rb'\("tengu_[a-z_]+",!1\)\}')
+    predicate = (rb'function ' + ID + rb'\(\)\{if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)return!1;'
+                 rb'return!' + ID + rb'\(\)\|\|' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\}')
     return not re.search(predicate, d)
 
 
@@ -384,7 +398,12 @@ checks = {
     'agent model schema relaxed':         b'.enum(["sonnet","opus","haiku","fable"])' not in d,
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
     'subagent model badge':               not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d),
-    'input chevron colour':               bool(re.search(rb'color:' + ID + rb'\?' + ID + rb':"success",dimColor:!1', d)),
+    # The postcondition is that the chevron's colour is CONDITIONAL on the
+    # loading state -- which colour is the user's config. Pinning "success"
+    # made this check stricter than the step it verifies: step 6 became
+    # colour-agnostic when tweakcc started writing this edit first, so setting
+    # chevronIdleThemeColor to anything else would pass the step and fail here.
+    'input chevron colour':               bool(re.search(rb'color:' + ID + rb'\?' + ID + rb':"[^"]*",dimColor:!1', d)),
     'session memory forced on':           _session_memory_ungated(d),
     # every override read must now be a merge: `{...X().additionalModelCostsCache,...X().customModelCosts}`
     'custom model costs':                 len(re.findall(rb'\{\.\.\.' + ID + rb'\(\)\.additionalModelCostsCache,\.\.\.' + ID + rb'\(\)\.customModelCosts\}', d))

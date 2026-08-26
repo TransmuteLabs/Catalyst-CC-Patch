@@ -206,10 +206,13 @@ step('4 model badge', () => {
 });
 
 // ==========================================================================
-// Ported from tweakcc — these three of ITS patches fail to apply on CC 2.1.220
-// (its published 4.3.2 locators no longer match), so they are disabled in
-// ~/.tweakcc/config.json and re-implemented here against locators verified
-// against 2.1.220. Each mirrors the original's behaviour, not just its intent.
+// Ported from tweakcc. These began as replacements for ITS patches, whose
+// published 4.3.2 locators no longer matched on CC 2.1.220. That is no longer
+// the whole story: since the fork was fixed for the split bundle, tweakcc's
+// session-memory and input-chevron patches DO apply and reach these same
+// sites first. Each step here therefore applies when the site is in its
+// original form and verifies the postcondition when it is not -- see steps 6
+// and 7. Each still mirrors the original's behaviour, not just its intent.
 // ==========================================================================
 
 // --------------------------------------------------------------------------
@@ -240,6 +243,14 @@ step('6 input chevron colour', () => {
     `,\\{isLoading:(${ID}),(?:${ID}:${ID},)*themeColor:(${ID})\\}=${ID},(${ID})=\\2\\?\\?void 0[,;]` +
     `[\\s\\S]{0,600}?if\\([^)]*!==\\3[^)]*\\|\\|[^)]*!==\\1[^)]*\\)${ID}=${ID}(?:\\.${ID})?\\(${ID},\\{color:\\3,dimColor:\\1,children:`
   );
+  // Both branches below refuse on ambiguity. A second component with the same
+  // destructuring and the same conditional render would let the verify branch
+  // report success while the real chevron sat in neither form -- a decoy the
+  // step could not tell from the thing it owns.
+  const rxAll = new RegExp(rx.source, 'g');
+  const candidates = js.match(rxAll) || [];
+  if (candidates.length > 1) fail(`input chevron component is ambiguous (${candidates.length} candidates)`);
+
   const m = js.match(rx);
   if (!m) {
     // tweakcc's own input-chevron patch writes the identical edit and runs
@@ -252,6 +263,8 @@ step('6 input chevron colour', () => {
       `[\\s\\S]{0,600}?if\\([^)]*!==\\3[^)]*\\|\\|[^)]*!==\\1[^)]*\\)${ID}=${ID}(?:\\.${ID})?\\(${ID},` +
       `\\{color:\\1\\?\\3:("[^"]*"),dimColor:!1,children:`
     );
+    const doneAll = js.match(new RegExp(patchedRx.source, 'g')) || [];
+    if (doneAll.length > 1) fail(`patched input chevron is ambiguous (${doneAll.length} candidates)`);
     const done = js.match(patchedRx);
     if (!done) fail('input chevron component not found');
     applied.push(`input chevron colour (idle -> ${JSON.parse(done[4])}, already applied upstream, verified)`);
@@ -290,8 +303,20 @@ step('7 session memory', () => {
   //    Anthropic renames these flags between releases, and a locator keyed on
   //    "tengu_passport_quail" turns a rename into either a loud failure or --
   //    worse -- a silent pass once the fallback stops recognising anything.
-  //    Both shapes were measured unique in the bundle without the names, so
-  //    the names buy nothing and cost a version.
+  //
+  //    The flag class is [a-z0-9_], not [a-z_]. With the narrower class a
+  //    rename to `tengu_passport_quail_v2` matched NOTHING, and the verify
+  //    branch then read "no gate here" as "already removed" -- a green run on
+  //    a build where session memory is still switched off. That is the exact
+  //    failure the flag-agnostic form was written to prevent, reintroduced by
+  //    a character class.
+  //
+  //    Uniqueness is NOT bundle-wide. On 2.1.246 the bare-return gate shape
+  //    occurs three times (tengu_hawthorn_steeple, tengu_passport_quail,
+  //    tengu_vscode_feedback_survey); it is unique only inside the window
+  //    after the extraction anchor, which is why the window exists and why it
+  //    is measured from the anchor rather than searched bundle-wide. The
+  //    extract-mode predicate shape IS unique bundle-wide.
   //
   // 2. Each half is APPLIED when its gate is present and VERIFIED when it is
   //    not. tweakcc's own session-memory patch runs before us and writes the
@@ -306,7 +331,7 @@ step('7 session memory', () => {
 
   // (a) the extraction gate, inside the entry point the anchor names.
   const WIN = 8000;
-  const gateRx = new RegExp(`if\\(!${ID}\\("tengu_[a-z_]+",!1\\)\\)return;`, 'g');
+  const gateRx = new RegExp(`if\\(!${ID}\\("tengu_[a-z0-9_]+",!1\\)\\)return;`, 'g');
   const window = js.slice(anchorIdx, anchorIdx + WIN);
   const gates = window.match(gateRx) || [];
   if (gates.length > 1) {
@@ -322,14 +347,14 @@ step('7 session memory', () => {
   // shrank by whatever was cut, and re-reading 8000 characters would pull in
   // trailing code that was never part of this entry point.
   const after = js.slice(anchorIdx, anchorIdx + WIN - (gateDone ? gates[0].length : 0));
-  if (new RegExp(`if\\(!${ID}\\("tengu_[a-z_]+",!1\\)\\)\\s*return[^;]*;`).test(after)) {
+  if (new RegExp(`if\\(!${ID}\\("tengu_[a-z0-9_]+",!1\\)\\)\\s*return[^;]*;`).test(after)) {
     fail('session-memory extraction is still gated on a feature flag');
   }
 
   // (b) the extract-mode predicate: `flagA && (!something || flagB)`.
   const modeRx = new RegExp(
-    `(function ${ID}\\(\\))\\{if\\(!${ID}\\("tengu_[a-z_]+",!1\\)\\)return!1;` +
-      `return!${ID}\\(\\)\\|\\|${ID}\\("tengu_[a-z_]+",!1\\)\\}`,
+    `(function ${ID}\\(\\))\\{if\\(!${ID}\\("tengu_[a-z0-9_]+",!1\\)\\)return!1;` +
+      `return!${ID}\\(\\)\\|\\|${ID}\\("tengu_[a-z0-9_]+",!1\\)\\}`,
     'g'
   );
   const modes = js.match(modeRx) || [];
@@ -2301,11 +2326,15 @@ step('22 judge consulted before a subagent dispatch', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ported from tweakcc's own patch set, which cannot apply on this build at all:
-// its patched bundle no longer parses ("SyntaxError: Unexpected identifier"),
-// so EVERY customization it carries is silently absent. These three are the
-// ones worth owning ourselves; located independently rather than by porting
-// tweakcc's regexes, two of which already fail on their own terms here.
+// Ported from tweakcc's own patch set. The reason WAS that its patched bundle
+// no longer parsed ("SyntaxError: Unexpected identifier"), so every
+// customization it carried was silently discarded -- that was a defect in its
+// parse gate, fixed in the fork, and tweakcc's patches now reach the image.
+// These three stay ours because they are located independently rather than by
+// porting tweakcc's regexes, two of which still fail on their own terms here.
+// Each one shares a site with a tweakcc patch that is off in the config today
+// and would collide the moment it is switched on, so each applies-or-verifies
+// rather than assuming it is the only writer.
 
 step('23 statusline update throttle', () => {
   const ID = '[A-Za-z_$][\\w$]*';
@@ -2324,7 +2353,16 @@ step('23 statusline update throttle', () => {
   const constName = m[5];
   const decl = new RegExp(`var ${rxEsc(constName)}=300\\b`);
   if (!decl.test(moduleTextAt(m.index))) {
-    fail(`statusline throttle constant '${constName}' is not the expected 300`);
+    // tweakcc's statusline patch rewrites this same constant when its knob is
+    // set; its locator does not match this build's class-field site today, but
+    // "not 300" must not mean "fail the run" the moment it does. Accept any
+    // value the debounce already carries and say which; fail only if the
+    // declaration is missing entirely.
+    const anyDecl = new RegExp(`var ${rxEsc(constName)}=(\\d+)\\b`);
+    const found = moduleTextAt(m.index).match(anyDecl);
+    if (!found) fail(`statusline throttle constant '${constName}' has no declaration in its module`);
+    applied.push(`statusline throttle already ${found[1]}ms upstream (constant '${constName}'); left as is`);
+    return;
   }
   editModuleAt(m.index, body => body.replace(decl, `var ${repEsc(constName)}=${THROTTLE_MS}`));
   applied.push(`statusline throttle 300 -> ${THROTTLE_MS}ms (constant '${constName}')`);
@@ -2332,17 +2370,38 @@ step('23 statusline update throttle', () => {
 
 step('24 bypass permissions under sudo', () => {
   // Two independent guards refuse bypassPermissions when euid is 0: the inline
-  // check on the startup path and the exported refuseBypassUnderRoot(). tweakcc
-  // rewrites only the FIRST — String.match stops there — which leaves the
-  // second one live and the setting half-applied. Both are neutralised here.
+  // check on the startup path and the exported refuseBypassUnderRoot(). Both
+  // are neutralised here.
+  //
+  // tweakcc's own patch for this rewrites only the FIRST -- its regex is not
+  // global and String.match stops there -- which leaves the second live and the
+  // setting half-applied. That patch is condition-gated off in the config
+  // today, and the older form of this step demanded EXACTLY two occurrences,
+  // so the day the knob is switched on the count becomes 1 and this step fails
+  // the whole run. The comment above already named the collision; the step did
+  // not act on it. It does now: whatever the count, every LIVE guard is
+  // neutralised, and zero live guards is a verified postcondition rather than
+  // a failure.
   const guard =
     'console.error("--dangerously-skip-permissions cannot be used with root/sudo ' +
     'privileges for security reasons"),process.exit(1)';
   const count = js.split(guard).length - 1;
-  if (count === 0) fail('root/sudo refusal not found');
-  if (count !== 2) fail(`expected 2 root/sudo refusals, found ${count} — re-check before neutralising`);
+  if (count === 0) {
+    // Nothing live -- but prove the refusal is actually gone rather than
+    // reworded, or this branch turns a moved guard into a green run.
+    if (js.includes('cannot be used with root/sudo privileges')) {
+      fail('root/sudo refusal survives in an unrecognised form');
+    }
+    applied.push('root/sudo refusal (already neutralised upstream; verified)');
+    return;
+  }
+  if (count > 2) fail(`found ${count} root/sudo refusals, expected at most 2 — re-check before neutralising`);
   js = js.split(guard).join('void 0');
-  applied.push(`root/sudo refusal neutralised at ${count} sites`);
+  applied.push(
+    count === 2
+      ? 'root/sudo refusal neutralised at 2 sites'
+      : `root/sudo refusal neutralised at 1 site (the other was already neutralised upstream)`,
+  );
 });
 
 step('25 CLAUDE.md alternate filenames', () => {
@@ -2350,43 +2409,67 @@ step('25 CLAUDE.md alternate filenames', () => {
   // Every memory file -- user, project, local, parent-directory walk -- is read
   // through this one function, so a wrapper around it covers all of them. The
   // storage-backed branch returns "absent" WITHOUT throwing, which is why
-  // tweakcc's older approach (patch the catch clause) misses the common case
-  // here; the fork's 2.1.233+ matcher was rewritten to wrap for the same
-  // reason, and emits the same wrapper this step does.
+  // editing the reader's catch clause misses the common case; the fork's
+  // 2.1.233+ matcher was rewritten to wrap for the same reason and emits the
+  // BYTE-IDENTICAL wrapper this step does. Keep the two in step: the detector
+  // below recognises that exact opening.
   //
-  // Which of the two lands is not this step's business. tweakcc runs first, so
-  // when its agents-md patch is enabled the loader arrives already wrapped and
-  // this step VERIFIES rather than wraps -- wrapping a wrapper would work but
-  // would read the alternates twice under two different lists. When tweakcc's
-  // is off (or fails), this step applies. Same apply-or-verify contract as the
-  // session-memory step, and for the same reason: what is owed is the
-  // postcondition, not the authorship.
+  // tweakcc runs first, so when its agents-md patch is enabled the loader
+  // arrives already wrapped and this step VERIFIES rather than wraps. Wrapping
+  // a wrapper would work but would read the alternates twice under two lists.
   const ALTS = [
     'AGENTS.md', 'GEMINI.md', 'CRUSH.md', 'QWEN.md',
     'IFLOW.md', 'WARP.md', 'copilot-instructions.md',
   ];
 
-  // Already wrapped? Both wrappers open identically, by construction.
+  // The detector keys on the wrapper's FIXED-LENGTH opening only. An earlier
+  // version spanned `[\s\S]{0,600}?` to the closing `return __r}` so it could
+  // read the alternates out of the body -- and that bound is a function of the
+  // alternates list, which is user-editable: measured, the seven-name wrapper
+  // leaves 216 bytes of headroom and detection fails silently once the
+  // serialised list passes 309 bytes, at which point the loader gets wrapped
+  // twice. A byte bound must never gate a correctness decision on a
+  // user-sized string. The body is inspected separately, scoped to the module.
   const wrappedRx = new RegExp(
-    `async function (${ID})\\((${ID}),(${ID}),(${ID}),(${ID})\\)\\{` +
-      `let __r=await (${ID})\\(\\2,\\3,\\4,\\5\\);if\\(__r&&__r\\.info\\)return __r;` +
-      `[\\s\\S]{0,600}?return __r\\}`,
+    `async function (${ID})\\((${ID}),(${ID}),(${ID}),(${ID})\\)\\{let __r=null;` +
+      `try\\{__r=await (${ID})\\(\\2,\\3,\\4,\\5\\)\\}catch\\((${ID})\\)\\{__r=null\\}` +
+      `if\\(__r&&__r\\.info\\)return __r;`,
   );
   const already = js.match(wrappedRx);
   if (already) {
-    const [wrapper, fn, , , , , inner] = already;
-    // Presence of a wrapper is not the postcondition -- offering the alternates
-    // is. Check the wrapper actually names them and actually delegates to a
-    // function that exists, so a half-written wrapper cannot pass as success.
-    const offered = ALTS.filter((n) => wrapper.includes(JSON.stringify(n)));
+    const fn = already[1];
+    const inner = already[6];
+    // Everything from here is checked INSIDE the wrapper's own module: a
+    // bundle-wide search for `async function <inner>(` is satisfied by an
+    // unrelated chunk-local function of the same minified name, which is the
+    // one assumption this file exists to refuse.
+    const mod = moduleTextAt(already.index);
+    const innerRx = new RegExp(`async function ${rxEsc(inner)}\\(`);
+    if (!innerRx.test(mod)) {
+      fail(`memory-file loader wrapper delegates to '${inner}', which its own module does not define`);
+    }
+    const body = mod.slice(mod.indexOf(already[0]) + already[0].length);
+    const tail = body.slice(0, body.indexOf(`async function ${inner}(`));
+    // Presence of a wrapper is not the postcondition. Two things are: it must
+    // offer alternates, and it must DROP the storage descriptor when reading
+    // one -- a descriptor names a single stored key, so a wrapper that passed
+    // it through would answer with CLAUDE.md's own bytes under the alternate's
+    // name. That is a wrong answer, not a missing one, so it fails here.
+    const offered = ALTS.filter(n => tail.includes(JSON.stringify(n)));
     if (offered.length === 0) {
       fail(`memory-file loader '${fn}' is wrapped but offers no alternate filenames`);
     }
-    if (!new RegExp(`async function ${inner.replace(/\$/g, '\\$')}\\(`).test(js)) {
-      fail(`memory-file loader wrapper delegates to '${inner}', which is not defined`);
+    // `[^)]*` does NOT work here: the alternate call's own arguments contain
+    // parentheses (`__sw(__p,__n)`), so a negated-paren class stops before the
+    // `,void 0` it is looking for and the check fails on correct output. It did
+    // exactly that on the first run.
+    if (!new RegExp(`await ${rxEsc(inner)}\\([\\s\\S]{0,240}?,void 0\\)`).test(tail)) {
+      fail(`memory-file loader '${fn}' is wrapped but does not drop the storage descriptor for alternates`);
     }
+    const missing = ALTS.filter(n => !offered.includes(n));
     applied.push(
-      `CLAUDE.md alternates: ${offered.join(', ')} (loader '${fn}', already wrapped upstream, verified)`,
+      `CLAUDE.md alternates: ${offered.join(', ')} (loader '${fn}', already wrapped upstream, verified)` +
+        (missing.length ? ` -- NOT offered by the upstream list: ${missing.join(', ')}` : ''),
     );
     return;
   }
@@ -2400,12 +2483,13 @@ step('25 CLAUDE.md alternate filenames', () => {
   if (!m) fail('memory-file loader not found');
   const [, fn, a, b, c, d] = m;
   const inner = `${fn}$cc`;
-  // The alternate is read from the filesystem (descriptor dropped): a storage
-  // descriptor names ONE key, so reusing it would hand back CLAUDE.md's bytes
-  // under the alternate's name -- worse than not finding the file.
+  // The initial read is guarded like the alternates: the reader converts its
+  // own filesystem failures to a null-info result, but a throw that escapes it
+  // would otherwise skip the alternates entirely -- the wrapper promises to be
+  // exit-agnostic and this is one of the exits.
   const wrapper =
     `async function ${fn}(${a},${b},${c},${d}){` +
-      `let __r=await ${inner}(${a},${b},${c},${d});` +
+      `let __r=null;try{__r=await ${inner}(${a},${b},${c},${d})}catch(__e){__r=null}` +
       `if(__r&&__r.info)return __r;` +
       `let __p=String(${a}??"");` +
       `if(!/(^|[\\\\/])CLAUDE\\.md$/.test(__p))return __r;` +
@@ -2414,7 +2498,7 @@ step('25 CLAUDE.md alternate filenames', () => {
       `for(let __n of ${JSON.stringify(ALTS)}){` +
         `try{let __x=await ${inner}(__sw(__p,__n),${b},__c?__sw(__c,__n):${c},void 0);` +
         `if(__x&&__x.info)return __x}catch{}}` +
-      `return __r}`;
+      `return __r||{info:null,includePaths:[]}}`;
   const declAt = js.indexOf(m[0]);
   js =
     js.slice(0, declAt) +
