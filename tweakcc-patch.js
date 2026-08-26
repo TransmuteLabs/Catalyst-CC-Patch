@@ -265,27 +265,80 @@ step('6 input chevron colour', () => {
 step('7 session memory', () => {
   const ID = '[A-Za-z_$][\\w$]*';
 
+  // Session memory ships switched off behind two gates: an early return in the
+  // extraction entry point, and a predicate that decides whether extraction
+  // mode is on at all. Both are removed here.
+  //
+  // Two properties this step deliberately has:
+  //
+  // 1. The gate shapes are matched WITHOUT pinning the feature-flag names.
+  //    Anthropic renames these flags between releases, and a locator keyed on
+  //    "tengu_passport_quail" turns a rename into either a loud failure or --
+  //    worse -- a silent pass once the fallback stops recognising anything.
+  //    Both shapes were measured unique in the bundle without the names, so
+  //    the names buy nothing and cost a version.
+  //
+  // 2. Each half is APPLIED when its gate is present and VERIFIED when it is
+  //    not. tweakcc's own session-memory patch runs before us and writes the
+  //    byte-identical edits, so "already gone" is the normal case, not an
+  //    anomaly. What this step owes the user is the postcondition -- nothing
+  //    gates extraction any more -- not the authorship of the edit. A gate
+  //    that survives in a form neither of us recognises is a stop: session
+  //    memory silently staying off is the failure this step exists to prevent.
   const anchor = 'querySource:"extract_memories",forkLabel:"extract_memories"';
   const anchorIdx = js.indexOf(anchor);
   if (anchorIdx === -1) fail('session-memory extraction anchor not found');
 
-  const window = js.slice(anchorIdx, anchorIdx + 8000);
-  const gate = window.match(new RegExp(`if\\(!${ID}\\("tengu_passport_quail",!1\\)\\)return;`));
-  if (!gate) fail('session-memory extraction gate not found');
+  // (a) the extraction gate, inside the entry point the anchor names.
+  const WIN = 8000;
+  const gateRx = new RegExp(`if\\(!${ID}\\("tengu_[a-z_]+",!1\\)\\)return;`, 'g');
+  const window = js.slice(anchorIdx, anchorIdx + WIN);
+  const gates = window.match(gateRx) || [];
+  if (gates.length > 1) {
+    fail(`session-memory extraction gate is ambiguous (${gates.length} candidates)`);
+  }
+  const gateDone = gates.length === 1;
+  if (gateDone) {
+    const gateAt = anchorIdx + window.indexOf(gates[0]);
+    js = js.slice(0, gateAt) + js.slice(gateAt + gates[0].length);
+  }
 
-  const gateAt = anchorIdx + gate.index;
-  js = js.slice(0, gateAt) + js.slice(gateAt + gate[0].length);
+  // Postcondition over the SAME text as before, not the same width: the slice
+  // shrank by whatever was cut, and re-reading 8000 characters would pull in
+  // trailing code that was never part of this entry point.
+  const after = js.slice(anchorIdx, anchorIdx + WIN - (gateDone ? gates[0].length : 0));
+  if (new RegExp(`if\\(!${ID}\\("tengu_[a-z_]+",!1\\)\\)\\s*return[^;]*;`).test(after)) {
+    fail('session-memory extraction is still gated on a feature flag');
+  }
 
+  // (b) the extract-mode predicate: `flagA && (!something || flagB)`.
   const modeRx = new RegExp(
-    `(function ${ID}\\(\\))\\{if\\(!${ID}\\("tengu_passport_quail",!1\\)\\)return!1;` +
-    `return!${ID}\\(\\)\\|\\|${ID}\\("tengu_slate_thimble",!1\\)\\}`
+    `(function ${ID}\\(\\))\\{if\\(!${ID}\\("tengu_[a-z_]+",!1\\)\\)return!1;` +
+      `return!${ID}\\(\\)\\|\\|${ID}\\("tengu_[a-z_]+",!1\\)\\}`,
+    'g'
   );
-  const mode = js.match(modeRx);
-  if (!mode) fail('session-memory extract-mode predicate not found');
+  const modes = js.match(modeRx) || [];
+  if (modes.length > 1) {
+    fail(`session-memory extract-mode predicate is ambiguous (${modes.length} candidates)`);
+  }
+  const modeDone = modes.length === 1;
+  if (modeDone) {
+    const modeAt = js.indexOf(modes[0]);
+    const head = modes[0].slice(0, modes[0].indexOf('{'));
+    js = js.slice(0, modeAt) + `${head}{return!0}` + js.slice(modeAt + modes[0].length);
+  }
+  if (new RegExp(modeRx.source).test(js)) {
+    fail('session-memory extract-mode predicate still consults its feature flags');
+  }
 
-  js = js.slice(0, mode.index) + `${mode[1]}{return!0}` + js.slice(mode.index + mode[0].length);
-
-  applied.push('session memory (extraction gate + extract-mode predicate)');
+  const did = [gateDone ? 'extraction gate' : null, modeDone ? 'extract-mode predicate' : null].filter(Boolean);
+  applied.push(
+    did.length === 2
+      ? 'session memory (extraction gate + extract-mode predicate)'
+      : did.length === 0
+        ? 'session memory (both gates already removed upstream; postconditions verified)'
+        : `session memory (${did[0]}; the other gate already removed upstream, verified)`
+  );
 });
 
 // --------------------------------------------------------------------------
