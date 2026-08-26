@@ -2122,6 +2122,47 @@ case "$GATE_STATE" in
     ;;
 esac
 
+# --- 5a3. the probes must BEHAVE, not merely be present -----------------------
+# The 86 checks above are text checks on the image and the interface gate only
+# proves the product starts. Neither runs the judge or the watcher. The bench
+# does: it carves both probe blocks out of the finished binary, compiles them,
+# and drives 37 scenarios through a throwaway probes home — verdicts, degraded
+# configs, trimming, nudges, the fleet filters.
+#
+# It existed for weeks and proved nothing, because nothing called it. That is
+# the same silence that let `emit-check.js` sit broken three times over, and it
+# hid three real faults here: the carve took whichever probe block came first
+# (so when the judge moved onto the dispatch tool, every scenario died in setup
+# with "free name not found: notify"), the judge's block was not compilable at
+# all (it names the tool `this` and derives its record key from the context),
+# and the session id was located by a payload field that only the watcher has —
+# leaving the name free inside the shared core, where the accessor catches the
+# ReferenceError and returns null. A green build said nothing about any of it.
+#
+# It runs in under a second, so there is no cost worth trading for the silence.
+if [[ "${CLAUDE_PATCH_SKIP_BENCH:-0}" != "1" ]]; then
+  BENCH="$(dirname "$0")/tools/probe-bench.js"
+  if ! command -v bun >/dev/null; then
+    # The bench must run under bun: the image is a single-file bun executable
+    # and the carved block is executed by its engine. Refusing loudly beats a
+    # skip that reads like a pass.
+    echo "FATAL: bun is required to run the probe bench (the image is a bun executable)." >&2
+    echo "  Set CLAUDE_PATCH_SKIP_BENCH=1 to build without this gate." >&2
+    exit 1
+  fi
+  BENCH_LOG="$(mktemp)"
+  if bun "$BENCH" --binary "$BIN" >"$BENCH_LOG" 2>&1; then
+    echo "Probes: $(grep -c '^[a-z][a-z0-9-]* *|' "$BENCH_LOG") scenarios behaved as specified"
+    rm -f "$BENCH_LOG"
+  else
+    echo "FATAL: the probe bench found behaviour that does not match its specification:" >&2
+    grep -E 'MISMATCH|probe-bench:' "$BENCH_LOG" | sed 's/^/  /' >&2
+    echo "  full table kept at $BENCH_LOG" >&2
+    echo "  Set CLAUDE_PATCH_SKIP_BENCH=1 to build without this gate." >&2
+    exit 1
+  fi
+fi
+
 # --- 5b. only now may the launcher point at the new build ----------------------
 # The installer deliberately leaves ~/.local/bin/claude on the PREVIOUS version:
 # between "pristine installed" and "patched + verified" there is about a minute,

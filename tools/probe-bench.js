@@ -89,42 +89,141 @@ function readImage(binaryPath) {
   return fs.readFileSync(binaryPath, 'latin1');
 }
 
-function carveBlock(source) {
-  const start = source.indexOf(START_MARKER);
-  const end = start < 0 ? -1 : source.indexOf(END_MARKER, start + START_MARKER.length);
-
-  if (start < 0) throw new Error(`marker not found: ${START_MARKER}`);
-  if (end < 0) throw new Error(`marker not found: ${END_MARKER}`);
-  return source.slice(start + START_MARKER.length, end);
+// The image carries TWO probe blocks: the judge on the dispatch tool and the
+// idle watcher on the main dispatcher. This used to take the FIRST one and run
+// every scenario against it. That was survivable while the watcher happened to
+// come first; when the judge moved onto the tool it became the first block, and
+// since the judge's block contains no notification queue, setup died with
+// "free name not found: notify" — every scenario, on every image. Nothing runs
+// this bench in the pipeline, so it stayed dead and unnoticed.
+//
+// Carve both and tell them apart by MECHANISM, not by order: only the watcher
+// nudges, so only its block carries the nudge's literal. Position is exactly
+// the property that already broke once.
+function carveBlocks(source) {
+  const blocks = [];
+  let from = 0;
+  for (;;) {
+    const start = source.indexOf(START_MARKER, from);
+    if (start < 0) break;
+    const end = source.indexOf(END_MARKER, start + START_MARKER.length);
+    if (end < 0) throw new Error(`marker not found: ${END_MARKER}`);
+    blocks.push(source.slice(start + START_MARKER.length, end));
+    from = end + END_MARKER.length;
+  }
+  if (blocks.length === 0) throw new Error(`marker not found: ${START_MARKER}`);
+  return blocks;
 }
 
-function locateNames(carved) {
-  const slots = /tool:([A-Za-z_$][\w$]*),input:([A-Za-z_$][\w$]*),ctx:([A-Za-z_$][\w$]*),key:([A-Za-z_$][\w$]*)/.exec(carved);
+const WATCH_MARK = '[fleet-idle] ';
+
+function classifyBlocks(blocks) {
+  const found = { judge: [], watch: [] };
+  for (const block of blocks) found[block.includes(WATCH_MARK) ? 'watch' : 'judge'].push(block);
+  for (const kind of ['judge', 'watch']) {
+    if (found[kind].length !== 1) {
+      throw new Error(
+        `expected exactly one ${kind} block, found ${found[kind].length} ` +
+        `(carved ${blocks.length} in total)`,
+      );
+    }
+  }
+  return { judge: found.judge[0], watch: found.watch[0] };
+}
+
+// A slot is not always a plain name. On the dispatch tool the judge names the
+// tool as `this` (it IS the tool), and it derives the record key from the
+// context as `l.toolUseId`. The old locator demanded an identifier for all four
+// and, on the judge's block, matched the `l` of `l.toolUseId` — producing a
+// duplicate parameter and a key that was the context object. `this` cannot be a
+// parameter name at all, so the judge's block was never compilable by this
+// bench: it was unreachable behind the first-block bug, and once that was fixed
+// this fault was simply the next one in line.
+//
+// So read each slot as an EXPRESSION and bind only the ones that are plain
+// names. `this` is supplied as the call receiver; a derived key comes from the
+// context the bench already builds.
+const IDENT = /^[A-Za-z_$][\w$]*$/;
+// `this` matches the identifier shape and is NOT a bindable name — the first
+// attempt at this fix bound it anyway and the block still refused to compile.
+const NOT_A_PARAM = new Set(['this', 'arguments', 'null', 'true', 'false', 'void']);
+const isBindable = (expr) => IDENT.test(expr) && !NOT_A_PARAM.has(expr);
+
+function locateNames(carved, kind) {
+  const slots = /tool:([^,]+),input:([^,]+),ctx:([^,]+),key:([^,]+?),/.exec(carved);
   if (!slots) throw new Error('free names not found: tool, input, context, key');
   const pool = /let __pool=typeof ([A-Za-z_$][\w$]*)==="function"/.exec(carved);
   if (!pool) throw new Error('free name not found: pool');
-  // The reaction shape changed (became asynchronous) — the locator must not
-  // crash over something immaterial to it.
-  const notify = /onAct:(?:async)?\(__r\)=>\{try\{([A-Za-z_$][\w$]*)\(\{value:"\[fleet-idle\] "/.exec(carved);
-  if (!notify) throw new Error('free name not found: notify');
-  const agent = /mode:"task-notification",agentId:([A-Za-z_$][\w$]*)\(\)/.exec(carved);
+  // The reaction shape changed twice — asynchronous, then carrying the core's
+  // services as a second parameter. The locator must not crash over either:
+  // what it is after is the queue's name, and neither change touches that.
+  // The session id and the title accessor belong to the SHARED core, so both
+  // blocks need them; only the notification queue is the watcher's alone.
+  // Locating them by their consumer said otherwise — the field `agentId:` in
+  // the nudge payload exists only in the watcher — and binding by that reading
+  // left `Tr` free inside the judge's core, where `__sid` catches the
+  // ReferenceError and returns null. The bench then reported sid=null and
+  // title=null as if the image had produced them. Locate by the MECHANISM that
+  // uses the name, never by the one payload that happens to show it.
+  const agent = /let __sid=\(\)=>\{try\{return ([A-Za-z_$][\w$]*)\(\)\}/.exec(carved);
   if (!agent) throw new Error('free name not found: agentId');
   // The title accessor is a free name whose binding in the image is NOT proven.
   // The bench must be able to feed both the correct shape and the wrong one.
   const title = /let __v=([A-Za-z_$][\w$]*)\(__i\)/.exec(carved);
   if (!title) throw new Error('free name not found: sessionTitle');
-  return [slots[1], slots[2], slots[3], slots[4], pool[1], notify[1], agent[1], title[1]];
+  const bind = (expr, source) => (isBindable(expr) ? { name: expr, source } : null);
+  const spec = {
+    // `tool:this` means the block reads the tool off the call receiver.
+    usesThis: slots[1].trim() === 'this',
+    bindings: [
+      bind(slots[1].trim(), 'tool'),
+      bind(slots[2].trim(), 'input'),
+      bind(slots[3].trim(), 'context'),
+      // A key like `l.toolUseId` is read out of the context, not passed in.
+      bind(slots[4].trim(), 'key'),
+      bind(pool[1], 'pool'),
+      { name: agent[1], source: 'agentId' },
+      { name: title[1], source: 'sessionTitle' },
+    ].filter(Boolean),
+  };
+  if (!spec.usesThis && !isBindable(slots[1].trim())) {
+    throw new Error(`tool slot is neither a name nor \`this\`: ${slots[1].trim()}`);
+  }
+  if (kind === 'judge') return spec;
+  const notify = /onAct:(?:async)?\(__r(?:,__svc)?\)=>\{try\{([A-Za-z_$][\w$]*)\(\{value:"\[fleet-idle\] "/.exec(carved);
+  if (!notify) throw new Error('free name not found: notify');
+  spec.bindings.push({ name: notify[1], source: 'notify' });
+  return spec;
 }
 
-function compileProbe(carved, names) {
+function compileProbe(carved, spec) {
+  // Two slots can legitimately share one name in the image; a duplicated
+  // parameter is a strict-mode error, so collapse them — but only when they
+  // would receive the same value, since anything else means the locator
+  // mis-read the block.
+  const params = [];
+  for (const binding of spec.bindings) {
+    const seen = params.find((entry) => entry.name === binding.name);
+    if (!seen) { params.push(binding); continue; }
+    if (seen.source !== binding.source) {
+      throw new Error(
+        `slots '${seen.source}' and '${binding.source}' both resolved to the name ` +
+        `'${binding.name}' — the locator read the block wrong`,
+      );
+    }
+  }
+  let fn;
   try {
-    return new Function(
-      ...names,
-      '"use strict";return (async()=>{' + carved + '})()',
+    // A plain arrow would capture the enclosing `this`; a function expression
+    // is what lets the receiver reach a block that names the tool as `this`.
+    fn = new Function(
+      ...params.map((entry) => entry.name),
+      '"use strict";return (async function(){' + carved + '}).call(this)',
     );
   } catch (error) {
     throw new Error(`cannot compile carved block: ${error.message}`);
   }
+  return (bag) => fn.apply(spec.usesThis ? bag.tool : undefined, params.map((entry) => bag[entry.source]));
 }
 
 function baseConfig(scenario) {
@@ -375,6 +474,15 @@ const scenarios = [
     response: 'NUDGE: отправь scout на перечисление файлов',
     expected: { passed: true, outcome: 'nudge', poolCalls: 1, nudges: 1,
                 nudgeIncludes: 'отправь scout' } },
+  // The reaction's OWN failure path. It had never been driven, and for a while
+  // it could not run at all: the handler called the journal writer by a name
+  // that is private to the core and free at the consumer's site, so the record
+  // this scenario now demands was swallowed as a ReferenceError. Text checks
+  // saw the line and passed. Only a run tells the difference.
+  { name: 'watch-nudge-undelivered', probe: 'watch', toolName: 'Read', watchState: OLD,
+    notifyThrows: true,
+    response: 'NUDGE: отправь scout на перечисление файлов',
+    expected: { passed: true, outcome: 'nudge_undelivered', poolCalls: 1, nudges: 0 } },
   { name: 'watch-nudge-not-enforced', probe: 'watch', toolName: 'Read', watchState: OLD,
     config: { enforce: false },
     response: 'NUDGE: отправь scout на перечисление файлов',
@@ -672,6 +780,9 @@ async function runScenario(probe, scenario) {
       agentId: 'a1',
       agentContext: { agentType: 'main' },
       getAppState: () => ({ toolPermissionContext: {} }),
+      // The judge derives its record key from the context (`ctx.toolUseId`)
+      // rather than taking it as a slot, so the context has to carry one.
+      toolUseId: 'tool-use-1',
     };
     // The task registry is the source of "live work". An absent registry and
     // an empty registry are DIFFERENT states: the first is blindness, the
@@ -702,7 +813,9 @@ async function runScenario(probe, scenario) {
       };
     };
     const nudges = [];
-    const notify = (payload) => { nudges.push(payload); };
+    const notify = scenario.notifyThrows
+      ? () => { throw new Error('очередь недоступна'); }
+      : (payload) => { nudges.push(payload); };
     const sessionTitle = scenario.titleValue === undefined
       ? () => 'починка наблюдателя'
       : () => scenario.titleValue;
@@ -711,7 +824,7 @@ async function runScenario(probe, scenario) {
       : () => 'a1';
 
     try {
-      await probe(tool, input, context, 'tool-use-1', pool, notify, agentId, sessionTitle);
+      await probe({ tool, input, context, key: 'tool-use-1', pool, notify, agentId, sessionTitle });
     } catch (error) {
       passed = false;
       errorText = sanitizeText(error?.message ?? error, tempDir);
@@ -810,13 +923,17 @@ async function main() {
     const homeBefore = homeFingerprint(realHome);
     const source = readImage(options.binary);
     warnRuntimeSkew(source, benchVersion);
-    const carved = carveBlock(source);
-    const names = locateNames(carved);
-    const probe = compileProbe(carved, names);
+    const carved = classifyBlocks(carveBlocks(source));
+    // Both blocks are compiled up front, so a block that is broken on the image
+    // fails setup even when no scenario happens to exercise it.
+    const probes = {
+      judge: compileProbe(carved.judge, locateNames(carved.judge, 'judge')),
+      watch: compileProbe(carved.watch, locateNames(carved.watch, 'watch')),
+    };
     const results = [];
 
     for (const scenario of scenarios) {
-      results.push(await runScenario(probe, scenario));
+      results.push(await runScenario(probes[scenario.probe === 'watch' ? 'watch' : 'judge'], scenario));
     }
 
     printTable(results);
