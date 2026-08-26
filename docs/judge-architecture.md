@@ -73,17 +73,43 @@ exists only to introduce the side effect without rewriting the operator.
 
 ### Injection 22 — the judge itself
 
-Location: the single tool call inside the executor where the call is
-already resolved but not yet executed:
+Location: inside the dispatch tool's own `call`, at the top of the body,
+right after the parameter pattern the original signature destructured —
+which the patch moves into the body so the judge can run after it:
 
 ```
-Q = await e.call(E, {...n, toolUseId:t, userModified:X.userModified??!1}, o, i, p)
+async call(__ccIn, l, c, u, d) { let {prompt:e, subagent_type:t, …} = __ccIn;
+  /* the judge */ …
 ```
 
-The injection sits IMMEDIATELY before it. A cancellation is thrown with
-`throw`; the executor's outer `catch` routinely turns what was thrown
-into a `tool_result` with `is_error`. This is precisely the "stop, and
-here is what is wrong" — and it is not coupled to any minified name.
+It used to sit immediately before the executor's `e.call(…)`. That was an
+anchor on a COUNT of dispatchers, and the count is upstream's to change:
+a dispatcher that appears in a later version is then a silent pass, which
+a fail-closed mechanism cannot afford. The tool's own `call` is the one
+funnel every executor must go through — the main dispatcher, the REPL
+sandbox, and `claude mcp serve` — including the 2.1.239 adapter, which
+falls through to `e.call(…)` because the tool declares no `executor`.
+
+A cancellation is thrown with `throw`; the executor's outer `catch`
+routinely turns what was thrown into a `tool_result` with `is_error`.
+This is precisely the "stop, and here is what is wrong" — and it is not
+coupled to any minified name. The product refuses a launch from exactly
+here too (the nesting-depth cap throws out of this method), so a throw at
+this point is the product's own idiom, not one we invented.
+
+**Accepted trade-off.** The judge is consulted BEFORE the tool's own
+guards — depth cap, teammate rules, budget. A dispatch those guards would
+refuse is therefore still judged, and still costs one consultation and
+one journal line. The alternative is worse: running after them would put
+the judge behind checks whose order and existence upstream may change,
+and the dispatch was authored either way — judging it is not a lie about
+what happened.
+
+**What has no id here.** `claude mcp serve` calls this same method with a
+context built as `agentContext:{agentType:"main", agentId:…}` and no
+`toolUseId` at all. The key is therefore undefined on that whole route:
+there is no current turn to fetch (correctly — none was stashed), and the
+record name must not lean on the key for uniqueness. See §9.
 
 The consultation goes through the client's OWN single request
 (`queryModelWithoutStreaming`, the same path the prompt hooks use). This
@@ -548,6 +574,21 @@ model, transcript size, threshold, budget, duration, code, and error.
 
 Two things this was done for (the user's wording): (1) to later check
 whether it judged correctly; (2) to later train a small model on this.
+
+**The record's NAME is a join key, so it must be unique by construction.**
+The journal line points at the file through `rec`, and `validate.py` and
+`adjudicate.py` index human labels by that basename — two consultations
+sharing a name do not merely overwrite a file, they merge two different
+judgements under one label, and nothing in the data says it happened. The
+name cannot get uniqueness from the tool-use id, because not every route
+has one: under `claude mcp serve` the key is undefined for the whole
+route (§2, injection 22), which turned `String(key).slice(-8)` into the
+constant `ndefined`. The name is therefore
+`<timestamp>-<key|nokey>-<pid>-<seq>`: the key keeps the correlation
+where it exists, `nokey` says plainly when it does not, and pid plus a
+per-process counter separate everything else — across processes and
+inside one. Readers must keep treating `rec` as opaque; nothing may parse
+a meaning back out of the name.
 
 The record schema grew over the campaign: the corpus's first seven
 records lack the `url`, `cwd`, and `attempts` fields — these appeared

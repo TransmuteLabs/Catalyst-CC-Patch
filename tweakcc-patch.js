@@ -1759,6 +1759,24 @@ step('22 judge consulted before a subagent dispatch', () => {
   if (allTool.length !== 1) {
     fail(`dispatch tool call implementation is not unique (${allTool.length} matches)`);
   }
+  // Shape is not identity, and uniqueness of the shape does not make it one.
+  // A later build could carry ONE unrelated method with the same four leading
+  // fields while the real one changed, and both checks above would still pass
+  // while the judge was installed where it can never fire. In a mechanism that
+  // fails CLOSED that is not a missed edit, it is a silent pass.
+  //
+  // The dispatch tool names itself in its own first statements: it is the only
+  // place in the image that refuses a launch by the nesting-depth cap. Measured
+  // on the four payloads in range: exactly one occurrence each, 179-193
+  // characters past the start of the match (2.1.233 and 240 at 193, 242 at 180,
+  // 246 at 179), so the window below is the measurement with room, not a guess.
+  const DEPTH_CAP = '"subagent_launch","subagent_depth_cap"';
+  if (!js.slice(mTool.index, mTool.index + 600).includes(DEPTH_CAP)) {
+    fail(
+      'the matched call implementation is not the dispatch tool ' +
+        '(no depth-cap refusal among its first statements)',
+    );
+  }
   // The parameter pattern moves into the body verbatim, so the destructuring
   // that the original signature performed still happens, in the same order and
   // with the same failure on a null input; the judge runs after it, on the
@@ -1921,7 +1939,28 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __v=' + TTL + '(__i);' +
       'return typeof __v==="string"&&__v?__v:void 0}catch{return void 0}};' +
     'let __jsave=async(__ts,__base)=>{if(!__jrec||!__jreq||!__jfs)return null;' +
-      'let __n=__ts.replace(/[:.]/g,"-")+"-"+String(__o.key).slice(-8)+".json"+(__jgz?".gz":"");' +
+      // The record's NAME is the join key of the whole corpus: the journal
+      // line points at it through `rec`, and judge/validate.py indexes labels
+      // by that basename. Two consultations under one name do not merely
+      // overwrite a file -- they merge two different judgements under one
+      // label, and nothing in the data says it happened.
+      //
+      // The tool-use id cannot carry that guarantee. `claude mcp serve` builds
+      // its context WITHOUT one -- `agentContext:{agentType:"main",agentId:…}`
+      // and no `toolUseId` field at all -- so `String(undefined).slice(-8)`
+      // gave every consultation on that whole route the same `-ndefined` name.
+      // That route reaches the judge BY CONSTRUCTION: the judge rides the tool
+      // precisely so that no executor can miss it, which is exactly why the
+      // name may no longer assume the caller had an id to give.
+      //
+      // So uniqueness is the CORE's guarantee, held for every caller present
+      // and future, while the key stays honest -- named `nokey` when the route
+      // has none, rather than stringified into a word that reads like a bug.
+      // pid separates processes, the counter separates calls inside one.
+      'let __seq=globalThis.__ccRecSeq=(globalThis.__ccRecSeq??0)+1;' +
+      'let __n=__ts.replace(/[:.]/g,"-")+"-"' +
+        '+(__o.key==null?"nokey":String(__o.key).slice(-8))' +
+        '+"-"+process.pid+"-"+__seq+".json"+(__jgz?".gz":"");' +
       'try{await __jfs.mkdir(__jdir+"/records",{recursive:!0});' +
         'let __rq;try{__rq=JSON.parse(__jreq)}catch{__rq=__jreq}' +
         // rx/act — only here, not in the shared base: the base also feeds the

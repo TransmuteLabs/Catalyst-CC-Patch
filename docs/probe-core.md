@@ -21,7 +21,12 @@ the core).
 
 ## The core contract
 
-The core is injected ONCE and takes a probe description:
+The core is written ONCE in the patch source and takes a probe description.
+It is emitted at each consumer site, because the two sites are far apart in
+the bundle and a block has to be self-contained where it lands; the second
+copy is inert at run time, since the core assigns itself with `??=` and the
+first site to execute wins. The build asserts the copies are byte-identical,
+so "one core" is a guarantee about behaviour, not about the byte count:
 
 1. **Probe identifier** — `judge`, `idle-watch`. All probes share ONE home
    (`~/.claude/probes`, with the `CLAUDE_PROBES_DIR` override applying to all

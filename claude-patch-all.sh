@@ -404,6 +404,13 @@ def _escaped_interpolations(src):
     return not bad
 
 def _judge_both_shapes(src):
+    # Reads the PATCH SOURCE, not the image, and its name now says so. Only ONE
+    # dispatcher shape exists in any given payload, so no image can testify that
+    # the other branch survives; what this guards is a branch being deleted from
+    # the locator, which would go unnoticed until a version that needs it. The
+    # shape actually present IS verified against the image, by
+    # _judge_rides_the_tool, which builds its tail out of that call's own names.
+    #
     # 2.1.239 moved the tool call behind an adapter: `e.call(w,ctx,…)` became
     # `hii(e).execute(w,ctx,…)`, where `hii(e) = e.executor ?? {execute:…}`.
     # The judge locator must hold BOTH shapes and latch onto the tool itself,
@@ -738,6 +745,36 @@ def _turn_belongs_to_the_judge(d):
     return b'key:' + key.group(1) + b',' in blk
 
 
+def _record_name_is_unique(d):
+    """One consultation, one record file -- on every route, not only the ones with an id.
+
+    `rec` is the join key between the journal and the corpus: judge/validate.py
+    indexes labels by that basename and adjudicate.py matches on it. Two
+    consultations sharing a name therefore do not merely overwrite a file, they
+    merge two different judgements under one label -- and the data does not say
+    it happened.
+
+    The name cannot get that guarantee from the tool-use id, because the id is
+    not something every route has: `claude mcp serve` calls the dispatch tool
+    with a context built as `agentContext:{agentType:"main",agentId:...}` and no
+    `toolUseId` field, so the key is undefined for that whole route. The judge
+    meets that route by construction -- it rides the tool exactly so no executor
+    can slip past it.
+
+    Asserted here: the name is still derived from the key, so the correlation
+    survives; the keyless case is NAMED rather than stringified into "ndefined";
+    and the two separators of last resort are present -- the pid, and a counter
+    incremented exactly once per record. Replacing the key with a constant, or
+    dropping either separator, turns this red.
+    """
+    if not re.search(rb'let __n=__ts\.replace\(/\[:\.\]/g,"-"\)\+"-"'
+                     rb'\+\(__o\.key==null\?"nokey":String\(__o\.key\)\.slice\(-8\)\)'
+                     rb'\+"-"\+process\.pid\+"-"\+__seq\+"\.json"', d):
+        return False
+    # After the collapse above there is ONE core, so one counter line. Two would
+    # mean the cores drifted; none, that the guarantee was edited away.
+    return d.count(b'let __seq=globalThis.__ccRecSeq=(globalThis.__ccRecSeq??0)+1;') == 1
+
 _probe_full = d
 _probe_dup = re.findall(rb'/\*__ccCore0\*/[\s\S]*?/\*__ccCore1\*/', d)
 for _b in _probe_dup[1:]:
@@ -746,7 +783,7 @@ for _b in _probe_dup[1:]:
 checks = {
     'routing (claude-* -> subscription)': _routing_agrees_with_connection(d),
     'captured names are escaped into patterns': _escaped_interpolations(src),
-    'judge anchors both tool-call shapes':      _judge_both_shapes(src),
+    'patch source keeps both dispatcher shapes': _judge_both_shapes(src),
     'full bypass keeps peer-machine immunity': _bypass_no_immunity(d),
     'agent model schema relaxed':         b'.enum(["sonnet","opus","haiku","fable"])' not in d,
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
@@ -930,6 +967,7 @@ checks = {
                                               rb'await globalThis\.__ccProbe\(\{', d)),
     'judge rides the tool, watcher the dispatcher': _judge_rides_the_tool(_probe_full),
     'current turn is the judge\'s alone': _turn_belongs_to_the_judge(_probe_full),
+    'one consultation, one record name': _record_name_is_unique(d),
     # One core per site, and the count is CHECKED. The previous form of this
     # entry was `bool(re.search(...))` under the name "defined once" -- a
     # presence test wearing a count's name, which would have gone green on any
