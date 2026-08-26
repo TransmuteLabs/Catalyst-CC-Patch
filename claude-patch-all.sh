@@ -150,7 +150,7 @@ echo "Target binary: $BIN"
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-15f7a21b725255d1402ec6d9212d9d90fa7574bb}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-e309c80cdc984ae06dc20f30e30eb3a7d8ee6d56}"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
 # TWEAKCC_LOCAL is the development escape hatch: point it at a built
