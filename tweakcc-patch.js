@@ -241,7 +241,22 @@ step('6 input chevron colour', () => {
     `[\\s\\S]{0,600}?if\\([^)]*!==\\3[^)]*\\|\\|[^)]*!==\\1[^)]*\\)${ID}=${ID}(?:\\.${ID})?\\(${ID},\\{color:\\3,dimColor:\\1,children:`
   );
   const m = js.match(rx);
-  if (!m) fail('input chevron component not found');
+  if (!m) {
+    // tweakcc's own input-chevron patch writes the identical edit and runs
+    // first, so "the original form is gone" is the normal case, not a
+    // failure. Verify the postcondition -- the chevron's colour is now
+    // conditional on the loading state -- and record which colour landed;
+    // fail only if the site is neither in its original nor in a patched form.
+    const patchedRx = new RegExp(
+      `,\\{isLoading:(${ID}),(?:${ID}:${ID},)*themeColor:(${ID})\\}=${ID},(${ID})=\\2\\?\\?void 0[,;]` +
+      `[\\s\\S]{0,600}?if\\([^)]*!==\\3[^)]*\\|\\|[^)]*!==\\1[^)]*\\)${ID}=${ID}(?:\\.${ID})?\\(${ID},` +
+      `\\{color:\\1\\?\\3:("[^"]*"),dimColor:!1,children:`
+    );
+    const done = js.match(patchedRx);
+    if (!done) fail('input chevron component not found');
+    applied.push(`input chevron colour (idle -> ${JSON.parse(done[4])}, already applied upstream, verified)`);
+    return;
+  }
 
   const [, isLoading, , color] = m;
   const oldPart = `color:${color},dimColor:${isLoading}`;
@@ -2332,14 +2347,50 @@ step('24 bypass permissions under sudo', () => {
 
 step('25 CLAUDE.md alternate filenames', () => {
   const ID = '[A-Za-z_$][\\w$]*';
-  // Every memory file — user, project, local, parent-directory walk — is read
+  // Every memory file -- user, project, local, parent-directory walk -- is read
   // through this one function, so a wrapper around it covers all of them. The
   // storage-backed branch returns "absent" WITHOUT throwing, which is why
-  // tweakcc's approach (patch the catch clause) misses the common case here.
+  // tweakcc's older approach (patch the catch clause) misses the common case
+  // here; the fork's 2.1.233+ matcher was rewritten to wrap for the same
+  // reason, and emits the same wrapper this step does.
+  //
+  // Which of the two lands is not this step's business. tweakcc runs first, so
+  // when its agents-md patch is enabled the loader arrives already wrapped and
+  // this step VERIFIES rather than wraps -- wrapping a wrapper would work but
+  // would read the alternates twice under two different lists. When tweakcc's
+  // is off (or fails), this step applies. Same apply-or-verify contract as the
+  // session-memory step, and for the same reason: what is owed is the
+  // postcondition, not the authorship.
   const ALTS = [
     'AGENTS.md', 'GEMINI.md', 'CRUSH.md', 'QWEN.md',
     'IFLOW.md', 'WARP.md', 'copilot-instructions.md',
   ];
+
+  // Already wrapped? Both wrappers open identically, by construction.
+  const wrappedRx = new RegExp(
+    `async function (${ID})\\((${ID}),(${ID}),(${ID}),(${ID})\\)\\{` +
+      `let __r=await (${ID})\\(\\2,\\3,\\4,\\5\\);if\\(__r&&__r\\.info\\)return __r;` +
+      `[\\s\\S]{0,600}?return __r\\}`,
+  );
+  const already = js.match(wrappedRx);
+  if (already) {
+    const [wrapper, fn, , , , , inner] = already;
+    // Presence of a wrapper is not the postcondition -- offering the alternates
+    // is. Check the wrapper actually names them and actually delegates to a
+    // function that exists, so a half-written wrapper cannot pass as success.
+    const offered = ALTS.filter((n) => wrapper.includes(JSON.stringify(n)));
+    if (offered.length === 0) {
+      fail(`memory-file loader '${fn}' is wrapped but offers no alternate filenames`);
+    }
+    if (!new RegExp(`async function ${inner.replace(/\$/g, '\\$')}\\(`).test(js)) {
+      fail(`memory-file loader wrapper delegates to '${inner}', which is not defined`);
+    }
+    applied.push(
+      `CLAUDE.md alternates: ${offered.join(', ')} (loader '${fn}', already wrapped upstream, verified)`,
+    );
+    return;
+  }
+
   const rx = new RegExp(
     `async function (${ID})\\((${ID}),(${ID}),(${ID}),(${ID})\\)\\{try\\{let (${ID}),(${ID})=!1;` +
       `if\\(\\5\\)\\{let (${ID})=await (${ID})\\(\\5\\);switch\\(\\8\\.kind\\)\\{case"absent":` +
@@ -2351,7 +2402,7 @@ step('25 CLAUDE.md alternate filenames', () => {
   const inner = `${fn}$cc`;
   // The alternate is read from the filesystem (descriptor dropped): a storage
   // descriptor names ONE key, so reusing it would hand back CLAUDE.md's bytes
-  // under the alternate's name — worse than not finding the file.
+  // under the alternate's name -- worse than not finding the file.
   const wrapper =
     `async function ${fn}(${a},${b},${c},${d}){` +
       `let __r=await ${inner}(${a},${b},${c},${d});` +
