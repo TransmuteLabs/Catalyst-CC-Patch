@@ -33,6 +33,55 @@
 #   bundle id.
 set -euo pipefail
 
+# ONE RUN AT A TIME. Two instances are not independent: tweakcc keeps its state
+# in a single shared directory, and it stores the system-prompt hashes by
+# reading the whole index, editing it and writing it back. Two runs interleaving
+# on that read-modify-write lose each other's entries, and the loser reports
+# `hash storage failed` on whichever prompts happened to collide -- a failure
+# that has nothing to do with the binary being patched and disappears on a
+# retry, which is exactly the shape that gets dismissed as flaky. Measured: a
+# version sweep and a single-version build started in parallel produced two such
+# failures and a refused build.
+#
+# The lock is per-user, not per-target: the contended resource is tweakcc's
+# state, not the binary. It is released when this shell exits, including on a
+# kill, because the descriptor dies with the process.
+__lock="${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock"
+exec 9>"$__lock"
+if ! flock -n 9 2>/dev/null; then
+  if command -v flock >/dev/null 2>&1; then
+    echo "FATAL: another claude-patch-all.sh is running (lock: $__lock)." >&2
+    echo "       tweakcc's state is shared; wait for it to finish rather than racing it." >&2
+    exit 3
+  fi
+  # macOS has no flock(1). Fall back to an atomic directory create, which is
+  # equally exclusive but must be cleaned up by hand on exit.
+  __lockdir="$__lock.d"
+  if ! mkdir "$__lockdir" 2>/dev/null; then
+    # The pid lands a moment AFTER the directory, so an empty lock is either a
+    # holder caught in that window or one that was killed inside it. Waiting a
+    # second tells the two apart; without the wait, a kill in that window would
+    # leave a lock nobody can ever break.
+    __owner=''
+    for _ in 1 2 3 4 5; do
+      __owner="$(cat "$__lockdir/pid" 2>/dev/null || true)"
+      [[ -n "$__owner" ]] && break
+      sleep 0.2
+    done
+    if [[ -z "$__owner" ]] || ! kill -0 "$__owner" 2>/dev/null; then
+      # Nobody is behind it -- the lock is stale, take it over.
+      rm -rf "$__lockdir"
+      mkdir "$__lockdir" 2>/dev/null || { echo "FATAL: cannot take the patch lock ($__lockdir)." >&2; exit 3; }
+    else
+      echo "FATAL: another claude-patch-all.sh is running (pid $__owner, lock: $__lockdir)." >&2
+      echo "       tweakcc's state is shared; wait for it to finish rather than racing it." >&2
+      exit 3
+    fi
+  fi
+  echo $$ > "$__lockdir/pid"
+  trap 'rm -rf "$__lockdir"' EXIT
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUR_PATCH="$HERE/tweakcc-patch.js"
 INSTALLER="$HERE/claude_patch.py"
@@ -420,8 +469,11 @@ def _stream_finalize_ok(d):
     "no marker is emitted" would pass a build where the yield came back
     unguarded, which is the stock half answer.
     """
-    cond = (rb'\((' + ID + rb')\.isNonInteractiveSession&&\1\.querySource\?\.startsWith\('
-            rb'"repl_main_thread"\)&&\([^()]{0,80}\)\)')
+    # The lane test is the reader's WHOLE classifier -- `repl_main_thread*` OR
+    # `"sdk"`, both of which `kD()` maps to "main". Pinning only the prefix let a
+    # guard that was a strict subset of the reader read as correct.
+    cond = (rb'\((' + ID + rb')\.isNonInteractiveSession&&\(\1\.querySource\?\.startsWith\('
+            rb'"repl_main_thread"\)\|\|\1\.querySource==="sdk"\)&&\([^()]{0,80}\)\)')
     if b'truncatedAfterOutput' not in d:
         if re.search(rb',error:"server_error"\}\),' + ID + rb'!=="credited"', d):
             return False
@@ -475,62 +527,224 @@ def _bypass_no_immunity(d):
     return len(re.findall(rb'\.decisionReason,', d)) >= 1
 
 
-def _probe_hooks_both_sites(d):
-    """The probe block must sit in front of EVERY tool-dispatch site.
+def _fork_drops_are_gone(d):
+    """No value is discarded for being a fork, near the launch telemetry.
 
-    There are two on 2.1.233 / 240 / 242 / 246, both in the same bundle module:
-    the main dispatcher, and the inner executor the REPL sandbox hands to
-    model-written JavaScript. The REPL's tool map excludes exactly one tool --
-    REPL itself -- so the dispatch tool is reachable from inside a REPL program,
-    and for as long as only the main site was hooked, a subagent started that
-    way reached neither the judge nor the fleet counter. In a mechanism that
-    fails CLOSED, an unhooked path is not a gap in coverage, it is a silent
-    pass, so the site count is asserted rather than assumed.
+    The old form of this check listed three literal shapes the patch removes.
+    Two of them stopped existing upstream at 2.1.242, and the third is searched
+    FORWARD from `is_fork:` while the surviving drops sit before it -- so on
+    pristine 2.1.242 and 2.1.246 the entry went green on an image where the
+    patch had done nothing at all. A check that passes on an unpatched build is
+    worth less than no check, because it reads as a proof.
 
-    Counting blocks alone would accept two blocks in front of the SAME site, so
-    each block is identified by the call that follows it: the REPL one carries
-    the sandbox's `fileReadingLimits`, the main one closes its context literal
-    straight after `userModified`.
+    Stated the way the patch states it: within the radius the sweep is allowed
+    to touch, `<fork>?void 0:` must not occur. That fails on all four pristine
+    payloads (the sites are there) and passes only once they are cleared.
+    """
+    m = re.search(rb'is_fork:(' + ID + rb'),', d)
+    if not m:
+        return False
+    fork = re.escape(m.group(1))
+    lo, hi = max(0, m.start() - 20000), m.start() + 20000
+    return not re.search(rb'(?<![\w$])' + fork + rb'\?void 0:', d[lo:hi])
 
-    The cores must also be byte-identical. They are emitted from one string and
-    reference no call-site name, so any difference means an edit reached one
-    copy and not the other -- the drift the single-core decomposition exists to
-    prevent.
+
+def _fork_sweep_stayed_near_its_anchor(d):
+    """The class sweep must not have roamed outside the launch site.
+
+    This is a WITNESS, not the whole guarantee -- an image cannot prove what was
+    not touched. It is the site that actually got hit: before the sweep was
+    bounded, `moduleSliceAround` returned the whole bundle on the single-module
+    builds (2.1.233 / 2.1.240), the fork flag on 2.1.233 minifies to `L`, and
+    4.97 MB from the anchor
+
+        M=await P(k?{kind:"skip"}:{kind:"default"},O||L?void 0:process.env.ANTHROPIC_VERTEX_PROJECT_ID)
+
+    binds `L` to GOOGLE_APPLICATION_CREDENTIALS. The sweep removed `L?void 0:`
+    from it and the build shipped 79/79 green with Vertex project resolution
+    altered. The construct exists once on every payload in range, so its stock
+    shape is a cheap, exact tripwire for the same class returning.
+    """
+    return len(re.findall(
+        rb'\|\|' + ID + rb'\?void 0:process\.env\.ANTHROPIC_VERTEX_PROJECT_ID', d)) == 1
+
+def _routing_agrees_with_connection(d):
+    """The destination and the connection options must name the same host.
+
+    Step 1 sends `claude-*` to api.anthropic.com while every other id falls
+    through to ANTHROPIC_BASE_URL. The same options bag also carries
+    `fetchOptions`, and the builder behind it picks proxy-vs-direct from the URL
+    it is handed:
+
+        let o=_();                                          // HTTPS_PROXY etc.
+        if(o){ if(e.url && m(e.url)) return {...r,...h()};   // NO_PROXY match
+               return {...r, proxy:..., ...h()} }
+
+    Computed from the provider URL (ANTHROPIC_BASE_URL for firstParty), that
+    decision belongs to a host the request is not going to. Both halves are
+    therefore checked TOGETHER, against the same captured model variable and the
+    same literal: a build where only one of them survived a relocator is exactly
+    the split this is written to forbid, and either half alone reads as success.
+    """
+    m = re.search(rb'baseURL:/\^claude/i\.test\((' + ID + rb')\)\?'
+                  rb'"https://api\.anthropic\.com":void 0,', d)
+    if not m:
+        return False
+    model = re.escape(m.group(1))
+    return bool(re.search(
+        rb'url:/\^claude/i\.test\(' + model + rb'\)\?"https://api\.anthropic\.com":'
+        + ID + rb'\(' + ID + rb',' + model + rb',' + ID + rb'\)\}\)', d))
+
+def _judge_rides_the_tool(d):
+    """The judge must sit inside the dispatch tool, the watcher on the dispatcher.
+
+    An earlier form of this check counted DISPATCHERS and required a probe in
+    front of each. That was the wrong invariant twice over: the executor it
+    named as the second one cannot receive a dispatch at all (the sandbox's
+    tool list is built by a filter that drops the dispatch tool by name), and
+    the census it rested on was not complete anyway -- `claude mcp serve`
+    exposes the same tool through a third executor. A mechanism that fails
+    CLOSED cannot be anchored to a number that upstream is free to change, so
+    the judge now rides the one thing every executor must go through: the
+    tool's own `call`.
+
+    What is asserted here:
+
+      * the judge block is inside that method, and the parameter pattern the
+        original signature destructured moved into the body intact;
+      * `$2` at that site is `this` -- the tool, not a literal we made up;
+      * the watcher block is in front of the main dispatch call, with all four
+        of its names bound to that call's own;
+      * neither consumer appears at the other's site (one judgement per
+        dispatch, one heartbeat per tool call);
+      * the two cores are byte-identical.
     """
     ends = [mm.end() for mm in re.finditer(rb'/\*__ccProbe1\*/', d)]
     starts = [mm.start() for mm in re.finditer(rb'/\*__ccProbe0\*/', d)]
     if len(ends) != 2 or len(starts) != 2:
         return False
-    cores = [d[st:d.index(b'if(process.env.CLAUDE_JUDGE', st)] for st in starts]
+    # `.index` would RAISE on a block whose core marker is gone, and an
+    # exception in this dict aborts the whole verify stage -- no verdicts at
+    # all, which reads as a pipeline bug rather than as the failed check it is.
+    # Every lookup here answers False instead.
+    core_end = [d.find(b'/*__ccCore1*/', st) for st in starts]
+    if any(c < 0 for c in core_end) or any(c > e for c, e in zip(core_end, ends)):
+        return False
+    cores = [d[st:c] for st, c in zip(starts, core_end)]
     if len(set(cores)) != 1 or len(cores[0]) < 15000:
         return False
-    repl = main = 0
-    for e in ends:
-        tail = d[e:e + 400]
-        if re.match(rb'(?:let )?' + ID + rb'=await [\s\S]{0,160}?'
-                    rb'fileReadingLimits:\{maxTokens:1/0,maxSizeBytes:268435456\}', tail):
-            repl += 1
-        elif re.match(rb'' + ID + rb'=await [\s\S]{0,160}?userModified:' + ID
-                      + rb'\.userModified\?\?!1\},', tail):
-            main += 1
-    return repl == 1 and main == 1
+
+    JUDGE = rb'if\(process\.env\.CLAUDE_JUDGE&&\('
+    WATCH = rb'globalThis\.__ccFleet\?\?=\[\];'
+    judge_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
+                   if re.search(JUDGE, d[c:e])]
+    watch_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
+                   if re.search(WATCH, d[c:e])]
+    if len(judge_sites) != 1 or len(watch_sites) != 1 or judge_sites == watch_sites:
+        return False
+
+    # The judge's home: the tool's own call, with the pattern re-bound in the
+    # body and `this` as the tool.
+    ji = judge_sites[0]
+    head = d[max(0, starts[ji] - 400):starts[ji]]
+    if not re.search(rb'async call\(__ccIn,' + ID + rb'[^)]*\)\{let \{prompt:' + ID
+                     + rb',subagent_type:' + ID + rb',description:' + ID + rb',model:'
+                     + ID + rb',[^{}]*\}=__ccIn;$', head):
+        return False
+    body = d[core_end[ji]:ends[ji]]
+    if body.count(b'this.name==="Agent"||this.name==="Task"') != 1:
+        return False
+    if b'tool:this,input:__ccIn,ctx:' not in body:
+        return False
+
+    # The watcher's home: in front of the main dispatch call, every name bound
+    # to that call's own. Normalising the names would only prove they are used
+    # consistently INSIDE the block; building the tail out of them is what
+    # proves they are the right ones.
+    wi = watch_sites[0]
+    wb = d[core_end[wi]:ends[wi]]
+    b4 = re.search(rb'tool:(' + ID + rb'),input:(' + ID + rb'),ctx:(' + ID
+                   + rb'),key:(' + ID + rb'),', wb)
+    if not b4:
+        return False
+    tool, inp, ctx, key = (re.escape(b4.group(i)) for i in (1, 2, 3, 4))
+    tail = d[ends[wi]:ends[wi] + 400]
+    if not re.match(ID + rb'=await (?:' + tool + rb'\.call|' + ID + rb'\(' + tool
+                    + rb'\)\.execute)\(' + inp + rb',\{\.\.\.' + ctx
+                    + rb',toolUseId:' + key + rb',userModified:' + ID
+                    + rb'\.userModified\?\?!1\},', tail):
+        return False
+    return True
 
 
-# Every check below that COUNTS occurrences counts them per emitted block: the
-# numbers were measured when the block existed once, and they say something
-# about the shape of one probe, not about how many dispatch sites it guards.
-# Emitting it at a second site would double each of them, and a doubled `== 6`
-# no longer tells 3+3 from 2+4. So the site count is proved above, once, and
-# the duplicate blocks are dropped here -- the checks keep both their numbers
-# and their meaning. Removal only takes text away, so every "is absent" check
-# is unaffected by it.
+# Every check below that COUNTS occurrences counts them per emitted copy: the
+# numbers were measured when the injected text existed once, and they say
+# something about the SHAPE of the probe, not about how many places carry it.
+# The judge and the watcher live at different sites now and each appears once,
+# so their numbers stand as calibrated; what is emitted twice is the CORE they
+# share, because neither site can rely on the other having run first. `??=`
+# makes the second copy inert at runtime, and the collapse below makes it
+# absent from the text the counts are taken over. Removal only takes text away,
+# which is why the site check above runs on the UNCOLLAPSED bytes -- an
+# "is absent" count is exactly the shape that removal makes more likely to
+# pass, so nothing that must be PRESENT may be verified after this point.
+def _turn_belongs_to_the_judge(d):
+    """The current-turn stash must be consumed by the judge and by nobody else.
+
+    Step 21 fills a map keyed by tool_use id so the judge can see the thinking
+    that motivated a dispatch -- in streaming, the message that reaches the
+    executor carries the tool_use block alone. Its contract is single-consumer:
+    an entry goes away when the judge reads it.
+
+    The read used to live in the SHARED core, so whichever consumer ran the
+    core first took the entry. That was invisible while both consumers sat in
+    one block with the judge written first; it stopped being true the moment
+    they moved to different sites, and the watcher -- which has no use for a
+    turn -- would have emptied it before the judge was reached. Nothing would
+    crash and nothing would be refused: the judge would simply reason without
+    the turn, on the first dispatch of a session and on every watcher window
+    after it. So ownership is asserted in the text rather than left to splice
+    order.
+    """
+    starts = [mm.start() for mm in re.finditer(rb'/\*__ccProbe0\*/', d)]
+    ends = [mm.end() for mm in re.finditer(rb'/\*__ccProbe1\*/', d)]
+    if len(starts) != 2 or len(ends) != 2:
+        return False
+    core_end = [d.find(b'/*__ccCore1*/', st) for st in starts]
+    if any(c < 0 for c in core_end) or any(c > e for c, e in zip(core_end, ends)):
+        return False
+    # no core may touch the map, and each must take the turn from its caller
+    for st, c in zip(starts, core_end):
+        if b'__ccJudgeTurn' in d[st:c]:
+            return False
+        if d.count(b'let __t=__o.turn?__o.turn():[];', st, c) != 1:
+            return False
+    # exactly one consumer supplies a turn, and it is the one carrying the judge
+    suppliers = [i for i, (c, e) in enumerate(zip(core_end, ends))
+                 if b'turn:()=>{' in d[c:e]]
+    judges = [i for i, (c, e) in enumerate(zip(core_end, ends))
+              if re.search(rb'if\(process\.env\.CLAUDE_JUDGE&&\(', d[c:e])]
+    if suppliers != judges or len(suppliers) != 1:
+        return False
+    c, e = core_end[suppliers[0]], ends[suppliers[0]]
+    blk = d[c:e]
+    key = re.search(rb'turn:\(\)=>\{let __x=globalThis\.__ccJudgeTurn\?\.get\((' + ID
+                    + rb'(?:\.' + ID + rb')?)\);'
+                    rb'globalThis\.__ccJudgeTurn\?\.delete\(\1\);return __x\|\|\[\]\},', blk)
+    if not key:
+        return False
+    # the turn is fetched under the SAME key the record and journal use, or the
+    # judge would read one dispatch's thinking while filing it under another
+    return b'key:' + key.group(1) + b',' in blk
+
+
 _probe_full = d
-_probe_dup = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', d)
+_probe_dup = re.findall(rb'/\*__ccCore0\*/[\s\S]*?/\*__ccCore1\*/', d)
 for _b in _probe_dup[1:]:
     d = d.replace(_b, b'', 1)
 
 checks = {
-    'routing (claude-* -> subscription)': b'baseURL:/^claude/i.test(' in d,
+    'routing (claude-* -> subscription)': _routing_agrees_with_connection(d),
     'captured names are escaped into patterns': _escaped_interpolations(src),
     'judge anchors both tool-call shapes':      _judge_both_shapes(src),
     'full bypass keeps peer-machine immunity': _bypass_no_immunity(d),
@@ -563,11 +777,17 @@ checks = {
     # Windows?.[` was satisfied by the old tail placement, where four earlier
     # returns shadowed the override, and by an unguarded config read that throws
     # before the config settles -- so it proved neither of the things that matter.
+    # The prelude must stand at the head of the context-window function ITSELF,
+    # which is proved by what FOLLOWS it: the first of the three `return 1e6`
+    # arms, testing the same identifier the lookup keys on. Without that tail the
+    # check accepted the prelude after any `{` -- including one below the arms it
+    # exists to outrank, which is the placement the step was written to fix.
     'per-model context window':           bool(re.search(
                                               rb'\{let __ccw;try\{__ccw=' + ID + rb'\(\)\.customModelContextWindows\}catch\{\}'
                                               rb'let __ccv=__ccw\?\.\[(' + ID + rb')\]\?\?__ccw\?\.\['
                                               + ID + rb'\(' + ID + rb'\(\1\)\)\];'
-                                              rb'if\(typeof __ccv==="number"&&__ccv>0\)return __ccv;', d))
+                                              rb'if\(typeof __ccv==="number"&&__ccv>0\)return __ccv;'
+                                              rb'if\(' + ID + rb'\(\1\)\)return 1e6;', d))
                                           and not re.search(rb'\?\?' + ID + rb'\(\)\.customModelContextWindows', d),
     # the expired-login bail must be reachable only for the subscription lane,
     # and the proxy lane that now survives it must null both auth headers or
@@ -581,8 +801,8 @@ checks = {
     # no path may still discard the caller's model: not coordinator mode, and
     # not the fork path (whose flag is whatever is_fork reports)
     'dispatch keeps its model':           not re.search(rb'Date\.now\(\),' + ID + rb'=' + ID + rb'\(\)\?void 0:', d)
-                                          and not re.search(rb'is_fork:(' + ID + rb'),.{0,4000}?\1\?void 0:', d, re.S)
-                                          and not re.search(rb'model:(' + ID + rb')\?void 0:.{0,40}?,override:\1\?', d, re.S),
+                                          and _fork_drops_are_gone(d),
+    'fork sweep stayed near its anchor':  _fork_sweep_stayed_near_its_anchor(d),
     # effort must be DECLARED (schema), CARRIED (call handler) and USED (spliced
     # into the definition the runtime reads) — declaring it alone would satisfy
     # a routing gate while the request still went at the vendor default
@@ -592,11 +812,15 @@ checks = {
     # string straight through, which is the defect: an unvalidated model-supplied
     # value reaching an internal effort layer. Now the only bare use is the
     # destructure, and the attach site must normalise the product's own aliases
-    # and drop anything outside its vocabulary.
+    # and drop anything outside its vocabulary. The trim/case-fold is pinned
+    # too: without it the check went green on a normaliser stricter than every
+    # other surface of the product, where a dropped effort is silent.
     'dispatch carries effort':            len(re.findall(rb'effort:__ccEffort', d)) == 1
                                           and bool(re.search(
-                                              rb'=\{agentDefinition:\(\(\(\)=>\{let __ccLvl=__ccEffort==="med"\?"medium":'
-                                              rb'__ccEffort==="ultracode"\?"xhigh":__ccEffort;return __ccLvl&&'
+                                              rb'=\{agentDefinition:\(\(\(\)=>\{let __ccRaw=typeof __ccEffort==="string"'
+                                              rb'\?__ccEffort\.trim\(\)\.toLowerCase\(\):__ccEffort;'
+                                              rb'let __ccLvl=__ccRaw==="med"\?"medium":'
+                                              rb'__ccRaw==="ultracode"\?"xhigh":__ccRaw;return __ccLvl&&'
                                               rb'\["low","medium","high","xhigh","max"\]\.includes\(__ccLvl\)\?'
                                               rb'\{\.\.\.(' + ID + rb'),effort:__ccLvl\}:\1\}\)\(\)\),promptMessages:', d))
                                           and bool(re.search(rb'dispatch_class:' + ID + rb'\(\)\.optional\(\)', d)),
@@ -704,7 +928,8 @@ checks = {
                                               rb'\|\|' + ID + rb'\.name==="Task"\)&&' + ID +
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{', d)),
-    'probe hooks both dispatch sites': _probe_hooks_both_sites(_probe_full),
+    'judge rides the tool, watcher the dispatcher': _judge_rides_the_tool(_probe_full),
+    'current turn is the judge\'s alone': _turn_belongs_to_the_judge(_probe_full),
     # One core per site, and the count is CHECKED. The previous form of this
     # entry was `bool(re.search(...))` under the name "defined once" -- a
     # presence test wearing a count's name, which would have gone green on any

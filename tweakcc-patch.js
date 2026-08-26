@@ -100,6 +100,7 @@ const step = (name, fn) => {
 //    Site: the final firstParty client-options object in getAnthropicClient.
 // --------------------------------------------------------------------------
 step('1 routing', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
   const rx = /(accessToken\?\?null:null,)(\.\.\.!1,\.\.\.)([A-Za-z_$][\w$]*)(,)/;
   const m = js.match(rx);
   if (!m) fail('routing site not found');
@@ -111,13 +112,58 @@ step('1 routing', () => {
   if (regions.length === 0) fail('could not capture the model identifier');
   const model = regions[regions.length - 1][1];
 
-  const inject = `baseURL:/^claude/i.test(${model})?"https://api.anthropic.com":void 0,`;
+  const SUBSCRIPTION_URL = 'https://api.anthropic.com';
+  const inject = `baseURL:/^claude/i.test(${model})?${JSON.stringify(SUBSCRIPTION_URL)}:void 0,`;
   js =
     js.slice(0, m.index) +
     m[1] + inject + m[2] + m[3] + m[4] +
     js.slice(m.index + m[0].length);
 
-  applied.push(`routing (model var '${model}')`);
+  // The destination is only half of the decision. The same options bag carries
+  //
+  //   fetchOptions: Na({forAnthropicAPI:!0, hasBodyIdleWatchdog:…, url: FOo(k,model,T)})
+  //
+  // and `Na` reads that `url` to choose between the configured proxy and a
+  // direct connection:
+  //
+  //   let o=_();                                   // HTTPS_PROXY / HTTP_PROXY
+  //   if(o){ if(e.url && m(e.url)) return {...r,...h()};   // NO_PROXY match
+  //          return {...r, proxy:…, ...h()} }
+  //
+  // `FOo("firstParty", …)` is `process.env.ANTHROPIC_BASE_URL || <default>`, so
+  // with a proxy configured and the ANTHROPIC_BASE_URL host in NO_PROXY -- the
+  // ordinary shape of a local gateway on a corporate network -- the request is
+  // marked "no proxy needed" for the LOCAL host and then sent to
+  // api.anthropic.com by the baseURL above. The connection options describe one
+  // destination and the request goes to another.
+  //
+  // The fix is at the point the url is COMPUTED, not at the consumer: the model
+  // variable is already the second argument there on every build in range
+  // (2.1.233 `QoS(b,r,v)`, 240 `PQS(b,r,v)`, 242 `KMo(b,n,S)`, 246 `FOo(k,n,T)`),
+  // so the same condition can be applied without introducing a name that might
+  // not be in scope. Both sites now read one constant, so they cannot drift to
+  // different destinations.
+  //
+  // Latent on a machine with no proxy variables set -- `Na` then returns the
+  // same options for any url -- and wrong in the mechanism regardless.
+  const foRx = new RegExp(
+    `(fetchOptions:${ID}\\(\\{forAnthropicAPI:!0,hasBodyIdleWatchdog:${ID}\\(${ID}\\),url:)` +
+      `(${ID}\\(${ID},${rxEsc(model)},${ID}\\)\\}\\))`,
+  );
+  const foAll = js.match(new RegExp(foRx.source, 'g'));
+  if (!foAll) fail('anthropic-API fetch-options site not found');
+  if (foAll.length !== 1) {
+    fail(`anthropic-API fetch-options site is not unique (${foAll.length} matches)`);
+  }
+  js = js.replace(
+    foRx,
+    `$1/^claude/i.test(${repEsc(model)})?${JSON.stringify(SUBSCRIPTION_URL)}:$2`,
+  );
+
+  applied.push(
+    `routing (model var '${model}'), and the connection options are computed ` +
+      `for the same destination`,
+  );
 });
 
 // --------------------------------------------------------------------------
@@ -769,16 +815,44 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   // of existence, or grew a crop of unrelated ones, fails loudly rather than
   // being silently half-patched. The lookbehind keeps `<fork>` from matching
   // the tail of a longer minified name.
+  //
+  // A CLASS SWEEP NEEDS A BOUNDARY, and the module was not one. Before 2.1.242
+  // the bundle is a single module, so `moduleSliceAround` returns the whole
+  // image and the sweep ran over ~27 MB looking for a one- or two-letter
+  // minified name. On 2.1.233 the fork flag minifies to `L`, and 4.97 MB away
+  // from the anchor sits
+  //
+  //   M=await P(k?{kind:"skip"}:{kind:"default"},O||L?void 0:process.env.ANTHROPIC_VERTEX_PROJECT_ID)
+  //
+  // where `L` is GOOGLE_APPLICATION_CREDENTIALS -- a different local that
+  // happens to share the letter. The sweep took `L?void 0:` out of it, and the
+  // count bound (2..6) accepted 3, so the build went out 79/79 green with
+  // Vertex project resolution quietly altered: a set GCLOUD_PROJECT became the
+  // project id, and a credentials-only setup started passing
+  // ANTHROPIC_VERTEX_PROJECT_ID where the product passes nothing.
+  //
+  // So the boundary is now the ANCHOR's neighbourhood, intersected with the
+  // module. Measured distance from `is_fork:` to the real drop sites:
+  // 2.1.233 -422 / +3180, 2.1.240 -460 / +3576, 2.1.242 -1053..-478,
+  // 2.1.246 -1123..-477. A radius of 20000 covers every one with room to
+  // spare and is 250x smaller than the miss it excludes. A build that moves a
+  // drop site outside this radius fails the count bound loudly, which is the
+  // outcome to want: this sweep must never again be free to roam.
   const droppedRx = new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?void 0:(${ID})`, 'g');
-  const [mStart, mEnd] = moduleSliceAround(js, js.search(new RegExp(`is_fork:${rxEsc(fork)},`)));
-  let body = js.slice(mStart, mEnd);
+  const anchorIdx = js.search(new RegExp(`is_fork:${rxEsc(fork)},`));
+  if (anchorIdx < 0) fail('fork telemetry anchor vanished between match and sweep');
+  const [mStart, mEnd] = moduleSliceAround(js, anchorIdx);
+  const SWEEP_RADIUS = 20000;
+  const lo = Math.max(mStart, anchorIdx - SWEEP_RADIUS);
+  const hi = Math.min(mEnd, anchorIdx + SWEEP_RADIUS);
+  let body = js.slice(lo, hi);
   const droppedHits = body.match(droppedRx) ?? [];
   if (droppedHits.length < 2 || droppedHits.length > 6)
     fail(`fork value-drop sites: expected 2..6, found ${droppedHits.length}`);
   body = body.replace(droppedRx, '$1');
   if (new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?void 0:`).test(body))
     fail('fork value-drop sites survived the sweep');
-  js = js.slice(0, mStart) + body + js.slice(mEnd);
+  js = js.slice(0, lo) + body + js.slice(hi);
 
   // (c) schema: add the two fields next to the existing `model`
   const strFnMatch = js.match(
@@ -830,6 +904,21 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   // is dropped, which lands the dispatch on the definition's own effort exactly
   // as if none had been passed.
   //
+  // The comparison is done the way the product does it, not the way this list
+  // happens to be spelled. Its own string parser is
+  //   Wt(e){let t=e.trim().toLowerCase(),n=ze[t]??t;return x(n)?n:void 0}
+  // -- trim and case-fold FIRST, alias second, membership last. An exact-match
+  // test against the raw value was stricter than every other surface of the
+  // product: `"Medium"`, `"HIGH"` or a stray leading space were dropped here
+  // and accepted everywhere else, and a dropped effort is silent -- the
+  // dispatch simply lands on the definition's default. `ultracode` is folded
+  // too, from the product's second alias table; `Wt` itself does not know it,
+  // but the vocabulary is one vocabulary.
+  //
+  // Numeric efforts belong to the OTHER parser (`ae`, which parseInts and
+  // range-checks). This field is declared a string, so a number is outside its
+  // domain rather than a case it drops -- not an omission.
+  //
   // The field TYPE is deliberately left a string. Swapping it for an enum
   // schema would reject a bad value more loudly, but a wrong guess about which
   // local is the enum builder hard-fails the whole Agent tool, and this list is
@@ -838,7 +927,8 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   const EFFORTS = '["low","medium","high","xhigh","max"]';
   js = js.replace(
     defRx,
-    `$1((()=>{let __ccLvl=__ccEffort==="med"?"medium":__ccEffort==="ultracode"?"xhigh":__ccEffort;` +
+    `$1((()=>{let __ccRaw=typeof __ccEffort==="string"?__ccEffort.trim().toLowerCase():__ccEffort;` +
+      `let __ccLvl=__ccRaw==="med"?"medium":__ccRaw==="ultracode"?"xhigh":__ccRaw;` +
       `return __ccLvl&&${EFFORTS}.includes(__ccLvl)?{...$2,effort:__ccLvl}:$2})())$3`,
   );
 
@@ -1421,9 +1511,22 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   // answer this leg exists to prevent.
   //
   // So the leg now splits on the same conditions the reader uses, expressed with
-  // values in scope at this site: the session flag, the main-loop lane (the
-  // product spells the same test `l.startsWith("repl_main_thread")` elsewhere),
-  // and the marker's own truthiness. Where they hold, the stock yield and break
+  // values in scope at this site: the session flag, the main-loop lane, and the
+  // marker's own truthiness.
+  //
+  // The lane test must be the reader's WHOLE test, not the half of it that is
+  // easy to spell. `GJn` asks `wl(n)==="main"`, and that classifier is
+  //
+  //   function kD(e){if(e===void 0)return;
+  //     if(e.startsWith("repl_main_thread")||e==="sdk")return"main";
+  //     if(e.startsWith("agent:")||e==="hook_agent")return"subagent";
+  //     return"auxiliary"}
+  //
+  // -- so `querySource:"sdk"` is a main-loop lane too, and an earlier version of
+  // this guard tested only the prefix. The subset is invisible in every check
+  // that pins the guard's own text: an SDK session that truncated took the throw
+  // while upstream's recovery stood ready for it. Both arms of the classifier
+  // are spelled out here. Where they hold, the stock yield and break
   // run untouched and the recovery gets its turn; everywhere else the throw
   // stands. If any of them is missing from a build the expression is falsy and
   // the behaviour is exactly what it was before this change.
@@ -1471,7 +1574,8 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   } else {
     const recoverable =
       `(${opts}.isNonInteractiveSession&&` +
-      `${opts}.querySource?.startsWith("repl_main_thread")&&(${truncExpr}))`;
+      `(${opts}.querySource?.startsWith("repl_main_thread")||${opts}.querySource==="sdk")&&` +
+      `(${truncExpr}))`;
     js = js.replace(
       rxFinal,
       `,${repEsc(recoverable)}?yield ${arFn}({content:${repEsc(content)},` +
@@ -1598,54 +1702,82 @@ step('22 judge consulted before a subagent dispatch', () => {
   const m = js.match(rx);
   if (!m) fail('tool dispatch call site not found');
   const TOOL = m[2] ?? m[3];
-  const SLOT = { $1: m[1], $2: TOOL, $3: m[4], $4: m[5], $5: m[6], $6: m[7] };
+  // Only what the watcher's body actually reads is bound. The locator still
+  // captures the result variable and the userModified holder -- they pin the
+  // call's SHAPE, which is what keeps this pattern from matching some other
+  // call -- but a captured group is not automatically a slot.
+  const SLOT = { $2: TOOL, $3: m[4], $4: m[5], $5: m[6] };
 
-  // THE SECOND DISPATCH SITE. The one above is the main tool dispatcher; it is
-  // not the only place a tool gets invoked. The REPL tool runs model-written
-  // JavaScript in a vm sandbox and hands that code a callable wrapper for every
-  // other tool:
+  // THE SECOND SITE IS THE TOOL ITSELF, NOT ANOTHER DISPATCHER.
   //
-  //   POt(e.filter((g)=>!Xn(g,ya)), …)   // ya = "REPL", Xn(e,t) = e.name===t ||
-  //                                      //     (e.aliases?.includes(t) ?? !1)
+  // An earlier form of this step hooked a second DISPATCHER -- the executor
+  // the REPL sandbox hands to model-written JavaScript -- on the reading that
+  // the sandbox's tool map excludes only REPL itself. Measured afterwards on
+  // pristine 233/240/242/246, that reading was wrong: the array reaching the
+  // sandbox is built by a filter one call earlier, which drops the dispatch
+  // tool BY NAME.
   //
-  // -- the ONLY tool excluded from that map is REPL itself, so the dispatch
-  // tool is in it, and `zss` (the wrapper factory) runs the whole permission
-  // chain and then calls the tool directly. Measured on pristine 2.1.233, 240,
-  // 242 and 246: `tengu_repl_inner_executing` and `[Stall] tool_dispatch_start`
-  // occur exactly once each, in the SAME bundle module (361 on 2.1.246), so
-  // every name this step resolves is in scope at both.
+  //   pis(e,t){ … let o=e.filter((s)=>!Xn(s,fn)&&!Xn(s,ya)&&!UI(s)); … }
+  //   fn = "Agent"  (module-local import, resolved through its exporter)
+  //   ya = "REPL"
+  //   R=pis(t.options.tools,Fe(t)) -> aVe(R,…)/our(v,R,…) -> POt(R.filter(…))
   //
-  // Consequence before this hook existed: a subagent dispatched from inside a
-  // REPL program reached neither the judge nor the fleet counter. In a
-  // mechanism that is meant to fail CLOSED, that is the worst possible shape --
-  // not a refusal, a silent pass. Hooking one site and calling the mechanism
-  // enforced was the claim; hooking both is what makes it true.
+  // So a dispatch cannot occur inside a REPL program at all, and a hook there
+  // guarded nothing while adding a probe call to every tool call a sandboxed
+  // program makes.
   //
-  // No dispatch is judged twice. The REPL tool itself goes through the main
-  // site under the name "REPL", where the judge's own `name==="Agent"||
-  // name==="Task"` condition is false; the inner Agent call is seen only here.
-  // An ordinary dispatch never passes through the sandbox at all.
+  // The lesson is not "there were two dispatchers, now there are three": it is
+  // that the NUMBER of dispatchers is not a constant, so anchoring a
+  // fail-closed mechanism to a census of them is unsound by construction.
+  // `claude mcp serve` is a third executor, `gE()` puts the dispatch tool in
+  // its list (only zg/Sh/rv/"StructuredOutput" are excluded, and the http-only
+  // allowlist is not applied to the stdio transport the CLI hard-codes), and it
+  // builds `agentContext:{agentType:"main"}` -- i.e. an unhooked path on which
+  // a dispatch really can happen.
   //
-  // The shape differs from the main site in two ways that the locator must
-  // carry: the REPL path adds `fileReadingLimits`/`globLimits` to the context
-  // literal (which is also what keeps the two patterns from matching each
-  // other's site), and it passes two trailing arguments instead of three.
-  const rxRepl = new RegExp(
-    `(?:let )?(${ID})=await (?:(${ID})\\.call|${ID}\\((${ID})\\)\\.execute)` +
-      `\\((${ID}),\\{\\.\\.\\.(${ID}),toolUseId:(${ID}),` +
-      `userModified:(${ID})\\.userModified\\?\\?!1,` +
-      `fileReadingLimits:\\{maxTokens:1\\/0,maxSizeBytes:268435456\\},` +
-      `globLimits:\\{maxResults:25000\\}\\},(${ID}),(${ID})\\)`,
+  // Every one of them ends in the SAME place: the dispatch tool's own `call`.
+  // The tool declares no `executor`, so the 2.1.239 adapter
+  // (`e.executor??{execute:(…)=>e.call(…)}`) falls through to it as well. The
+  // product refuses a launch from exactly here too -- the nesting-depth cap
+  // throws out of this method -- so a throw at this point is the product's own
+  // idiom for "this dispatch does not happen", not an idiom we invented.
+  //
+  // The head is unique: exactly ONE occurrence on each of 2.1.233, 240, 242
+  // and 246.
+  // The whole signature is taken, up to and including the opening brace: the
+  // block is a sequence of statements and has to land INSIDE the body, and the
+  // parameter pattern has to move in with it. `[^{}]*` in the pattern is not
+  // decoration -- a nested destructuring or a default value would need
+  // different handling, and this refuses instead of mangling one.
+  const rxTool = new RegExp(
+    `async call\\((\\{prompt:${ID},subagent_type:${ID},description:${ID},` +
+      `model:${ID},[^{}]*\\}),(${ID})((?:,${ID})*)\\)\\{`,
   );
-  const mRepl = js.match(rxRepl);
-  if (!mRepl) fail('REPL inner tool dispatch call site not found');
-  const SLOT_REPL = {
-    $1: mRepl[1],
-    $2: mRepl[2] ?? mRepl[3],
-    $3: mRepl[4],
-    $4: mRepl[5],
-    $5: mRepl[6],
-    $6: mRepl[7],
+  const mTool = js.match(rxTool);
+  if (!mTool) fail('dispatch tool call implementation not found');
+  const allTool = js.match(new RegExp(rxTool.source, 'g'));
+  if (allTool.length !== 1) {
+    fail(`dispatch tool call implementation is not unique (${allTool.length} matches)`);
+  }
+  // The parameter pattern moves into the body verbatim, so the destructuring
+  // that the original signature performed still happens, in the same order and
+  // with the same failure on a null input; the judge runs after it, on the
+  // whole object under a name of our own.
+  const TOOL_IN = '__ccIn';
+  const SLOT_TOOL = {
+    // `this` is the tool. Every route into this method binds it -- `e.call(…)`
+    // at the main dispatcher, `s.call(…)` in serve mode, and the adapter's
+    // arrow, which calls `e.call(…)` too. A future build that detaches the
+    // method would make `$2.name` throw, i.e. cancel the dispatch: the right
+    // polarity for a mechanism that fails closed, and loud instead of silent.
+    $2: 'this',
+    $3: TOOL_IN,
+    $4: mTool[2],
+    // The dispatcher puts `toolUseId` in the context it builds; serve mode
+    // does not, and an undefined key degrades the record name and the turn
+    // stash without stopping anything -- the judge's own material is the brief
+    // and the model, both of which are in the input.
+    $5: `${mTool[2]}.toolUseId`,
   };
   // The judge rides the client's OWN single-shot query
   // (queryModelWithoutStreaming), not its own HTTP call: this function goes
@@ -1704,7 +1836,7 @@ step('22 judge consulted before a subagent dispatch', () => {
   const TTL = repEsc(tm[1]);
 
   const core =
-    '/*__ccProbe0*/globalThis.__ccProbe??=async function(__o){' +
+    '/*__ccCore0*/globalThis.__ccProbe??=async function(__o){' +
     // The filter runs BEFORE any I/O. For a probe called on every tool call,
     // a "cheap count after reading settings" bankrupts it twice: walking up
     // the tree costs up to 96 filesystem accesses per call, and the refusal is
@@ -1830,7 +1962,17 @@ step('22 judge consulted before a subagent dispatch', () => {
       'catch(__we){try{console.error(__o.tag+" journal write failed: "+' +
         '(__we?.message??__we)+" | "+__r)}catch{}}};' +
     'try{' +
-      'let __t=globalThis.__ccJudgeTurn?.get(__o.key)||[];globalThis.__ccJudgeTurn?.delete(__o.key);' +
+      // The turn snapshot is the JUDGE's material and the judge's alone, so the
+      // core only asks its caller for it. It used to read and DELETE the stash
+      // itself, which made the map's single-consumer contract depend on which
+      // consumer happened to run the core first -- and the two consumers do not
+      // even sit at the same site any more. The watcher, which has no use for a
+      // turn, would then have destroyed it before the judge was reached: not a
+      // crash and not a refusal, just a judge suddenly reasoning without the
+      // thinking that motivated the dispatch, on the first call of a session
+      // and on every watcher window afterwards. Ownership is now structural
+      // rather than positional.
+      'let __t=__o.turn?__o.turn():[];' +
       // Provenance, not just role. Claude Code files tool results, injected
       // reminders, task notifications and peer messages under the SAME "user"
       // role as something the human typed, so a judge shown bare role labels
@@ -2440,7 +2582,15 @@ step('22 judge consulted before a subagent dispatch', () => {
       // pass: what arrives here is also a crash before the ladder (config,
       // body, trimming), where there is and can be no verdict.
       'if(__jarm)await __o.onFail(__rs);' +
-      'if(__o.dbg)console.error(__o.tag+" skipped: "+(__e?.message??__e));}};';
+      'if(__o.dbg)console.error(__o.tag+" skipped: "+(__e?.message??__e));}};' +
+    // The core is emitted at BOTH sites and is byte-identical at both -- it
+    // has to be, because neither site is guaranteed to run before the other:
+    // `claude mcp serve` never reaches the main dispatcher, and the main loop
+    // reaches the tool only when a dispatch actually happens. `??=` makes the
+    // second copy inert at runtime; these markers let the verify stage collapse
+    // it in the TEXT, so every check that counts occurrences keeps counting one
+    // core and means what it meant when it was calibrated.
+    '/*__ccCore1*/';
 
   // The judge is the core's first consumer. What is judge-specific lives HERE
   // and only here: when to call, what to show, which vocabulary to judge by,
@@ -2452,10 +2602,21 @@ step('22 judge consulted before a subagent dispatch', () => {
   // The judge's reaction is a throw. It is tied to no minified name: a tool
   // that throws an exception already comes back to the model as an error.
   const judgeCall =
+    // The judge deliberately runs at the TOP of the method, ahead of the tool's
+    // own guards (nesting depth, teammate and agent-type checks, budgets) --
+    // the same position it held when it sat in front of the dispatcher's call.
+    // Nothing above it in the body does anything but destructure, so a
+    // cancellation leaves nothing half-done.
     'if(process.env.CLAUDE_JUDGE&&($2.name==="Agent"||$2.name==="Task")' +
       '&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Judge]",dirName:"judge",arm:!0,' +
+      // Read AND remove, in one place: step 21 fills this map for every tool
+      // call, and its comment states the contract -- an entry goes away when
+      // the judge reads it. Taken above the gate so a call the gate filters out
+      // does not leave an entry behind forever.
+      'turn:()=>{let __x=globalThis.__ccJudgeTurn?.get($5);' +
+        'globalThis.__ccJudgeTurn?.delete($5);return __x||[]},' +
       // The verdict vocabulary is a parameter, not a property of the core: the
       // watcher has its own.
       'rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",' +
@@ -2557,57 +2718,80 @@ step('22 judge consulted before a subagent dispatch', () => {
       // The watcher is fail-open: no verdict, broken settings, a channel
       // failure — all of it stays in the journal and stops NOTHING.
       'onNoVerdict:()=>{},onBroken:()=>{},onFail:()=>{}' +
-    '});/*__ccProbe1*/';
+    '});';
 
   // Injection by OFFSET, not via String.replace: group numbers diverge between
   // the two call shapes, and the replacement string additionally reads `$` as
   // a reference. The slice at m.index interprets nothing, and the call itself
   // goes back in place verbatim (m[0]) — we have no business rewriting it.
-  const resolveFor = (slots, where) =>
-    (core + judgeCall + watchCall).replace(/\$([1-9])/g, (t, digit) => {
+  // A slot the body never mentions is a slot nobody maintains: it survives a
+  // rename of the thing it pointed at without a sound. So the resolution is
+  // checked in BOTH directions -- every `$n` the text uses must be bound, and
+  // every slot the map binds must be used.
+  const resolveFor = (text, slots, where) => {
+    const used = new Set();
+    const out = text.replace(/\$([1-9])/g, (t, digit) => {
       const v = slots['$' + digit];
-      if (!v) fail(`judge body references ${t}, which the ${where} call shape does not bind`);
+      if (!v) fail(`${where} body references ${t}, which that site does not bind`);
+      used.add('$' + digit);
       return v;
     });
-
-  // The block is a sequence of STATEMENTS, so the byte it is spliced in front
-  // of has to begin one. That is not the same question at the two sites: the
-  // main site's match starts right after a `try{` (the result variable was
-  // declared earlier), while the REPL one starts at `let X=await …`, and
-  // dropping statements between `let` and its binding would produce a build
-  // that fails to parse. The locator therefore swallows the `let ` and the
-  // boundary is CHECKED rather than assumed -- a future build that moves
-  // either call into an expression position must stop here loudly instead of
-  // emitting something that cannot parse.
-  const sites = [
-    { name: 'main dispatch', mm: m, slots: SLOT },
-    { name: 'REPL inner dispatch', mm: mRepl, slots: SLOT_REPL },
-  ];
-  for (const site of sites) {
-    const prev = js.slice(0, site.mm.index).trimEnd().slice(-1);
-    if (!(prev === ';' || prev === '{' || prev === '}')) {
-      fail(
-        `${site.name} call site is not in statement position (preceded by ` +
-          `'${prev}') -- refusing to splice statements there`,
-      );
+    for (const k of Object.keys(slots)) {
+      if (!used.has(k)) fail(`${where} binds ${k}, which its body never uses`);
     }
-    site.block = resolveFor(site.slots, site.name);
+    return out;
+  };
+
+  // Two homes, one core.
+  //
+  // The WATCHER belongs to the main dispatcher: it is a heartbeat over every
+  // tool call the main loop makes, and the dispatch count it keeps is a
+  // by-product taken along the way. Moving it onto the dispatch tool would
+  // leave it blind on every session that dispatches nothing -- which is
+  // precisely the state it exists to notice.
+  //
+  // The JUDGE belongs to the tool: it has exactly one subject, and the tool is
+  // the one place every dispatcher must pass through. That is what makes the
+  // count of dispatchers stop mattering.
+  const watchBlock =
+    '/*__ccProbe0*/' + resolveFor(core + watchCall, SLOT, 'watcher') + '/*__ccProbe1*/';
+  const judgeBlock =
+    '/*__ccProbe0*/' + resolveFor(core + judgeCall, SLOT_TOOL, 'judge') + '/*__ccProbe1*/';
+
+  // The watcher block is a sequence of STATEMENTS, so the byte it is spliced in
+  // front of has to begin one. The main site's match starts right after a
+  // `try{` (the result variable was declared earlier), and a build that moved
+  // the call into an expression position must stop here loudly instead of
+  // emitting something that cannot parse.
+  const prev = js.slice(0, m.index).trimEnd().slice(-1);
+  if (!(prev === ';' || prev === '{' || prev === '}')) {
+    fail(
+      `main dispatch call site is not in statement position (preceded by ` +
+        `'${prev}') -- refusing to splice statements there`,
+    );
   }
 
   // Later offset first: splicing the earlier one would move every index after
-  // it, and the second site's match index was taken from the same string.
-  for (const site of [...sites].sort((a, b) => b.mm.index - a.mm.index)) {
-    js =
-      js.slice(0, site.mm.index) +
-      site.block +
-      site.mm[0] +
-      js.slice(site.mm.index + site.mm[0].length);
+  // it, and both match indices were taken from the same string.
+  const edits = [
+    { at: m.index, len: 0, text: watchBlock },
+    {
+      at: mTool.index,
+      len: mTool[0].length,
+      text:
+        `async call(${TOOL_IN},${mTool[2]}${mTool[3]}){` +
+        `let ${mTool[1]}=${TOOL_IN};` +
+        judgeBlock,
+    },
+  ];
+  for (const e of [...edits].sort((x, y) => y.at - x.at)) {
+    js = js.slice(0, e.at) + e.text + js.slice(e.at + e.len);
   }
 
   applied.push(
-    `judge: consulted before dispatch at ${sites.length} sites — main (tool ` +
-      `'${TOOL}', input '${m[4]}', context '${m[5]}') and the REPL sandbox's ` +
-      `inner executor (input '${mRepl[4]}', context '${mRepl[5]}')`,
+    `judge: consulted inside the dispatch tool's own call (context ` +
+      `'${mTool[2]}', input pattern re-bound as '${TOOL_IN}'); watcher on the ` +
+      `main dispatcher (tool '${TOOL}', input '${m[4]}', context '${m[5]}')`,
   );
 });
 
