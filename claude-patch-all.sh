@@ -292,6 +292,21 @@ PY
     if [[ $TWEAKCC_RC -ne 0 ]]; then
       echo "NOTE: tweakcc --apply reported a problem (no config yet?); continuing with ours only."
     elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
+         && ! grep -qE '^    [✓✗] ' "$TWEAKCC_OUT"; then
+      # The failure detector below is a one-sided text anchor on another
+      # program's human-facing output: a glyph, an indent, an English phrase.
+      # If any of those drift, `grep -q '✗'` finds nothing and the build is
+      # declared good -- the very "clean skip renders the stock interface and
+      # passes" hole the interface gate was added to close, reopened from the
+      # other end. So require the positive counterpart first: if we cannot see a
+      # single row of EITHER kind, we did not read the output at all, and the
+      # absence of a ✗ proves nothing.
+      echo "FATAL: could not read tweakcc's apply output -- no result rows found." >&2
+      echo "  Either no patches are configured, or its output format changed and" >&2
+      echo "  the failure check below is now blind. Inspect: $TWEAKCC_OUT" >&2
+      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
+      exit 1
+    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
          && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
       echo "FATAL: a configured tweakcc patch did not apply:" >&2
       grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
@@ -745,6 +760,73 @@ def _turn_belongs_to_the_judge(d):
     return b'key:' + key.group(1) + b',' in blk
 
 
+def _agent_model_schema_relaxed(d):
+    """The agent tool's model field takes any string -- asserted so the check CAN fail.
+
+    The previous form of this gate asserted the absence of the zod-v3 shape,
+    `.enum(["sonnet","opus","haiku","fable"])`. Measured on every payload this
+    pipeline supports -- 2.1.233, 240, 242, 246, 247 -- that shape occurs ZERO
+    times, in the PRISTINE image as well as the patched one. The check therefore
+    returned the same answer for an unpatched binary and a correct build: no
+    discriminating power on any supported version, while the row it printed
+    claimed the schema had been relaxed. A check that cannot fail is worse than
+    no check, because it is counted.
+
+    Since 2.1.224 the schema is emitted in the zod-v4 standalone-helper form,
+    `model:<enum>(["sonnet","opus","haiku","fable"])` (exactly one occurrence on
+    each supported payload), and step 3 rewrites it to `model:<str>()`, borrowing
+    the builder from the sibling `subagent_type:<str>()` just above.
+
+    Both halves are asserted, because either alone is passable:
+      * the stock enum is gone -- true on a patched image, false on a pristine one;
+      * the relaxed field uses the SAME builder as subagent_type -- false on a
+        pristine image, and this is the half that catches a sibling capture which
+        grabbed something other than the string builder. With only the negative
+        half, that mis-capture patched and passed.
+    """
+    if b'.enum(["sonnet","opus","haiku","fable"])' in d:
+        return False
+    if re.search(rb'model:' + ID + rb'\(\["sonnet","opus","haiku","fable"\]\)', d):
+        return False
+    for mm in re.finditer(rb'subagent_type:(' + ID + rb')\(\)', d):
+        if re.search(rb'model:' + re.escape(mm.group(1)) + rb'\(\)', d[mm.end():mm.end() + 800]):
+            return True
+    return False
+
+def _every_launch_carries_effort(d):
+    """Effort must reach the agent definition at EVERY launch, not only at ours.
+
+    Step 12 attaches effort at the dispatch tool's launch, and it does so by
+    replacing the FIRST match. There are two launch sites on every version in
+    range (2.1.233, 240, 242, 246, 247): the dispatch tool's, and the resume of a
+    parked agent. Leaving the second alone is correct -- upstream attaches effort
+    there itself,
+    `<opt>?.effort!==void 0?{...<def>,effort:<opt>.effort}:<def>` -- and patching
+    it too would make a second source of truth for the same field.
+
+    But that correctness rests on upstream behaviour that nothing checked. Drop
+    their attachment in a later version and effort silently vanishes on resume,
+    with every gate still green and the feature half working. This is the same
+    class as anchoring a mechanism to a dispatcher COUNT: a thing upstream is
+    free to change.
+
+    So the guarantee is asserted rather than the authorship: each launch site
+    carries effort by one route or the other. Our injection rewrites the
+    definition expression in place, so a patched site no longer matches the plain
+    identifier form; whatever still matches it must be covered by upstream's own.
+    """
+    if len(re.findall(rb'=\{agentDefinition:\(\(\(\)=>\{', d)) != 1:
+        return False
+    plain = list(re.finditer(rb'=\{agentDefinition:(' + ID + rb'),promptMessages:', d))
+    if not plain:
+        return False
+    for m in plain:
+        window = d[max(0, m.start() - 3000):m.start()]
+        if not re.search(rb'(' + ID + rb')\?\.effort!==void 0\?\{\.\.\.(' + ID
+                         + rb'),effort:\1\.effort\}:\2', window):
+            return False
+    return True
+
 def _record_name_is_unique(d):
     """One consultation, one record file -- on every route, not only the ones with an id.
 
@@ -785,7 +867,8 @@ checks = {
     'captured names are escaped into patterns': _escaped_interpolations(src),
     'patch source keeps both dispatcher shapes': _judge_both_shapes(src),
     'full bypass keeps peer-machine immunity': _bypass_no_immunity(d),
-    'agent model schema relaxed':         b'.enum(["sonnet","opus","haiku","fable"])' not in d,
+    'agent model schema relaxed':         _agent_model_schema_relaxed(d),
+    'every launch carries effort':        _every_launch_carries_effort(d),
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
     # Two-sided: the stock branch must be gone AND the widened one must still
     # test the "inherit" sentinel. The negative alone passed a build where the
@@ -1633,8 +1716,25 @@ txt = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", txt)
 flat = re.sub(r"\s+", "", txt)
 
 # A connection failure is the EXPECTED outcome here -- the model id is routed to
-# a dead port on purpose -- so those two are not interface faults.
-BENIGN = ("Connectionrefused", "Connectionerror", "APIError", "fetchfailed")
+# a dead port on purpose -- so those are not interface faults.
+#
+# Entries must be spelled the way the ONLY reader below can produce them: that
+# loop matches `[A-Z][A-Za-z]*Error`, so a capital-E `Error` suffix is the whole
+# vocabulary. The earlier list held "Connectionrefused", "Connectionerror" and
+# "fetchfailed" -- flattened PHRASES, none of which that pattern can ever emit,
+# so three of its four entries were dead and only APIError did any work. The
+# cost was not a silent pass but a false FATAL waiting to happen: let the
+# product print a camel-case `ConnectionError` for the dead port and a healthy
+# build is refused.
+BENIGN = (
+    "APIError",
+    "APIConnectionError",
+    "APIConnectionTimeoutError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "FetchError",
+    "NetworkError",
+)
 # Order matters. The parenthesised exit line is the only place the name is
 # delimited; anywhere else the flattening glues it to whatever the screen drew
 # just before it ("...for shortcuts ERROR" + "l0"), so the on-screen ERROR
@@ -1705,7 +1805,20 @@ for _ in $(seq 1 "$GATE_BUDGET"); do
       sleep 1
       GATE_STATE="$(gate_state)"
       [[ "$GATE_STATE" == ERROR* ]] && break
-      kill -0 $GATE_PID 2>/dev/null || break
+      # The same death the outer loop handles, and it must be handled the same
+      # way HERE -- this is the branch the follow-up loop exists for. Breaking
+      # without reading the status left GATE_EXITED at 0, and the block below
+      # then forced GATE_RC=0: a build that drew its message and died one second
+      # later, with a crash whose text matches none of gate_state's patterns
+      # (a stack overflow, an engine-level fatal, a bare non-zero exit), was
+      # reported as a clean interface.
+      if ! kill -0 $GATE_PID 2>/dev/null; then
+        GATE_EXITED=1
+        wait $GATE_PID 2>/dev/null
+        GATE_RC=$?
+        GATE_STATE="$(gate_state)"
+        break
+      fi
     done
     break
   fi
