@@ -39,6 +39,25 @@ const failures = [];
 // escaped — they are meant to stay references.
 const rxEsc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const repEsc = s => String(s).replace(/\$/g, '$$$$');
+// A name that is spliced into text by OFFSET must go in exactly as the
+// image spells it. repEsc is for the replacement side of String.replace,
+// where `$` opens a group reference; on a plain splice it doubles the
+// dollar and produces a DIFFERENT identifier. That is not hypothetical: on
+// 2.1.242/243/245 the single-shot query engine is called `$A`, the probe
+// asked for `$$A`, and since `typeof` does not throw on an unbound name the
+// judge quietly fell back to raw HTTP on a third of the supported range.
+// Every shape check passed -- `$$A` looks like a perfectly good name.
+//
+// The one thing a raw name must not contain is `$` followed by a digit:
+// the block's slots are written `$1`..`$9` and are expanded in this same
+// text, so such a name would be eaten by its own slot syntax. It stops the
+// build instead.
+const siteName = (name, what) => {
+  if (/\$[1-9]/.test(name)) {
+    fail(`the ${what} name '${name}' collides with the block's slot syntax ($1..$9)`);
+  }
+  return String(name);
+};
 
 // From Claude Code 2.1.242 the bundle is not one module but an entry plus
 // ~1400 code-split chunks, handed to us joined with
@@ -170,6 +189,13 @@ step('1 routing', () => {
 // 2. DISCOVERY — drop the ANTHROPIC_AUTH_TOKEN requirement in
 //    fetchGatewayModelOptions so /model lists the proxy's models without a
 //    token (an open /v1/models needs none). `!<tok>` -> `!1` = never bail early.
+//
+//    This does NOT switch discovery on, and the difference is worth stating:
+//    the enclosing function is gated ABOVE by a predicate that requires
+//    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, firstParty auth and
+//    ANTHROPIC_BASE_URL. With that opt-in absent, /model lists no gateway
+//    models at all -- with or without this step. What the step removes is the
+//    token requirement INSIDE a discovery that is already running.
 // --------------------------------------------------------------------------
 step('2 discovery', () => {
   const rx = /(let ([A-Za-z_$][\w$]*)=[\w$]*\.ANTHROPIC_AUTH_TOKEN,([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\(\);if\(!)\2(&&!\3\)return)/;
@@ -343,6 +369,13 @@ step('6 input chevron colour', () => {
 //      b) the extract-mode predicate ANDs that flag with `tengu_slate_thimble`
 //    Past-session search needs no patch — this build already ships it
 //    (`tengu_session_search_toggled` telemetry is present).
+//
+//    What is forced here are the SERVER-side flags. The user-side master
+//    switch is untouched and still decides: the entry point returns early on
+//    settings.autoMemoryEnabled (default on, cleared by
+//    CLAUDE_CODE_DISABLE_AUTO_MEMORY or CLAUDE_CODE_SIMPLE) and on a remote
+//    session. With memory switched off in settings this step changes nothing,
+//    which is the intended division rather than a gap.
 // --------------------------------------------------------------------------
 step('7 session memory', () => {
   const ID = '[A-Za-z_$][\\w$]*';
@@ -1113,10 +1146,23 @@ step('14 environment overrides a resumed session mode', () => {
   // The same env-truthy helper as #13, re-derived from the gate rather than
   // handed over between steps: this must not depend on step order, and the
   // prefix it is captured from is untouched by #13's own edit.
-  const helperMatch = js.match(
+  //
+  // Captured from the module the call is injected INTO, not from the whole
+  // image. A minified name is scoped to its chunk, so a helper found first
+  // somewhere else would be spliced in here as letters that mean something
+  // different -- or nothing -- at this site. Today all three sites (the
+  // coordinator export, this matcher and the helper) share one module on every
+  // version in range, and on 2.1.233/240 there is only one module at all; that
+  // is what makes the capture correct, and it is asserted rather than assumed.
+  const helperMatch = moduleTextAt(matcherMatch.index).match(
     new RegExp(`\\{if\\(!(${ID})\\(process\\.env\\.CLAUDE_CODE_COORDINATOR_MODE\\)\\)return!1;`),
   );
-  if (!helperMatch) fail('coordinator env-truthy helper not found');
+  if (!helperMatch) {
+    fail(
+      'coordinator env-truthy helper is not in the module that holds the resume ' +
+        'matcher — a name captured from another chunk would not resolve here',
+    );
+  }
   const envTruthy = helperMatch[1];
 
   // Anchored on the shape, not on the message literals: the guard, the live
@@ -1587,6 +1633,8 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
 
   applied.push(
     `a broken stream is retried, never finalized as a half answer ` +
+      `(interactive lanes; the non-interactive recoverable lane keeps the stock ` +
+      `partial-plus-nudge by design) ` +
       `(backoff '${backoff}', budgets ${mBudget[3]}/${mBudget[7]} -> 300, ` +
       `dropped content gate on '${mGate[1]}', error var '${errVar}', ` +
       `${truncExpr === undefined ? 'no truncation marker in this build' : `truncation marker kept for the recoverable lane ('${truncExpr}')`}, ` +
@@ -1672,11 +1720,18 @@ step('21 current turn reachable at tool dispatch', () => {
 //     is the same one the server-side advisor sees (the request's message
 //     array) PLUS the current turn — which advisor never gets, because its
 //     view is the request body, i.e. the state BEFORE the model answered.
-//     Deliberately a plain HTTP call and not the bundle's own single-shot
-//     query helper: that helper is invoked with constructors that live in
-//     another module's scope, so reaching it would need a lazily-initialised
-//     bridge that may never run. A direct request depends on no minified
-//     binding at all.
+//     The consultation rides the bundle's OWN single-shot query helper, so
+//     `claude-*` stays on the subscription lane and everything else goes to
+//     the proxy, at the client's prices and through the client's connection
+//     settings. A raw HTTP request is the fallback, not the design: it is
+//     taken only when an address is named explicitly (CLAUDE_JUDGE_URL, the
+//     probe's url key, raw_http) or when the helper's binding is absent from
+//     this build.
+//     (An earlier version of this comment claimed the opposite -- plain HTTP
+//     by design, on the grounds that the helper's scope was unreachable. That
+//     was the first design; the lane changed and the paragraph did not. What
+//     makes the helper reachable is that its definition and both probe homes
+//     share one module, which patch 22 now asserts rather than assumes.)
 //     OFF unless CLAUDE_JUDGE is set; every failure path is fail-open, so a
 //     dead proxy degrades to today's behaviour instead of breaking dispatch.
 //     Subagent dispatches are not judged (agentType must be "main").
@@ -1777,6 +1832,20 @@ step('22 judge consulted before a subagent dispatch', () => {
         '(no depth-cap refusal among its first statements)',
     );
   }
+  // Patch 12 destructures `effort` in THIS handler's parameter pattern, and
+  // this step rewrites that pattern into the body. The order is therefore
+  // load-bearing in one direction: run this step first and #12's locator no
+  // longer matches the signature it expects, because the signature is no
+  // longer the one it was written against. That failure would be loud but
+  // would name the wrong thing. Asserting the marker also proves the two
+  // locators, written independently, landed on the SAME method.
+  if (!mTool[1].includes('effort:__ccEffort')) {
+    fail(
+      'the dispatch tool signature carries no effort binding from patch 12 ' +
+        '(run patch 12 first — it destructures effort in the pattern this step rewrites)',
+    );
+  }
+
   // The parameter pattern moves into the body verbatim, so the destructuring
   // that the original signature performed still happens, in the same order and
   // with the same failure on a null input; the judge runs after it, on the
@@ -1814,7 +1883,25 @@ step('22 judge consulted before a subagent dispatch', () => {
   if (!qm) fail('single-shot query engine not found');
   // A minified name can contain `$`, and the replacement string reads `$` as
   // a group reference — escape it before splicing into the replacement.
-  const QM = repEsc(qm[1]);
+  const QM = siteName(qm[1], 'single-shot query engine');
+  // The name is spliced into a block that lands at two DIFFERENT sites, and a
+  // minified name is scoped to its chunk: it means the helper only inside the
+  // module that defines it. Anywhere else `typeof` quietly answers
+  // "undefined", the pool is null and the consultation falls back to raw HTTP
+  // without a word -- the lane changes and nothing says so. Measured across the
+  // range: the definition and both homes share one module (374 on 2.1.247, 360
+  // on 246, 433 on 242; 233 and 240 have a single module altogether). Asserted
+  // rather than assumed, because a future split would be silent.
+  const [qLo, qHi] = moduleSliceAround(js, qm.index);
+  for (const [label, at] of [['watcher', m.index], ['judge', mTool.index]]) {
+    if (at < qLo || at >= qHi) {
+      fail(
+        `the single-shot query engine is defined in a different module than the ` +
+          `${label} home — its name would not resolve there and the consultation ` +
+          `would silently fall back to raw HTTP`,
+      );
+    }
+  }
   // Everything the operator tunes lives in files read ON EVERY CALL, not in the
   // binary: a judge whose wording can only change by re-patching cannot be
   // iterated on. body.json is a full request template with {{CONTEXT}} and
@@ -1839,8 +1926,8 @@ step('22 judge consulted before a subagent dispatch', () => {
   );
   const nm = js.match(nrx);
   if (!nm) fail('pending-notification queue not found');
-  const TV = repEsc(nm[1]);
-  const DI = repEsc(nm[2]);
+  const TV = siteName(nm[1], 'notification queue');
+  const DI = siteName(nm[2], 'session id');
 
   // The session-title accessor. The locator requires an ARGUMENT: in the hook
   // schemas the same property name carries a zod string
@@ -1851,7 +1938,7 @@ step('22 judge consulted before a subagent dispatch', () => {
   const trx = new RegExp(`session_title:(${ID})\\([\\w$]+[.\\w$]*\\)`);
   const tm = js.match(trx);
   if (!tm) fail('session title accessor not found');
-  const TTL = repEsc(tm[1]);
+  const TTL = siteName(tm[1], 'session title accessor');
 
   const core =
     '/*__ccCore0*/globalThis.__ccProbe??=async function(__o){' +
@@ -2000,6 +2087,23 @@ step('22 judge consulted before a subagent dispatch', () => {
           'await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}}' +
       'catch(__we){try{console.error(__o.tag+" journal write failed: "+' +
         '(__we?.message??__we)+" | "+__r)}catch{}}};' +
+    // The core's services, handed to the consumer as an ARGUMENT.
+    // Not a convenience: the core is a closed function assigned to
+    // globalThis, while a consumer's call sits in the scope of the site
+    // it was spliced into. Everything declared here is invisible there.
+    // The watcher's queueing-failure handler used to call `__jlog` and
+    // `__clip` by their bare names, which are free variables at that
+    // site: the call threw ReferenceError, its own `catch{}` swallowed
+    // it, and the `nudge_undelivered` line the comment beside it
+    // promises could never be written. Nothing saw it -- the check
+    // asked whether the text was present, and free names are a RUNTIME
+    // error, so neither the parse stand nor the 83 text checks can see
+    // one. Passing them makes the dependency structural: a consumer
+    // that gets no services cannot call them by accident.
+    // Per-consultation, not global: __jlog closes over THIS call's
+    // directory, tag and timers, so a shared copy would attribute one
+    // consultation's lines to another whenever two overlap.
+    'let __svc={log:__jlog,clip:__clip};' +
     'try{' +
       // The turn snapshot is the JUDGE's material and the judge's alone, so the
       // core only asks its caller for it. It used to read and DELETE the stash
@@ -2533,7 +2637,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           // a silence with one word.
           'try{await __jlog({outcome:__o.arm?"block_degraded":"skip_degraded",' +
             'tries:__jtry,jm:null,deg:__dcut(__deg,5)})}catch{}' +
-          'await __o.onBroken(__dcut(__degb,3).join("; "));' +
+          'await __o.onBroken(__dcut(__degb,3).join("; "),__svc);' +
           // The judge does not return from here — its onBroken throws. A probe
           // that returns does not know its own rules, and the fallback prompt
           // contains none of its vocabulary: the consultation would be payment
@@ -2608,8 +2712,8 @@ step('22 judge consulted before a subagent dispatch', () => {
       // together with the client itself, so a total failure means the sessions
       // have nothing to work with anyway. Switched off by one config key, no
       // rebuild of the binary.
-      'if(__fc)await __o.onNoVerdict(String(__jerr1||"").slice(0,200));' +
-      'if(__bl&&__en)await __o.onAct(__bl[1].trim());' +
+      'if(__fc)await __o.onNoVerdict(String(__jerr1||"").slice(0,200),__svc);' +
+      'if(__bl&&__en)await __o.onAct(__bl[1].trim(),__svc);' +
       // The decision has been made — the obligation is released. Released
       // LAST: anything that throws earlier must cancel the call, not pass it.
       '__jarm=!1;' +
@@ -2620,7 +2724,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // A judge failure with the obligation armed is a cancellation, not a
       // pass: what arrives here is also a crash before the ladder (config,
       // body, trimming), where there is and can be no verdict.
-      'if(__jarm)await __o.onFail(__rs);' +
+      'if(__jarm)await __o.onFail(__rs,__svc);' +
       'if(__o.dbg)console.error(__o.tag+" skipped: "+(__e?.message??__e));}};' +
     // The core is emitted at BOTH sites and is byte-identical at both -- it
     // has to be, because neither site is guaranteed to run before the other:
@@ -2745,15 +2849,15 @@ step('22 judge consulted before a subagent dispatch', () => {
       // where Sleep fired, so an entry with "later" would wait for Sleep
       // indefinitely — the journal would write "nudge", the queue would accept
       // the entry, and there would be no delivery.
-      'onAct:async(__r)=>{try{' + TV + '({value:"[fleet-idle] "+__r+"\\n(\\u041d\\u0430\\u043f\\u043e\\u043c\\u0438\\u043d\\u0430\\u043d\\u0438\\u0435 \\u043d\\u0430\\u0431\\u043b\\u044e\\u0434\\u0430\\u0442\\u0435\\u043b\\u044f \\u0437\\u0430 \\u0444\\u043b\\u043e\\u0442\\u043e\\u043c, \\u0430 \\u043d\\u0435 \\u0433\\u0435\\u0439\\u0442: \\u0440\\u0435\\u0448\\u0430\\u0435\\u0448\\u044c \\u0442\\u044b.)",' +
+      'onAct:async(__r,__svc)=>{try{' + TV + '({value:"[fleet-idle] "+__r+"\\n(\\u041d\\u0430\\u043f\\u043e\\u043c\\u0438\\u043d\\u0430\\u043d\\u0438\\u0435 \\u043d\\u0430\\u0431\\u043b\\u044e\\u0434\\u0430\\u0442\\u0435\\u043b\\u044f \\u0437\\u0430 \\u0444\\u043b\\u043e\\u0442\\u043e\\u043c, \\u0430 \\u043d\\u0435 \\u0433\\u0435\\u0439\\u0442: \\u0440\\u0435\\u0448\\u0430\\u0435\\u0448\\u044c \\u0442\\u044b.)",' +
         'mode:"task-notification",agentId:' + DI + '(),priority:"next"})}' +
         // A queueing failure is NOT swallowed silently. A silent catch here
         // would mean "the journal writes nudge, there is no delivery" — the
         // very shape of a mechanism formally alive and substantively off.
         // Crashing a working call over a reminder is still forbidden, so the
         // outcome goes to the journal.
-        'catch(__ne){try{await __jlog({outcome:"nudge_undelivered",' +
-          'reason:__clip(String(__ne?.message??__ne),200)})}catch{}}},' +
+        'catch(__ne){try{await __svc.log({outcome:"nudge_undelivered",' +
+          'reason:__svc.clip(String(__ne?.message??__ne),200)})}catch{}}},' +
       // The watcher is fail-open: no verdict, broken settings, a channel
       // failure — all of it stays in the journal and stops NOTHING.
       'onNoVerdict:()=>{},onBroken:()=>{},onFail:()=>{}' +
@@ -2796,6 +2900,23 @@ step('22 judge consulted before a subagent dispatch', () => {
     '/*__ccProbe0*/' + resolveFor(core + watchCall, SLOT, 'watcher') + '/*__ccProbe1*/';
   const judgeBlock =
     '/*__ccProbe0*/' + resolveFor(core + judgeCall, SLOT_TOOL, 'judge') + '/*__ccProbe1*/';
+
+  // The names went in as text; assert they came out as themselves. A future
+  // escaping mistake would otherwise produce a plausible-looking identifier
+  // that is bound to nothing, and every shape check would still pass.
+  for (const [what, name, where] of [
+    ['single-shot query engine', qm[1], `typeof ${qm[1]}===`],
+    ['notification queue', nm[1], `${nm[1]}({value:`],
+    ['session id', nm[2], `agentId:${nm[2]}()`],
+    ['session title accessor', tm[1], `let __v=${tm[1]}(__i)`],
+  ]) {
+    if (!watchBlock.includes(where)) {
+      fail(`the ${what} name '${name}' did not survive into the watcher block verbatim`);
+    }
+  }
+  if (!judgeBlock.includes(`typeof ${qm[1]}===`)) {
+    fail(`the single-shot query engine name '${qm[1]}' did not survive into the judge block verbatim`);
+  }
 
   // The watcher block is a sequence of STATEMENTS, so the byte it is spliced in
   // front of has to begin one. The main site's match starts right after a

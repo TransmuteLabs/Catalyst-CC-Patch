@@ -26,6 +26,7 @@ const parts = [
 
 let total = '';
 const sizes = [];
+const vals = {};
 for (const [name, from, to] of parts) {
   const a = src.indexOf(from);
   const b = src.indexOf(to, a);
@@ -63,8 +64,21 @@ for (const [name, from, to] of parts) {
   const val = new Function('__scope', 'with(__scope){return (' + expr + ')}')(scope);
   if (typeof val !== 'string') { console.error('НЕ СТРОКА: ' + name); process.exit(2); }
   sizes.push(name + '=' + val.length);
+  vals[name] = val;
   total += val;
 }
+
+// The consumer's own scope was checked here by hand for a while, and the
+// re-implementation is gone: resolving scopes is a compiler's job, and the
+// hand-written one proved it by calling six names free on its first run --
+// they were the tail of a single `let a=…,b=…,c=…` chain it did not read to
+// the end. The question it asked is now asked below, of tsc, which does not
+// have to be taught what a declaration list is.
+//
+// The structural half of the rule -- a consumer must never NAME something
+// private to the core, even where the name would happen to resolve -- is not
+// dropped with it: it is checked on the finished image, in the build's
+// 'consumers do not reach into the core'.
 
 // The tool-call slots are the same ones the patcher fills in.
 const resolved = total.replace(/\$([1-9])/g, (_, d) => '__slot' + d);
@@ -77,6 +91,64 @@ try {
 }
 console.log('ВКЛЕИВАЕМЫЙ КОД РАЗБИРАЕТСЯ; ' + sizes.join(', ') +
   ', всего ' + resolved.length);
+
+// A name the block does not declare has to come from the site it is spliced
+// into. Whether it does is a scope question, and scope questions belong to a
+// compiler. The block is already valid JavaScript, so it can be handed to one
+// as it stands: no build step, not one shipped byte changed, and no regex of
+// ours pretending to resolve scopes.
+//
+// It is asked exactly one thing -- does every name resolve -- because that is
+// the class that has cost this file four incidents: `__pdir` read from a
+// neighbouring block, and `__jlog`/`__clip` reached for across the core's
+// boundary, where the record they were supposed to write could never be
+// written. Both parse perfectly; a free name is a RUNTIME error, and the lines
+// holding them are failure handlers, which is to say lines nobody reaches
+// until the day they matter.
+//
+// Types are a different question and are deliberately not asked: the host is
+// untyped, and the answers would be noise that trains a human to skip the
+// output.
+//
+// tools/site.d.ts is the contract -- everything the site provides, written
+// down. A name that stops being provided turns red here instead of at the
+// moment the failure handler finally runs.
+const os = require('os');
+const { spawnSync } = require('child_process');
+const NAME_ERRORS = /error TS(2304|2552|2584|2591):/;
+const tsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-scope-'));
+try {
+  const blockPath = path.join(tsDir, 'block.js');
+  fs.writeFileSync(blockPath, `async function __spliceSite(){\n${resolved}\n}\n`);
+  const tsc = spawnSync('tsc', [
+    '--noEmit', '--allowJs', '--checkJs',
+    '--target', 'es2022', '--lib', 'es2022',
+    '--module', 'esnext', '--moduleResolution', 'bundler',
+    '--skipLibCheck', '--noImplicitAny', 'false',
+    path.join(__dirname, 'site.d.ts'), blockPath,
+  ], { encoding: 'utf8' });
+  // A check that quietly skips itself is the shape this file has been bitten
+  // by three times already, so a missing compiler is a failure, not a notice.
+  if (tsc.error) {
+    console.error('ПРОВЕРКА ИМЁН НЕ ВЫПОЛНЕНА: tsc не запустился (' +
+      (tsc.error.code === 'ENOENT' ? 'не найден; установить: brew install typescript'
+                                   : tsc.error.message) + ')');
+    process.exit(2);
+  }
+  const unresolved = String(tsc.stdout || '')
+    .split('\n')
+    .filter((line) => NAME_ERRORS.test(line));
+  if (unresolved.length) {
+    console.error('ИМЕНА, КОТОРЫЕ НЕ РАЗРЕШАЮТСЯ В ОБЛАСТИ ВКЛЕЙКИ:');
+    for (const line of unresolved) {
+      console.error('  ' + line.split(path.sep).pop());
+    }
+    process.exit(1);
+  }
+  console.log('ВСЕ ИМЕНА ВО ВКЛЕИВАЕМОМ КОДЕ РАЗРЕШАЮТСЯ');
+} finally {
+  fs.rmSync(tsDir, { recursive: true, force: true });
+}
 
 // A line-end anchor inside the injected code's own regexes is NOT a slot,
 // and warning about it means training yourself to ignore noise. The dangerous

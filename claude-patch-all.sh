@@ -171,9 +171,63 @@ elif [[ $DO_UPDATE -eq 1 ]]; then
   echo "==> Installing a pristine Claude Code${UPDATE_VER:+ $UPDATE_VER}"
   BIN="$(python3 "$INSTALLER" --download-only ${UPDATE_VER:+$UPDATE_VER} | tail -1)"
 else
-  CLAUDE_BIN="$(command -v claude || true)"
-  [[ -z "$CLAUDE_BIN" ]] && { echo "ERROR: 'claude' not on PATH"; exit 1; }
-  BIN="$(readlink -f "$CLAUDE_BIN" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$CLAUDE_BIN")"
+  # `command -v claude` returns the FIRST match on PATH, and the first match is
+  # not necessarily a Claude Code image. This machine puts a shell wrapper ahead
+  # of the installer's symlink (~/.local/bin-shims/claude adds a flag and then
+  # execs the real launcher), and handing that wrapper to the unpacker produced
+  # "No VERSION strings found in JS file" -- a message that reads like a broken
+  # bundle rather than like a target that was never a bundle at all. The run
+  # then continued past it and died a second time in our own patcher, so the
+  # first diagnosis to appear was also the least informative one.
+  #
+  # Walk PATH instead and take the first entry that really is a native image.
+  # The wrapper execs the very launcher this then selects, so the binary we
+  # patch stays the binary that runs: a wrapper is a redirection, not a
+  # different product. If nothing on PATH is an image, say which candidates were
+  # found and why each was rejected -- "not on PATH" and "on PATH but not a
+  # binary" are different faults and must not share one message.
+  BIN="$(python3 - <<'PY'
+import os, sys
+
+# Mach-O thin (both endians, 32/64), Mach-O fat, and ELF. A file that starts
+# with none of these is not something the unpacker can read.
+MAGIC = (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
+         b'\xfe\xed\xfa\xce', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf',
+         b'\x7fELF')
+
+seen, rejected = [], []
+for d in os.environ.get('PATH', '').split(os.pathsep):
+    p = os.path.join(d or '.', 'claude')
+    if not (os.path.isfile(p) and os.access(p, os.X_OK)):
+        continue
+    real = os.path.realpath(p)
+    if real in seen:
+        continue
+    seen.append(real)
+    try:
+        head = open(real, 'rb').read(4)
+    except OSError as exc:
+        rejected.append('%s: unreadable (%s)' % (p, exc))
+        continue
+    if any(head.startswith(m) for m in MAGIC):
+        if rejected:
+            sys.stderr.write('Note: skipped %d non-image candidate(s) ahead of it on PATH:\n' % len(rejected))
+            for r in rejected:
+                sys.stderr.write('  %s\n' % r)
+        print(real)
+        sys.exit(0)
+    rejected.append('%s: %s' % (p, 'shell script' if head.startswith(b'#!') else 'not a native image'))
+
+if not seen:
+    sys.stderr.write("ERROR: 'claude' not on PATH\n")
+else:
+    sys.stderr.write('ERROR: no native Claude Code image on PATH; every candidate was rejected:\n')
+    for r in rejected:
+        sys.stderr.write('  %s\n' % r)
+    sys.stderr.write('  Pass the image explicitly with --target /path/to/binary.\n')
+sys.exit(1)
+PY
+)"
 fi
 echo "Target binary: $BIN"
 
@@ -289,8 +343,23 @@ PY
     "${TWEAKCC[@]}" --apply -y 2>&1 | tee "$TWEAKCC_OUT"
     TWEAKCC_RC=${PIPESTATUS[0]}
     set -e
-    if [[ $TWEAKCC_RC -ne 0 ]]; then
-      echo "NOTE: tweakcc --apply reported a problem (no config yet?); continuing with ours only."
+    if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" && $TWEAKCC_RC -ne 0 ]]; then
+      # A non-zero exit means the whole stage died, so NONE of its patches
+      # applied -- strictly worse than the single ✗ the branches below treat as
+      # fatal, yet this branch used to print a note and let the build continue.
+      # The note guessed "no config yet?", a case the no-result-rows branch below
+      # already reports properly; the guess only served to make a crash look
+      # routine. It hid a real one: handed a shell wrapper instead of an image,
+      # tweakcc threw "No VERSION strings found", this branch waved it through,
+      # and the run went on to fail in our patcher with a message that pointed
+      # nowhere near the actual cause.
+      echo "FATAL: tweakcc --apply exited $TWEAKCC_RC -- not one of its patches applied." >&2
+      tail -n 20 "$TWEAKCC_OUT" | sed 's/^/  /' >&2
+      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
+      rm -f "$TWEAKCC_OUT"
+      exit 1
+    elif [[ $TWEAKCC_RC -ne 0 ]]; then
+      echo "NOTE: tweakcc --apply exited $TWEAKCC_RC; CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 is set, continuing with ours only." >&2
     elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
          && ! grep -qE '^    [✓✗] ' "$TWEAKCC_OUT"; then
       # The failure detector below is a one-sided text anchor on another
@@ -361,29 +430,188 @@ def _same_env_helper(d):
         return False
     return bool(re.search(re.escape(m.group(1)) + rb'\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)', d))
 
+def _probe_uses_the_images_own_names(full):
+    """The probe's free names must be the image's own bindings, byte for byte.
+
+    They are spliced into the block as text. While the injection still went
+    through String.replace, a `$` in a minified name had to be doubled or it
+    would have read as a group reference; the injection later moved to a plain
+    offset splice and the doubling stayed behind. On 2.1.242/243/245 the
+    single-shot query engine is called `$A`, so the block asked for `$$A` --
+    a name bound to nothing. `typeof` does not throw on an unbound name, so the
+    judge fell back to raw HTTP and said so nowhere: the channel changed lanes
+    on a third of the supported range while every shape check passed, because
+    `$$A` is a perfectly well-formed identifier.
+
+    Shape is therefore not enough here. Each name is compared against the site
+    the image itself defines it at, with the probe's own blocks cut out first so
+    a name cannot be confirmed by the very text under test.
+    """
+    blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', full)
+    if len(blocks) != 2:
+        return False
+    rest = full
+    for b in blocks:
+        rest = rest.replace(b, b'', 1)
+
+    pool = re.search(rb'let __pool=typeof (' + ID + rb')==="function"', blocks[0])
+    engine = re.search(rb'async function (' + ID + rb')\(\{messages:' + ID +
+                       rb',systemPrompt:' + ID + rb',thinkingConfig:', rest)
+    if not pool or not engine or pool.group(1) != engine.group(1):
+        return False
+    # Both copies of the core ask for the same engine, or they are not one core.
+    if re.search(rb'let __pool=typeof (' + ID + rb')==="function"', blocks[1]).group(1) != pool.group(1):
+        return False
+
+    watch = [b for b in blocks if b'tag:"[Watch]"' in b]
+    if len(watch) != 1:
+        return False
+    queue = re.search(rb'onAct:async\(__r,__svc\)=>\{try\{(' + ID + rb')\(\{value:', watch[0])
+    session = re.search(rb'agentId:(' + ID + rb')\(\),priority:"next"', watch[0])
+    # Upstream spells the same call with `mode` first, so this cannot match our
+    # own text even before the blocks are cut out.
+    upstream = re.search(rb'(?:^|[^.\w$])(' + ID + rb')\(\{mode:"task-notification",agentId:(' +
+                         ID + rb')\(\)', rest)
+    if not (queue and session and upstream):
+        return False
+    return queue.group(1) == upstream.group(1) and session.group(1) == upstream.group(2)
+
+
+def _effort_binding_reaches_the_launch(d):
+    """The effort name is declared by one edit and read by another.
+
+    Patch 12 destructures `effort:__ccEffort` in the dispatch tool's parameter
+    pattern, and reads it again at the launch-definition site -- a different
+    splice, tens of kilobytes away. That only holds while both sites are in ONE
+    function body: a name bound by a parameter list is invisible to a sibling
+    function, and the failure would be a ReferenceError on every dispatch. It
+    is the same shape that cost the watcher its journal line one scope over,
+    and nothing asserted it here.
+
+    Measured, not argued: string literals are blanked first, so a brace inside
+    a message cannot close a function that is still open.
+    """
+    if d.count(b'async call(__ccIn') != 1:
+        return False
+    start = d.find(b'async call(__ccIn')
+    use = d.find(b'__ccRaw=typeof __ccEffort')
+    if use < 0 or use < start:
+        return False
+    body = d.find(b'{', d.find(b')', start))
+    if body < 0 or body > use:
+        return False
+    region = d[body:use]
+    for pat in (rb'"(?:[^"\\\n]|\\.)*"', rb"'(?:[^'\\\n]|\\.)*'", rb'`(?:[^`\\]|\\.)*`'):
+        region = re.sub(
+            pat,
+            lambda m: m.group(0)[:1] + b'.' * (len(m.group(0)) - 2) + m.group(0)[:1],
+            region)
+    depth = 0
+    for c in region:
+        ch = bytes([c])
+        if ch == b'{':
+            depth += 1
+        elif ch == b'}':
+            depth -= 1
+            if depth == 0:
+                return False
+    return depth > 0
+
+def _strip_strings(b):
+    # Same length, no punctuation carried over from inside a literal: the walk
+    # below counts braces and semicolons, and a message that contains one would
+    # end a declaration list that has not ended.
+    return re.sub(rb'"(?:[^"\\]|\\.)*"',
+                  lambda m: b'"' + b'.' * (len(m.group(0)) - 2) + b'"', b)
+
+
+def _decl_list(b, i, names):
+    """Collect a whole declaration LIST starting just past let/const/var.
+
+    `let __now=…,__w=…,__th=…` binds every name in it. A reader that takes only
+    the first calls the rest undeclared -- which is exactly what the JS-side
+    stand did on its first run, reporting six names out of one chain.
+    """
+    depth, expect, n = 0, True, len(b)
+    while i < n:
+        c = b[i:i + 1]
+        if c in b'([{':
+            depth += 1; i += 1; continue
+        if c in b')]}':
+            if depth == 0:
+                break
+            depth -= 1; i += 1; continue
+        if depth == 0:
+            if c == b';':
+                break
+            if c == b',':
+                expect = True; i += 1; continue
+            if not c.isspace():
+                if expect:
+                    m = re.match(rb'[A-Za-z_$][\w$]*', b[i:])
+                    if m:
+                        names.add(m.group(0)); i += m.end(); expect = False; continue
+                expect = False
+        i += 1
+    return i
+
+
+def _core_head_declared(d):
+    """Every name in scope at the top of the core body, read from the code.
+
+    Not a fixed-size window. The window form ended at a fixed byte distance and
+    everything past it had to be hand-listed -- `__jlog` had in fact been
+    written into this check by a human. A list a human maintains stops matching
+    the code the first time nobody remembers to extend it, and the check goes
+    on passing.
+    """
+    blk = re.search(rb'/\*__ccCore0\*/(.*?)/\*__ccCore1\*/', d, re.S)
+    if not blk:
+        return None
+    b = _strip_strings(blk.group(1))
+    m = re.search(rb'globalThis\.__ccProbe\?\?=async function\((__\w+)\)\{', b)
+    if not m:
+        return None
+    names = {m.group(1)}
+    i, depth, n = m.end(), 0, len(b)
+    while i < n:
+        c = b[i:i + 1]
+        if c in b'([{':
+            depth += 1; i += 1; continue
+        if c in b')]}':
+            if depth == 0:
+                break
+            depth -= 1; i += 1; continue
+        if depth == 0:
+            if b[i:i + 4] == b'try{':
+                break
+            km = re.match(rb'(?:let|const|var)\s+', b[i:i + 8])
+            if km:
+                i = _decl_list(b, i + km.end(), names); continue
+        i += 1
+    return names
+
+
 def _judge_catch_scope(d):
     # The judge's failure path runs only when something is broken, so a typo in
     # it lives unnoticed: the name __pdir was read from a neighboring block and
     # crashed with ReferenceError BEFORE the journal write — the dispatch got
     # "__pdir is not defined", the journal got nothing. The check is
     # structural: every name the catch reads must be declared ABOVE the try.
-    m = re.search(rb'let __t0=Date\.now\(\),(.{0,900}?)__jdir=', d, re.S)
-    if not m:
+    declared = _core_head_declared(d)
+    if declared is None:
         return False
-    # __o is a parameter of the core function itself, not a declaration inside
-    # the body: it is always in scope, and requiring its declaration would mean
-    # requiring the impossible. It is taken from the signature, not written in
-    # as a constant.
-    sig = re.search(rb'globalThis\.__ccProbe\?\?=async function\((__\w+)\)', d)
-    declared = set(re.findall(rb'(__\w+)\s*=', m.group(1))) | {b'__jdir', b'__cut'}
-    if sig:
-        declared |= {sig.group(1)}
-    c = re.search(rb'\}\}catch\(__e\)\{if\(__e&&__e\.__ccJudgeBlock\)throw __e;(.{0,1400}?)\}\}', d, re.S)
+    blk = re.search(rb'/\*__ccCore0\*/(.*?)/\*__ccCore1\*/', d, re.S)
+    body = _strip_strings(blk.group(1))
+    c = re.search(rb'\}\}catch\(__e\)\{if\(__e&&__e\.__ccJudgeBlock\)throw __e;(.{0,1400}?)\}\}',
+                  body, re.S)
     if not c:
         return False
-    body = c.group(1)
-    local = set(re.findall(rb'let (__\w+)', body)) | {b'__e', b'__jlog', b'__ccJudgeBlock'}
-    used = set(re.findall(rb'(__\w+)', body))
+    cb = c.group(1)
+    local = set(re.findall(rb'let (__\w+)', cb)) | {b'__e'}
+    # A name behind a dot is a property, not a binding: `__e.__ccJudgeBlock`
+    # asks nothing of this scope.
+    used = {m.group(1) for m in re.finditer(rb'(?<![.\w$])(__\w+)', cb)}
     return not (used - declared - local)
 
 def _captured_names(src):
@@ -857,6 +1085,38 @@ def _record_name_is_unique(d):
     # mean the cores drifted; none, that the guarantee was edited away.
     return d.count(b'let __seq=globalThis.__ccRecSeq=(globalThis.__ccRecSeq??0)+1;') == 1
 
+def _consumer_uses_no_core_privates(full):
+    """The consumer half of a probe block must not name the core's privates.
+
+    The core is a closed function assigned to globalThis; each consumer's call
+    is spliced into the scope of ITS site. Anything the core declares is
+    invisible there, so a bare `__jlog` in a consumer is a free variable that
+    throws ReferenceError the moment that line runs -- and the lines in
+    question are failure handlers. That is how the watcher lost its
+    `nudge_undelivered` record: present in the text, unreachable in fact,
+    swallowed by its own catch{}. The pre-build stand now resolves scopes
+    exactly; this is its counterpart on the FINISHED image, where the text is
+    the only evidence left.
+
+    Checked on the pre-collapse payload, so both blocks are seen. What the core
+    owns crosses the boundary as an argument -- hence the positive half: the
+    watcher's queueing failure must reach the journal through the handed-over
+    services, not by a name it cannot see.
+    """
+    blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', full)
+    if len(blocks) != 2:
+        return False
+    for b in blocks:
+        i = b.find(b'/*__ccCore1*/')
+        if i < 0:
+            return False
+        tail = b[i:]
+        for private in (b'__jlog', b'__clip', b'__jdir', b'__jarm', b'__deg', b'__t0'):
+            if private in tail:
+                return False
+    return bool(re.search(rb'catch\(__ne\)\{try\{await __svc\.log\(\{'
+                          rb'outcome:"nudge_undelivered",reason:__svc\.clip\(', full))
+
 _probe_full = d
 _probe_dup = re.findall(rb'/\*__ccCore0\*/[\s\S]*?/\*__ccCore1\*/', d)
 for _b in _probe_dup[1:]:
@@ -1049,6 +1309,9 @@ checks = {
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{', d)),
     'judge rides the tool, watcher the dispatcher': _judge_rides_the_tool(_probe_full),
+    'consumers do not reach into the core': _consumer_uses_no_core_privates(_probe_full),
+    'probe names match the image bindings': _probe_uses_the_images_own_names(_probe_full),
+    'effort binding reaches the launch': _effort_binding_reaches_the_launch(d),
     'current turn is the judge\'s alone': _turn_belongs_to_the_judge(_probe_full),
     'one consultation, one record name': _record_name_is_unique(d),
     # One core per site, and the count is CHECKED. The previous form of this
@@ -1095,12 +1358,16 @@ checks = {
     # "later" would wait for Sleep indefinitely: a journal with "nudge" and
     # zero delivery.
     'watcher nudges through the notification queue': bool(re.search(
-                                              rb'onAct:async\(__r\)=>\{try\{' + ID +
+                                              rb'onAct:async\(__r,__svc\)=>\{try\{' + ID +
                                               rb'\(\{value:"\[fleet-idle\] "\+__r\+"[^"]*",'
                                               rb'mode:"task-notification",agentId:' + ID +
                                               rb'\(\),priority:"next"\}\)\}', d))
-                                          # a silent catch here = a journal with nudge and zero delivery
+                                          # A silent catch here = a journal with nudge and zero delivery.
+                                          # The line must be written through the services the core
+                                          # HANDS OVER: the same record written by a bare `__jlog` is
+                                          # a free variable at this site and never runs at all.
                                           and bool(re.search(
+                                              rb'catch\(__ne\)\{try\{await __svc\.log\(\{'
                                               rb'outcome:"nudge_undelivered"', d))
                                           # the recipient must match what the filter itself requires
                                           and bool(re.search(
@@ -1357,11 +1624,11 @@ checks = {
                                               rb'__cfg\.retry_context_chars\?\?8000\)\)', d))
                                           # the obligation is released LAST
                                           and bool(re.search(
-                                              rb'await __o\.onAct\(__bl\[1\]\.trim\(\)\);__jarm=!1;\}\}catch', d))
+                                              rb'await __o\.onAct\(__bl\[1\]\.trim\(\),__svc\);__jarm=!1;\}\}catch', d))
                                           and bool(re.search(
                                               rb'outcome:__jarm\?"block_no_verdict":"skip"', d))
                                           and bool(re.search(
-                                              rb'if\(__jarm\)await __o\.onFail\(__rs\);', d))
+                                              rb'if\(__jarm\)await __o\.onFail\(__rs,__svc\);', d))
                                           # the journal write does not steer control past decisions
                                           and bool(re.search(
                                               rb'try\{await __jlog\(\{http:__jst,outcome:__bl\?', d))
@@ -1522,13 +1789,13 @@ checks = {
     'judge cancels when its rules are broken': bool(re.search(
                                               rb'if\(__degb\.length&&__en\)\{', d))
                                           and bool(re.search(
-                                              rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\)\)', d))
+                                              rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\),__svc\)', d))
                                           and bool(re.search(
                                               rb'outcome:__o\.arm\?"block_degraded":"skip_degraded"', d))
                                           # a probe that does not cancel the dispatch does not pay
                                           # for a consultation by rules it does not have
                                           and bool(re.search(
-                                              rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\)\);return\}', d))
+                                              rb'await __o\.onBroken\(__dcut\(__degb,3\)\.join\("; "\),__svc\);return\}', d))
                                           and bool(re.search(
                                               rb'\.\.\.\(__deg\.length\?\{deg:__dcut\(__deg,5\)\}:\{\}\)', d))
                                           and bool(re.search(
