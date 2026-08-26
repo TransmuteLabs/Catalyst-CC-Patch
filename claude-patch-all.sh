@@ -224,9 +224,34 @@ PY
   fi
   if "${TWEAKCC[@]}" --list-patches >/dev/null 2>&1; then
     echo "==> Applying tweakcc's configured patches"
-    "${TWEAKCC[@]}" --apply -y || {
+    # A patch of tweakcc's that cannot find its site prints a ✗ row and marks
+    # itself failed -- and then the CLI exits 0 anyway. Nothing downstream looks
+    # at it either: none of our checks below cover tweakcc's own output. So a
+    # patch could stop applying entirely and the build would still be declared
+    # good, with the feature simply gone. That is the same silence the interface
+    # gate exists to end, except the gate only sees a CRASH: a clean skip renders
+    # the stock interface and passes it.
+    #
+    # Every patch in the config is there because it is wanted, so a ✗ is a
+    # failure of the build. The escape hatch is for deliberately running against
+    # a version where something is known not to apply yet.
+    TWEAKCC_OUT="$(mktemp)"
+    set +e
+    "${TWEAKCC[@]}" --apply -y 2>&1 | tee "$TWEAKCC_OUT"
+    TWEAKCC_RC=${PIPESTATUS[0]}
+    set -e
+    if [[ $TWEAKCC_RC -ne 0 ]]; then
       echo "NOTE: tweakcc --apply reported a problem (no config yet?); continuing with ours only."
-    }
+    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
+         && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
+      echo "FATAL: a configured tweakcc patch did not apply:" >&2
+      grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
+      grep -E '^patch: ' "$TWEAKCC_OUT" | sed 's/^/  /' >&2
+      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
+      rm -f "$TWEAKCC_OUT"
+      exit 1
+    fi
+    rm -f "$TWEAKCC_OUT"
   fi
 fi
 
@@ -1121,126 +1146,195 @@ fi
 
 # --- 5a2. the interface must actually come up ---------------------------------
 # `--version` never executes a single React render. A patch that emits a name
-# which is not in scope where it lands therefore passes every byte check AND
-# the version smoke, and then kills the product the moment the interface is
-# drawn: 2.1.246 shipped that way twice in one morning ("l0 is not defined",
-# then "sR is not defined"), each time with 78/78 green above this line.
+# which is not in scope where it lands passes every byte check AND the version
+# smoke, then kills the product the moment the interface is drawn: 2.1.246
+# shipped that way twice in one morning ("l0 is not defined", then "sR is not
+# defined"), each time with 78/78 green above this line.
 #
-# So drive the real interface on a pty with a pre-submitted prompt. The API
-# points at a dead port -- the session draws its OWN message before any
-# response, so the render path is exercised without a request going anywhere.
+# So drive the real interface on a pty with a pre-submitted prompt and require
+# the prompt to come BACK on screen -- the echo is the user-message renderer
+# having run, which is the exact path both crashes died on.
 #
-# Two things this gate learned the hard way:
-#  * it needs a directory the CLI already trusts, or it stops at "is this a
-#    project you trust?" and never renders -- which greps identically to a
-#    clean run. Hence the positive marker: no marker, no pass.
-#  * the marker cannot be grepped out of the raw pty stream. The interface
-#    writes cursor moves and colour codes BETWEEN the words, so a literal
-#    "auto mode on" is not present as bytes even when it is on the screen.
-#    Everything is matched on an escape-stripped copy instead.
-TUI_PROMPT="tweakcc interface gate"
-TUI_DIR="$(python3 - <<'PYGATE'
-import json, os
-try:
-    cfg = json.load(open(os.path.expanduser("~/.claude.json")))
-except Exception:
-    cfg = {}
-home = os.path.expanduser("~")
-cands = [
-    p
-    for p, v in (cfg.get("projects") or {}).items()
-    if isinstance(v, dict) and v.get("hasTrustDialogAccepted") and os.path.isdir(p)
-]
-# "/" is trusted on this machine and a session started there never gets as far
-# as a render, so it produced a false failure. A trusted project inside the
-# home directory behaves like the ones a person actually uses.
-good = [p for p in cands if p.startswith(home + os.sep)]
-print(good[0] if good else (cands[0] if cands else ""))
-PYGATE
-)"
-if [[ -z "$TUI_DIR" ]]; then
-  echo "FATAL: no trusted project directory to run the interface gate in." >&2
-  echo "       Accept the trust prompt once in any directory, then re-run." >&2
-  exit 1
-fi
+# The session runs in a THROWAWAY config home, and every part of that is
+# load-bearing. An earlier version of this gate reused the user's own config and
+# a trusted project of theirs, which meant each build: started their 9 MCP
+# servers, fired their hooks, wrote a transcript, a history entry and a cost
+# record into a real project of theirs, and -- because settings.json `env`
+# overrides the process environment -- sent the prompt to their live proxy and
+# got a real billed answer back. "Points at a dead port" was written in this
+# file while none of it was true.
+#
+#   * CLAUDE_CONFIG_DIR   -> a temp home: no hooks, no MCP, no history, no cost
+#   * seeded trust entry  -> no "is this a project you trust?" prompt, which is
+#                            what a session stops at otherwise, rendering
+#                            nothing while grepping exactly like a clean run
+#   * a NON-claude model  -> patch #1 routes claude-* to api.anthropic.com no
+#                            matter what the environment says; anything else
+#                            falls through to ANTHROPIC_BASE_URL, so only a
+#                            non-claude id actually reaches the dead port
+#   * CHILD_SESSION marker-> transcript saving off
+#   * --strict-mcp-config -> no servers even if one were configured
+GATE_HOME="$(mktemp -d)"
+mkdir -p "$GATE_HOME/cfg" "$GATE_HOME/proj"
+GATE_PROMPT="tweakcc interface gate"
+python3 - "$GATE_HOME" <<'PYSEED'
+import json, os, sys
+home = sys.argv[1]
+cfg = os.path.join(home, "cfg")
+proj = os.path.realpath(os.path.join(home, "proj"))
+# The project key must be the RESOLVED path: on macOS /tmp is a symlink to
+# /private/tmp, and a key written under the unresolved name does not match, so
+# the session stops at the trust prompt and the gate proves nothing.
+json.dump(
+    {
+        "hasCompletedOnboarding": True,
+        "theme": "dark",
+        "autoUpdates": False,
+        "projects": {proj: {"hasTrustDialogAccepted": True, "allowedTools": [], "history": []}},
+    },
+    open(os.path.join(cfg, ".claude.json"), "w"),
+)
+json.dump(
+    {
+        "model": "gate-offline-model",
+        "env": {
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+            "DISABLE_TELEMETRY": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        },
+    },
+    open(os.path.join(cfg, "settings.json"), "w"),
+)
+PYSEED
 
-TUI_LOG="$(mktemp)"
-# Reads the capture and answers in one word: RENDERED, PENDING, or the error.
-tui_state() {
-  python3 - "$TUI_LOG" "$TUI_PROMPT" <<'PYSTATE'
+GATE_LOG="$GATE_HOME/capture.log"
+: > "$GATE_LOG"
+
+# Reads the capture and answers in one word: RENDERED, PENDING, or ERROR <what>.
+gate_state() {
+  python3 - "$GATE_LOG" "$GATE_PROMPT" <<'PYSTATE'
 import re, sys
+
 raw = open(sys.argv[1], "rb").read().decode("utf8", "replace")
-txt = re.sub(r"\x1b\][^\x07]*\x07", "", raw)
+# OSC sequences carry the prompt text in a notification payload and can be
+# terminated by BEL *or* by ESC-backslash; stripping only the BEL form left the
+# prompt visible to the marker check without a single character having been
+# rendered.
+txt = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", raw)
 txt = re.sub(r"\x1b[\[\(][0-9;?<>=]*[a-zA-Z]", "", txt)
 txt = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", txt)
+# The interface writes cursor moves where a person sees spaces, so a literal
+# "auto mode on" is not present as bytes even while it is on the screen.
 flat = re.sub(r"\s+", "", txt)
-# The screen prints its own "ERROR" label next to the message and flattening
-# glues the two together, so the label is consumed explicitly -- otherwise the
-# captured identifier reads "ERRORl0" instead of "l0".
-err = re.search(
-    r"unrecoverableinterfaceerror\(([^)]*)\)"
-    r"|(?:ERROR)?([A-Za-z_$][A-Za-z0-9_$]*)isnotdefined"
-    r"|(ReferenceError|TypeError|SyntaxError)",
-    flat,
-)
-if err:
-    # The screen text has to be matched with the whitespace removed (the
-    # interface writes cursor moves where a person sees spaces), so the report
-    # is rebuilt into something readable rather than echoing "l0isnotdefined".
-    if err.group(2):
-        print(f"ERROR {err.group(2)} is not defined")
-    elif err.group(1):
-        print(f"ERROR unrecoverable interface error ({err.group(1)})")
-    else:
-        print(f"ERROR {err.group(0)}")
-elif re.sub(r"\s+", "", sys.argv[2]) in flat:
-    # The prompt echoed back IS the user-message renderer having run, which is
-    # the exact path both 2.1.246 crashes died on.
-    print("RENDERED")
-else:
-    print("PENDING")
+
+# A connection failure is the EXPECTED outcome here -- the model id is routed to
+# a dead port on purpose -- so those two are not interface faults.
+BENIGN = ("Connectionrefused", "Connectionerror", "APIError", "fetchfailed")
+# Order matters. The parenthesised exit line is the only place the name is
+# delimited; anywhere else the flattening glues it to whatever the screen drew
+# just before it ("...for shortcuts ERROR" + "l0"), so the on-screen ERROR
+# label is consumed explicitly and the capture is non-greedy. Without both, the
+# gate reported the identifier as "forshortcutsERRORl0".
+m = re.search(r"unrecoverableinterfaceerror\(([^)]*)\)", flat)
+if m:
+    print(f"ERROR unrecoverable interface error ({m.group(1)})")
+    sys.exit()
+m = re.search(r"ERROR([A-Za-z_$][A-Za-z0-9_$]*?)isnotdefined", flat)
+if m:
+    print(f"ERROR {m.group(1)} is not defined")
+    sys.exit()
+if "isnotdefined" in flat:
+    tail = flat[: flat.index("isnotdefined")][-16:]
+    print(f"ERROR ...{tail} is not defined")
+    sys.exit()
+# Any exception class, not the three that happened to be seen once: a build
+# that dies with RangeError or "Cannot read properties of undefined" is just as
+# broken, and the earlier list called both of those a pass.
+for m in re.finditer(r"([A-Z][A-Za-z]*Error)", flat):
+    if m.group(1) not in BENIGN:
+        print(f"ERROR {m.group(1)}")
+        sys.exit()
+if re.search(r"Cannotread(?:property|properties)of(?:undefined|null)", flat):
+    print("ERROR cannot read properties of undefined")
+    sys.exit()
+print("RENDERED" if re.sub(r"\s+", "", sys.argv[2]) in flat else "PENDING")
 PYSTATE
 }
 
+# `exec` replaces the subshell so $! is the pid that setsid then makes a session
+# and process-group leader. Killing the single pid leaves `script` and the CLI
+# running: during one version sweep that left 23 sessions and 1.4 GB resident.
+# The group kill is what actually ends the run.
 (
-  cd "$TUI_DIR" || exit 1
-  ANTHROPIC_BASE_URL="http://127.0.0.1:9" ANTHROPIC_AUTH_TOKEN=x \
-    script -q /dev/null "$BIN" "$TUI_PROMPT" >"$TUI_LOG" 2>&1
+  cd "$GATE_HOME/proj" || exit 1
+  exec env CLAUDE_CONFIG_DIR="$GATE_HOME/cfg" CLAUDE_CODE_CHILD_SESSION=1 \
+    perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV or die $!' \
+    script -q /dev/null "$BIN" --strict-mcp-config "$GATE_PROMPT" >"$GATE_LOG" 2>&1
 ) &
-TUI_PID=$!
-TUI_STATE=PENDING
-for _ in $(seq 1 40); do
-  sleep 1
-  TUI_STATE="$(tui_state)"
-  case "$TUI_STATE" in
-    ERROR*) break ;;
-    RENDERED)
-      # Give a late render error its chance to appear before declaring victory.
-      sleep 3
-      TUI_STATE="$(tui_state)"
-      break
-      ;;
-  esac
-  kill -0 $TUI_PID 2>/dev/null || break
-done
-kill -TERM $TUI_PID 2>/dev/null || true
-wait $TUI_PID 2>/dev/null || true
+GATE_PID=$!
 
-case "$TUI_STATE" in
+# A full session start on a machine already running builds is not a two-second
+# affair, and a healthy build that misses the budget is reported as a failure.
+# 40s was a guess that a loaded box can lose; this is generous and adjustable.
+GATE_BUDGET="${CLAUDE_PATCH_GATE_BUDGET:-150}"
+GATE_STATE=PENDING
+GATE_EXITED=0
+for _ in $(seq 1 "$GATE_BUDGET"); do
+  sleep 1
+  GATE_STATE="$(gate_state)"
+  case "$GATE_STATE" in
+    ERROR*) break ;;
+  esac
+  if ! kill -0 $GATE_PID 2>/dev/null; then
+    # It ended on its own. That is not success by itself: read the exit status.
+    GATE_EXITED=1
+    wait $GATE_PID 2>/dev/null
+    GATE_RC=$?
+    GATE_STATE="$(gate_state)"
+    break
+  fi
+  if [[ "$GATE_STATE" == RENDERED ]]; then
+    # An error can still land after the first paint, so keep watching for a
+    # while instead of declaring victory three seconds in.
+    for _ in $(seq 1 8); do
+      sleep 1
+      GATE_STATE="$(gate_state)"
+      [[ "$GATE_STATE" == ERROR* ]] && break
+      kill -0 $GATE_PID 2>/dev/null || break
+    done
+    break
+  fi
+done
+
+if [[ $GATE_EXITED -eq 0 ]]; then
+  kill -TERM -"$GATE_PID" 2>/dev/null || kill -TERM "$GATE_PID" 2>/dev/null || true
+  wait $GATE_PID 2>/dev/null || true
+  GATE_RC=0
+fi
+
+case "$GATE_STATE" in
   RENDERED)
-    echo "Interface: came up in $TUI_DIR and drew a message, no name or type errors"
-    rm -f "$TUI_LOG"
+    if [[ ${GATE_RC:-0} -ne 0 ]]; then
+      echo "FATAL: the interface drew its message and then exited ${GATE_RC}" >&2
+      echo "  capture kept at $GATE_LOG" >&2
+      exit 1
+    fi
+    echo "Interface: came up in a throwaway home and drew its message, no name or type errors"
+    rm -rf "$GATE_HOME"
     ;;
   ERROR*)
     echo "FATAL: the interface does not come up — leaving the launcher alone" >&2
-    echo "  ${TUI_STATE#ERROR }" >&2
-    echo "  full capture kept at $TUI_LOG" >&2
+    echo "  ${GATE_STATE#ERROR }" >&2
+    echo "  capture kept at $GATE_LOG" >&2
     exit 1
     ;;
   *)
-    echo "FATAL: the interface gate never reached a render in $TUI_DIR, so it" >&2
-    echo "       proves nothing — refusing to call this build good." >&2
-    echo "  full capture kept at $TUI_LOG" >&2
+    echo "FATAL: the interface gate never reached a render within ${GATE_BUDGET}s," >&2
+    echo "       so it proves nothing — refusing to call this build good." >&2
+    echo "       Raise CLAUDE_PATCH_GATE_BUDGET if the machine is simply slow." >&2
+    echo "  capture kept at $GATE_LOG" >&2
     exit 1
     ;;
 esac
