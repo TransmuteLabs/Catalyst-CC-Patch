@@ -50,6 +50,32 @@ prune_config_backups() {
   fi
 }
 
+# One cache entry per pinned SHA, ~490 MB each, and nothing ever removed them:
+# nine pins from a single afternoon of bisecting a locator came to 4.3 GB. Keep
+# the pin in use plus the two most recent others -- enough to step a bump back
+# without a two-minute rebuild -- and drop the rest. Nothing removed here is
+# lost: an entry is a content-addressed fetch of a commit GitHub still serves,
+# rebuilt on demand by ensure_tweakcc.
+prune_tweakcc_cache() {
+  local keep="$1" stale entry
+  [[ -d "$CATALYST_TWEAKCC_CACHE" ]] || return 0
+  # The pin in use is excluded BY NAME, not by position: an unchanged pin is not
+  # re-fetched, so its mtime keeps ageing while newer bumps come and go, and a
+  # purely mtime-ordered keep-list would eventually delete the one entry this
+  # run depends on. `.tmp` entries belong to a fetch in flight, possibly another
+  # run's, and are never touched.
+  stale=$(ls -t "$CATALYST_TWEAKCC_CACHE" 2>/dev/null \
+            | grep -v '\.tmp$' \
+            | grep -vx "$CATALYST_TWEAKCC_SHA" \
+            | tail -n +$((keep + 1)) || true)
+  [[ -n "$stale" ]] || return 0
+  echo "==> Cleaning old unpacker builds (keeping the pin in use + $keep most recent)"
+  while read -r entry; do
+    [[ -n "$entry" ]] || continue
+    rm -rf "${CATALYST_TWEAKCC_CACHE:?}/$entry" && echo "    removed ${entry:0:12}"
+  done <<< "$stale"
+}
+
 CONFIGURE=0
 ONLY_OURS=0
 DO_UPDATE=0
@@ -154,6 +180,7 @@ ensure_tweakcc() {
 
   TWEAKCC=(node "$dir/dist/index.mjs")
   echo "Unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
+  prune_tweakcc_cache 2
 }
 ensure_tweakcc
 
