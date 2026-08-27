@@ -20,6 +20,8 @@ const ENV_KEYS = [
   'CLAUDE_IDLE_PROMPT',
   'CLAUDE_IDLE_TIMEOUT_MS',
   'CLAUDE_IDLE_DEBUG',
+  'CLAUDE_JUDGE_TIMEOUT_MS',
+  'ANTHROPIC_BASE_URL',
 ];
 
 function failSetup(message) {
@@ -367,16 +369,22 @@ const scenarios = [
       passed: true, outcome: 'ok',
       headerIncludes: 'подрезан: показано 200 из ',
       dispatchLen: 200,
+      dispatchExcludes: 'подрезан',
     },
   },
   {
     // A dispatch that fits is not touched and not declared trimmed.
     name: 'dispatch-whole',
     config: { dispatch_chars: 4000 },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] ' + 'я'.repeat(600),
     response: 'OK: бриф полон',
     expected: {
       passed: true, outcome: 'ok',
       headerExcludes: 'подрезан',
+      // The whole run arrives uncut. A length would have to restate how the
+      // harness builds the input object, and would go stale the day a field is
+      // added; the run itself is the thing that must survive.
+      dispatchIncludes: 'я'.repeat(600),
     },
   },
   {
@@ -411,7 +419,7 @@ const scenarios = [
     name: 'no-verdict-failopen',
     response: 'просто рассуждение без вердикта',
     config: { fail_closed: false },
-    expected: { passed: true },
+    expected: { passed: true, outcome: 'empty', poolCalls: 2, nudges: 0 },
   },
   {
     name: 'broken-config',
@@ -444,7 +452,7 @@ const scenarios = [
     name: 'filtered',
     config: { filter: { classes_skip: ['1e'] } },
     response: 'OK: бриф полон',
-    expected: { passed: true, outcome: 'filtered', poolCalls: 0 },
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'classes_skip' },
   },
   {
     name: 'block-not-enforced',
@@ -523,10 +531,18 @@ const scenarios = [
   // it was exactly on the filter that the field stayed silent, and the layer
   // had to be inferred from behavior.
   { name: 'watch-live-work', probe: 'watch', toolName: 'Read', watchState: OLD,
-    projectLayer: {},
     tasks: { t1: { id: 't1', type: 'local_agent', status: 'running' } },
     response: 'SILENT: —',
-    expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'live-work:1', nudges: 0,
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'live-work:1', nudges: 0 } },
+  // The nearest .claude/probes above cwd layers over the global one, and the
+  // journal must NAME the layer it applied: it was on the filter that this
+  // field stayed silent and the layer had to be inferred from behaviour. The
+  // gate is deliberately allowed to pass here so that nothing but the layer
+  // decides the verdict.
+  { name: 'watch-project-layer', probe: 'watch', toolName: 'Read', watchState: OLD,
+    projectLayer: {},
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
                 cfg: '<temp>/proj/.claude/probes/idle-watch' } },
   // Un-backgrounded — the work is NOT live (the trait is taken from the
   // image).
@@ -586,17 +602,16 @@ const scenarios = [
   // both scenarios above unnoticed.
   { name: 'watch-threshold-valid-nondefault', probe: 'watch', toolName: 'Read', watchState: OLD,
     config: { threshold: 2 },
-    fleet: () => [Date.now(), Date.now()],
-    response: 'NUDGE: не должно дойти',
-    expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
-                by: 'fleet-busy:2', degExact: null } },
+    fleet: () => [Date.now()],
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0, degExact: null } },
   // One record per consultation, ~28 KB each, and until now nothing ever
   // removed one: 31 MB across 1134 files on the live install. Three seeded plus
   // one written, keep 2 — so the prune must both fire and stop, and the file it
   // just wrote must survive.
   { name: 'records-pruned', seedRecords: 3, config: { records_keep: 2 },
     response: 'OK: бриф полон',
-    expected: { passed: true, outcome: 'ok', recordCount: 2, degExact: null } },
+    expected: { passed: true, outcome: 'ok', recordCount: 2, recordSeeds: 1, degExact: null } },
   // The complement, and the reason the limit is sanitised with min 1 rather
   // than min 0: a typo must not be able to mean "keep nothing". Zero is
   // refused, reported, and the default keeps everything present.
@@ -620,7 +635,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 43;
+const EXPECTED_SCENARIOS = 44;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -769,6 +784,8 @@ function expectationText(expected) {
   if (expected.degExact !== undefined) parts.push(`деградация=${JSON.stringify(expected.degExact)}`);
   if (expected.requestMaxTokens !== undefined) parts.push(`бюджет запроса=${expected.requestMaxTokens}`);
   if (expected.recordCount !== undefined) parts.push(`записей в каталоге=${expected.recordCount}`);
+  if (expected.recordSeeds !== undefined) parts.push(`из них засеянных=${expected.recordSeeds}`);
+  if (expected.dispatchExcludes !== undefined) parts.push(`нагрузка без «${expected.dispatchExcludes}»`);
   return parts.join(', ');
 }
 
@@ -799,6 +816,8 @@ function checkMismatch(result, expected) {
   if (expected.degExact !== undefined && JSON.stringify(result.deg) !== JSON.stringify(expected.degExact)) return true;
   if (expected.requestMaxTokens !== undefined && result.requestMaxTokens !== expected.requestMaxTokens) return true;
   if (expected.recordCount !== undefined && result.recordCount !== expected.recordCount) return true;
+  if (expected.recordSeeds !== undefined && result.recordSeeds !== expected.recordSeeds) return true;
+  if (expected.dispatchExcludes !== undefined && result.sentDispatch.includes(expected.dispatchExcludes)) return true;
   return false;
 }
 
@@ -810,6 +829,8 @@ async function runScenario(probe, scenario) {
   const savedFleet = Object.getOwnPropertyDescriptor(globalThis, '__ccFleet');
   const savedWatch = Object.getOwnPropertyDescriptor(globalThis, '__ccWatch');
   const savedToml = globalThis.Bun.TOML;
+  const savedRecSeq = Object.getOwnPropertyDescriptor(globalThis, '__ccRecSeq');
+  delete globalThis.__ccRecSeq;
   delete globalThis.__ccProbe;
   delete globalThis.__ccFleet;
   delete globalThis.__ccWatch;
@@ -950,6 +971,11 @@ async function runScenario(probe, scenario) {
       recordCount: fs.existsSync(path.join(probeDir, 'records'))
         ? fs.readdirSync(path.join(probeDir, 'records')).length
         : 0,
+      // Counted apart from the total: "two files survived" is also true of a
+      // prune that deleted the record it had just written and kept two seeds.
+      recordSeeds: fs.existsSync(path.join(probeDir, 'records'))
+        ? fs.readdirSync(path.join(probeDir, 'records')).filter((n) => n.includes('-seed-')).length
+        : 0,
       result: passed ? 'прошёл' : 'отменён',
       outcome: entry?.outcome ?? null,
       sid: entry === null ? undefined : (entry.sid ?? null),
@@ -969,16 +995,20 @@ async function runScenario(probe, scenario) {
     result.mismatch = checkMismatch(result, scenario.expected);
     return result;
   } finally {
-    if (prevCwd !== null) process.chdir(prevCwd);
-    restoreEnvironment(savedEnvironment);
-    if (savedProbe) Object.defineProperty(globalThis, '__ccProbe', savedProbe);
-    else delete globalThis.__ccProbe;
-    if (savedFleet) Object.defineProperty(globalThis, '__ccFleet', savedFleet);
-    else delete globalThis.__ccFleet;
-    if (savedWatch) Object.defineProperty(globalThis, '__ccWatch', savedWatch);
-    else delete globalThis.__ccWatch;
-    if (scenario.withoutTomlParser) globalThis.Bun.TOML = savedToml;
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    const step = (fn) => { try { fn(); } catch { /* one failed restore must not skip the rest */ } };
+    step(() => { if (prevCwd !== null) process.chdir(prevCwd); });
+    step(() => restoreEnvironment(savedEnvironment));
+    step(() => {
+      for (const [name, saved] of [
+        ['__ccProbe', savedProbe], ['__ccFleet', savedFleet],
+        ['__ccWatch', savedWatch], ['__ccRecSeq', savedRecSeq],
+      ]) {
+        if (saved) Object.defineProperty(globalThis, name, saved);
+        else delete globalThis[name];
+      }
+    });
+    step(() => { if (scenario.withoutTomlParser) globalThis.Bun.TOML = savedToml; });
+    step(() => fs.rmSync(tempDir, { recursive: true, force: true }));
   }
 }
 
