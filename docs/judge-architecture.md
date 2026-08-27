@@ -8,8 +8,8 @@ findings, measurements, and rejected options is in `judge-patch-spec.md`
 What is here is what you need to KNOW the mechanism, to carry it to the
 next version, and to extend it.
 
-State as of 2026-08-22, image 2.1.239, checks in `claude-patch-all.sh` —
-78 (all green on the built image). As of 2026-08-22 the judging mechanism
+State as of 2026-08-27, images 2.1.233 through 2.1.247, checks in
+`claude-patch-all.sh` — 95 (all green on the built image). As of 2026-08-22 the judging mechanism
 has been split into a shared CORE and its callers: the core contract is
 in `probe-core.md`, and its second consumer (the fleet idle watcher) is
 in `idle-watch.md`. Everything below describes the judge; what it shares
@@ -273,7 +273,9 @@ first line" rule does not save you here. A measurement on one transcript
 (2026-08-20): flash spends 434–2120 tokens at `high` and 302–3000 at
 `low` — the spread within one effort exceeds the difference between
 efforts, so there is nothing to treat overrun with by lowering the
-effort. The ceiling was raised 3000 → 8000: it does not lengthen a normal
+effort. The ceiling was raised 3000 → 8000 (the shipped settings ask for
+24000; 8000 is what the code falls back to when nothing is configured, and
+the single home of that number is `__mtd`): it does not lengthen a normal
 answer, but it removes the unrecoverable break on the path where a break
 costs the whole consultation (27.9 s observed wasted, after which rung 2
 answered in 2.5 s). A rung for which even 8000 is not enough, the ladder
@@ -284,8 +286,10 @@ follows: the same last model on a short tail (`retry_context_chars`,
 default 8000; `0` disables it — for a ladder that already ends with a
 short rung).
 
-The default threshold is 60 s (`timeout_ms` in the shipped settings; if
-there is no config at all, the code falls back to 8 s). The choice logic:
+The shipped `timeout_ms` is 240 s per rung (`probes/probes.toml`); with no
+config at all the code falls back to 8 s. The budget is per RUNG, not for the
+ladder: three rungs plus the retry is the worst case, and the retry runs on
+half its rung's clock. The choice logic:
 better to over-wait than to under-wait — a long answer is cheaper than a
 missed call.
 
@@ -303,7 +307,8 @@ What exactly goes out on the pool path was captured by a proxy dump
 2026-08-20 (the client body and the upstream body match in what matters):
 
     model: deepseek-v4-flash | max_tokens: 3000 | stream: true | tools: 0
-    (the ceiling has since been raised to 8000 — see above)
+    (the ceiling has since been raised: 8000 as the code default, 24000 in
+    the shipped settings — see above)
     output_config: {"effort":"high"} system: 3 blocks — the client's
     billing header, "You are a Claude agent, built on Anthropic's Claude
     Agent SDK.", and our judge instruction
@@ -424,9 +429,11 @@ also makes nested labels structurally impossible.
 A rung's threshold also works on the pool path — this was checked
 separately, because all the judge's traffic now goes there: a rung with
 `timeout_ms: 1500` broke off at 1506 ms with "Request was aborted". Hence
-also the treatment for minute-long consultations: the first rung has its
-own threshold of 25 s, after which the full transcript yields to a short
-rung that answers in 2-3 s.
+also the treatment for minute-long consultations: a rung may carry its own
+`timeout_ms`, after which the full transcript yields to a short rung that
+answers in 2-3 s. The shipped rungs do NOT set one — they inherit the 240 s
+from `[defaults]` — so this is a lever available to an operator, not a
+property of the kit as delivered.
 
 ---
 
@@ -536,8 +543,14 @@ sources fired — previously this was unobservable.
 
 ## 8. Fault tolerance and its price
 
-Every failure path is fail-open: a dead proxy, a blown threshold, a
-broken config, a missing file — the call goes through as before. This is
+Every failure path is fail-open BY DEFAULT — a dead proxy, a blown threshold,
+a broken config, a missing file, and the call goes through as before — but the
+shipped settings turn that off for the judge: `[probe.judge] fail_closed =
+true` on top of `[defaults] enforce = true`. On a machine installed from this
+kit a channel failure therefore CANCELS the dispatch (the user's principle: a
+false cancellation is better than a silent pass). The table in §7 is the
+authority on which state does what; this paragraph describes the code default
+underneath it. This is
 the right choice (the judge must not break the work), but it has a price:
 **a judge that switched itself off looks in every report exactly like a
 judge that approved everything**.
@@ -595,12 +608,21 @@ about 130 a day — measured on the live install at 31 MB across 1134 files
 with nothing anywhere that ever deleted one. After each successful write
 the directory is listed and everything past the newest `records_keep`
 (default 500) is unlinked; record names begin with a fixed-width ISO
-stamp, so a lexicographic sort is chronological. The prune rides the
-WRITE on purpose: `record = false` means "stop writing", not "erase what
-is already there", and a switch that quietly destroyed an existing corpus
-would be a worse surprise than a directory that stops growing. A prune
-failure is reported on the same channel as a failed record write and
-never swallowed.
+stamp and end with a zero-padded counter, so a lexicographic sort is
+chronological down to two records written in the same millisecond. The
+horizon is SHARED: every session on this machine writes into the same
+directory, so the count above is the whole machine's, not one session's,
+and a busy neighbour evicts a quiet session's records sooner than its own
+rate would suggest. The record just written is never the one evicted —
+names are ordered by a wall clock, and a clock stepped backwards would
+otherwise make the newest file sort earliest and take it first. The prune
+rides the WRITE on purpose: `record = false` means "stop writing", not
+"erase what is already there", and a switch that quietly destroyed an
+existing corpus would be a worse surprise than a directory that stops
+growing. A prune failure is reported on the same channel as a failed
+record write and never swallowed — except a file a neighbouring session
+removed first, which is the outcome this loop wanted and is not reported
+as a failure.
 
 The record schema grew over the campaign: the corpus's first seven
 records lack the `url`, `cwd`, and `attempts` fields — these appeared
@@ -884,7 +906,7 @@ silently looked successful.
 
 1. Unpack the new version's image, run `claude-patch-all.sh` — the
    locators are structural and usually apply as is.
-2. 78/78 checks must pass; any `fail` — read the locator, do not work
+2. 114/114 checks must pass; any `fail` — read the locator, do not work
    around it. The locators survived 2.1.229–2.1.238 without edits (the
    237→238 transition — on the first run). On 2.1.239 two broke: the
    adapter around the tool call, and the `$jS` name glued into a pattern

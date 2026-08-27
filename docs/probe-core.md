@@ -33,7 +33,10 @@ so "one core" is a guarantee about behaviour, not about the byte count:
    probes at once). Settings are read from the shared `probes.toml`: `[defaults]`,
    on top of it the `[probe.<id>]` table, on top of that the same from the
    project layer. The subdirectory `<id>/` holds `prompt.md` (replacement),
-   `prompt.extra.md` (append), `body.json`, `journal.jsonl`, `records/`.
+   `body.json`, `journal.jsonl`, `records/`. `prompt.extra.md` (append) is a
+   PROJECT-layer file only: it exists so a project can add rules without
+   replacing the global prompt, and in the home directory there would be
+   nothing for it to add to.
    `enabled = false` disables the probe with the outcome `skip_disabled`;
    an absent TOML parser is declared with the string `no-toml-parser` rather
    than handing out empty settings.

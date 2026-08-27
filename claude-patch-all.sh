@@ -208,12 +208,21 @@ else
   # then continued past it and died a second time in our own patcher, so the
   # first diagnosis to appear was also the least informative one.
   #
-  # Walk PATH instead and take the first entry that really is a native image.
+  # Walk the WHOLE of PATH and require exactly one Claude Code image. Taking the
+  # first would make the choice a property of PATH order: a second image earlier
+  # in PATH would be patched while the launcher kept running the other one, and
+  # every check below would pass on the binary nobody executes.
   # The wrapper execs the very launcher this then selects, so the binary we
   # patch stays the binary that runs: a wrapper is a redirection, not a
   # different product. If nothing on PATH is an image, say which candidates were
   # found and why each was rejected -- "not on PATH" and "on PATH but not a
   # binary" are different faults and must not share one message.
+  # NOTE: this heredoc sits inside a command substitution, and bash scans
+  # `$( ... )` for its closing paren while honouring quotes -- so a LONE
+  # apostrophe anywhere in this body (in prose, in a comment) opens a quote
+  # that swallows the rest of the file, and the parse error surfaces a
+  # thousand lines away inside a different heredoc. Write "a foreign tool",
+  # never "someone else\x27s tool", below this line.
   BIN="$(python3 - <<'PY'
 import os, sys
 
@@ -223,33 +232,92 @@ MAGIC = (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
          b'\xfe\xed\xfa\xce', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf',
          b'\x7fELF')
 
-seen, rejected = [], []
+# Three questions, three lists: what named `claude` at all (candidates), which
+# physical files have been looked at (seen, keyed by inode), and what was turned
+# away and why (rejected). One list answering two questions happens to work only
+# for as long as the two kinds of value never compare equal.
+candidates, seen, rejected, images = [], [], [], []
+
+
+def contains(path, marker):
+    # Streamed, with an overlap: the marker may straddle a chunk boundary, and a
+    # naive per-chunk search would miss it on some builds and not others.
+    overlap = len(marker) - 1
+    tail = b''
+    with open(path, 'rb') as fh:
+        while chunk := fh.read(8 << 20):
+            if marker in tail + chunk:
+                return True
+            tail = chunk[-overlap:] if overlap else b''
+    return False
 for d in os.environ.get('PATH', '').split(os.pathsep):
     p = os.path.join(d or '.', 'claude')
     if not (os.path.isfile(p) and os.access(p, os.X_OK)):
         continue
+    # Counted BEFORE anything is read: "no claude on PATH" and "claude is there,
+    # but none of them qualified" are different faults, and merging them sends
+    # the reader looking in the wrong place. A PATH of unreadable `claude` files
+    # reached the first message until this list existed.
+    candidates.append(p)
     real = os.path.realpath(p)
-    if real in seen:
+    # Identity is the INODE, not the path. realpath collapses symlinks but not
+    # hard links, so two directory entries for one physical file survived as two
+    # entries and tripped the "more than one image" refusal below -- a refusal
+    # whose text asserts the images are DIFFERENT while pointing at one file.
+    try:
+        st = os.stat(real)
+        key = (st.st_dev, st.st_ino)
+    except OSError as exc:
+        rejected.append('%s: unreadable (%s)' % (p, exc))
         continue
-    seen.append(real)
+    if key in seen:
+        continue
+    seen.append(key)
     try:
         head = open(real, 'rb').read(4)
     except OSError as exc:
         rejected.append('%s: unreadable (%s)' % (p, exc))
         continue
-    if any(head.startswith(m) for m in MAGIC):
-        if rejected:
-            sys.stderr.write('Note: skipped %d non-image candidate(s) ahead of it on PATH:\n' % len(rejected))
-            for r in rejected:
-                sys.stderr.write('  %s\n' % r)
-        print(real)
-        sys.exit(0)
-    rejected.append('%s: %s' % (p, 'shell script' if head.startswith(b'#!') else 'not a native image'))
+    if not any(head.startswith(m) for m in MAGIC):
+        rejected.append('%s: %s' % (p, 'shell script' if head.startswith(b'#!') else 'not a native image'))
+        continue
+    # Being a native image is not being THIS product. Without this test any
+    # executable named `claude` anywhere on PATH -- a foreign tool, a
+    # compile of your own -- became the target and was rewritten in place; the
+    # run only died later, in the unpacker, with a message about a broken
+    # bundle rather than about a target that was never this bundle.
+    if not contains(real, b'@anthropic-ai/claude-code'):
+        rejected.append('%s: a native image, but not Claude Code' % p)
+        continue
+    images.append(real)
 
-if not seen:
+# Exactly one, or say so. Taking the first would make the choice a property of
+# PATH order: a second Claude Code earlier in PATH would be patched while the
+# launcher kept running the other one, and every check below would pass on the
+# binary nobody executes.
+if len(images) == 1:
+    if rejected:
+        # Not "ahead of it": the walk no longer stops at the accepted image --
+        # continuing is what powers the exactly-one rule -- so this list holds
+        # candidates from BOTH sides of it.
+        # Not "non-image": the list now also holds real native images that are
+        # not this product. Name the rejections, let each row say why.
+        sys.stderr.write('Note: skipped %d other candidate(s) on PATH:\n' % len(rejected))
+        for r in rejected:
+            sys.stderr.write('  %s\n' % r)
+    print(images[0])
+    sys.exit(0)
+
+if len(images) > 1:
+    sys.stderr.write('ERROR: %d different Claude Code images on PATH:\n' % len(images))
+    for i in images:
+        sys.stderr.write('  %s\n' % i)
+    sys.stderr.write('  Patching the first would leave the launcher running another.\n')
+    sys.stderr.write('  Pass the one you mean with --target /path/to/binary.\n')
+elif not candidates:
     sys.stderr.write("ERROR: 'claude' not on PATH\n")
 else:
-    sys.stderr.write('ERROR: no native Claude Code image on PATH; every candidate was rejected:\n')
+    sys.stderr.write('ERROR: no Claude Code image on PATH; every candidate was rejected:\n')
     for r in rejected:
         sys.stderr.write('  %s\n' % r)
     sys.stderr.write('  Pass the image explicitly with --target /path/to/binary.\n')
@@ -258,6 +326,89 @@ PY
 )"
 fi
 echo "Target binary: $BIN"
+
+# --- 0b. never hand tweakcc a binary that already carries our patches ---------
+# `tweakcc --apply` runs its startupCheck first, and that check refreshes its
+# backup from whatever `ccInstallationPath` points at whenever the recorded
+# version differs from the installed one (startup.ts: `realVersion !==
+# backedUpVersion` -> unlink the backup, copy the CURRENT file, record the new
+# version). Point it at a patched binary in that state and its backup silently
+# becomes a copy of OUR build -- permanently, since the version now matches and
+# the refresh never fires again. From then on `tweakcc --restore` writes patched
+# bytes and reports success, and the human who asked for stock gets the patch.
+#
+# The state is not exotic: a sweep across versions leaves ccVersion on the last
+# one swept while the live binary is a different, patched one, and the very next
+# default run lands in it.
+#
+# So a default run that finds a patched live binary rebuilds from OUR pristine
+# copy into a staging file and swaps it in with a rename at the end -- which is
+# what the header mandates for a live binary anyway, and which additionally
+# keeps the live file out of the build until every gate has passed.
+#
+# It does NOT by itself make the build independent of tweakcc's backup: that
+# backup is restored over the staging file at the start of tweakcc's stage, so
+# what the build begins from is verified in 1b, not here. A `--target` run
+# patches in place and skips this step entirely; there the live file IS the
+# build, and the recognizer sends people to exactly that flag when it finds more
+# than one image on PATH.
+OUR_MARKER='baseURL:/^claude/i.test('
+STAGED_FROM_LIVE=0
+# `--only-ours` is excluded on purpose. The hazard 0b exists for is handing
+# tweakcc a patched image, and `--only-ours` never invokes tweakcc at all (the
+# whole stage is behind ONLY_OURS below). Staging from the pristine copy there
+# would instead REMOVE tweakcc's patches from the build and swap that in -- the
+# opposite kind of loss, committed while preventing nothing. In place is right
+# for that flag: our own patcher refuses loudly if the image already carries us.
+if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]] \
+   && grep -q -a -F "$OUR_MARKER" "$BIN"; then
+  # Same notion of pristine as 1b and claude_patch.py's _is_pristine: neither
+  # our bytes nor tweakcc's. A copy carrying only tweakcc's stage passed the
+  # our-marker test alone, and on a machine with no backup yet it is exactly
+  # this file that becomes tweakcc's idea of the original.
+  if [[ -f "$BIN.orig" ]] \
+     && ! grep -q -a -F "$OUR_MARKER" "$BIN.orig" \
+     && ! grep -q -a -F 'tweakcc' "$BIN.orig"; then
+    # Adjacent name is not the same build. A `.orig` left over from an earlier
+    # version -- easy on any install that keeps the binary under a FIXED name
+    # rather than a versioned one -- would be staged, patched and renamed over
+    # the live build: a silent DOWNGRADE presented as a rebuild. Ask both files
+    # what they are; `--version` is offline and the pipeline already execs the
+    # built image for the smoke check.
+    # First line only: a patched image prints tweakcc's version on a second
+    # line, and reading every line made this comparison fail against any
+    # pristine copy -- refusing the default path outright.
+    LIVE_VER="$("$BIN" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
+    ORIG_VER="$("$BIN.orig" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
+    if [[ -z "$LIVE_VER" || -z "$ORIG_VER" || "$LIVE_VER" != "$ORIG_VER" ]]; then
+      echo "ERROR: $BIN.orig is not a pristine copy of the live build." >&2
+      echo "  live=${LIVE_VER:-unreadable}  pristine copy=${ORIG_VER:-unreadable}" >&2
+      echo "  Rebuilding from it would swap a different version over the live one." >&2
+      echo "  Install the version you mean instead:" >&2
+      echo "    bash claude-patch-all.sh --update ${LIVE_VER:-<version>}" >&2
+      exit 1
+    fi
+    cp -p "$BIN.orig" "$BIN.staging"
+    BIN="$BIN.staging"
+    STAGED_FROM_LIVE=1
+    echo "Live binary already carries our patches; rebuilding from the pristine copy"
+    echo "into $BIN and swapping it in at the end."
+  else
+    echo "ERROR: the live binary is already patched and there is no pristine copy" >&2
+    echo "  beside it ($BIN.orig is missing, or carries our patches or tweakcc's)." >&2
+    echo "  Rebuilding in place would hand tweakcc a patched image and poison its" >&2
+    echo "  backup. Re-install a pristine build instead:" >&2
+    echo "    bash claude-patch-all.sh --update" >&2
+    exit 1
+  fi
+fi
+# The pristine twin of whatever we are building, for the backup guard below.
+# Computed AFTER any staging swap and with the suffix stripped: on the --update
+# path claude_patch.py leaves <version>.orig beside <version>.staging, never
+# <version>.staging.orig, so "$BIN.orig" would name a file that never exists --
+# and the repair would silently degrade to a warning on the one path where
+# stock bytes are guaranteed to be at hand.
+PRISTINE_SRC="${BIN%.staging}.orig"
 
 # --- which tweakcc unpacks the image -----------------------------------------
 # Claude Code 2.1.242 split the bundle from one 28 MB module into an ESM entry
@@ -335,6 +486,62 @@ if [[ $CONFIGURE -eq 1 ]]; then
   "${TWEAKCC[@]}" || true
 fi
 
+# --- 1b. tweakcc's backup decides what the build starts from -----------------
+# Its `--apply` calls restoreNativeBinaryFromBackup() unconditionally for native
+# installs (patches/index.ts, pinned SHA): it writes the backup's bytes over
+# whatever ccInstallationPath names, and only then patches. Step 0b points that
+# path at OUR staging file, so the pristine copy we just made is overwritten
+# before tweakcc's first patch lands. Staging alone therefore guarantees
+# nothing -- the file the build really starts from is this backup, and it is the
+# one that has to be verified. Hence BEFORE the stage: an earlier version of this
+# check ran after it, and would have repaired the backup for next time while
+# this build had already been made from the poisoned bytes.
+#
+# With no backup yet, tweakcc's startupCheck creates one from
+# ccInstallationPath -- our pristine staging file -- which needs nothing from us.
+TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
+# Detection is unconditional -- including under `--only-ours`, which does not
+# invoke tweakcc and so cannot cause the poisoning, but whose user is just as
+# entitled to learn that a neighbour already did. Only the REPAIR needs a
+# verified source, and only a real tweakcc run needs to abort.
+if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; then
+  # "Free of OUR marker" is not "pristine". A `.orig` snapshotted from a binary
+  # that had been through tweakcc's stage carries none of our bytes and every
+  # one of theirs -- exactly the case claude_patch.py refuses to CREATE, and
+  # promoting such a file into the backup would restore a patch while reporting
+  # a removal. Nor is a copy of another build a valid restore for this one: ask
+  # both for their version.
+  BACKUP_OK=0
+  if [[ -f "$PRISTINE_SRC" ]] \
+     && ! grep -q -a -F "$OUR_MARKER" "$PRISTINE_SRC" \
+     && ! grep -q -a -F 'tweakcc' "$PRISTINE_SRC"; then
+    SRC_VER="$("$PRISTINE_SRC" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
+    BLD_VER="$("$BIN" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
+    [[ -n "$SRC_VER" && "$SRC_VER" == "$BLD_VER" ]] && BACKUP_OK=1
+  fi
+  if [[ $BACKUP_OK -eq 1 ]]; then
+    # Staged and renamed, not written in place: a `cp` killed halfway leaves a
+    # TRUNCATED backup, and truncated bytes contain no marker either -- so every
+    # later run of this very check would read it as healthy while a restore
+    # wrote a broken binary and reported success.
+    cp -p "$PRISTINE_SRC" "$TWEAKCC_BACKUP.repair" \
+      && mv "$TWEAKCC_BACKUP.repair" "$TWEAKCC_BACKUP"
+    echo "NOTE: tweakcc's backup held a PATCHED image; restored it from $PRISTINE_SRC." >&2
+    echo "      This build starts from those bytes, and 'tweakcc --restore' would" >&2
+    echo "      have returned the patch until now." >&2
+  else
+    echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image, and no" >&2
+    echo "  verified-pristine copy of THIS build is available to repair it from" >&2
+    echo "  ($PRISTINE_SRC is missing, patched, tweakcc-staged, or another version)." >&2
+    echo "  tweakcc restores that backup over the target before patching, so the" >&2
+    echo "  build would be made FROM our own patched bytes -- and 'tweakcc" >&2
+    echo "  --restore' would hand a human the patch while reporting a removal." >&2
+    echo "  Fetch stock bytes for this version and try again:" >&2
+    echo "    python3 claude_patch.py --download-only <version>" >&2
+    [[ $ONLY_OURS -eq 1 ]] || exit 1
+  fi
+fi
+
 # --- 2. tweakcc's own patches (restores from its backup first!) ---------------
 # tweakcc takes no target argument — it resolves the installation itself, from
 # `ccInstallationPath` in its config (auto-detect when null). After --update that
@@ -392,7 +599,15 @@ PY
       # nowhere near the actual cause.
       echo "FATAL: tweakcc --apply exited $TWEAKCC_RC -- not one of its patches applied." >&2
       tail -n 20 "$TWEAKCC_OUT" | sed 's/^/  /' >&2
-      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
+      # On a machine with no ~/.tweakcc yet this is the FIRST thing a human sees,
+      # and the only exit it used to name was the hatch -- which builds without
+      # that whole stage. Name the two real answers first, so the hatch stays
+      # what it is: a deliberate choice, not the obvious way out.
+      echo "  If this is a first run, tweakcc has no saved customizations yet:" >&2
+      echo "    bash claude-patch-all.sh --configure   # pick its patches, save, quit" >&2
+      echo "  To build only OUR patches and skip that stage on purpose:" >&2
+      echo "    bash claude-patch-all.sh --only-ours" >&2
+      echo "  To build anyway, with the stage failing: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1" >&2
       rm -f "$TWEAKCC_OUT"
       exit 1
     elif [[ $TWEAKCC_RC -ne 0 ]]; then
@@ -440,6 +655,18 @@ PY
   fi
 fi
 
+# The stage above began by restoring tweakcc's backup over the target. If our
+# marker is in the result, that restore reintroduced a patched image behind 1b's
+# back -- say so here, where the cause is still nameable, instead of letting our
+# patcher fail three steps later with "site not found" for eleven locators and a
+# diagnosis that points nowhere near the reason.
+if [[ $ONLY_OURS -eq 0 ]] && grep -q -a -F "$OUR_MARKER" "$BIN"; then
+  echo "FATAL: after tweakcc's stage the target already carries OUR patches." >&2
+  echo "  Its --apply restores $TWEAKCC_BACKUP over the target first, so that" >&2
+  echo "  backup is patched and step 1b did not catch it." >&2
+  exit 1
+fi
+
 # --- 3. our patches, ALWAYS after tweakcc -------------------------------------
 # The injected code is parsed BEFORE the build: the patcher is syntactically
 # intact on its own, while a program glued from hundreds of string pieces may
@@ -452,7 +679,7 @@ node "$(dirname "$0")/tools/emit-check.js"
 # `bash -n` treats a heredoc as data and `node --check` has no opinion about
 # python. So a stray parenthesis in a check was found only AFTER the patch stage
 # had already rewritten the image -- minutes in, with a SyntaxError where the
-# verdict should have been, and 94 checks that never ran. Compile it here, for
+# verdict should have been, and not one check having run. Compile it here, for
 # the same reason the injected JS is parsed before anything is written: a gate
 # that cannot run is not a lenient gate, it is an absent one.
 echo "==> Разбор блока проверок"
@@ -477,6 +704,82 @@ except SyntaxError as e:
     sys.exit(1)
 print(f"БЛОК ПРОВЕРОК РАЗБИРАЕТСЯ ({end - start - 1} строк)")
 PYCOMPILE
+
+# --- 0d. the numbers stated in the docs must be the numbers that are declared --
+# A count written in prose has no reader, so it goes stale by default. This is
+# its reader. Twice already a wave raised EXPECTED_CHECKS and left every
+# sentence about it behind; the second time the correction itself went stale
+# within one wave.
+echo "==> Сверка чисел в доках"
+python3 - "$0" <<'PYDOCS'
+import io, os, re, sys, glob
+
+here = os.path.dirname(os.path.abspath(sys.argv[1]))
+read = lambda p: io.open(p, encoding='utf-8').read()
+
+checks = re.search(r'^EXPECTED_CHECKS = (\d+)$', read(sys.argv[1]), re.M)
+bench_path = os.path.join(here, 'tools', 'probe-bench.js')
+scenarios = (re.search(r'^const EXPECTED_SCENARIOS = (\d+);$', read(bench_path), re.M)
+             if os.path.exists(bench_path) else None)
+if not checks or not scenarios:
+    print("ЧИСЛА НЕ ОБЪЯВЛЕНЫ: не найдено EXPECTED_CHECKS и/или EXPECTED_SCENARIOS")
+    sys.exit(1)
+declared = {'checks': checks.group(1), 'проверок': checks.group(1),
+            'проверки': checks.group(1), 'scenarios': scenarios.group(1),
+            'сценариев': scenarios.group(1), 'сценария': scenarios.group(1)}
+
+readme = os.path.join(here, 'README.md')
+if not os.path.exists(readme):
+    # Declared, not silent: the script may legitimately be deployed alone.
+    print("СВЕРКА ЧИСЕЛ ПРОПУЩЕНА — README.md рядом со скриптом не найден")
+    sys.exit(0)
+
+# The campaign journal records past builds by date: a line reading "N checks
+# green" under "Porting to 2.1.237" is true of THAT build and must not be
+# rewritten to today's number.
+JOURNAL = 'judge-patch-spec.md'
+MARKERS = ('at measurement time', 'на момент замера', 'historical', 'историческ')
+WORDS = '|'.join(declared)
+PAIR = re.compile(r'(\d+)\s*/\s*(\d+)\s+(' + WORDS + r')')
+ONE = re.compile(r'(\d+)\s+(' + WORDS + r')')
+
+bad = []
+# Prose is not only in .md files. The first version of this gate read the docs
+# alone and left three present-tense counts standing in the code -- two of them
+# in the header of the very tool that exists because the checks cannot see the
+# build path, while naming the wrong number of checks.
+files = [readme, sys.argv[1]] + sorted(
+    sum((glob.glob(os.path.join(here, *parts))
+         for parts in (('docs', '*.md'), ('tools', '*.sh'), ('tools', '*.js'),
+                       ('tools', '*.py'), ('judge', '*.py'))), [])
+    + [os.path.join(here, name) for name in ('tweakcc-patch.js', 'claude_patch.py')])
+for path in files:
+    if os.path.basename(path) == JOURNAL or not os.path.exists(path):
+        continue
+    for lineno, line in enumerate(read(path).split('\n'), 1):
+        if any(marker in line for marker in MARKERS):
+            continue
+        for m in PAIR.finditer(line):
+            want = declared[m.group(3)]
+            if m.group(1) != want or m.group(2) != want:
+                bad.append((path, lineno, m.group(0), want + '/' + want + ' ' + m.group(3)))
+        if PAIR.search(line):
+            continue
+        for m in ONE.finditer(line):
+            want = declared[m.group(2)]
+            if m.group(1) != want:
+                bad.append((path, lineno, m.group(0), want + ' ' + m.group(2)))
+
+if bad:
+    print("ЧИСЛА В ДОКАХ РАЗОШЛИСЬ С ОБЪЯВЛЕННЫМИ:")
+    for path, lineno, got, want in bad:
+        print("  %s:%d  «%s» — объявлено «%s»" % (os.path.relpath(path, here), lineno, got, want))
+    print("  Если число ИСТОРИЧЕСКОЕ (запись о прошлой сборке), пометьте строку")
+    print("  словами «at measurement time» / «на момент замера» — тогда она не сверяется.")
+    sys.exit(1)
+print("ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (проверок %s, сценариев %s)"
+      % (declared['checks'], declared['scenarios']))
+PYDOCS
 
 echo "==> Applying our multi-provider patches"
 "${TWEAKCC[@]}" adhoc-patch \
@@ -1239,7 +1542,8 @@ def _record_name_is_unique(d):
     """
     if not re.search(rb'let __n=__ts\.replace\(/\[:\.\]/g,"-"\)\+"-"'
                      rb'\+\(__o\.key==null\?"nokey":String\(__o\.key\)\.slice\(-8\)\)'
-                     rb'\+"-"\+process\.pid\+"-"\+__seq\+"\.json"', d):
+                     rb'\+"-"\+process\.pid\+"-"'
+                     rb'\+String\(__seq\)\.padStart\(6,"0"\)\+"\.json"', d):
         return False
     # After the collapse above there is ONE core, so one counter line. Two would
     # mean the cores drifted; none, that the guarantee was edited away.
@@ -1523,6 +1827,63 @@ def _dispatch_keeps_its_model(d):
     # unbounded search would find someone else's `model:f` in another chunk.
     return bool(re.search(rb'model:' + var + rb'(?![\w$.])', d[m.end():m.end() + 8000]))
 
+def _every_cut_is_named(d):
+    """Every cut in the probe is either declared to its reader or structural.
+
+    Round 8 replaced a list of known-bad truncations with a CENSUS, and the
+    census immediately found four more the list did not name. This is that
+    census as a check, and widened: it counts every `.slice(` in both probe
+    blocks, not only the `.slice(0,N)` head-cut shape, because a tail cut and a
+    two-ended cut lose text just as quietly.
+
+    The set below is the whole inventory. Two entries cut TEXT and both append
+    a notice as they do it -- `__dcut` (the list) and `__clip` (the string),
+    which is also where the dispatch head and the transcript head/tail land.
+    The rest do not lose meaning: a BOM byte, a lone surrogate half, the JSON
+    quote pair, the array copy, the fleet ring, the eight-character key suffix
+    of a record name, and the prune victim list.
+
+    Re-run by hand after changing the injected code:
+      python3 - <<'EOF'  (the same walk, printing Counter(args))
+
+    A new cut fails this check whatever it cuts, which is the point: the
+    previous form could only catch the cuts somebody had already thought of.
+    The paren walk assumes no unbalanced parenthesis inside a string literal
+    argument; if that ever appears the captured text is wrong and the check
+    goes RED, which is the safe direction.
+    """
+    blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', d)
+    if len(blocks) != 2:
+        return False
+    found = {}
+    for b in blocks:
+        for m in re.finditer(rb'\.slice\(', b):
+            i, depth = m.end(), 1
+            while i < len(b) and depth:
+                c = b[i:i + 1]
+                if c == b'(':
+                    depth += 1
+                elif c == b')':
+                    depth -= 1
+                i += 1
+            if depth:
+                return False
+            arg = b[m.end():i - 1]
+            found[arg] = found.get(arg, 0) + 1
+    return found == {
+        b'': 1,                            # array copy before the trim walk
+        b'-256': 1,                        # the fleet ring keeps its last marks
+        b'-8': 1,                          # key suffix inside the record name
+        b'-__tl': 1,                       # declared middle-cut, tail half
+        b'0,-1': 1,                        # trailing lone high surrogate
+        b'0,__dmax': 1,                    # dispatch head, declared on the label
+        b'0,__h': 1,                       # declared middle-cut, head half
+        b'0,__k': 2,                       # __dcut and __clip, both declare
+        b'0,__ls.length-__jkeep+1': 1,     # prune victims, not text
+        b'1': 4,                           # three BOM strips, one low surrogate
+        b'1,-1': 1,                        # JSON.stringify quote pair
+    }
+
 _probe_full = d
 _probe_dup = re.findall(rb'/\*__ccCore0\*/[\s\S]*?/\*__ccCore1\*/', d)
 for _b in _probe_dup[1:]:
@@ -1754,8 +2115,24 @@ checks = {
     # The verdict vocabulary is set by the CALLER: the judge and the watcher
     # have different ones, and a vocabulary hardcoded into the core would
     # silently judge the watcher in the judge's words.
+    # And so does the FALLBACK PROMPT, for exactly the same reason. The core
+    # used to carry the judge's own text and hand it to both probes; the
+    # watcher's parser accepts only SILENT|NUDGE, so a machine with no
+    # idle-watch/prompt.md paid for a full ladder that could not produce a
+    # verdict by construction. Pin all three halves: the core defers to the
+    # caller, the judge's fallback names its own verdicts, the watcher's names
+    # its own.
+    'each probe fallback prompt speaks its own vocabulary': bool(re.search(
+                                              rb'__sys=__o\.fb\}', d))
+                                          and not re.search(rb'__sys="You judge', d)
+                                          and bool(re.search(
+                                              rb'act:"BLOCK\|STOP\|DENY",fb:"You judge one'
+                                              rb'[\s\S]{0,500}OK:<why>[\s\S]{0,200}BLOCK:<', d))
+                                          and bool(re.search(
+                                              rb'act:"NUDGE",fb:"You watch'
+                                              rb'[\s\S]{0,500}SILENT:<[\s\S]{0,160}NUDGE:<', d)),
     'probe verdict vocabulary comes from the caller': bool(re.search(
-                                              rb'let __rx=new RegExp\("\^\\\\s\*\(\?:"\+__o\.rx\+"\):\.\*\$","gm"\)', d))
+                                              rb'let __rx=new RegExp\("\^\\\\s\*\(\?:"\+__o\.rx\+"\):\.\*\$","gmi"\)', d))
                                           and bool(re.search(
                                               rb'rx:"OK\|BLOCK\|STOP\|DENY\|WARN",act:"BLOCK\|STOP\|DENY"', d)),
     # A regex built from a STRING needs a double backslash: a single one
@@ -1765,7 +2142,7 @@ checks = {
     # ok, and the judge cancelled nothing.
     'probe verdict classes survive string escaping': bool(re.search(
                                               rb'new RegExp\("\^\(\?:"\+__o\.act\+"\):\\\\s\*'
-                                              rb'\(\[\\\\s\\\\S\]\+\)\$","m"\)', d))
+                                              rb'\(\[\\\\s\\\\S\]\+\)\$","mi"\)', d))
                                           and not re.search(
                                               rb'new RegExp\("\^\(\?:"\+__o\.act\+"\):\\s\*\(\[\\s\\S\]\+\)', d),
     # The watcher is the second consumer of the SAME core. A separate
@@ -1810,7 +2187,7 @@ checks = {
     'watcher counts every dispatch': bool(re.search(
                                               rb'globalThis\.__ccFleet\?\?=\[\];if\(' + ID +
                                               rb'\.name==="Agent"\|\|' + ID + rb'\.name==="Task"\)\{'
-                                              rb'globalThis\.__ccFleet\.push\(Date\.now\(\)\);', d))
+                                              rb'globalThis\.__ccFleet\.push\(globalThis\.__ccMono\(\)\);', d))
                                           and bool(re.search(
                                               rb'if\(globalThis\.__ccFleet\.length>256\)', d)),
     # The cheap count stands BEFORE the model: a busy fleet, an unfilled window
@@ -1832,11 +2209,25 @@ checks = {
                                               rb'catch\{__pr=null\}if\(__pr\)return\}', d)),
     # The filter must know the MOMENT, not the polling interval: every cheap-count
     # refusal names a time before which it cannot change.
+    # A monotonic clock has no "long ago": its zero is the start of the
+    # process. The sentinel for "has not spoken yet" must therefore sit outside
+    # the value space, or a fresh session serves a full cooldown of silence the
+    # moment its window fills -- and writes `cooldown` in the journal, where it
+    # is indistinguishable from a real one. Both halves are pinned: a null that
+    # nothing tests for is arithmetic on null, which is a 0 again.
+    'the watcher\'s "never" is not a clock reading': bool(re.search(
+                                              rb'let __s=globalThis\.__ccWatch\?\?='
+                                              rb'\{last:null,start:__now\}', d))
+                                          and bool(re.search(
+                                              rb'if\(__s\.last!==null&&__now-__s\.last<__cd\)'
+                                              rb'\{__s\.nextAt=__s\.last\+__cd;return "cooldown"\}', d))
+                                          and len(re.findall(rb'last:0,start:', d)) == 0,
+    'every cut in the probe is named': _every_cut_is_named(d),
     'watcher names the next possible moment': bool(re.search(
                                               rb'pre:\(\)=>\{let __s=globalThis\.__ccWatch;'
-                                              rb'return __s&&__s\.nextAt>Date\.now\(\)\?"not-yet":null\}', d))
+                                              rb'return __s&&__s\.nextAt>globalThis\.__ccMono\(\)\?"not-yet":null\}', d))
                                           and bool(re.search(
-                                              rb'if\(__n>=__th\)\{__s\.nextAt=__f\[__n-__th\]\+__w;', d))
+                                              rb'\}else if\(__n>=__th\)\{__s\.nextAt=__f\[__n-__th\]\+__w;', d))
                                           and bool(re.search(
                                               rb'__s\.nextAt=__s\.start\+__w;', d))
                                           and bool(re.search(
@@ -1888,7 +2279,7 @@ checks = {
     # consultation cost — without both, `block` and `block_not_enforced` are
     # separable only by guessing at the environment of a past run
     'judge journal records cost and switch': bool(re.search(
-                                              rb'ms:Date\.now\(\)-__t0,sw:__o\.sw\|\|null', d))
+                                              rb'ms:globalThis\.__ccMono\(\)-__t0,sw:__o\.sw\|\|null', d))
                                           and bool(re.search(
                                               rb'en:__en\?\(__o\.sw==="enforce"\?'
                                               rb'"env":"config"\):null', d))
@@ -1909,7 +2300,7 @@ checks = {
     'judge budget has one home': bool(re.search(
                                               rb'let __mt=__e\.max_tokens\|\|__cfg\.max_tokens;'
                                               rb'if\(__mt\)__obj\.max_tokens=__num\("max_tokens",__mt,'
-                                              rb'__obj\.max_tokens\?\?1200,1\)', d)),
+                                              rb'__obj\.max_tokens\?\?__mtd,1\)', d)),
     'judge treats a verdictless reply as a failure': bool(re.search(
                                               rb'__v=__pv\(__raw\);if\(__v\)break;', d))
                                           and bool(re.search(
@@ -1930,7 +2321,7 @@ checks = {
     # about what the project is — the nearest .claude/judge above cwd layers over
     # the global one
     'judge takes a project layer': bool(re.search(
-                                              rb'if\(__has\.some\(\(__x\)=>__x\.c===1\)\)\{if\(__c!==__dir\)'
+                                              rb'if\(__has\.some\(\(__x\)=>__x\.c===1\)\)\{if\(__c!==__jdir\)'
                                               rb'\{__pdir=__c;__phomeP=__ch\}break\}', d))
                                   and bool(re.search(
                                               rb'if\(__phomeP\)\{let __c1=await __ldt\(__phomeP\+"/probes\.toml"\);'
@@ -2019,7 +2410,7 @@ checks = {
                                           and bool(re.search(
                                               rb'__lim=Math\.max\(8,Math\.floor\(__lim\*__tc/__c\*0\.9\)\)', d))
                                           and bool(re.search(
-                                              rb'__tot\+__mc>__n', d)),
+                                              rb'__tot\+__mc>__b', d)),
     # trimming must be LINEAR: re-serialising the whole array on every removal
     # gave 8.3 s of local compute against the rung's 25 s threshold
     'judge trims without re-serialising': bool(re.search(
@@ -2073,7 +2464,7 @@ checks = {
                                               # payload, so they equal the source's.
                                               len(re.findall(rb'__num\("context_chars"', d)) == 1
                                           and len(re.findall(rb'__num\("dispatch_chars"', d)) == 1
-                                          and len(re.findall(rb'__num\("retry_context_chars"', d)) == 2
+                                          and len(re.findall(rb'__num\("retry_context_chars"', d)) == 1
                                           and len(re.findall(rb'__num\("records_keep"', d)) == 1
                                           and len(re.findall(rb'__num\("max_tokens"', d)) == 5
                                           and len(re.findall(rb'__num\("timeout_ms"', d)) == 1
@@ -2117,12 +2508,14 @@ checks = {
     # record write, never swallowed.
     'the records directory is bounded': (
                                               bool(re.search(
-                                                  rb'__ls=await __jfs\.readdir\(__jdir\+"/records"\)', d))
+                                                  rb'let __ls=\(await __jfs\.readdir\(__jdir\+"/records"\)\)'
+                                                  rb'\.filter\(\(__x\)=>__x!==__n\)', d))
                                           and bool(re.search(
-                                                  rb'if\(__ls\.length>__jkeep\)\{__ls\.sort\(\);', d))
+                                                  rb'if\(__ls\.length>=__jkeep\)\{__ls\.sort\(\);', d))
                                           and bool(re.search(
-                                                  rb'__ls\.slice\(0,__ls\.length-__jkeep\)\)'
-                                                  rb'await __jfs\.unlink\(', d))
+                                                  rb'for\(let __old of __ls\.slice\(0,__ls\.length-__jkeep\+1\)\)'
+                                                  rb'try\{await __jfs\.unlink\(__jdir\+"/records/"\+__old\)\}'
+                                                  rb'catch\(__ue\)\{if\(__ue\?\.code!=="ENOENT"\)throw __ue\}', d))
                                           and bool(re.search(rb'record prune failed: ', d))
                                           and bool(re.search(
                                                   rb'__jkeep=__num\("records_keep",__cfg\.records_keep,500,1\)', d))),
@@ -2133,8 +2526,10 @@ checks = {
                                               rb'if\(__ask\)\{__jarm=!!__o\.arm&&__en&&__fcl;', d))
                                           # the retry is wrapped the same way as a rung
                                           and bool(re.search(
-                                              rb'try\{__raw=await __call\(__cut\(__num\("retry_context_chars",'
-                                              rb'__cfg\.retry_context_chars,8000,0\)\)', d))
+                                              rb'let __rcc=__num\("retry_context_chars",'
+                                              rb'__cfg\.retry_context_chars,8000,0\);', d))
+                                          and bool(re.search(
+                                              rb'try\{__raw=await __call\(__cut\(__rcc\),', d))
                                           # the obligation is released LAST
                                           and bool(re.search(
                                               rb'await __o\.onAct\(__bl\[1\]\.trim\(\),__svc\);__jarm=!1;\}\}catch', d))
@@ -2196,7 +2591,14 @@ checks = {
                                                   rb'if\(typeof __v2==="string"\)__base\[__k2\]=__clip\(__v2,400\);', d))
                                           and bool(re.search(
                                                   rb'else if\(Array\.isArray\(__v2\)\)__base\[__k2\]='
-                                                  rb'__v2\.slice\(0,8\)', d))
+                                                  rb'__dcut\(__v2,8\);', d))
+                                          # A value that is neither string nor array used to
+                                          # go in untouched, so one object field could carry
+                                          # an unbounded string inside it and the name of
+                                          # this check would be decoration.
+                                          and bool(re.search(
+                                                  rb'else if\(__v2&&typeof __v2==="object"\)'
+                                                  rb'__base\[__k2\]=__clip\(JSON\.stringify\(__v2\),400\)', d))
                                           # the join key is added AFTER the walk and must stay whole
                                           and bool(re.search(rb'__rn\?\{\.\.\.__base,rec:__rn\}:__base', d))),
     'session title is shape-guarded': bool(re.search(
@@ -2217,6 +2619,100 @@ checks = {
                                           # an unreachable registry is NOT reported as "no work"
                                           and bool(re.search(rb'__s\.reg=!!__tr', d))
                                           and bool(re.search(rb'if\(__tr&&__lv\.length>=__lth\)', d)),
+    # --- волна 9 -------------------------------------------------------------
+    # A mark is the PAST; the registry is the present. When the registry can be
+    # read, a mark may silence the watcher only for the settling time.
+    'watcher prefers the registry to a stale mark': bool(re.search(
+                                              rb'return "dispatch-settling:"\+', d))
+                                          and bool(re.search(
+                                              rb'__now-__lm<__rc', d))
+                                          # the window path survives ONLY as the
+                                          # unreadable-registry fallback
+                                          and bool(re.search(
+                                              rb'\}else if\(__n>=__th\)\{', d))
+                                          and bool(re.search(
+                                              rb'return "fleet-busy:"\+__n', d)),
+    # Durations and schedules on a monotonic clock, moments on the wall clock.
+    'intervals are monotonic, moments are not': bool(re.search(
+                                              rb'globalThis\.__ccMono\?\?=', d))
+                                          and bool(re.search(
+                                              rb'let __t0=globalThis\.__ccMono\(\)', d))
+                                          and bool(re.search(
+                                              rb'ms:globalThis\.__ccMono\(\)-__t0', d))
+                                          and bool(re.search(
+                                              rb'__ccFleet\.push\(globalThis\.__ccMono\(\)\)', d))
+                                          and bool(re.search(
+                                              rb'__s&&__s\.nextAt>globalThis\.__ccMono\(\)', d))
+                                          # not one duration left on the wall clock
+                                          and len(re.findall(rb'Date\.now\(\)-__t0', d)) == 0
+                                          and len(re.findall(rb'Date\.now\(\)-__s0', d)) == 0
+                                          # and the moment is still named by it
+                                          and bool(re.search(
+                                              rb'new Date\(\)\.toISOString\(\)', d)),
+    'the record just written is never pruned': bool(re.search(
+                                              rb'\.filter\(\(__x\)=>__x!==__n\)', d))
+                                          and bool(re.search(
+                                              rb'__ls\.length>=__jkeep', d)),
+    'a prune losing a race is not a failure': bool(re.search(
+                                              rb'if\(__ue\?\.code!=="ENOENT"\)throw __ue', d)),
+    'record names sort as time inside one millisecond': bool(re.search(
+                                              rb'String\(__seq\)\.padStart\(6,"0"\)', d)),
+    'debug artefacts name their consultation': bool(re.search(
+                                              rb'last-request\."\+process\.pid\+"\."\+__seq', d))
+                                          and bool(re.search(
+                                              rb'last-verdict\."\+process\.pid\+"\."\+__seq', d)),
+    # Both regexes carry the flag or the pair splits: recorded by one, acted on
+    # by the other.
+    'the verdict vocabulary ignores case': bool(re.search(
+                                              rb'\+__o\.rx\+"\):\.\*\$","gmi"\)', d))
+                                          and bool(re.search(
+                                              rb'\+__o\.act\+"\):', d))
+                                          and bool(re.search(
+                                              rb'","mi"\)\.exec\(__v\)', d)),
+    'a content array reads like a content string': bool(re.search(
+                                              rb'Array\.isArray\(__mm\.content\)', d)),
+    'a BOM does not silence the channel': len(re.findall(
+                                              rb'\^\\uFEFF/,""', d)) >= 2,
+    'an answer cut at the output cap says so': bool(re.search(
+                                              rb'finish_reason==="length"', d))
+                                          and bool(re.search(
+                                              rb'stop_reason==="max_tokens"', d)),
+    # Recorded, never gated on: the gateway answers with another id by design.
+    'the model that answered is recorded': len(re.findall(
+                                              rb'__a\.served=', d)) >= 2,
+    'the output budget has one default': bool(re.search(
+                                              rb'let __mtd=8000', d))
+                                          and len(re.findall(
+                                              rb'__cfg\.max_tokens,300,1\)', d)) == 0
+                                          and len(re.findall(
+                                              rb'__cfg\.max_tokens,1200,1\)', d)) == 0,
+    'transcript cuts are declared like every other': bool(re.search(
+                                              rb'__clip\(JSON\.stringify\(__b\.input\),400\)', d))
+                                          and len(re.findall(
+                                              rb'JSON\.stringify\(__b\.input\)\.slice', d)) == 0
+                                          and bool(re.search(
+                                              rb'\[result\] "\+__clip\(String\(', d)),
+    'no cut leaves a lone surrogate': bool(re.search(
+                                              rb'__sur=\(__x\)=>', d))
+                                          and bool(re.search(
+                                              rb'__sur\(__x\.slice\(0,__k\)\)', d))
+                                          and bool(re.search(
+                                              rb'__sur\(__t\.slice\(0,__h\)\)', d)),
+    'the marker phase measures by the same floor': bool(re.search(
+                                              rb'__tot\+__mc>__b', d))
+                                          and len(re.findall(
+                                              rb'__tot\+__mc>__n', d)) == 0,
+    'the retry runs on half its rung': bool(re.search(
+                                              rb'Math\.round\(__num\("rung\.timeout_ms"', d))
+                                          and bool(re.search(
+                                              rb'__tmo,1\)/2\)\)', d)),
+    # One expression per core copy, and no second name for the same string.
+    'the probes home is computed once': len(re.findall(
+                                              rb'__phome=__o\.dirEnv\|\|\(\(process\.env\.HOME', d)) == 1
+                                          and bool(re.search(
+                                              rb'__jdir=__phome\+"/"\+__o\.dirName', d))
+                                          and len(re.findall(
+                                              rb'let __dir=__phome', d)) == 0,
     'journal line carries the session id': bool(re.search(
                                               rb'__base=\{t:__ts,sid:__sid\(\)', d))
                                           and bool(re.search(
@@ -2251,12 +2747,11 @@ checks = {
     # one home for all probes: the id is a subdirectory, not a separate
     # settings root
     'settings live in one probes home': bool(re.search(
-                                              rb'let __phome=__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
-                                              rb'\+"/\.claude/probes"\);let __dir=__phome\+"/"\+__o\.dirName', d))
+                                              rb'__phome=__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
+                                              rb'\+"/\.claude/probes"\),__jdir=__phome\+"/"\+__o\.dirName', d))
                                           # a probe's journal lives in its subdirectory of the same home
                                           and bool(re.search(
-                                              rb'__jdir=\(__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
-                                              rb'\+"/\.claude/probes"\)\)\+"/"\+__o\.dirName', d))
+                                              rb'__jdir=__phome\+"/"\+__o\.dirName;', d))
                                           # ONE environment variable for all probes
                                           and len(re.findall(rb'dirEnv:process\.env\.CLAUDE_PROBES_DIR', d)) == 2
                                           and len(re.findall(rb'CLAUDE_JUDGE_DIR', d)) == 0
@@ -2280,11 +2775,11 @@ checks = {
                                               rb'if\(typeof __tp!=="function"\)\{'
                                               rb'__deg\.push\("no-toml-parser:"\+__f\);'
                                               rb'__degb\.push\("no-toml-parser:"\+__f\);return !1\}', d)),
-    'debug artefacts do not collide between processes': (
+    'debug artefacts do not collide between processes or consultations': (
                                               bool(re.search(
-                                                  rb'__dir\+"/last-request\."\+process\.pid\+"\.json"', d))
+                                                  rb'__jdir\+"/last-request\."\+process\.pid\+"\."\+__seq\+"\.json"', d))
                                           and bool(re.search(
-                                                  rb'__dir\+"/last-verdict\."\+process\.pid\+"\.txt"', d))
+                                                  rb'__jdir\+"/last-verdict\."\+process\.pid\+"\."\+__seq\+"\.txt"', d))
                                           and len(re.findall(rb'"/last-request\.json"', d)) == 0
                                           and len(re.findall(rb'"/last-verdict\.txt"', d)) == 0),
     'judge tells a broken config from a missing one': bool(re.search(
@@ -2338,20 +2833,23 @@ checks = {
     'fallback prompt can cancel': b'BLOCK cancels the dispatch' in d
                                           and b'SWAP:<model>:<why>' not in d
                                           and bool(re.search(
-                                              rb'let __pmm="prompt-missing:"\+__dir', d)),
+                                              rb'let __pmm="prompt-missing:"\+__jdir', d)),
     # an answer outside the vocabulary is not a verdict: it used to be
     # recorded as ok
     'an unrecognised answer is not a verdict': bool(re.search(
-                                              rb'return \(\(String\(__rr\)\.match\(__rx\)\|\|\[\]\)\.pop\(\)\|\|""\)\.trim\(\)', d))
+                                              rb'let __cv=\(\(String\(__rr\)\.match\(__rx\)\|\|\[\]\)'
+                                              rb'\.pop\(\)\|\|""\)\.trim\(\);'
+                                              rb'return __cv\?__cv\+__cut1:""\}', d))
                                           and len(re.findall(rb'\.pop\(\)\)\|\|__ct\)\.trim\(\)', d)) == 0,
     # a cancellation must have a way out: which file to fix, and whether
     # several more like it were silently dropped
     'a cancelled dispatch names the file to fix': bool(re.search(
-                                              rb'"prompt-missing:"\+__dir\+"/prompt\.md"', d))
+                                              rb'"prompt-missing:"\+__jdir\+"/prompt\.md"', d))
                                           # degradation lists are cut with a declaration
                                           and bool(re.search(
                                               rb'__dcut=\(__l,__k\)=>\(__l\.length<=__k\?__l:'
-                                              rb'__l\.slice\(0,__k\)\)\.map\(\(__i\)=>__clip\(__i,300\)\)'
+                                              rb'__l\.slice\(0,__k\)\)\.map\(\(__i\)=>__clip\('
+                                              rb'typeof __i==="string"\?__i:JSON\.stringify\(__i\),300\)\)'
                                               rb'\.concat\(', d))
                                           and len(re.findall(rb'__deg\.slice\(0,5\)', d)) == 0
                                           and len(re.findall(rb'__degb\.slice\(0,3\)', d)) == 0
@@ -2371,7 +2869,7 @@ checks = {
     # an unknown wrapper under the user role must be VISIBLE in the journal:
     # three defects in a row were one class, found through an incident
     'judge reports unknown user-role wrappers': bool(re.search(
-                                              rb'\{uw:__uw\.slice\(0,5\)\}', d))
+                                              rb'\{uw:__dcut\(__uw,5\)\}', d))
                                           and bool(re.search(
                                               rb'"command-name","command-message","command-args"', d)),
     # after compaction the summary is the ONLY carrier of standing directives;
@@ -2414,7 +2912,7 @@ checks = {
 # wrong: the author of these lines twice recounted the keys with a regex that
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89.
-EXPECTED_CHECKS = 94
+EXPECTED_CHECKS = 114
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -2692,7 +3190,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives 37 scenarios through a throwaway probes home — verdicts, degraded
+# and drives 54 scenarios through a throwaway probes home — verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #
 # It existed for weeks and proved nothing, because nothing called it. That is
@@ -2724,7 +3222,13 @@ else
   fi
   BENCH_LOG="$(mktemp)"
   if bun "$BENCH" --binary "$BIN" >"$BENCH_LOG" 2>&1; then
-    echo "Probes: $(grep -c '^[a-z][a-z0-9-]* *|' "$BENCH_LOG") scenarios behaved as specified"
+    # -a and a numeric guard: a plain `grep -c` on a log with a NUL byte
+    # prints NOTHING and exits 1, and the line would read "Probes:  scenarios
+    # behaved as specified" -- which still matches every pattern that looks
+    # for it, so the loss would be invisible to the sweep as well.
+    BENCH_N=$(grep -a -c '^[a-z][a-z0-9-]* *|' "$BENCH_LOG")
+    case "$BENCH_N" in ''|*[!0-9]*) BENCH_N="НЕИЗВЕСТНО СКОЛЬКО" ;; esac
+    echo "Probes: $BENCH_N scenarios behaved as specified"
     # The bench says so itself when its bun differs from the image's: the block
     # is executed by a DIFFERENT engine than the one that will run it in
     # production, so runtime-level differences are not covered. That warning
@@ -2754,17 +3258,20 @@ fi
 # the local proxy with the subscription OAuth bearer and the session dies on
 # "unknown provider for model claude-opus-5" (observed 2026-08-18). The checks
 # above are the gate: `set -e` aborts before this line if any of them failed.
-if [[ $DO_UPDATE -eq 1 ]]; then
+if [[ $DO_UPDATE -eq 1 || $STAGED_FROM_LIVE -eq 1 ]]; then
   # The installer hands back a `.staging` path when the requested version was
   # already installed -- the live file was left untouched while we patched a
-  # copy. Swap it in now, with a rename: atomic, and it takes effect on the next
-  # launch rather than under a running process.
+  # copy. A default run over an already-patched live binary stages for the same
+  # reason (see 0b). Swap it in now, with a rename: atomic, and it takes effect
+  # on the next launch rather than under a running process.
   if [[ "$BIN" == *.staging ]]; then
     FINAL="${BIN%.staging}"
     mv "$BIN" "$FINAL"
     echo "Swapped the verified build over the previous one: $FINAL"
     BIN="$FINAL"
   fi
+fi
+if [[ $DO_UPDATE -eq 1 ]]; then
   python3 "$HERE/claude_patch.py" --repoint "$BIN"
 fi
 
@@ -2813,6 +3320,14 @@ if [[ $DO_UPDATE -eq 1 ]]; then
         echo "  kept (a running session is executing it): $base"
         continue
       fi
+      # A kept binary without its pristine twin cannot be returned to stock, and
+      # that twin is exactly what the in-use test never matches: sessions execute
+      # `2.1.239`, never `2.1.239.orig`, so the backup of the one version we
+      # deliberately preserved was the first thing deleted. Keep the pair.
+      if [[ "$base" == *.orig ]] && grep -qxF "${old%.orig}" <<<"$IN_USE"; then
+        echo "  kept (pristine copy of a binary a running session is executing): $base"
+        continue
+      fi
       rm -v "$old"
     done
   fi
@@ -2859,12 +3374,38 @@ echo "Done. Re-run this script after ANY of:"
 echo "  * a Claude Code update      (bash $(basename "$0") --update)"
 echo "  * running tweakcc's TUI or --apply (it restores from backup and drops our patches)"
 echo "  * the proxy gaining a model (or just: bash $(basename "$0") --only-ours)"
+
+# The probes read the rest of their posture from ~/.claude/probes/probes.toml.
+# Its absence does NOT soften them: `enforce` is carried by the switch alone, and
+# a machine without the settings file has no prompt file either, which the judge
+# treats as not knowing its rules -- so it cancels every dispatch and names the
+# missing file. Saying so here is the point: the state is loud, but a human who
+# sets the switch before syncing the files meets a stopped fleet and no
+# explanation of why. (`fail_closed` genuinely has no env carrier: a setting with
+# two homes is the defect this kit checks for elsewhere.)
+if [[ ! -f "${CLAUDE_PROBES_DIR:-$HOME/.claude/probes}/probes.toml" ]]; then
+  echo
+  echo "The probes have no settings file yet, and on such a machine the prompt"
+  echo "files are missing too -- which is what makes CLAUDE_JUDGE=enforce CANCEL"
+  echo "every dispatch (a missing prompt means the judge does not know its rules;"
+  echo "a missing settings file by itself is not a degradation). Install both:"
+  echo "  bash $(dirname "$0")/scripts/probes-sync.sh --to-home"
+fi
 # `.orig` is created by the installer, so it exists on the --update path only.
 # The default and --target paths patch in place and leave tweakcc's own backup
 # under ~/.tweakcc instead. Printing the cp unconditionally hands the reader a
 # recovery step that fails exactly when they need it.
 if [[ -f "$BIN.orig" ]]; then
-  echo "Restore the pristine binary with:  cp \"$BIN.orig\" \"$BIN\""
+  # Not `cp .orig over the live file`: that rewrites the inode a running session
+  # is reading its embedded assets out of, and the two files differ in size, so
+  # every offset inside moves under it. Same staging+rename the kit uses for its
+  # own installs -- atomic, and it takes effect on the next launch.
+  echo "Restore the pristine binary with:"
+  echo "  cp -p \"$BIN.orig\" \"$BIN.restore\" && mv \"$BIN.restore\" \"$BIN\""
+  echo "  (running sessions keep the old build until they are restarted)"
 else
   echo "No pristine copy beside the binary; tweakcc keeps its own backup under ~/.tweakcc."
+  echo "  Check it before trusting it -- tweakcc restores it blind:"
+  echo "    grep -c -a -F 'baseURL:/^claude/i.test(' ~/.tweakcc/native-binary.backup"
+  echo "  A non-zero count means the backup itself carries our patches."
 fi

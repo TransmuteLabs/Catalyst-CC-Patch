@@ -52,6 +52,12 @@ from pathlib import Path
 NPM_MAIN = "@anthropic-ai/claude-code"
 BUNDLE_ID = "com.anthropic.claude-code"
 ROUTING_MARKER = b"baseURL:/^claude/i.test("      # constant across versions
+# tweakcc leaves its own name in the image it patches (11 occurrences on 2.1.247 --
+# `grep -c` says 8 because it counts LINES, not matches; the presence test is what
+# matters, but a number in a comment has to be the number the tool returned,
+# 0 in stock). Used only to refuse making a "pristine" backup out of a binary
+# that plainly is not one -- never to decide whether OUR patches are present.
+TWEAKCC_MARKER = b"tweakcc"
 ENUM_MARKER = b".string()" + b" " * 10            # padding run is unique to our edit
 
 HERE = Path(__file__).resolve().parent
@@ -269,6 +275,30 @@ def has_marker(path: Path, marker: bytes) -> bool:
     return False
 
 
+def _replace_backup(src: Path, backup: Path) -> None:
+    """Write `backup` from `src` atomically.
+
+    Never a plain copy onto the destination: a copy killed halfway leaves a
+    TRUNCATED backup, and truncated bytes carry no marker -- so `_is_pristine`
+    calls it pristine, every later run keeps it, and a restore writes a broken
+    binary while reporting success. Same staging-and-rename the rest of the kit
+    uses for live files, for the same reason.
+    """
+    tmp = backup.with_name(backup.name + ".new")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, backup)
+
+
+def _is_pristine(path: Path) -> bool:
+    """True when the file carries neither our patches nor tweakcc's stage.
+
+    Used to decide whether an EXISTING `.orig` may keep its place. A backup that
+    fails this is worse than no backup: it is the file a human is told to
+    restore from, so restoring returns a patch while reporting a removal.
+    """
+    return not has_marker(path, ROUTING_MARKER) and not has_marker(path, TWEAKCC_MARKER)
+
+
 def patch_binary(target: Path) -> None:
     if has_marker(target, ROUTING_MARKER):
         info("Already patched — nothing to do.")
@@ -276,10 +306,32 @@ def patch_binary(target: Path) -> None:
 
     backup = target.with_name(target.name + ".orig")
     if not backup.exists():
-        shutil.copy2(target, backup)
+        # `.orig` is what a human restores from, so it must not quietly become a
+        # snapshot of somebody else's patch. The guard above only knows OUR
+        # marker: a binary that has been through tweakcc's stage carries none of
+        # it and used to be copied straight into `.orig`, after which "restore
+        # the pristine binary" put tweakcc's patches back.
+        #
+        # A copy taken from a file on disk is a PRE-PATCH SNAPSHOT, not a
+        # guaranteed-stock image -- only --download-only can promise that,
+        # because it took the bytes from the registry. Say which one this is.
+        if has_marker(target, TWEAKCC_MARKER):
+            die(f"{target} has already been through tweakcc's stage, so a copy of it "
+                f"would not be a pristine backup. Fetch stock bytes first: "
+                f"python3 claude_patch.py --download-only <version>")
+        _replace_backup(target, backup)
         info(f"Backed up original -> {backup}")
-    else:
+        info("  (a snapshot of the file on disk; --download-only is what guarantees stock bytes)")
+    elif _is_pristine(backup):
         info(f"Backup already exists -> {backup} (keeping it)")
+    else:
+        # Keeping it would preserve exactly the file a human is told to restore
+        # from, in exactly the state that makes restoring return a patch. This
+        # tool cannot heal it -- it has no stock bytes -- so it says which one
+        # can, instead of building on top of a backup it knows is wrong.
+        die(f"{backup} is not a pristine copy (it carries our patches or tweakcc's). "
+            f"Restoring from it would return a patch. Replace it with stock bytes: "
+            f"python3 claude_patch.py --download-only <version>")
 
     # Stage the temp file in the TARGET's directory, not the system temp dir:
     # os.replace() cannot cross filesystems (Linux /tmp is often tmpfs, Windows
@@ -319,7 +371,12 @@ def patch_binary(target: Path) -> None:
             die(f"{target} is in use — close all Claude Code sessions "
                 f"(including VS Code) and re-run")
         info(f"Installed patched binary over {target}")
-        info(f"Restore anytime with:  cp \"{backup}\" \"{target}\"")
+        # Staged and renamed, never a copy onto the live file: a bun executable
+        # reads its embedded assets back out of its own file, and the two images
+        # differ in size, so an in-place rewrite moves every offset under a session
+        # that is still running.
+        info(f"Restore anytime with:  cp -p \"{backup}\" \"{target}.restore\" && "
+             f"mv \"{target}.restore\" \"{target}\"")
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -359,17 +416,25 @@ def main(argv: list[str]) -> None:
             staging = target.with_name(target.name + ".staging")
             download_binary(version, staging)
             info(f"{version} is already installed; built pristine beside it -> {staging}")
-            if not backup.exists():
+            if not backup.exists() or not _is_pristine(backup):
                 # The installed file may already carry our patches, so it cannot
                 # serve as the pristine backup. The bytes just downloaded can.
-                shutil.copy2(staging, backup)
+                #
+                # And an EXISTING backup is replaced when it is not pristine.
+                # Keeping it was a closed loop: a `.orig` that had been
+                # snapshotted from a patched or tweakcc-staged binary made the
+                # pipeline refuse to build (it will not stage from a poisoned
+                # copy) and send the human here -- where the one place holding
+                # guaranteed-stock bytes declined to use them, so the next run
+                # refused again with the same advice.
+                _replace_backup(staging, backup)
                 info(f"Backed up pristine -> {backup}")
             print(staging)
             return
         download_binary(version, target)
         info(f"Installed pristine {version} -> {target}")
-        if not backup.exists():
-            shutil.copy2(target, backup)
+        if not backup.exists() or not _is_pristine(backup):
+            _replace_backup(target, backup)
             info(f"Backed up pristine -> {backup}")
         # The launcher is deliberately NOT repointed here. This mode installs a
         # PRISTINE image and hands it to the combined pipeline, which needs a

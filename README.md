@@ -11,8 +11,17 @@ by design). Both mechanisms share one core and are configured by a single
 
 The patch lives in the image itself, not in a hook: a hook does not see
 everything and can be worked around, an injection cannot. Nothing is
-installed if any one of the 78 checks fails, and the switch to a new build
-happens only after the smoke gate.
+installed if any one of the 114 checks fails, and the switch to a new build
+happens only after those checks AND the smoke run AND the interface gate AND the
+probe bench have all passed.
+
+Before any of that the run refuses outright — nothing is written — if the
+pasted code does not parse, if the check block does not parse, or if a count
+stated in this file or under `docs/` disagrees with the declaration that owns
+it (`EXPECTED_CHECKS`, `EXPECTED_SCENARIOS`). A number written in prose has no
+reader and goes stale by default; that last gate is its reader. Counts that
+record a PAST build are exempt when the line says so — see the message the
+gate prints.
 
 > **Boundary.** This repository contains ONLY our own files. The Claude Code
 > image is Anthropic's proprietary software and is not distributed here:
@@ -21,7 +30,7 @@ happens only after the smoke gate.
 > not by this license. Use at your own risk: a broken image is fixed by
 > reinstalling, but the time is lost.
 
-Verified on **2.1.239** (macOS arm64). This is a mac tool: that is where it
+Verified on **2.1.233 through 2.1.247** (macOS arm64). This is a mac tool: that is where it
 lives and where it is tested. By construction `claude_patch.py` also
 handles linux and windows (the patched JS bundle is IDENTICAL on all
 platforms; only the container differs — unpacking, repacking, signing), but
@@ -69,7 +78,7 @@ invocation (including its TUI) requires re-running this script.
 | file | role |
 |---|---|
 | `claude-patch-all.sh` | the pipeline: tweakcc → our patches → signing → checks → launcher switch → model costs |
-| `tweakcc-patch.js` | the patches themselves (78 checks), a script for `tweakcc adhoc-patch` |
+| `tweakcc-patch.js` | the patches themselves, as a script for `tweakcc adhoc-patch`; the 114 checks that verify them live in `claude-patch-all.sh` |
 | `claude_patch.py` | cross-platform install/download/launcher switch |
 | `set-model-costs.py` | syncs `customModelCosts` and `customModelContextWindows` into `~/.claude.json` |
 | `patch-claude-routing.sh/.ps1` | thin wrappers around `claude_patch.py` (must sit next to it) |
@@ -90,11 +99,12 @@ invocation (including its TUI) requires re-running this script.
 | `tools/probes-migrate.py` | a one-time consolidation of the two old `config.json` files into a single `probes.toml`, with a self-check |
 | `docs/probe-registry-spec.md` | the probe registry spec: one settings file, a dictionary of conditions, reactions |
 | `tools/emit-check.js` | parses the pasted code BEFORE the image is built |
+| `tools/build-path-probe.sh` | drives the default-run BUILD branch for real (staging, rename, tweakcc’s backup) — the one thing the 114 checks cannot see, with a negative control |
 | `docs/judge-architecture.md` | the judge's full design: injections, flow, layers, invariants |
 | `docs/judge-patch-spec.md` | the campaign journal: anchors, rejected options, measurements |
 | `tools/listener.py` | an HTTP receiver for routing probes |
 
-## What the patches do (78 checks)
+## What the patches do (114 checks)
 
 Routing and models: `claude-*` go to the subscription, everything else to
 the proxy; arbitrary models on agents; gateway model discovery without a
@@ -192,6 +202,72 @@ and `cooldown_min` (how often a reminder is possible at all). The project
 layer is `.claude/probes/`, with the same merge rules as the judge's.
 
 For details see `judge/README.md` and `idle-watch/README.md`.
+
+## Turning the probes on
+
+The judge and the fleet watcher are inert until their switches are set, and they
+read the rest of their posture from `~/.claude/probes/probes.toml`.
+
+The switch is obeyed with or without that file. `CLAUDE_JUDGE=enforce` enforces
+immediately -- and on a machine where `probes.toml` is missing the judge's
+`prompt.md` is missing too, which is a broken posture rather than a lax one: the
+judge does not know the rules it is meant to judge by, so it CANCELS every
+dispatch and names the file to create. That is deliberate, and it is the
+opposite of a silent pass, but it will stop the fleet until the files are there.
+Install them first.
+
+`fail_closed` is the one setting with no environment carrier, because a setting
+with two homes is the defect this kit checks for elsewhere. Without the file a
+channel failure therefore passes rather than cancels.
+
+```sh
+bash scripts/probes-sync.sh --to-home   # FIRST: settings and prompts into ~/.claude/probes
+export CLAUDE_JUDGE=enforce             # nothing happens until this is set
+export CLAUDE_IDLE=1                    # the fleet watcher, separately
+```
+
+Each probe also reads `~/.claude/probes/<probe>/prompt.md`. If that file is
+missing, the journal records it with the exact path to create, and what happens
+next depends on the posture: in advise the probe consults on a built-in
+instruction written in its own verdict vocabulary; under `enforce` it does not
+consult at all -- not knowing the rules is a broken posture, so the judge
+cancels and the watcher stays silent.
+
+
+## Going back to stock
+
+`--update` leaves a pristine copy of the same build beside the patched one, as
+`<binary>.orig`. The `--target` path and a first default run over an unpatched
+binary do not: they patch in place, and the only copy of the original is then
+tweakcc's own backup under `~/.tweakcc`. Restoring is a staging copy and a rename, never a `cp` over
+the live file: a bun executable reads its embedded assets back out of its own
+file, the patched and pristine images differ in size, and overwriting in place
+moves every offset under a session that is still running.
+
+```sh
+V=~/.local/share/claude/versions/<version>
+cp -p "$V.orig" "$V.restore" && mv "$V.restore" "$V"
+```
+
+Sessions already running keep the old build until they are restarted -- they
+hold the previous inode.
+
+Two things worth knowing before trusting a restore:
+
+* `tweakcc` keeps its own backup at `~/.tweakcc/native-binary.backup` and
+  restores it blind, without checking what is in it. If something once pointed
+  it at an already-patched binary, its `--restore` writes patched bytes and
+  reports success. Check with
+  `grep -c -a -F 'baseURL:/^claude/i.test(' ~/.tweakcc/native-binary.backup` --
+  a non-zero count means the backup carries the patches. This kit checks the
+  same thing on every run and repairs it when it holds a pristine copy.
+* Rolling back to a PREVIOUS version is not possible from local files: cleanup
+  keeps the current version and its `.orig`, plus any older version a running
+  session is still executing (with that version's `.orig`, so it can be
+  restored too); once those sessions exit the next `--update` collects them.
+  Re-install the older version
+  with `--update <version>`.
+
 
 ## Rakes we stepped on
 

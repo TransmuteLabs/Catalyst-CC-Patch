@@ -2056,7 +2056,22 @@ step('22 judge consulted before a subagent dispatch', () => {
   const TTL = siteName(tm[1], 'session title accessor');
 
   const core =
-    '/*__ccCore0*/globalThis.__ccProbe??=async function(__o){' +
+    // Intervals and schedules are measured on a MONOTONIC clock, timestamps
+    // are not. The wall clock is the only thing that can name the moment a
+    // consultation happened, and the only thing that must never be used to
+    // measure how long it took: it steps backwards on an NTP correction and
+    // forwards across a sleep. Both were live: `ms` in the journal could come
+    // out NEGATIVE while the caller was still waiting, and a step back left
+    // `nextAt` in the future -- muting the watcher with no journal line at all,
+    // since `pre` writes nothing by design.
+    //
+    // Installed at the head of the CORE because the core is prepended to both
+    // blocks, so in the watcher this line runs one statement before the fleet
+    // mark is pushed. A second copy is inert by the same `??=` that guards the
+    // core itself, and the one home of the text is this string.
+    '/*__ccCore0*/globalThis.__ccMono??=(()=>{let __p=globalThis.performance;' +
+      'return __p&&typeof __p.now==="function"?()=>Math.round(__p.now()):()=>Date.now()})();' +
+    'globalThis.__ccProbe??=async function(__o){' +
     // The filter runs BEFORE any I/O. For a probe called on every tool call,
     // a "cheap count after reading settings" bankrupts it twice: walking up
     // the tree costs up to 96 filesystem accesses per call, and the refusal is
@@ -2072,7 +2087,14 @@ step('22 judge consulted before a subagent dispatch', () => {
     // record both are indistinguishable from a judge that was never asked —
     // the "switched off at both ends" failure. Declared OUTSIDE the try so
     // the catch can still record why a consultation was skipped.
-    'let __t0=Date.now(),__jfs=null,__jrec=!0,__jgz=!1,__jkeep=500,__nseen={},' +
+    // One number per consultation, taken at the START and used by both the
+    // record name and the debug artefacts. Taken at the end it named only the
+    // record, and the debug files -- written DURING the ladder -- had nothing
+    // but the pid: two consultations running at once in one process (parallel
+    // tool calls in a single turn) overwrote each other's last-request and
+    // last-verdict, so the pair a human read belonged to neither.
+    'let __seq=globalThis.__ccRecSeq=(globalThis.__ccRecSeq??0)+1;' +
+    'let __t0=globalThis.__ccMono(),__jfs=null,__jrec=!0,__jgz=!1,__jkeep=500,__nseen={},' +
     '__jreq=null,__jres=null,__jst=null,' +
     // __jtry=0, not 1: before the first attempt there are ZERO attempts. A one
     // claimed an attempt where the throw happened BEFORE the ladder.
@@ -2109,7 +2131,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __x=Number(__v);' +
       'if(!Number.isFinite(__x)||__x<__min){' +
         'if(!__q&&!__nseen[__k]){__nseen[__k]=1;' +
-          '__deg.push("bad-setting:"+__k+"="+String(__v).slice(0,24)+" (need >="+__min+"), using "+__d)}' +
+          '__deg.push("bad-setting:"+__k+"="+__clip(__v,24)+" (need >="+__min+"), using "+__d)}' +
         'return __d}' +
       'return __x},' +
     // The degradation list is cut with a declaration: a silently dropped sixth
@@ -2120,17 +2142,41 @@ step('22 judge consulted before a subagent dispatch', () => {
     // built from a parser message plus a path was unbounded — and an unbounded
     // journal line is what makes an append from two sessions able to tear,
     // there being no flock in node:fs/promises to fall back on.
-    '__dcut=(__l,__k)=>(__l.length<=__k?__l:__l.slice(0,__k)).map((__i)=>__clip(__i,300))'+
+    // A non-string element is clipped by its JSON, not by String(): the
+    // latter turns any object into the fifteen characters "[object Object]",
+    // which is a silent loss of the value in the one place that was supposed
+    // to be declaring its losses. Both current callers pass string lists, so
+    // this changes nothing for them; it matters for whoever passes the next
+    // list, who will not read this line first.
+    '__dcut=(__l,__k)=>(__l.length<=__k?__l:__l.slice(0,__k)).map((__i)=>__clip(typeof __i==="string"?__i:JSON.stringify(__i),300))'+
       '.concat(__l.length<=__k?[]:('+
       '["[\\u043f\\u043e\\u043a\\u0430\\u0437\\u0430\\u043d\\u044b \\u043d\\u0435 \\u0432\\u0441\\u0435: \\u0435\\u0449\\u0451 "+(__l.length-__k)+"]"])),' +
     // Every truncation in the journal and the record is declared — by the same
     // convention as trimming the transcript: a verdict cut mid-word reads as a
     // complete verdict, and a truncated failed-attempt reply as its whole
     // trace.
+    // A cut is measured in UTF-16 code units, so it can land BETWEEN the halves
+    // of a surrogate pair and leave an unpaired one at the seam. That is not a
+    // cosmetic loss: the fragment goes into JSON and then into text a model
+    // reads, where an unpaired surrogate is either an error or a replacement
+    // character standing where an emoji was. Every slice in this code runs
+    // through here, so the seam is repaired in ONE place: a trailing high half
+    // and a leading low half are dropped.
+    '__sur=(__x)=>{let __s0=String(__x);' +
+      'if(__s0.length){let __c0=__s0.charCodeAt(0);' +
+        'if(__c0>=56320&&__c0<=57343)__s0=__s0.slice(1)}' +
+      'if(__s0.length){let __c1=__s0.charCodeAt(__s0.length-1);' +
+        'if(__c1>=55296&&__c1<=56319)__s0=__s0.slice(0,-1)}' +
+      'return __s0},' +
     '__clip=(__s,__k)=>{let __x=String(__s??"");return __x.length<=__k?__x:'+
-      '__x.slice(0,__k)+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+'+
+      '__sur(__x.slice(0,__k))+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+'+
       '(__x.length-__k)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432]"},' +
-    '__jdir=(__o.dirEnv||((process.env.HOME||".")+"/.claude/probes"))+"/"+__o.dirName;' +
+    // The probes home is computed ONCE. It used to be spelled out twice, in
+    // two identical expressions, and derived two names for one and the same
+    // string -- so an edit to either would have sent the journal to a different
+    // home than the settings, and nothing would have said so.
+    '__phome=__o.dirEnv||((process.env.HOME||".")+"/.claude/probes"),' +
+    '__jdir=__phome+"/"+__o.dirName;' +
     // The journal line is an INDEX, not evidence: its verdict is clipped and
     // the material the judge actually saw is nowhere in it, so neither
     // "did it judge correctly" nor "train a smaller model on these" can be
@@ -2187,10 +2233,16 @@ step('22 judge consulted before a subagent dispatch', () => {
       // and future, while the key stays honest -- named `nokey` when the route
       // has none, rather than stringified into a word that reads like a bug.
       // pid separates processes, the counter separates calls inside one.
-      'let __seq=globalThis.__ccRecSeq=(globalThis.__ccRecSeq??0)+1;' +
+            // The counter is zero-padded because the name is SORTED, and an unpadded
+      // one sorts 10 before 9. The ISO stamp keeps the order between different
+      // milliseconds; within one millisecond the counter is the only tiebreak,
+      // and unpadded it inverted -- so a prune at the horizon could take the
+      // newer of two records written in the same millisecond. Six digits is
+      // past any process lifetime here (one per consultation); beyond it the
+      // order breaks again, and only inside a single millisecond.
       'let __n=__ts.replace(/[:.]/g,"-")+"-"' +
         '+(__o.key==null?"nokey":String(__o.key).slice(-8))' +
-        '+"-"+process.pid+"-"+__seq+".json"+(__jgz?".gz":"");' +
+        '+"-"+process.pid+"-"+String(__seq).padStart(6,"0")+".json"+(__jgz?".gz":"");' +
       'try{await __jfs.mkdir(__jdir+"/records",{recursive:!0});' +
         'let __rq;try{__rq=JSON.parse(__jreq)}catch{__rq=__jreq}' +
         // rx/act — only here, not in the shared base: the base also feeds the
@@ -2206,10 +2258,29 @@ step('22 judge consulted before a subagent dispatch', () => {
         'if(__jgz){try{let __z=await import("node:zlib");__out=__z.gzipSync(Buffer.from(__data))}' +
           'catch{__n=__n.replace(/\\.gz$/,"")}}' +
         'await __jfs.writeFile(__jdir+"/records/"+__n,__out);' +
-        'try{let __ls=await __jfs.readdir(__jdir+"/records");' +
-          'if(__ls.length>__jkeep){__ls.sort();' +
-            'for(let __old of __ls.slice(0,__ls.length-__jkeep))' +
-              'await __jfs.unlink(__jdir+"/records/"+__old)}}' +
+        // Two things this loop must not do.
+        //
+        // It must not delete the record THIS consultation just wrote. Names are
+        // ordered by a wall-clock stamp, so a clock stepped backwards makes the
+        // newest file sort earliest and the horizon eats it first -- the one
+        // record whose loss is guaranteed to matter, because it is the one
+        // someone is about to read. Excluding it by name costs nothing and holds
+        // whatever the clock does. (Records from OTHER processes cannot be
+        // ordered against ours under a rolled-back clock by any means available
+        // here -- mtime comes from the same clock -- so the guarantee is exactly
+        // this one, and it is stated as such.)
+        //
+        // And it must not read a neighbour's success as its own failure. Two
+        // live sessions prune the same directory and pick overlapping victims;
+        // the loser used to get ENOENT, abandon the REST of its list, and report
+        // "record prune failed" -- the same channel a real prune failure uses,
+        // which is how a benign race devalues the one message that means
+        // something. A file already gone is the outcome this loop wanted.
+        'try{let __ls=(await __jfs.readdir(__jdir+"/records")).filter((__x)=>__x!==__n);' +
+          'if(__ls.length>=__jkeep){__ls.sort();' +
+            'for(let __old of __ls.slice(0,__ls.length-__jkeep+1))' +
+              'try{await __jfs.unlink(__jdir+"/records/"+__old)}' +
+              'catch(__ue){if(__ue?.code!=="ENOENT")throw __ue}}}' +
         'catch(__pe){try{console.error(__o.tag+" record prune failed: "' +
           '+(__pe?.message??__pe))}catch{}}' +
         'return __n}' +
@@ -2223,12 +2294,17 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __base={t:__ts,sid:__sid(),title:__ttl(),tool:__o.tool.name,' +
         'agent:__o.input?.subagent_type,model:__mv.m,msrc:__mv.s,' +
         'cfg:__pdir||null,' +
-        'ms:Date.now()-__t0,sw:__o.sw||null,...__oc};' +
+        'ms:globalThis.__ccMono()-__t0,sw:__o.sw||null,...__oc};' +
       // Bound every string the line carries, whatever put it there.
       'for(let __k2 in __base){let __v2=__base[__k2];' +
         'if(typeof __v2==="string")__base[__k2]=__clip(__v2,400);' +
-        'else if(Array.isArray(__v2))__base[__k2]=__v2.slice(0,8)' +
-          '.map((__x)=>typeof __x==="string"?__clip(__x,300):__x)}' +
+        'else if(Array.isArray(__v2))__base[__k2]=__dcut(__v2,8);' +
+        // The third arm is what makes the name of this guarantee true. A
+        // value that was neither string nor array used to go into the line
+        // untouched, so one object field could carry an unbounded string
+        // inside it and "the line is bounded" would be decoration. Numbers,
+        // booleans and null are short by construction; objects are not.
+        'else if(__v2&&typeof __v2==="object")__base[__k2]=__clip(JSON.stringify(__v2),400)}' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +
       // On a fresh install the judge's directory does not exist yet, and that
@@ -2287,16 +2363,18 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __fs=await import("node:fs/promises");__jfs=__fs;' +
       // One home for all probes: everyone's settings live in the probes.toml
       // next door; each probe keeps a directory for its prompt, template,
-      // journal and records.
-      'let __phome=__o.dirEnv||((process.env.HOME||".")+"/.claude/probes");' +
-      'let __dir=__phome+"/"+__o.dirName;' +
-      // The judge stays project-agnostic on purpose: it rules on the event, the
+      // journal and records. Both are computed in the preamble, ABOVE the try,
+      // because the catch journals too and a binding from the try is not
+      // visible there.
+      // A probe stays project-agnostic on purpose: it rules on the event, the
       // logic and the rules, not on what a project is about. What a project MAY
-      // do is restate the rules for itself — a nearest `.claude/judge` above the
-      // cwd layers over the global one (config keys merge, `prompt.extra.md` is
-      // appended, a full `prompt.md`/`body.json` replaces). An explicit
-      // CLAUDE_JUDGE_DIR turns layering off: a probe must get exactly what it
-      // was handed.
+      // do is restate the rules for itself — a nearest `.claude/probes` above
+      // the cwd layers over the global one (config keys merge, `prompt.extra.md`
+      // is appended, a full `prompt.md`/`body.json` replaces). An explicit
+      // CLAUDE_PROBES_DIR turns layering off: a probe must get exactly what it
+      // was handed. (The names in this comment were `.claude/judge` and
+      // CLAUDE_JUDGE_DIR until the two probes were given one home; the code
+      // moved and the comment did not.)
       '__pdir=null;let __phomeP=null;' +
       // An absent layer and an UNREADABLE layer are different events: the
       // first means "no rules", the second "there are rules but I could not
@@ -2322,9 +2400,9 @@ step('22 judge consulted before a subagent dispatch', () => {
           'let __no=__has.find((__x)=>__x.c===2),__un=__has.find((__x)=>__x.c===3);' +
           'if(__no){__deg.push("layer-unreadable:"+__c+" ("+__no.e+")");' +
             '__degb.push("layer-unreadable:"+__c+" ("+__no.e+")");' +
-            'if(__c!==__dir){__pdir=__c;__phomeP=__ch}break}' +
+            'if(__c!==__jdir){__pdir=__c;__phomeP=__ch}break}' +
           'if(__un)__deg.push("layer-unknown:"+__c+" ("+__un.e+")");' +
-          'if(__has.some((__x)=>__x.c===1)){if(__c!==__dir){__pdir=__c;__phomeP=__ch}break}' +
+          'if(__has.some((__x)=>__x.c===1)){if(__c!==__jdir){__pdir=__c;__phomeP=__ch}break}' +
           'let __up=__p.replace(/\\/[^\\/]*$/,"");if(!__up||__up===__p)break;__p=__up}}catch{}' +
       // The reader declares its outcome: null — no file, !1 — the file exists
       // but was not read or not parsed. A silent parse turned a broken config
@@ -2414,8 +2492,16 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __c=Array.isArray(__m.content)?__m.content:[{type:"text",text:String(__m.content??"")}];' +
         'let __bt=__c.map((__b)=>__b?.type==="text"?__b.text:' +
         '__b?.type==="thinking"?"[thinking] "+__b.thinking:' +
-        '__b?.type==="tool_use"?"[tool "+__b.name+"] "+JSON.stringify(__b.input).slice(0,400):' +
-        '__b?.type==="tool_result"?"[result] "+String(typeof __b.content==="string"?__b.content:JSON.stringify(__b.content)).slice(0,300):' +
+        // Declared, like every other cut in this code. These two were bare
+        // slices: a tool_use input longer than 400 characters reached the judge
+        // looking WHOLE, and a brief that had lost its tail read as a brief
+        // that never had one -- the same shape of defect as the dispatch label
+        // that once cut a brief without saying so, one level down, on the
+        // transcript entries. The marker costs about 27 characters on top of
+        // the nominal cap; the cap is here to bound the payload, and it still
+        // does.
+        '__b?.type==="tool_use"?"[tool "+__b.name+"] "+__clip(JSON.stringify(__b.input),400):' +
+        '__b?.type==="tool_result"?"[result] "+__clip(String(typeof __b.content==="string"?__b.content:JSON.stringify(__b.content)),300):' +
         '"["+__b?.type+"]").join("\\n");if(!__bt)return null;' +
         // Provenance comes from the ENVELOPE first (isMeta / toolUseResult are
         // what Claude Code itself uses to tell synthetic and tool messages
@@ -2516,7 +2602,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           'for(let __z=0;__z<10;__z++){' +
             'let __h=Math.min(__t.length,Math.floor(__lim*0.55));' +
             'let __tl=Math.max(0,Math.min(__lim-__h-44,__t.length-__h));' +
-            '__nx={src:__a[__i].src,text:__t.slice(0,__h)+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+(__t.length-__h-__tl)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432] "+(__tl?__t.slice(-__tl):"")};' +
+            '__nx={src:__a[__i].src,text:__sur(__t.slice(0,__h))+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+(__t.length-__h-__tl)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432] "+(__tl?__sur(__t.slice(-__tl)):"")};' +
             '__c=__cs(__nx);if(__c<=__tc||__lim<=8)break;' +
             '__lim=Math.max(8,Math.floor(__lim*__tc/__c*0.9))}' +
           'let __g=__w[__i]-__c;if(__g<=0)return 0;' +
@@ -2571,13 +2657,19 @@ step('22 judge consulted before a subagent dispatch', () => {
           'let __cd=0;let __mt=()=>"[\\u043b\\u0435\\u043d\\u0442\\u0430 \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u0430: \\u0432\\u044b\\u0442\\u0435\\u0441\\u043d\\u0435\\u043d\\u043e "+__d+" \\u0437\\u0430\\u043f\\u0438\\u0441\\u0435\\u0439; \\u0437\\u0430\\u043a\\u0440\\u0435\\u043f\\u043b\\u0435\\u043d\\u043e \\u0440\\u0435\\u043f\\u043b\\u0438\\u043a \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0430: "+__cnt(__isu)+", \\u0440\\u0435\\u0437\\u044e\\u043c\\u0435 \\u043a\\u043e\\u043c\\u043f\\u0430\\u043a\\u0446\\u0438\\u0438: "+__cnt(__iss)' +
             '+(__dp?"; \\u0412\\u042b\\u0422\\u0415\\u0421\\u041d\\u0415\\u041d\\u041e \\u0417\\u0410\\u041a\\u0420\\u0415\\u041f\\u041b\\u0401\\u041d\\u041d\\u042b\\u0425: "+__dp:"")+((__cd=__ctd())?"; \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e \\u043f\\u043e \\u0442\\u0435\\u043a\\u0441\\u0442\\u0443: "+__cd:"")+"]";' +
           'let __sm=()=>"[\\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+__d+"]";' +
-          'if(__cs({src:"injected",text:__mt()})*4>__n)__mt=__sm;' +
+          // __b, not __n: every loop above trims towards __b = max(60, __n), and
+          // the marker phase chased __n. With context_chars set below 60 the
+          // two disagree, the phase pursues a target the rest of the function
+          // will never reach, and it exits on its break conditions instead of
+          // on the budget -- so "paid for by shrinking the transcript by its own
+          // cost" stops being true exactly where the budget is tightest.
+          'if(__cs({src:"injected",text:__mt()})*4>__b)__mt=__sm;' +
           'let __mc=__cs({src:"injected",text:__mt()})+120;' +
-          'for(let __g=0;__g<20000&&__tot+__mc>__n&&__a.length>0;__g++){' +
+          'for(let __g=0;__g<20000&&__tot+__mc>__b&&__a.length>0;__g++){' +
             'let __i=__long(()=>!0);if(__i<0)break;' +
             'if(__w[__i]>120&&__fit(__i,Math.max(60,__w[__i]-(__tot+__mc-__n))))continue;' +
             'let __h4=__head();' +
-            'if(__cnt(()=>!0)<=1&&(__h4<0||!__fit(__h4,Math.max(24,__n-__mc-4))))break;' +
+            'if(__cnt(()=>!0)<=1&&(__h4<0||!__fit(__h4,Math.max(24,__b-__mc-4))))break;' +
             'let __h3=__head();if(__h3<0||__cnt(()=>!0)<=1)break;__del(__h3,__pr(__a[__h3]))}' +
           '__a=__a.filter((__x,__k)=>__al(__k));' +
           '__w=__a.map(__cs);__ot=__ot.filter((__x,__k)=>__al(__k));' +
@@ -2607,7 +2699,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __emb=(__s)=>JSON.stringify(String(__s)).slice(1,-1);' +
       'let __sys=__o.promptEnv;' +
       'if(!__sys&&__pdir)__sys=await __rdj(__pdir+"/prompt.md");' +
-      'if(!__sys)__sys=await __rdj(__dir+"/prompt.md");' +
+      'if(!__sys)__sys=await __rdj(__jdir+"/prompt.md");' +
       // The project's appendix is read by the same reader: its silent
       // disappearance is exactly the same case as the silent disappearance of
       // the project config.
@@ -2620,18 +2712,21 @@ step('22 judge consulted before a subagent dispatch', () => {
       // and substantively off, and the journal was full of "ok".
       // The label names the path, like all the others: on a fresh install this
       // is the ONLY refusal the human will see, and from a "prompt-missing"
-      // without a path it does not follow that ~/.claude/judge/prompt.md is
+      // without a path it does not follow that ~/.claude/probes/judge/prompt.md is
       // what needs creating.
-      'if(!__sys){let __pmm="prompt-missing:"+__dir+"/prompt.md"+' +
+      // The fallback prompt belongs to the caller, for the same reason `rx` and
+      // `act` do: the core does not know what a verdict sounds like. It used to
+      // hold the judge's own text -- OK/WARN/BLOCK -- and hand it to BOTH probes.
+      // The watcher's parser accepts only SILENT|NUDGE, so on any machine without
+      // ~/.claude/probes/idle-watch/prompt.md every watcher consultation ran the
+      // whole ladder, was paid for, and could not produce a verdict by
+      // construction: the model answered "OK", the parser refused it, the journal
+      // recorded `empty`, and the next cooldown did it again. Silence that costs
+      // money and reads as health.
+      'if(!__sys){let __pmm="prompt-missing:"+__jdir+"/prompt.md"+' +
         '(__pdir?" | "+__pdir+"/prompt.md":"");' +
         '__deg.push(__pmm);__degb.push(__pmm);' +
-        '__sys="You judge one about-to-run subagent dispatch. You do NOT rewrite it: "+' +
-        '"you either let it run or CANCEL it and say why. Answer with ONE line, "+' +
-        '"the verdict FIRST: OK:<why> or WARN:<why> or BLOCK:<what is wrong and what "+' +
-        '"to do instead>. BLOCK cancels the dispatch. Your own prompt file is "+' +
-        '"missing, so judge on the general rule: a dispatch must name its model and "+' +
-        '"class, the class must match what the brief actually does, and an expensive "+' +
-        '"model on closed mechanical work is a reason to BLOCK."}' +
+        '__sys=__o.fb}' +
       // A chain, not a single model: the judge shares its channel with the very
       // fleet it judges, so when the fleet is busy the judge is the one that
       // times out — and a silent fail-open is indistinguishable from blanket
@@ -2645,9 +2740,20 @@ step('22 judge consulted before a subagent dispatch', () => {
         '(Array.isArray(__cfg.models)&&__cfg.models.length?__cfg.models:[__cfg.model||"glm-5.3"]))' +
         '.map((__x)=>typeof __x==="string"?{model:__x}:__x).filter((__x)=>__x&&__x.model);' +
       'if(!__mdls.length)__mdls=[{model:"glm-5.3"}];' +
+      // ONE answer to "what output budget when nothing says otherwise". There
+      // were three: 300 in the raw-HTTP fallback body, 1200 twice on the pool
+      // path. All three are below what this judge was MEASURED to spend -- a
+      // reasoning model at `high` spends 434-2120 tokens on a verdict, and 1200
+      // is the number that once truncated a cancellation into silence (see
+      // docs/judge-architecture.md). 8000 is the ceiling that measurement
+      // argued for; the shipped probes.toml asks for more, and a template
+      // carries its own. This is only the floor under a machine that has said
+      // nothing at all -- and on such a machine the judge must still be able to
+      // finish a sentence.
+      'let __mtd=8000;' +
       'let __tplr=null;' +
       'if(__pdir)__tplr=await __rdj(__pdir+"/body.json");' +
-      'if(!__tplr)__tplr=await __rdj(__dir+"/body.json");' +
+      'if(!__tplr)__tplr=await __rdj(__jdir+"/body.json");' +
       // A broken body template does not change the outcome (the built-in body
       // works), but whoever dropped in their own template must learn that it
       // was not applied.
@@ -2673,11 +2779,11 @@ step('22 judge consulted before a subagent dispatch', () => {
         // a 1200-token ceiling that truncated a cancel verdict into silence.
         'let __obj=JSON.parse(__tpl);__obj.model=__mdl;' +
         'let __mt=__e.max_tokens||__cfg.max_tokens;' +
-        'if(__mt)__obj.max_tokens=__num("max_tokens",__mt,__obj.max_tokens??1200,1);' +
+        'if(__mt)__obj.max_tokens=__num("max_tokens",__mt,__obj.max_tokens??__mtd,1);' +
         'if(__e.effort)__obj.reasoning_effort=__e.effort;' +
         'return JSON.stringify(__obj)}catch{' +
         'return JSON.stringify({model:__mdl,' +
-          'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,300,1),' +
+          'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,__mtd,1),' +
           'messages:[{role:"system",content:__sys},' +
           '{role:"user",content:"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp}]})}};' +
       'let __pool=typeof ' + QM + '==="function"?' + QM + ':null;' +
@@ -2690,7 +2796,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       '__jurl=__http?__purl:"pool";' +
       'let __tmo=__num("timeout_ms",__o.tmoEnv||__cfg.timeout_ms,8000,1);' +
       'let __call=async(__cx,__ms,__e)=>{' +
-        'let __s0=Date.now(),__a={model:__e.model,via:__http?"http":"pool",ctx_chars:__cx.length,' +
+        'let __s0=globalThis.__ccMono(),__a={model:__e.model,via:__http?"http":"pool",ctx_chars:__cx.length,' +
           'timeout_ms:__ms,' +
           'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,null,1,!0),' +
           'effort:__e.effort||null};__jatt.push(__a);' +
@@ -2704,18 +2810,28 @@ step('22 judge consulted before a subagent dispatch', () => {
         'try{' +
           'if(__http){let __b=__mkb(__cx,__e);__jreq=__b;' +
             'if(__o.dbg)try{await __fs.writeFile(' +
-              '__dir+"/last-request."+process.pid+".json",__b)}catch{}' +
+              '__jdir+"/last-request."+process.pid+"."+__seq+".json",__b)}catch{}' +
             'let __r=await fetch(__purl,{method:"POST",signal:__ac.signal,' +
               'headers:{"content-type":"application/json"},body:__b});' +
             'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.resp=__clip(__t,800);' +
-            '__a.ms=Date.now()-__s0;__a.http=__r.status;' +
+            // Recorded, never gated on. The gateway answers with an id that is
+            // NOT the one asked for as a matter of routine (a build suffix, a
+            // family alias), and refusing those would refuse the whole proxy
+            // lane. But when a ladder rung is answered by something other than
+            // the model it addressed, that has to be legible afterwards: the
+            // attempt named only what it REQUESTED, so a verdict from an
+            // unexpected model was indistinguishable from one from the right
+            // one.
+            'try{let __sv=JSON.parse(String(__t).replace(/^\\uFEFF/,""))?.model;' +
+              'if(__sv&&__sv!==__e.model)__a.served=__clip(__sv,80)}catch{}' +
+            '__a.ms=globalThis.__ccMono()-__s0;__a.http=__r.status;' +
             'if(!__r.ok)throw new Error("HTTP "+__r.status);return __t}' +
           // Effort rides in the options field, not the body: the body here is
           // not ours, the client assembles it. The output limit is
           // maxOutputTokensOverride, also the single budget home on this path.
           'let __ut="=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp;' +
           '__jreq=JSON.stringify({via:"pool",model:__e.model,effort:__e.effort||null,' +
-            'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,1200,1),' +
+            'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,__mtd,1),' +
             'messages:[{role:"system",content:__sys},{role:"user",content:__ut}]});' +
           'let __r2=await __pool({messages:[{type:"user",message:{role:"user",content:__ut},' +
               'uuid:(globalThis.crypto?.randomUUID?.()||String(Date.now())),' +
@@ -2723,11 +2839,13 @@ step('22 judge consulted before a subagent dispatch', () => {
             'systemPrompt:[__sys],thinkingConfig:{type:"disabled"},tools:[],signal:__ac.signal,' +
             'options:{model:__e.model,isNonInteractiveSession:!0,hasAppendSystemPrompt:!1,' +
               'agents:[],mcpTools:[],querySource:"hook_prompt",toolChoice:void 0,' +
-              'maxOutputTokensOverride:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,1200,1),' +
+              'maxOutputTokensOverride:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,__mtd,1),' +
               'effortValue:__e.effort||void 0,agentId:__o.ctx?.agentId,agentContext:__o.ctx?.agentContext,' +
               'getToolPermissionContext:async()=>__o.ctx?.getAppState?.()?.toolPermissionContext}});' +
           'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__clip(__t2,800);' +
-          '__a.ms=Date.now()-__s0;' +
+          'let __sv2=__r2?.message?.model;' +
+          'if(__sv2&&__sv2!==__e.model)__a.served=__clip(__sv2,80);' +
+          '__a.ms=globalThis.__ccMono()-__s0;' +
           '__jst=__r2?.isApiErrorMessage?"api_error":200;__a.http=__jst;' +
           // The pool's error text MUST reach the journal: without it the ledger
           // hangs on "api error from the pool" with no cause, and the cause (a
@@ -2736,10 +2854,10 @@ step('22 judge consulted before a subagent dispatch', () => {
           // and there was nothing to analyze them with.
           'if(__r2?.isApiErrorMessage){let __et="";' +
             'try{__et=(__r2.message?.content||[]).filter((__b)=>__b?.type==="text")' +
-              '.map((__b)=>__b.text).join(" ").slice(0,300)}catch{}' +
-            'throw new Error("api error from the pool: "+(__et||"(\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430)"))}' +
+              '.map((__b)=>__b.text).join(" ")}catch{}' +
+            'throw new Error("api error from the pool: "+(__clip(__et,300)||"(\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430)"))}' +
           'return __t2}' +
-        'catch(__xe){__a.ms=Date.now()-__s0;__a.timed_out=__mine||void 0;' +
+        'catch(__xe){__a.ms=globalThis.__ccMono()-__s0;__a.timed_out=__mine||void 0;' +
           // Our own cap and a foreign failure arrive as one line, "Request was
           // aborted". Measured 2026-08-23: a rung spent three days dying on ITS
           // OWN timeout while the journal read it as model flakiness. The cause
@@ -2777,15 +2895,47 @@ step('22 judge consulted before a subagent dispatch', () => {
       // choices[].message, the pool an AssistantMessage with an array of blocks.
       // One parser, so the "verdict on the first line" rule does not diverge
       // between channels.
-      'let __pv=(__r0)=>{let __j;try{__j=JSON.parse(__r0)}catch{__j=null}' +
+      // A BOM is invisible and JSON.parse rejects it -- the same fact the
+      // settings reader was taught two waves ago, and the channel body was
+      // never told. A gateway that prefixes one turns a spoken verdict into
+      // "the channel said nothing", which under fail_closed is a cancellation.
+      'let __pv=(__r0)=>{let __j;' +
+        'try{__j=JSON.parse(String(__r0).replace(/^\\uFEFF/,""))}catch{__j=null}' +
         'let __mm=__j?.choices?.[0]?.message||{};' +
-        'let __rx=new RegExp("^\\\\s*(?:"+__o.rx+"):.*$","gm");' +
+        // Case-insensitive, and the ACT regex below with it. The vocabulary is
+        // a set of WORDS, not a set of glyph sequences: a model answering
+        // "ok: fine" is answering in the vocabulary. Matching case-sensitively
+        // filed that under "no verdict", and "no verdict" under fail_closed is
+        // a CANCELLATION -- so a lower-case approval cancelled the call it
+        // approved, and in advise a lower-case refusal passed in silence.
+        // Both regexes must carry the flag or the pair splits: the outcome word
+        // would be recorded from one and the action taken from the other.
+        'let __rx=new RegExp("^\\\\s*(?:"+__o.rx+"):.*$","gmi");' +
         'let __bl=Array.isArray(__j?.message?.content)?__j.message.content:' +
           '(Array.isArray(__j?.content)?__j.content:null);' +
-        'let __ct=String(__mm.content??"");' +
+        // `content` in the OpenAI slot may be a STRING or an array of parts.
+        // String() on the array yielded "[object Object]" -- truthy, so the
+        // block reader below was never reached, and a perfectly good verdict
+        // became an empty one. Our own judge/channel.py has read that shape
+        // since it was written; the injected parser had not.
+        'let __ct=Array.isArray(__mm.content)?__mm.content.filter((__b)=>' +
+          '__b?.type==="text"||typeof __b?.text==="string").map((__b)=>__b.text).join("\\n")' +
+          ':String(__mm.content??"");' +
         'if(!__ct&&__bl)__ct=__bl.filter((__b)=>__b?.type==="text")' +
           '.map((__b)=>__b.text).join("\\n");' +
-        'let __c1=(__ct.match(__rx)||[])[0];if(__c1)return __c1.trim();' +
+        // An answer cut at the output ceiling still carries its verdict -- the
+        // verdict is demanded FIRST, and it is the reason that loses its tail.
+        // Throwing the whole thing away would turn a real BLOCK into "no
+        // verdict", i.e. into the very cancellation-without-a-reason this
+        // mechanism exists to avoid. So the decision stands and the cut is
+        // DECLARED, the same way every other truncation in this code is: the
+        // notice rides the reason text that reaches the main loop.
+        'let __cut1=__j?.choices?.[0]?.finish_reason==="length"' +
+          '||__j?.stop_reason==="max_tokens"?' +
+          '" [\\u043e\\u0442\\u0432\\u0435\\u0442 \\u043e\\u0431\\u043e\\u0440\\u0432\\u0430\\u043d ' +
+          '\\u043d\\u0430 \\u043f\\u043e\\u0442\\u043e\\u043b\\u043a\\u0435 ' +
+          '\\u0432\\u044b\\u0432\\u043e\\u0434\\u0430]":"";' +
+        'let __c1=(__ct.match(__rx)||[])[0];if(__c1)return __c1.trim()+__cut1;' +
         'let __rr=[__mm.reasoning,__mm.reasoning_content,__bl?__bl.filter((__b)=>' +
           '__b?.type==="thinking").map((__b)=>__b.thinking).join("\\n"):""]' +
           '.filter(Boolean).join("\\n");' +
@@ -2793,7 +2943,8 @@ step('22 judge consulted before a subagent dispatch', () => {
         // to fall through here, and any answer outside the vocabulary (SWAP:
         // from the old fallback prompt, for example) was recorded as ok and let
         // the call through.
-        'return ((String(__rr).match(__rx)||[]).pop()||"").trim()};' +
+        'let __cv=((String(__rr).match(__rx)||[]).pop()||"").trim();' +
+        'return __cv?__cv+__cut1:""};' +
         // Broken settings or a broken prompt is not "fall back to defaults"
         // but "I do not know what rules to judge by". Under enforce such a call
         // is cancelled with the file named, not silently passed.
@@ -2805,9 +2956,13 @@ step('22 judge consulted before a subagent dispatch', () => {
             'tries:__jtry,jm:null,deg:__dcut(__deg,5)})}catch{}' +
           'await __o.onBroken(__dcut(__degb,3).join("; "),__svc);' +
           // The judge does not return from here — its onBroken throws. A probe
-          // that returns does not know its own rules, and the fallback prompt
-          // contains none of its vocabulary: the consultation would be payment
-          // for a guaranteed silence.
+          // that returns does not know which rules to judge by, and asking
+          // anyway would be paying for an answer we already know is worthless.
+          // (The fallback prompt itself is no longer the reason: it now speaks
+          // each probe's own vocabulary. It used to speak only the judge's, so
+          // for the watcher this branch was the ONLY thing standing between a
+          // missing prompt and an endless series of paid, unparsable
+          // consultations — and it stands only while enforce is on.)
           'return}' +
       'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
@@ -2826,21 +2981,33 @@ step('22 judge consulted before a subagent dispatch', () => {
       // spelled out — last model, short tail — kept so that a ladder written
       // without one still survives an oversized transcript. `retry_context_chars: 0`
       // switches it off for a ladder that already ends in a short-tail rung.
-      'if(!__v&&__num("retry_context_chars",__cfg.retry_context_chars,8000,0)>0){' +
+      // The budget is asked for ONCE: it used to be computed twice in the same
+      // statement, once to decide whether to retry and once to size the tail,
+      // so a config read that answered differently between the two calls would
+      // have retried with a size nobody chose.
+      'let __rcc=__num("retry_context_chars",__cfg.retry_context_chars,8000,0);' +
+      'if(!__v&&__rcc>0){' +
         'let __e=__mdls[__mdls.length-1];' +
         '__jtry=__mdls.length+1;__jm=__e.model;__jerr1=__errs.join(" | ")||null;' +
         // The retry is wrapped the same way as a rung: unwrapped, its failure
         // went to the outer catch, which wrote "skip" and did NOT cancel the
         // call — a silent pass exactly where fail_closed exists to prevent one.
-        'try{__raw=await __call(__cut(__num("retry_context_chars",__cfg.retry_context_chars,8000,0)),' +
-          '__num("rung.timeout_ms",__e.timeout_ms,__tmo,1),__e);__v=__pv(__raw);' +
+        // Half the deadline, as this block has claimed since it was written. The
+        // code passed the FULL rung timeout, which with the shipped 240 s and
+        // three rungs made the worst case four full rungs of blocking wait --
+        // and a retry that can cost as much as the thing it is rescuing is not
+        // a cheap salvage, it is a fourth attempt. The tail it sends is short
+        // by construction, so the shorter clock matches the work.
+        'try{__raw=await __call(__cut(__rcc),' +
+          'Math.max(1000,Math.round(__num("rung.timeout_ms",__e.timeout_ms,__tmo,1)/2)),' +
+          '__e);__v=__pv(__raw);' +
           'if(!__v)__errs.push(__jm+": empty verdict")}' +
         'catch(__ce){__raw=null;__errs.push(__jm+": "+String(__ce?.name||"Error")+": "+' +
           '__clip(__ce?.message??__ce,80))}}' +
       '__jerr1=__errs.join(" | ")||null;' +
-      'if(__o.dbg){console.error(__o.tag+" "+__v.slice(0,300));' +
+      'if(__o.dbg){console.error(__o.tag+" "+__clip(__v,300));' +
         'try{await __fs.writeFile(' +
-          '__dir+"/last-verdict."+process.pid+".txt",__v)}catch{}}' +
+          '__jdir+"/last-verdict."+process.pid+"."+__seq+".txt",__v)}catch{}}' +
       // The judge does not rewrite the dispatch — it CANCELS it and says why.
       // Rewriting would produce a model/effort pair that nothing validates:
       // the deterministic gate runs earlier in this same function, so a
@@ -2849,7 +3016,11 @@ step('22 judge consulted before a subagent dispatch', () => {
       // mattering. Thrown rather than hand-built: a tool that throws already
       // surfaces to the model as an error tool_result, which is exactly
       // "stop, and here is what is wrong" — and it couples to no minified name.
-      'let __bl=new RegExp("^(?:"+__o.act+"):\\\\s*([\\\\s\\\\S]+)$","m").exec(__v);' +
+      // The `i` here is not decoration: it is the other half of the flag on the
+      // verdict regex. With only one of the two, a lower-case BLOCK would be
+      // RECORDED as a block and not ACTED on -- a silent pass written in the
+      // journal as a cancellation, which is worse than either honest outcome.
+      'let __bl=new RegExp("^(?:"+__o.act+"):\\\\s*([\\\\s\\\\S]+)$","mi").exec(__v);' +
       // A cancellation from ladder exhaustion is a CHANNEL defect, a
       // cancellation by verdict is a JUDGMENT defect, and they are treated
       // differently. While both were written as "empty" (the same word as a
@@ -2868,7 +3039,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'try{await __jlog({http:__jst,outcome:__bl?(__en?__ocw:__ocw+"_not_enforced"):' +
         '(__v?__ocw:(__fc?"block_no_verdict":"empty")),' +
         'en:__en?(__o.sw==="enforce"?"env":"config"):null,' +
-        '...(__uw.length?{uw:__uw.slice(0,5)}:{}),' +
+        '...(__uw.length?{uw:__dcut(__uw,5)}:{}),' +
         '...(__deg.length?{deg:__dcut(__deg,5)}:{}),' +
         'tries:__jtry,jm:__jm,err1:__jerr1,' +
         'verdict:__clip(__v,400)||null})}catch{}' +
@@ -2880,7 +3051,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // together with the client itself, so a total failure means the sessions
       // have nothing to work with anyway. Switched off by one config key, no
       // rebuild of the binary.
-      'if(__fc)await __o.onNoVerdict(String(__jerr1||"").slice(0,200),__svc);' +
+      'if(__fc)await __o.onNoVerdict(__clip(String(__jerr1||""),200),__svc);' +
       'if(__bl&&__en)await __o.onAct(__bl[1].trim(),__svc);' +
       // The decision has been made — the obligation is released. Released
       // LAST: anything that throws earlier must cancel the call, not pass it.
@@ -2931,6 +3102,14 @@ step('22 judge consulted before a subagent dispatch', () => {
       // The verdict vocabulary is a parameter, not a property of the core: the
       // watcher has its own.
       'rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",' +
+      // Fallback text beside the vocabulary it has to speak.
+      'fb:"You judge one about-to-run subagent dispatch. You do NOT rewrite it: "+' +
+        '"you either let it run or CANCEL it and say why. Answer with ONE line, "+' +
+        '"the verdict FIRST: OK:<why> or WARN:<why> or BLOCK:<what is wrong and "+' +
+        '"what to do instead>. BLOCK cancels the dispatch. Your own prompt file "+' +
+        '"is missing, so judge on the general rule: a dispatch must name its "+' +
+        '"model and class, the class must match what the brief actually does, "+' +
+        '"and an expensive model on closed mechanical work is a reason to BLOCK.",' +
       'sw:process.env.CLAUDE_JUDGE,dirEnv:process.env.CLAUDE_PROBES_DIR,' +
       'promptEnv:process.env.CLAUDE_JUDGE_PROMPT,modelEnv:process.env.CLAUDE_JUDGE_MODEL,' +
       'urlEnv:process.env.CLAUDE_JUDGE_URL,tmoEnv:process.env.CLAUDE_JUDGE_TIMEOUT_MS,' +
@@ -2954,7 +3133,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     // thread a subagent was started in is silent by construction, and no
     // separate condition for that is needed.
     'globalThis.__ccFleet??=[];' +
-    'if($2.name==="Agent"||$2.name==="Task"){globalThis.__ccFleet.push(Date.now());' +
+    'if($2.name==="Agent"||$2.name==="Task"){globalThis.__ccFleet.push(globalThis.__ccMono());' +
       'if(globalThis.__ccFleet.length>256)globalThis.__ccFleet=globalThis.__ccFleet.slice(-256)}' +
     'if(process.env.CLAUDE_IDLE&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
@@ -2962,6 +3141,15 @@ step('22 judge consulted before a subagent dispatch', () => {
       // Its own vocabulary: the watcher has nothing to permit or forbid; it
       // either stays silent or names the subject.
       'rx:"SILENT|NUDGE",act:"NUDGE",' +
+      // Same vocabulary as `rx` above, in prose: a fallback speaking the judge's
+      // words could never be parsed here.
+      'fb:"You watch the subagent fleet of one running session. You do NOT "+' +
+        '"cancel or rewrite anything: you either stay quiet or name what is "+' +
+        '"being missed. Answer with ONE line, the verdict FIRST: "+' +
+        '"SILENT:<why nothing is needed> or NUDGE:<what work the fleet should "+' +
+        '"be doing right now>. Your own prompt file is missing, so judge on the "+' +
+        '"general rule: a main loop working while its fleet sits idle is the "+' +
+        '"subject; a loop waiting on work it already dispatched is not.",' +
       'sw:process.env.CLAUDE_IDLE,dirEnv:process.env.CLAUDE_PROBES_DIR,' +
       'promptEnv:process.env.CLAUDE_IDLE_PROMPT,modelEnv:process.env.CLAUDE_IDLE_MODEL,' +
       'urlEnv:process.env.CLAUDE_IDLE_URL,tmoEnv:process.env.CLAUDE_IDLE_TIMEOUT_MS,' +
@@ -2972,14 +3160,20 @@ step('22 judge consulted before a subagent dispatch', () => {
       // with, it has not missed anything yet. The filter predicate knows
       // exactly one number and not a single file.
       'pre:()=>{let __s=globalThis.__ccWatch;' +
-        'return __s&&__s.nextAt>Date.now()?"not-yet":null},' +
-      'gate:(__c,__svc)=>{let __now=Date.now(),' +
+        'return __s&&__s.nextAt>globalThis.__ccMono()?"not-yet":null},' +
+      'gate:(__c,__svc)=>{let __now=globalThis.__ccMono(),' +
         '__w=__svc.num("window_min",__c.window_min,30,1)*60000,__th=__svc.num("threshold",__c.threshold,1,1),' +
         '__cd=__svc.num("cooldown_min",__c.cooldown_min,30,1)*60000,' +
         '__lth=__svc.num("live_threshold",__c.live_threshold,1,1),' +
         '__lk=__c.live_kinds||["local_agent","remote_agent","in_process_teammate"],' +
         '__rc=__svc.num("live_recheck_ms",__c.live_recheck_ms,60000,1000);' +
-        'let __s=globalThis.__ccWatch??={last:0,start:__now};' +
+        // `last` is the moment of the previous consultation and `null` is
+        // its absence. It cannot be a 0: this clock is monotonic and its
+        // zero is the start of THIS process, so a fresh session read as
+        // "spoke a moment ago" and served a full cooldown of silence the
+        // instant its window filled. A sentinel has to be outside the
+        // value space, not at one end of it.
+        'let __s=globalThis.__ccWatch??={last:null,start:__now};' +
         '__s.w=__w;' +
         'let __tr=null;try{__tr=$4?.taskRegistry?.all?.()}catch{}' +
         '__s.reg=!!__tr;' +
@@ -2997,9 +3191,32 @@ step('22 judge consulted before a subagent dispatch', () => {
         // mark by seniority leaves the window. The marks lie in arrival order,
         // so that is an index. A new dispatch only pushes that moment back, so
         // an early estimate is safe: it costs one extra full pass, not a miss.
-        'if(__n>=__th){__s.nextAt=__f[__n-__th]+__w;return "fleet-busy:"+__n}' +
+        // A mark is a record of a PAST dispatch; the registry is the present.
+        // When the registry is readable and says the fleet is not busy, we HAVE
+        // the answer, and deferring to a mark instead is preferring hearsay to
+        // the witness. Two states did exactly that: a dispatch the judge
+        // cancelled leaves its mark behind (the mark is pushed here, on the main
+        // dispatcher, and the judge throws later, inside the tool call), and a
+        // dispatch that finished five minutes ago leaves one too. Either muted
+        // the watcher for the REST OF THE WINDOW -- 30 minutes by default --
+        // which is the "loop working, fleet idle" state it exists to notice,
+        // hidden by its own bookkeeping. Measured on the live journal before
+        // this change: 345 live-work refusals against 56 fleet-busy ones, i.e.
+        // the registry is readable in practice and the mark path still fired.
+        //
+        // What a mark can still testify to is a dispatch made moments ago that
+        // has not reached the registry yet. So it silences for exactly that
+        // settling time and no longer -- the same `live_recheck_ms` the live
+        // branch above uses, for the same reason.
+        //
+        // With an UNREADABLE registry nothing else is left, and the window and
+        // threshold keep their old meaning. That is the only path where they
+        // still apply, and the journal names which one was taken.
+        'if(__tr){let __lm=__n?__f[__n-1]:0;' +
+          'if(__n&&__now-__lm<__rc){__s.nextAt=__lm+__rc;return "dispatch-settling:"+__n}}' +
+        'else if(__n>=__th){__s.nextAt=__f[__n-__th]+__w;return "fleet-busy:"+__n}' +
         'if(__now-__s.start<__w){__s.nextAt=__s.start+__w;return "window-not-filled"}' +
-        'if(__now-__s.last<__cd){__s.nextAt=__s.last+__cd;return "cooldown"}' +
+        'if(__s.last!==null&&__now-__s.last<__cd){__s.nextAt=__s.last+__cd;return "cooldown"}' +
         '__s.last=__now;__s.nextAt=__now+__cd;return null},' +
       'payload:()=>JSON.stringify({spawns_in_window:globalThis.__ccWatch?.n??0,' +
         'window_min:Math.round((globalThis.__ccWatch?.w??0)/60000),' +

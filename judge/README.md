@@ -695,7 +695,7 @@ There must be a way out of a cancellation, and the bench found three
 places where there was none. The `prompt-missing` label named neither
 file nor directory — on a fresh install that is the only refusal a human
 will see, and it did not follow from it that what to create is
-`~/.claude/judge/prompt.md`; now the label carries the path (and the
+`~/.claude/probes/judge/prompt.md`; now the label carries the path (and the
 project layer's path, if there is one). Degradation lists were cut
 silently — five of six lines went to the journal, the human fixed five
 files and got the cancellation again; now the truncation is announced by

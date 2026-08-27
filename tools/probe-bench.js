@@ -292,8 +292,25 @@ function probeConfigToml(scenario, config) {
   return `${lines.join('\n')}\n`;
 }
 
-const OLD = () => ({ last: 0, start: Date.now() - 3600000 });
-const BROKEN_TOML_DEG = ["unparsed:<temp>/probes.toml: TOML Parse error: Expected a key but found '{'"];
+// The watcher measures windows, cooldowns and marks on a MONOTONIC clock, so
+// the bench must seed the same one. Seeded from Date.now() the numbers are
+// larger by many orders of magnitude: every mark stays inside every window for
+// ever, `start` sits in the far past, and the whole watcher half of this bench
+// goes quietly green on states it never actually reproduced.
+const mono = () => Math.round(performance.now());
+// `last: null` is "has never spoken", not "spoke at time zero": on a
+// monotonic clock zero is the start of this process, so a 0 here seeds the
+// state the image must never build for itself.
+const OLD = () => ({ last: null, start: mono() - 3600000 });
+// The wording after the colon belongs to bun's TOML parser, not to us, and it
+// changed between bun 1.3 and 1.4 ("Expected key but found {" vs "TOML Parse
+// error: Expected a key but found '{'"). Pinning it verbatim made this
+// assertion fail on a machine whose bun differed from the image's -- a red
+// check for a reason outside the code under test, which is the same one-sided
+// anchor on another program's human-facing output the pipeline refuses
+// elsewhere. What we actually guarantee is narrower and stable: exactly one
+// degradation entry, naming the file, carrying SOME reason after it.
+const BROKEN_TOML_DEG_PREFIX = ['unparsed:<temp>/probes.toml: '];
 const MISSING_PROMPT_DEG = ['prompt-missing:<temp>/judge/prompt.md'];
 
 const scenarios = [
@@ -426,7 +443,7 @@ const scenarios = [
     configText: '{',
     response: 'OK: бриф полон',
     expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
-                degExact: BROKEN_TOML_DEG },
+                degPrefixes: BROKEN_TOML_DEG_PREFIX },
   },
   // `expected: null` short-circuits checkMismatch to false, so these two ran and
   // were counted among the scenarios that "behaved as specified" while having no
@@ -439,6 +456,84 @@ const scenarios = [
     response: 'OK: бриф полон',
     expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
                 degExact: MISSING_PROMPT_DEG },
+  },
+  // The same absence with enforce off: the degraded gate does not fire, so the
+  // consultation really happens on the built-in instruction. What matters is
+  // not the outcome -- the stub writes the answer -- but WHICH instruction went
+  // out. The judge's must name the judge's verdicts.
+  {
+    name: 'missing-prompt-advises-in-its-own-words',
+    omitPrompt: true,
+    config: { enforce: false },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 1, nudges: 0,
+                systemIncludes: 'BLOCK:<', systemExcludes: 'NUDGE:<' },
+  },
+  // And the watcher's must name the watcher's. This is the case the core got
+  // wrong: the built-in text lived in the core and spoke only OK/WARN/BLOCK, so
+  // on any machine without idle-watch/prompt.md the watcher paid for a full
+  // ladder whose every answer its own parser had to refuse. Silence that costs
+  // money and reads as health.
+  {
+    name: 'watch-missing-prompt-speaks-its-own-words',
+    probe: 'watch', toolName: 'Read', watchState: OLD,
+    omitPrompt: true,
+    config: { enforce: false },
+    response: 'NUDGE: отправь scout на перечисление файлов',
+    expected: { passed: true, outcome: 'nudge_not_enforced', poolCalls: 1, nudges: 0,
+                systemIncludes: 'NUDGE:<', systemExcludes: 'BLOCK cancels the dispatch' },
+  },
+  // The state of a machine that has installed the kit and set the switch but
+  // has not synced the probe files. Nothing is configured, so `enforce` arrives
+  // by the switch alone -- and the prompt file is missing too, which the judge
+  // reads as not knowing its rules. It CANCELS. The README says so because this
+  // scenario says so; before, it said the reverse.
+  {
+    name: 'no-config-enforce-cancels',
+    omitConfig: true,
+    omitPrompt: true,
+    switchValue: 'enforce',
+    response: 'OK: бриф полон',
+    expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
+                degExact: MISSING_PROMPT_DEG },
+  },
+  // Same absence, switch left at advise: nothing is cancelled and the
+  // consultation really happens. Positive control for the pair -- without it a
+  // judge that cancelled unconditionally would satisfy the scenario above.
+  {
+    name: 'no-config-advise-consults',
+    omitConfig: true,
+    omitPrompt: true,
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 1, nudges: 0,
+                degExact: MISSING_PROMPT_DEG },
+  },
+  // A verdict in the vocabulary, in another case. Matching case-sensitively
+  // filed this under "no verdict", and no verdict under fail_closed is a
+  // CANCELLATION -- so the judge cancelled over a word it understood.
+  {
+    name: 'verdict-lowercase-acts',
+    poolReply: { message: { content: [{ type: 'text', text: 'block: бриф не готов' }] } },
+    expected: { passed: false, outcome: 'block', poolCalls: 1,
+                errorIncludes: 'бриф не готов' },
+  },
+  // The OpenAI envelope with content as an ARRAY of parts. String() on it gave
+  // "[object Object]", which is truthy, so the block reader below was never
+  // reached and a spoken verdict became an empty one.
+  {
+    name: 'openai-content-array',
+    poolReply: { choices: [{ message: { content: [{ type: 'text', text: 'OK: бриф полон' }] } }] },
+    expected: { passed: true, outcome: 'ok', poolCalls: 1 },
+  },
+  // Cut at the output ceiling: the decision stands, and the cut is DECLARED in
+  // the reason that reaches the main loop -- a truncated reason must not read
+  // as a whole one.
+  {
+    name: 'answer-cut-at-cap-declared',
+    poolReply: { choices: [{ message: { content: 'BLOCK: бриф обрыва' },
+                             finish_reason: 'length' }] },
+    expected: { passed: false, outcome: 'block', poolCalls: 1,
+                errorIncludes: 'оборван на потолке вывода' },
   },
   {
     name: 'pool-throws',
@@ -506,23 +601,56 @@ const scenarios = [
     response: 'NUDGE: отправь scout на перечисление файлов',
     expected: { passed: true, outcome: 'nudge_not_enforced', poolCalls: 1, nudges: 0 } },
   { name: 'watch-fleet-busy', probe: 'watch', toolName: 'Read', watchState: OLD,
-    fleet: () => [Date.now()],
+    fleet: () => [mono()],
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
                 by: 'fleet-busy:1' } },
+  // The registry is READABLE and says nobody is working. A mark from a dispatch
+  // made a moment ago is the one thing it cannot yet know about, so it silences
+  // for the settling time and names that reason -- not the window.
+  { name: 'watch-mark-fresh-registry-readable', probe: 'watch', toolName: 'Read',
+    watchState: OLD, tasks: {}, fleet: () => [mono()],
+    response: 'NUDGE: не должно дойти',
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
+                by: 'dispatch-settling:1' } },
+  // The same mark five minutes later: still inside the 30-minute window, and
+  // before this wave that alone bought silence for the rest of it. The registry
+  // is readable and empty, so the consultation MUST happen -- this is the state
+  // the watcher exists for (the loop works, the fleet does not), and it was
+  // hidden by the watcher's own bookkeeping.
+  { name: 'watch-mark-stale-registry-readable', probe: 'watch', toolName: 'Read',
+    watchState: OLD, tasks: {}, fleet: () => [mono() - 300000],
+    response: 'SILENT: флот работает',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0 } },
   { name: 'watch-window-not-filled', probe: 'watch', toolName: 'Read',
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
                 by: 'window-not-filled' } },
   { name: 'watch-cooldown', probe: 'watch', toolName: 'Read',
-    watchState: () => ({ last: Date.now(), start: Date.now() - 3600000 }),
+    watchState: () => ({ last: mono(), start: mono() - 3600000 }),
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
                 by: 'cooldown' } },
   // The memory-only filter: no channel, no JOURNAL LINE — a skipped pass is
   // the absence of a consultation, not one of its outcomes.
+  // The complement of watch-cooldown, and the reason `last` is not a 0: a
+  // watcher that has never spoken has no cooldown to serve. Kept sharp with
+  // a cooldown far above the window -- at equal defaults a regression here
+  // hides behind `window-not-filled` and shows only to whoever raised the
+  // cooldown in their own probes.toml.
+  //
+  // What this scenario does NOT cover: every watcher scenario seeds
+  // globalThis.__ccWatch itself, so the image's own `??={last:null,...}`
+  // initialiser never runs here. This pins the GUARD; the initialiser is
+  // pinned by the check block, which goes red on a `last:0`. Two halves,
+  // two instruments -- neither alone is the guarantee.
+  { name: 'watch-never-spoke-no-cooldown', probe: 'watch', toolName: 'Read',
+    watchState: () => ({ last: null, start: mono() - 3600000 }),
+    config: { cooldown_min: 600 },
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0 } },
   { name: 'watch-not-yet', probe: 'watch', toolName: 'Read',
-    watchState: () => ({ last: 0, start: Date.now() - 3600000, nextAt: Date.now() + 600000 }),
+    watchState: () => ({ last: null, start: mono() - 3600000, nextAt: mono() + 600000 }),
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: null, poolCalls: 0, nudges: 0 } },
   // A live subagent: the session is busy IN FACT, even if the dispatch was
@@ -571,7 +699,7 @@ const scenarios = [
     configText: '{',
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'skip_degraded', poolCalls: 0, nudges: 0,
-                degExact: BROKEN_TOML_DEG } },
+                degPrefixes: BROKEN_TOML_DEG_PREFIX } },
   // Every number used to be read as `Number(x||default)`, which normalizes the
   // falsy typos and lets through the two that actually break the mechanism.
   // A NEGATIVE threshold passed: `0>=-1` is true on every call, so the gate
@@ -591,7 +719,7 @@ const scenarios = [
   // where it is produced.
   { name: 'watch-threshold-not-a-number', probe: 'watch', toolName: 'Read', watchState: OLD,
     config: { threshold: 'abc' },
-    fleet: () => [Date.now()],
+    fleet: () => [mono()],
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
                 by: 'fleet-busy:1',
@@ -602,7 +730,7 @@ const scenarios = [
   // both scenarios above unnoticed.
   { name: 'watch-threshold-valid-nondefault', probe: 'watch', toolName: 'Read', watchState: OLD,
     config: { threshold: 2 },
-    fleet: () => [Date.now()],
+    fleet: () => [mono()],
     response: 'SILENT: причина',
     expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0, degExact: null } },
   // One record per consultation, ~28 KB each, and until now nothing ever
@@ -624,8 +752,8 @@ const scenarios = [
   // default and the config is named as the cause.
   { name: 'budget-negative', config: { max_tokens: -5 },
     response: 'OK: бриф полон',
-    expected: { passed: true, outcome: 'ok', requestMaxTokens: 1200,
-                degExact: ['bad-setting:max_tokens=-5 (need >=1), using 1200'] } },
+    expected: { passed: true, outcome: 'ok', requestMaxTokens: 8000,
+                degExact: ['bad-setting:max_tokens=-5 (need >=1), using 8000'] } },
 ];
 
 // The same invariant the check registry carries, for the same reason it was
@@ -635,7 +763,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 44;
+const EXPECTED_SCENARIOS = 54;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -693,8 +821,11 @@ function setScenarioEnvironment(tempDir, scenario) {
   for (const key of ENV_KEYS) delete process.env[key];
   process.env.HOME = tempDir;
   if (scenario.projectLayer === undefined) process.env.CLAUDE_PROBES_DIR = tempDir;
-  if (scenario.probe === 'watch') process.env.CLAUDE_IDLE = '1';
-  else process.env.CLAUDE_JUDGE = '1';
+  // The switch VALUE is a scenario property, not a constant: `enforce` reaches
+  // the probe through it alone, which is the whole point of the no-config case.
+  const sw = scenario.switchValue ?? '1';
+  if (scenario.probe === 'watch') process.env.CLAUDE_IDLE = sw;
+  else process.env.CLAUDE_JUDGE = sw;
 }
 
 // The second line: overriding HOME makes a leak impossible by construction,
@@ -782,10 +913,13 @@ function expectationText(expected) {
   if (expected.dispatchIncludes !== undefined) parts.push(`нагрузка содержит «${expected.dispatchIncludes}»`);
   if (expected.degStartsWith !== undefined) parts.push(`деградация начинается с «${expected.degStartsWith}»`);
   if (expected.degExact !== undefined) parts.push(`деградация=${JSON.stringify(expected.degExact)}`);
+  if (expected.degPrefixes !== undefined) parts.push(`деградация начинается с ${JSON.stringify(expected.degPrefixes)}`);
   if (expected.requestMaxTokens !== undefined) parts.push(`бюджет запроса=${expected.requestMaxTokens}`);
   if (expected.recordCount !== undefined) parts.push(`записей в каталоге=${expected.recordCount}`);
   if (expected.recordSeeds !== undefined) parts.push(`из них засеянных=${expected.recordSeeds}`);
   if (expected.dispatchExcludes !== undefined) parts.push(`нагрузка без «${expected.dispatchExcludes}»`);
+  if (expected.systemIncludes !== undefined) parts.push(`инструкция содержит «${expected.systemIncludes}»`);
+  if (expected.systemExcludes !== undefined) parts.push(`инструкция без «${expected.systemExcludes}»`);
   return parts.join(', ');
 }
 
@@ -814,10 +948,25 @@ function checkMismatch(result, expected) {
   if (expected.dispatchIncludes !== undefined && !result.sentDispatch.includes(expected.dispatchIncludes)) return true;
   if (expected.degStartsWith !== undefined && !result.deg?.some((item) => item.startsWith(expected.degStartsWith))) return true;
   if (expected.degExact !== undefined && JSON.stringify(result.deg) !== JSON.stringify(expected.degExact)) return true;
+  // Same count, same order, each entry starting with its prefix AND carrying
+  // something after it: a prefix match alone would accept an entry that names
+  // the file and then says nothing about what is wrong with it.
+  if (expected.degPrefixes !== undefined) {
+    const got = result.deg ?? [];
+    if (got.length !== expected.degPrefixes.length) return true;
+    for (let i = 0; i < got.length; i += 1) {
+      if (!got[i].startsWith(expected.degPrefixes[i])) return true;
+      if (got[i].length <= expected.degPrefixes[i].length) return true;
+    }
+  }
   if (expected.requestMaxTokens !== undefined && result.requestMaxTokens !== expected.requestMaxTokens) return true;
   if (expected.recordCount !== undefined && result.recordCount !== expected.recordCount) return true;
   if (expected.recordSeeds !== undefined && result.recordSeeds !== expected.recordSeeds) return true;
   if (expected.dispatchExcludes !== undefined && result.sentDispatch.includes(expected.dispatchExcludes)) return true;
+  // What was SENT, not what came back: the stub writes the answer, so an
+  // outcome assertion cannot tell a usable instruction from an unusable one.
+  if (expected.systemIncludes !== undefined && !result.sentSystem.includes(expected.systemIncludes)) return true;
+  if (expected.systemExcludes !== undefined && result.sentSystem.includes(expected.systemExcludes)) return true;
   return false;
 }
 
@@ -869,7 +1018,13 @@ async function runScenario(probe, scenario) {
     }
 
     const config = { ...baseConfig(scenario), ...(scenario.config || {}) };
-    fs.writeFileSync(path.join(root, 'probes.toml'), probeConfigToml(scenario, config));
+    // A machine that has never run probes-sync has NO settings file. Every
+    // scenario until now wrote one, so the posture of that state was described
+    // in prose and never measured -- and the prose said the opposite of the
+    // code.
+    if (!scenario.omitConfig) {
+      fs.writeFileSync(path.join(root, 'probes.toml'), probeConfigToml(scenario, config));
+    }
     if (!scenario.omitPrompt) {
       const prompt = scenario.probe === 'watch'
         ? 'Rules must contain NUDGE.\n'
@@ -916,12 +1071,20 @@ async function runScenario(probe, scenario) {
     // declaration reaches the model and that the header cannot be forged from
     // the payload — only an intercepted request proves.
     let sentUser = '';
+    let sentSystem = '';
     let requestMaxTokens = null;
     const pool = async (args) => {
       poolCalls += 1;
       sentUser = args?.messages?.[0]?.message?.content ?? '';
+      sentSystem = args?.systemPrompt?.[0] ?? '';
       requestMaxTokens = args?.options?.maxOutputTokensOverride ?? null;
       if (scenario.poolError) throw scenario.poolError;
+      // A scenario may hand back a whole reply object instead of a verdict
+      // string: the shapes a real gateway produces (the OpenAI envelope, a
+      // content ARRAY where a string was expected, a finish_reason) cannot be
+      // expressed as text, and it was precisely those shapes that the parser
+      // read as "the channel said nothing".
+      if (scenario.poolReply) return scenario.poolReply;
       return {
         message: {
           content: [{ type: 'text', text: scenario.response }],
@@ -965,6 +1128,7 @@ async function runScenario(probe, scenario) {
       scenario: scenario.name,
       passed,
       sentHeader,
+      sentSystem: undoLatin1(sentSystem),
       sentDispatchLen: sentDispatch.length,
       sentDispatch,
       requestMaxTokens,

@@ -30,19 +30,29 @@ while a line from tool output does not, however it looks.
 
 ## 2. Where it lives
 
-One injection site, right after the judge's, on EVERY tool call (step 22 in
-`tweakcc-patch.js`, between the markers `/*__ccProbe0*/` and `/*__ccProbe1*/`).
-The order is mandatory: the judge throws an exception on cancellation, and the
-watcher never reaches a cancelled call.
+Two injection sites, one core (step 22 in `tweakcc-patch.js`, each between the
+markers `/*__ccProbe0*/` and `/*__ccProbe1*/`). The WATCHER rides the main
+dispatcher, on EVERY tool call; the JUDGE rides the dispatch tool's own `call`.
+So the watcher runs FIRST — earlier than the judge, not after it, and it does
+reach a call the judge will go on to cancel. This paragraph claimed the
+opposite for as long as both probes shared one site, and the claim outlived the
+split.
 
-The fleet counter is also maintained on every call, not only where the watcher
-is invoked: counting only at the consultation point would mean never seeing
+The fleet counter is maintained on every call, not only where the watcher is
+invoked: counting only at the consultation point would mean never seeing
 already-launched subagents. The list is capped at 256 marks — otherwise it
 grows for the whole session.
 
-The current dispatch is counted BEFORE the cheap count. It follows for free
-that in a turn where a subagent is launched the watcher stays silent: no
-separate condition is needed for this.
+The current dispatch is marked BEFORE the cheap count, which is why a turn that
+launches a subagent needs no separate condition to stay silent. But a mark is a
+record of a PAST dispatch, and it is not evidence about the present: the judge
+may cancel the very call that left it, and any dispatch may have finished long
+ago. So when the task registry is READABLE, a mark silences the watcher only
+for `live_recheck_ms` — the time a fresh dispatch needs to reach the registry —
+and the registry answers for everything after that. The window and the
+threshold still decide when the registry cannot be read; the journal names
+which of the two paths a refusal came from (`dispatch-settling` against
+`fleet-busy`).
 
 ## 3. Two filters: by memory and by settings
 
@@ -159,9 +169,12 @@ fail_closed`. The empty `onNoVerdict`/`onBroken`/`onFail` are not stubs "for
 later" — they are the policy itself.
 
 Broken settings or a missing prompt yield `outcome:"skip_degraded"`, and the
-consultation is NOT performed at all. A probe not knowing its own rules would
-get a fallback prompt without its vocabulary — that is, it would pay for a
-guaranteed silence.
+consultation is NOT performed at all. A probe not knowing its own rules has
+nothing to judge by, so asking would be paying for an answer already known to be
+worthless. (Until the fallback prompt moved out of the shared core into each
+caller it also spoke only the judge’s vocabulary, so for the watcher this skip
+was the only thing between a missing prompt and an endless run of unparsable
+consultations.)
 
 The outcome word in the journal is the verdict class in lower case (`silent`,
 `nudge`, `nudge_not_enforced`). The core does not know the judge's vocabulary:
@@ -172,9 +185,11 @@ signs as a real judge's cancellation.
 
 Settings live in `~/.claude/probes/probes.toml`, the `[probe.idle-watch]`
 table on top of `[defaults]`. The probe's own directory
-`~/.claude/probes/idle-watch/` carries `prompt.md`, `prompt.extra.md`,
-`journal.jsonl`, `records/`; the project layer `.claude/probes` above the cwd
-is merged by the same rule as the judge's. The switch is `CLAUDE_IDLE`; the
+`~/.claude/probes/idle-watch/` carries `prompt.md`, `journal.jsonl` and
+`records/`; the project layer `.claude/probes` above the cwd is merged by the
+same rule as the judge's, and `prompt.extra.md` is a file of THAT layer only —
+there is no home-directory appendix, because a home prompt has nothing to
+append to but itself. The switch is `CLAUDE_IDLE`; the
 overrides are `CLAUDE_PROBES_DIR` (the probes home), `CLAUDE_IDLE_PROMPT`,
 `CLAUDE_IDLE_MODEL`, `CLAUDE_IDLE_URL`, `CLAUDE_IDLE_TIMEOUT_MS`,
 `CLAUDE_IDLE_DEBUG`.
@@ -188,8 +203,8 @@ to code defaults: a setting absent from the file is not configured by a human
 
 ## 8. How it is verified
 
-`claude-patch-all.sh` — 78 checks. `tools/probe-bench.js` — 36 scenarios on
-the live carved-out code, of which thirteen are the watcher's: both verdicts,
+`claude-patch-all.sh` — 114 checks. `tools/probe-bench.js` — scenarios on the
+live carved-out code, of which the watcher's are: both verdicts,
 the memory filter, all cheap-count refusals (each verified by its REASON —
 they share the same outcome, and a swapped branch would pass green), live
 work, stripped backgroundness, a non-agent kind of work, an empty registry, a
