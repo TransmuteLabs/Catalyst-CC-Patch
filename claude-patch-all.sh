@@ -632,6 +632,16 @@ def _escaped_interpolations(src):
     # else's capture — silently. The CLASS is checked: no captured name may
     # stand in a template or replacement without rxEsc/repEsc. On the pre-fix
     # source this catches 12 places.
+    # There is a THIRD legitimate defence beside the two escapers, and it is the
+    # stricter one: siteName does not transform the name, it REFUSES a name that
+    # would be transformed -- so what reaches the image is either the image's own
+    # name, verbatim, or nothing at all (the build stops). That only holds for a
+    # REPLACEMENT string, whose dangerous syntax siteName enumerates. In a regex
+    # SOURCE the danger is different -- there a bare `$` is the end-of-line
+    # anchor, and `$A` is a perfectly acceptable name to siteName while being a
+    # pattern that cannot match. So siteName counts for js.replace and never for
+    # new RegExp.
+    refused = set(re.findall(r'const (\w+) = siteName\(', src))
     names, lines, bad = _captured_names(src), src.split('\n'), []
     for i, ln in enumerate(lines):
         hits = [x for x in names if '${%s}' % x in ln]
@@ -641,8 +651,11 @@ def _escaped_interpolations(src):
             t = lines[j]
             if 'applied.push(' in t or 'fail(' in t:
                 break
-            if 'new RegExp(' in t or 'js.replace(' in t:
+            if 'new RegExp(' in t:
                 bad += hits
+                break
+            if 'js.replace(' in t:
+                bad += [x for x in hits if x not in refused]
                 break
     return not bad
 
@@ -1294,6 +1307,22 @@ checks = {
                                               rb'let ' + ID + rb'=process\.env\.ANTHROPIC_BASE_URL&&'
                                               rb'!/\^claude/i\.test\(' + ID + rb'\)\?void 0:'
                                               rb'!\(' + ID + rb'\.has\(', d)),
+    # ...and it must come back on the id that was ASKED FOR. The transcript
+    # records the model the server echoed; for a gateway model that differs from
+    # the requested one and the gateway refuses its own echo. The reader has to
+    # prefer the recorded request and strip the suffix (the stock reader appends
+    # `[1m]` itself further down), falling back to the echo for transcripts
+    # written before this existed.
+    'resumed model is the requested id, not the echo': bool(re.search(
+                                              rb'let ' + ID + rb'=typeof (' + ID + rb')\.requestedModel==="string"\?'
+                                              rb'' + ID + rb'\(\1\.requestedModel\):\1\.message\.model,', d)),
+    # The read side is useless unless EVERY assistant entry built from a request
+    # carries the field. Four construction sites; a count check rather than a
+    # presence check, because three out of four would leave a resume that lands
+    # on the fourth restoring the echo again -- intermittently, which is the
+    # hardest form to diagnose.
+    'every assistant entry records the model it asked for': (
+        len(re.findall(rb'\.\.\.typeof ' + ID + rb'\.model==="string"&&\{requestedModel:', d)) == 4),
     # judge part 1: the current turn (thinking included) is stashed by
     # tool_use id, because the message reaching the executor carries the
     # tool_use block alone

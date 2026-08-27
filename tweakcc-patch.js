@@ -53,8 +53,19 @@ const repEsc = s => String(s).replace(/\$/g, '$$$$');
 // text, so such a name would be eaten by its own slot syntax. It stops the
 // build instead.
 const siteName = (name, what) => {
-  if (/\$[1-9]/.test(name)) {
-    fail(`the ${what} name '${name}' collides with the block's slot syntax ($1..$9)`);
+  // A name spliced into a replacement string meets String.replace's own syntax.
+  // `$1`..`$9` were the first collision found (an engine called `$A` is not one,
+  // but `$1` would swallow a capture) — and `$$` is the second: it is a legal
+  // JavaScript identifier AND the escape for a literal dollar, so a name
+  // containing it arrives one `$` shorter than it left. `$&`, "$`" and `$'`
+  // cannot occur inside an identifier, but they cost nothing to refuse and the
+  // refusal is what makes this list a rule rather than a patch over two cases.
+  const bad = /\$(?:[1-9]|\$|&|`|'|<)/.exec(String(name));
+  if (bad) {
+    fail(
+      `the ${what} name '${name}' contains '${bad[0]}', which String.replace ` +
+      `reads as its own syntax — the name would reach the image altered`,
+    );
   }
   return String(name);
 };
@@ -1677,6 +1688,66 @@ step('20 session model restore', () => {
       '!$8($4)&&!$9($4)?"not_allowed":$10($4)?"retired":void 0;',
   );
   applied.push(`session model restore keeps a proxy model (verdict var '${m[1]}', model var '${m[4]}')`);
+
+  // --- the id that comes back must be the id that was ASKED FOR --------------
+  // The transcript stores the model the SERVER echoed, and for a gateway model
+  // that is not the model the client asked for. Measured against the gateway on
+  // this machine: asking for `grok-4.6` succeeds and the reply says
+  // `grok-4.6-build`; asking for `grok-4.6-build` is refused outright with
+  // "unknown provider for model grok-4.6-build". So a resumed session restores a
+  // name its own gateway rejects and every request of that session fails --
+  // 2329 entries carrying that echo were counted in the local transcripts.
+  //
+  // The verdict fix above cannot help here: it decides WHETHER to restore, not
+  // WHAT. Both sides go in this one step on purpose — a write side alone stores
+  // a field nobody reads, a read side alone reads a field nobody writes, and
+  // splitting them across steps makes either half look complete on its own.
+  //
+  // The resume loader keeps unknown fields (`let {isSidechain,parentUuid,
+  // promptId,...s}=t; return s`), so a new field survives to the reader. The two
+  // places that DO rebuild an entry field-by-field belong to the feedback
+  // sender, not to resume.
+  const stripper = siteName(m[6], 'model suffix stripper');
+
+  // Read side: prefer the requested id, fall back to the echo for transcripts
+  // written before this patch existed. The suffix is stripped because the stock
+  // reader appends `[1m]` itself further down; handing it an id that already
+  // carries one would produce `...[1m][1m]`.
+  const readRx = new RegExp(
+    `(typeof (${ID})\\.message\\?\\.model!=="string"\\|\\|\\2\\.message\\.model===${ID}\\)continue;` +
+      `let ${ID}=)\\2\\.message\\.model,`,
+  );
+  if (!readRx.test(js)) fail('session model restore: the reader does not take the model from the entry in the expected shape');
+  js = js.replace(
+    readRx,
+    `$1typeof $2.requestedModel==="string"?${stripper}($2.requestedModel):$2.message.model,`,
+  );
+
+  // Write side: every assistant entry built from a request records the id that
+  // request carried. Four sites, all inside one function, on every version from
+  // 2.1.233 to 2.1.247. The count is pinned: a fifth construction site added
+  // upstream would leave entries silently without the field, and a resume that
+  // lands on one of those would be back to restoring the echo -- exactly the
+  // failure this closes, but now only sometimes, which is worse to diagnose.
+  const writeRx = new RegExp(
+    `((${ID})\\((${ID})\\.querySource,\\3\\.spawnedBySkill[^)]*\\),)type:"assistant",uuid:`,
+    'g',
+  );
+  const writes = js.match(writeRx);
+  if (!writes || writes.length !== 4) {
+    fail(
+      `session model restore: expected 4 assistant-entry construction sites, found ` +
+        `${writes ? writes.length : 0} — the write side would cover only part of them`,
+    );
+  }
+  js = js.replace(
+    writeRx,
+    '$1...typeof $3.model==="string"&&{requestedModel:$3.model},type:"assistant",uuid:',
+  );
+  applied.push(
+    `the resumed model is the requested id, not the gateway's echo ` +
+      `(${writes.length} write sites, suffix stripper '${stripper}')`,
+  );
 });
 
 // --------------------------------------------------------------------------
