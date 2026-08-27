@@ -2292,7 +2292,12 @@ step('22 judge consulted before a subagent dispatch', () => {
         'catch(__pe){try{console.error(__o.tag+" record prune failed: "' +
           '+(__pe?.message??__pe))}catch{}}' +
         'return __n}' +
-      'catch(__re){try{console.error(__o.tag+" record write failed: "+(__re?.message??__re))}catch{}return null}};' +
+      'catch(__re){try{console.error(__o.tag+" record write failed: "+(__re?.message??__re))}catch{}' +
+        // В __deg, но НЕ в __degb: недоступный каталог записей портит
+        // корпус, а не сам вердикт, и отменять из-за прав на диске
+        // чужие вызовы было бы хуже болезни.
+        'try{__deg.push("rec-write:"+String(__re?.code??"")+" "+__clip(__re?.message??__re,48))}catch{}' +
+        'return null}};' +
     // `ms` and `sw` exist because both were unobservable before: a `block`
     // line and a `block_not_enforced` line differ only by a state the record
     // never held, and the latency tax — the feature's whole running cost —
@@ -2336,7 +2341,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     // it, and the `nudge_undelivered` line the comment beside it
     // promises could never be written. Nothing saw it -- the check
     // asked whether the text was present, and free names are a RUNTIME
-    // error, so neither the parse stand nor the 83 text checks can see
+    // error, so neither the parse stand nor the text checks can see
     // one. Passing them makes the dependency structural: a consumer
     // that gets no services cannot call them by accident.
     // Per-consultation, not global: __jlog closes over THIS call's
@@ -2456,11 +2461,15 @@ step('22 judge consulted before a subagent dispatch', () => {
       // gets bare defaults — not an error but the absence of its own edits.
       'let __eff=(__t,__id)=>__t&&typeof __t==="object"' +
         '?{...(__t.defaults||{}),...((__t.probe||{})[__id]||{})}:{};' +
-      'let __cfg={},__cfgbad=!1;' +
+      // __cfgseen -- «настроечный слой ВООБЩЕ был прочитан». Без него строка
+      // журнала не отличала «файла настроек нет» от «файл есть и говорит
+      // enforce=false»: оба давали en:null. Первое -- свойство машины (kit не
+      // раскатан), второе -- решение человека, и лечатся они по-разному.
+      'let __cfg={},__cfgbad=!1,__cfgseen=!1;' +
       'let __c0=await __ldt(__phome+"/probes.toml");' +
-      'if(__c0===!1)__cfgbad=!0;else if(__c0)__cfg=__eff(__c0,__o.dirName);' +
+      'if(__c0===!1)__cfgbad=!0;else if(__c0){__cfgseen=!0;__cfg=__eff(__c0,__o.dirName)}' +
       'if(__phomeP){let __c1=await __ldt(__phomeP+"/probes.toml");' +
-        'if(__c1===!1)__cfgbad=!0;else if(__c1)__cfg={...__cfg,...__eff(__c1,__o.dirName)}}' +
+        'if(__c1===!1)__cfgbad=!0;else if(__c1){__cfgseen=!0;__cfg={...__cfg,...__eff(__c1,__o.dirName)}}}' +
       // Disabling a probe is a setting, not a missing file: the registry must
       // be able to silence one consumer without touching the others.
       'if(__cfg.enabled===!1){await __jlog({outcome:"skip_disabled"});return}' +
@@ -2749,6 +2758,16 @@ step('22 judge consulted before a subagent dispatch', () => {
         '(__pdir?" | "+__pdir+"/prompt.md":"");' +
         '__deg.push(__pmm);__degb.push(__pmm);' +
         '__sys=__o.fb}' +
+      // Половина свода правил читается как целый свод: обрыв на середине
+      // оставляет законный текст, и ни один разбор его не отвергнет. Признак
+      // целостности вносится в сам файл -- последняя строка-хвост, которую
+      // копирование обязано донести. Нет хвоста -- промт усечён (или это
+      // чужой файл), правила применяются частично, и это объявляется.
+      // В __degb, а не только в __deg: неполный свод правил -- это дефект
+      // САМОГО СУЖДЕНИЯ, а такие отменяют вызов при enforce+fail_closed.
+      'else if(__sys!==__o.fb&&__sys.indexOf("<!-- END OF RULES -->")<0){' +
+        'let __ptr="prompt-truncated:"+(__pdir?__pdir:__jdir)+"/prompt.md";' +
+        '__deg.push(__ptr);__degb.push(__ptr)}' +
       // A chain, not a single model: the judge shares its channel with the very
       // fleet it judges, so when the fleet is busy the judge is the one that
       // times out — and a silent fail-open is indistinguishable from blanket
@@ -2781,6 +2800,13 @@ step('22 judge consulted before a subagent dispatch', () => {
       // was not applied.
       'if(__tplr){try{JSON.parse(__tplr.replace(/\\{\\{[A-Z]+\\}\\}/g,"x"))}' +
         'catch(__be){__deg.push("unparsed-body:"+__clip(__be?.message??__be,60));__tplr=null}}' +
+      // Разбор -- не единственное, что обязан выдержать развёрнутый шаблон.
+      // Тот же инвариант, что гейт канона проверяет в дереве, проверяется и
+      // здесь, на файле, который РЕАЛЬНО пошёл в дело: подстановки нет --
+      // шаблон не применяется (встроенная рамка работает) и это названо.
+      'if(__tplr){let __miss=["{{LABEL}}","{{CONTEXT}}","{{DISPATCH}}"]' +
+        '.filter((__ph)=>__tplr.indexOf(__ph)<0);' +
+        'if(__miss.length){__deg.push("body-no-placeholder:"+__miss.join(","));__tplr=null}}' +
       'let __mkb=(__cx,__e)=>{let __mdl=__e.model;try{if(!__tplr)throw new Error("no template");' +
         'let __tpl=__tplr.replace(/\\{\\{PROMPT\\}\\}/g,__emb(__sys)).replace(/\\{\\{MODEL\\}\\}/g,__emb(__mdl))' +
           '.replace(/\\{\\{CONTEXT\\}\\}/g,__emb(__cx)).replace(/\\{\\{DISPATCH\\}\\}/g,__emb(__disp))' +
@@ -3065,7 +3091,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __ocw=String((/^\\s*([A-Za-z]+):/.exec(__v||"")||[])[1]||"ok").toLowerCase();' +
       'try{await __jlog({http:__jst,outcome:__bl?(__en?__ocw:__ocw+"_not_enforced"):' +
         '(__v?__ocw:(__fc?"block_no_verdict":"empty")),' +
-        'en:__en?(__o.sw==="enforce"?"env":"config"):null,' +
+        'en:__en?(__o.sw==="enforce"?"env":"config"):(__cfgseen?"off":"no-config"),' +
         '...(__uw.length?{uw:__dcut(__uw,5)}:{}),' +
         '...(__deg.length?{deg:__dcut(__deg,5)}:{}),' +
         'tries:__jtry,jm:__jm,err1:__jerr1,' +
@@ -3579,6 +3605,18 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
   );
   const m = js.match(rx);
   if (!m) throw new Error('system-prompt assembly site not found');
+  // The one site in this file that rewrote by a NON-GLOBAL replace without
+  // asserting how many times its pattern matched: `replace` would have taken
+  // the first silently. Counted across all 32 announcements, 31 bound their
+  // edit either to a module (moduleTextAt/editModuleAt) or to an explicit
+  // `!== 1` refusal; this was the exception, and the check block cannot cover
+  // for it -- every one of its 112 entries asks whether the text EXISTS
+  // somewhere, none where it sits, so a rewrite of the wrong same-shaped site
+  // would be found by exactly the checks looking for what was just written.
+  // Minified names are chunk-local since 2.1.242, which is what makes a second
+  // same-shaped site a live possibility rather than a theoretical one.
+  const all = [...js.matchAll(new RegExp(rx.source, 'g'))];
+  if (all.length !== 1) fail(`expected 1 system-prompt assembly site, found ${all.length}`);
   js = js.replace(
     rx,
     '$1,...(process.env.CLAUDE_JUDGE&&$2?.agentContext?.agentType==="main"?' +

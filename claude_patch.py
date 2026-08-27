@@ -184,8 +184,16 @@ def resolve_active_binary() -> Path:
             return real
     vdir = versions_dir()
     if vdir.is_dir():
+        # Отсеиваются не только .orig. Незавершённый прогон оставляет рядом
+        # <версия>.staging (сборка в него идёт ДО переключения лаунчера), а
+        # документированный рецепт восстановления оставляет .restore. Оба —
+        # файлы, а .staging к тому же САМЫЙ СВЕЖИЙ по mtime, поэтому правило
+        # "новейший" выбирало именно его. Эта ветка достижима ровно в
+        # первозапускном состоянии (лаунчера ещё нет), то есть там, где
+        # ошибиться дороже всего: цель выбирается из обломков прошлого падения.
+        skip = (".orig", ".staging", ".restore", ".repair", ".new", ".tmp", ".bak")
         cands = [p for p in vdir.iterdir()
-                 if p.is_file() and not p.name.endswith(".orig")]
+                 if p.is_file() and not p.name.endswith(skip)]
         if cands:
             # newest by mtime — matches what the launcher points at after an update
             return max(cands, key=lambda p: p.stat().st_mtime)

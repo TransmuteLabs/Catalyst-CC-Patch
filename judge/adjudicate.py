@@ -13,7 +13,21 @@ sys.path.insert(0, HERE)
 import channel
 import replay
 
-LABELS_PATH = os.path.join(HERE, 'labels.jsonl')
+# The labels live in the DEPLOYMENT home beside the records they describe, not
+# beside the tool: `scripts/probes-sync.sh` puts the tools in `~/.claude/judge`
+# and the data under the probes home, so `HERE` was a different directory from
+# the one `validate.py` reads. Derived the same way its reader derives it.
+DEFAULT_HOME = os.environ.get('CLAUDE_PROBES_DIR') or '~/.claude/probes'
+DEFAULT_PROBE = os.environ.get('CLAUDE_JUDGE_PROBE') or 'judge'
+LABELS_PATH = None
+
+
+def configure_paths(home, probe):
+    global LABELS_PATH
+    LABELS_PATH = os.path.join(os.path.expanduser(home), probe, 'labels.jsonl')
+
+
+configure_paths(DEFAULT_HOME, DEFAULT_PROBE)
 DEFAULT_BASE_URL = 'http://127.0.0.1:8317'
 
 REVIEW_PROMPT = '''Тебе показывают инструкцию судьи вызовов субагентов, вход, который он
@@ -56,8 +70,7 @@ def url_for(record):
 # its only reader. A literal copy would drift from the image silently.
 DEFAULT_IMAGE = '~/.local/bin/claude'
 RX_VALUES, ACT_VALUES = replay.verdict_vocabulary(
-    os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE,
-    os.environ.get('CLAUDE_JUDGE_PROBE') or 'judge')
+    os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE, DEFAULT_PROBE)
 
 
 REVIEW_PROMPT = REVIEW_PROMPT.replace('{RX}', '|'.join(RX_VALUES))
@@ -178,7 +191,17 @@ def main():
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--out')
     parser.add_argument('--dry-run', action='store_true')
+    # The same three flags its three siblings take, with the environment kept as
+    # their default so existing invocations are unaffected. Documented as a
+    # common contract since before it was one.
+    parser.add_argument('--home', default=DEFAULT_HOME, help='дом проб')
+    parser.add_argument('--probe', default=DEFAULT_PROBE, help='идентификатор пробы')
+    parser.add_argument('--image', default=os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE,
+                        help='образ, из которого читается словарь вердиктов')
     args = parser.parse_args()
+    configure_paths(args.home, args.probe)
+    global RX_VALUES, ACT_VALUES
+    RX_VALUES, ACT_VALUES = replay.verdict_vocabulary(args.image, args.probe)
     if args.jobs < 1:
         raise SystemExit('--jobs должен быть не меньше 1')
 

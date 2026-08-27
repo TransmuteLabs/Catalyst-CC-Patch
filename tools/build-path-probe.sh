@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The build-path probe: the one part of this kit the 114 checks cannot see.
+# The build-path probe: the one part of this kit the 117 checks cannot see.
 #
 # Every check in claude-patch-all.sh is a byte search over the FINISHED image, so
 # all of them are blind to how that image came to be. The sweep across versions
@@ -34,7 +34,7 @@
 # path including a kill.
 #
 # Usage:  bash tools/build-path-probe.sh [--case a|b|c] [--version 2.1.247]
-# Cost:   one full pipeline run per case (tweakcc + our patches + 114 checks +
+# Cost:   one full pipeline run per case (tweakcc + our patches + 117 checks +
 #         the interface gate + the bench), so a few minutes each.
 
 set -u
@@ -89,7 +89,22 @@ self_test_marks
 # BSD stat and GNU stat spell the same question differently, and a probe whose
 # central assertion is "the inode changed" must not report `none` on Linux
 # because it asked in the wrong dialect -- that reads as "the file is gone".
-inode() { stat -f%i "$1" 2>/dev/null || stat -c%i "$1" 2>/dev/null || echo none; }
+inode() {
+  [[ -f "$1" ]] || { echo "absent"; return 0; }
+  stat -f%i "$1" 2>/dev/null || stat -c%i "$1" 2>/dev/null || echo "none"
+}
+# Отсутствие и «оба диалекта промолчали» -- РАЗНЫЕ ответы, и ни один из них не
+# является инодом. Потребитель сравнивает ДО с ПОСЛЕ, поэтому обязан отвергать
+# оба, а не радоваться неравенству.
+is_inode() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+self_test_inode() {
+  local t; t="$(mktemp)"
+  is_inode "$(inode "$t")" || { echo "ПРОВАЛ самопроверки inode(): живой файл не дал инода" >&2; rm -f "$t"; exit 1; }
+  rm -f "$t"
+  is_inode "$(inode "$t")" && { echo "ПРОВАЛ самопроверки inode(): исчезнувший файл дал инод" >&2; exit 1; }
+  return 0
+}
+self_test_inode
 
 # --- material ----------------------------------------------------------------
 # A patched build and a pristine copy of the SAME version. Both have to be real:
@@ -121,14 +136,30 @@ BACKUP_SNAP="$ROOT/native-binary.backup.snapshot"
 [[ -f "$TWEAKCC_BACKUP" ]] && cp -p "$TWEAKCC_BACKUP" "$BACKUP_SNAP"
 TWEAKCC_CFG="$HOME/.tweakcc/config.json"
 CFG_SNAP="$ROOT/config.json.snapshot"
-[[ -f "$TWEAKCC_CFG" ]] && cp -p "$TWEAKCC_CFG" "$CFG_SNAP"
+# Три состояния, а не два: конфиг был и снят в снимок; конфига не было и его
+# создаст сам зонд (тогда после прогона файл надо УБРАТЬ, а не «восстановить»);
+# конфиг был, но снять не удалось. Без третьего флага зонд, создавший конфиг на
+# чистой машине, оставлял бы его человеку навсегда.
+CFG_WAS_ABSENT=0
+if [[ -f "$TWEAKCC_CFG" ]]; then
+  cp -p "$TWEAKCC_CFG" "$CFG_SNAP"
+else
+  CFG_WAS_ABSENT=1
+fi
 
 cleanup() {
   # Restore the borrowed config first: it carries the seeded version, and leaving
   # a bogus one behind makes the next real tweakcc run refresh its backup from
   # whatever binary happens to be installed -- the exact poisoning this probe is
   # about, caused by the probe.
-  if [[ -f "$CFG_SNAP" ]]; then
+  if [[ "${CFG_WAS_ABSENT:-0}" == "1" ]]; then
+    # Конфига до зонда не было. Восстанавливать нечего -- надо убрать свой,
+    # иначе зонд оставляет человеку файл с ccVersion=0.0.0-probe, то есть ровно
+    # ту рассинхронизацию, ради обнаружения которой он его и завёл.
+    if [[ -f "$TWEAKCC_CFG" ]]; then
+      rm -f "$TWEAKCC_CFG" && echo "removed $TWEAKCC_CFG (the probe created it; there was none before)"
+    fi
+  elif [[ -f "$CFG_SNAP" ]]; then
     if ! cmp -s "$CFG_SNAP" "$TWEAKCC_CFG" 2>/dev/null; then
       cp -p "$CFG_SNAP" "$TWEAKCC_CFG.probe-restore" \
         && mv "$TWEAKCC_CFG.probe-restore" "$TWEAKCC_CFG" \
@@ -171,13 +202,29 @@ stage_dir() {
 # run, because tweakcc records the real version once it refreshes and would not
 # fire a second time.
 seed_version_mismatch() {
-  [[ -f "$TWEAKCC_CFG" ]] || return 0
+  # Прежняя форма молча возвращалась, если конфига нет: `[[ -f ... ]] || return 0`.
+  # На машине без конфига seed не срабатывал НИКОГДА, а значит утверждение
+  # «бэкап всё ещё штатный» держалось по причине, не связанной с предметом
+  # проверки, и отрицательный контроль не мог его покраснить -- при этом зонд
+  # всё равно печатал, что контроль показал зубы.
+  #
+  # Отсутствие конфига -- не причина не мерить: tweakcc читает его как
+  # `{...defaultConfig, ...JSON.parse(content)}` (src/config.ts:253), поэтому
+  # файл из одного ключа законен, а после прогона он убирается (CFG_WAS_ABSENT).
+  mkdir -p "$(dirname "$TWEAKCC_CFG")"
+  [[ -f "$TWEAKCC_CFG" ]] || printf '{}\n' > "$TWEAKCC_CFG"
   python3 - "$TWEAKCC_CFG" <<'PY'
-import json, sys
+import json, os, sys
 p = sys.argv[1]
 cfg = json.load(open(p))
 cfg['ccVersion'] = '0.0.0-probe'
-json.dump(cfg, open(p, 'w'), indent=2, ensure_ascii=False)
+# The LIVE config of the person running this probe. Staged and renamed: the
+# probe's restore runs from a trap, and a trap does not run on SIGKILL, so a
+# torn write here would outlive the probe.
+tmp = p + '.probe-new'
+with open(tmp, 'w', encoding='utf-8') as fh:
+    json.dump(cfg, fh, indent=2, ensure_ascii=False)
+os.replace(tmp, p)
 PY
 }
 
@@ -201,9 +248,16 @@ case_a() {
   [[ $rc -eq 0 ]] && ok "pipeline finished (rc=0)" || bad "pipeline exited rc=$rc (see $log)"
   grep -q 'rebuilding from the pristine copy' "$log" \
     && ok 'took the staging branch' || bad 'never announced the staging branch'
-  [[ "$ino_before" != "$ino_after" ]] \
-    && ok "swapped in by rename (inode $ino_before -> $ino_after)" \
-    || bad "same inode $ino_after: patched in place, under any running session"
+  # Неравенство инодов -- утверждение о ДВУХ существующих файлах. Ответ
+  # "absent"/"none" не инод, и пропускать его как «изменился» значит
+  # засчитывать исчезновение бинарника за успешную подмену.
+  if ! is_inode "$ino_before" || ! is_inode "$ino_after"; then
+    bad "инод не измерен (до=$ino_before после=$ino_after): файла нет или stat промолчал"
+  elif [[ "$ino_before" != "$ino_after" ]]; then
+    ok "swapped in by rename (inode $ino_before -> $ino_after)"
+  else
+    bad "same inode $ino_after: patched in place, under any running session"
+  fi
   [[ -e "$d/claude.staging" ]] \
     && bad 'left a staging file behind' || ok 'no staging file left behind'
   [[ "$(marks "$d/claude")" != 0 ]] \
@@ -290,7 +344,11 @@ case_c() {
   # unrelated guard tripping -- pass as proof about the staging branch.
   local required=0
   grep -q 'rebuilding from the pristine copy' "$log" || { required=1; note 'red' 'staging branch not taken'; }
-  [[ "$ino_before" == "$ino_after" ]] && { reddened=$((reddened+1)); note 'red' "patched in place (inode $ino_after)"; }
+  if ! is_inode "$ino_before" || ! is_inode "$ino_after"; then
+    note 'info' "инод не измерен (до=$ino_before после=$ino_after) -- не засчитано"
+  elif [[ "$ino_before" == "$ino_after" ]]; then
+    reddened=$((reddened+1)); note 'red' "patched in place (inode $ino_after)"
+  fi
   [[ "$(marks "$TWEAKCC_BACKUP")" != 0 ]] && { reddened=$((reddened+1)); note 'red' "tweakcc's backup poisoned"; }
   # Reported, never counted: a pipeline that refused says nothing about which
   # assertion has teeth, and it is the most likely way a future mutation goes

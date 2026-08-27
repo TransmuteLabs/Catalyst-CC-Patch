@@ -11,7 +11,7 @@ by design). Both mechanisms share one core and are configured by a single
 
 The patch lives in the image itself, not in a hook: a hook does not see
 everything and can be worked around, an injection cannot. Nothing is
-installed if any one of the 114 checks fails, and the switch to a new build
+installed if any one of the 117 checks fails, and the switch to a new build
 happens only after those checks AND the smoke run AND the interface gate AND the
 probe bench have all passed.
 
@@ -78,7 +78,7 @@ invocation (including its TUI) requires re-running this script.
 | file | role |
 |---|---|
 | `claude-patch-all.sh` | the pipeline: tweakcc → our patches → signing → checks → launcher switch → model costs |
-| `tweakcc-patch.js` | the patches themselves, as a script for `tweakcc adhoc-patch`; the 114 checks that verify them live in `claude-patch-all.sh` |
+| `tweakcc-patch.js` | the patches themselves, as a script for `tweakcc adhoc-patch`; the 117 checks that verify them live in `claude-patch-all.sh` |
 | `claude_patch.py` | cross-platform install/download/launcher switch |
 | `set-model-costs.py` | syncs `customModelCosts` and `customModelContextWindows` into `~/.claude.json` |
 | `patch-claude-routing.sh/.ps1` | thin wrappers around `claude_patch.py` (must sit next to it) |
@@ -99,12 +99,12 @@ invocation (including its TUI) requires re-running this script.
 | `tools/probes-migrate.py` | a one-time consolidation of the two old `config.json` files into a single `probes.toml`, with a self-check |
 | `docs/probe-registry-spec.md` | the probe registry spec: one settings file, a dictionary of conditions, reactions |
 | `tools/emit-check.js` | parses the pasted code BEFORE the image is built |
-| `tools/build-path-probe.sh` | drives the default-run BUILD branch for real (staging, rename, tweakcc’s backup) — the one thing the 114 checks cannot see, with a negative control |
+| `tools/build-path-probe.sh` | drives the default-run BUILD branch for real (staging, rename, tweakcc’s backup) — the one thing the 117 checks cannot see, with a negative control |
 | `docs/judge-architecture.md` | the judge's full design: injections, flow, layers, invariants |
 | `docs/judge-patch-spec.md` | the campaign journal: anchors, rejected options, measurements |
 | `tools/listener.py` | an HTTP receiver for routing probes |
 
-## What the patches do (114 checks)
+## What the patches do (117 checks)
 
 Routing and models: `claude-*` go to the subscription, everything else to
 the proxy; arbitrary models on agents; gateway model discovery without a

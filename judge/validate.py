@@ -86,10 +86,23 @@ def labels_by_record():
     labels = {}
     try:
         with open(LABELS_PATH, encoding='utf-8') as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, 1):
                 if not line.strip():
                     continue
-                item = json.loads(line)
+                try:
+                    item = json.loads(line)
+                except ValueError as exc:
+                    # Одна битая строка теряет ОДНУ метку и называет себя.
+                    # Ронять весь отчёт из-за хвоста, оборванного дописыванием,
+                    # значит отдавать всю накопленную разметку за один
+                    # незавершённый append.
+                    sys.stderr.write(
+                        f'ВНИМАНИЕ: {LABELS_PATH}:{lineno} не разбирается ({exc}); строка пропущена\n')
+                    continue
+                if not isinstance(item, dict):
+                    sys.stderr.write(
+                        f'ВНИМАНИЕ: {LABELS_PATH}:{lineno} не объект; строка пропущена\n')
+                    continue
                 rec = item.get('rec')
                 if not rec:
                     continue
@@ -422,15 +435,25 @@ def print_summary(rows, model_order=None, recorded_classes=None):
 def command_list(args):
     labels = labels_by_record()
     print('запись\tзаписанный\tчеловеческая\tпредложенная_моделью')
+    bad_records = 0
     for path in record_files(args.records):
         name = os.path.basename(path)
         pair = labels.get(name) or {}
         if args.unlabelled and pair:
             continue
-        recorded = replay.klass(replay.load(path).get('verdict') or '')
+        try:
+            recorded = replay.klass(replay.load(path).get('verdict') or '')
+        except Exception as exc:
+            # Усечённая запись -- это одна строка таблицы со словом ОШИБКА, а
+            # не конец перечня. compact.py умеет её НАЗВАТЬ, но не умеет убрать,
+            # поэтому она переживает каждый проход и роняла бы отчёт вечно.
+            recorded = f'ОШИБКА ЧТЕНИЯ ({type(exc).__name__})'
+            bad_records += 1
         human = (pair.get('human') or {}).get('truth') or 'нет метки'
         model = (pair.get('model') or {}).get('truth') or 'нет метки'
         print(f'{name}\t{recorded}\t{human}\t{model}')
+    if bad_records:
+        sys.stderr.write(f'ВНИМАНИЕ: записей, которые не читаются: {bad_records}\n')
 
 
 def resolve_record_name(value):
@@ -505,11 +528,20 @@ def default_output_path():
 
 def command_report(args):
     rows = []
+    skipped = 0
     for path in args.files:
-        with open(os.path.expanduser(path), encoding='utf-8') as fh:
-            for line in fh:
-                if line.strip():
+        full = os.path.expanduser(path)
+        with open(full, encoding='utf-8') as fh:
+            for lineno, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
                     rows.append(json.loads(line))
+                except ValueError as exc:
+                    sys.stderr.write(f'ВНИМАНИЕ: {full}:{lineno} не разбирается ({exc}); строка пропущена\n')
+                    skipped += 1
+    if skipped:
+        sys.stderr.write(f'ВНИМАНИЕ: пропущено нечитаемых строк: {skipped}\n')
     print_summary(rows)
 
 

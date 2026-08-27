@@ -143,7 +143,7 @@ prune_tweakcc_cache() {
     for entry in [0-9a-f][0-9a-f]*; do
       [[ -d "$entry" && ${#entry} -eq 40 && "$entry" =~ ^[0-9a-f]{40}$ ]] || continue
       [[ "$entry" == "$CATALYST_TWEAKCC_SHA" ]] && continue
-      printf '%s\t%s\n' "$(stat -f '%m' "$entry" 2>/dev/null || echo 0)" "$entry"
+      printf '%s\t%s\n' "$(stat -f '%m' "$entry" 2>/dev/null || stat -c '%Y' "$entry" 2>/dev/null || echo 0)" "$entry"
     done | sort -rn | cut -f2-
   )
   (( ${#entries[@]} > keep )) || return 0
@@ -325,6 +325,25 @@ sys.exit(1)
 PY
 )"
 fi
+
+# Три ветки выше выбрали цель тремя разными способами, и спрашивали с неё
+# разное. Авто-детект задавал образу два вопроса (магия, вхождение
+# `@anthropic-ai/claude-code`), ветка `--update` доверяла своей загрузке, а
+# `--target` не спрашивала НИЧЕГО, кроме существования файла -- при том что
+# рецепт в шапке этого же скрипта сам ведёт человека к `<версия>.staging`,
+# то есть ровно к файлу, который остаётся после ОБОРВАННОЙ загрузки.
+#
+# Оборванный образ проходит оба прежних вопроса: магия лежит в первых четырёх
+# байтах, маркер продукта -- задолго до конца файла. Падало это позже, внутри
+# распаковщика, сообщением про сломанный бандл, и классификатор ниже (:600)
+# объяснял его как "не применился ни один патч" с тремя советами, среди
+# которых причины не было.
+#
+# Поэтому вопрос задаётся ОДИН и в одном месте -- после того как цель выбрана,
+# каким бы способом она ни выбралась, -- и включает третий: объявляют ли
+# заголовки самого образа больше байт, чем лежит на диске.
+python3 "$HERE/tools/image-check.py" "$BIN" || exit 1
+
 echo "Target binary: $BIN"
 
 # --- 0b. never hand tweakcc a binary that already carries our patches ---------
@@ -432,7 +451,7 @@ PRISTINE_SRC="${BIN%.staging}.orig"
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-d5ced06304cf537ebee7204e72fcc62acada9d0e}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0}"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
 # TWEAKCC_LOCAL is the development escape hatch: point it at a built
@@ -524,11 +543,25 @@ if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; 
     # TRUNCATED backup, and truncated bytes contain no marker either -- so every
     # later run of this very check would read it as healthy while a restore
     # wrote a broken binary and reported success.
-    cp -p "$PRISTINE_SRC" "$TWEAKCC_BACKUP.repair" \
-      && mv "$TWEAKCC_BACKUP.repair" "$TWEAKCC_BACKUP"
-    echo "NOTE: tweakcc's backup held a PATCHED image; restored it from $PRISTINE_SRC." >&2
-    echo "      This build starts from those bytes, and 'tweakcc --restore' would" >&2
-    echo "      have returned the patch until now." >&2
+    # The message is INSIDE the success branch, and a failed repair is fatal.
+    # `set -e` does not fire when an AND-OR list short-circuits on its first
+    # command -- measured, not assumed: with `set -euo pipefail` and an
+    # unwritable destination, `cp` failed, `mv` was skipped, and the script ran
+    # on to exit 0. So the old shape printed "restored it from ..." over a
+    # backup that still held the patch, and then built from those bytes.
+    if cp -p "$PRISTINE_SRC" "$TWEAKCC_BACKUP.repair" \
+       && mv "$TWEAKCC_BACKUP.repair" "$TWEAKCC_BACKUP"; then
+      echo "NOTE: tweakcc's backup held a PATCHED image; restored it from $PRISTINE_SRC." >&2
+      echo "      This build starts from those bytes, and 'tweakcc --restore' would" >&2
+      echo "      have returned the patch until now." >&2
+    else
+      rm -f "$TWEAKCC_BACKUP.repair"
+      echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image and the" >&2
+      echo "       repair from $PRISTINE_SRC FAILED (no space, no permission?)." >&2
+      echo "       Refusing to build: the build would start from patched bytes, and" >&2
+      echo "       'tweakcc --restore' would keep handing out the patch." >&2
+      exit 1
+    fi
   else
     echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image, and no" >&2
     echo "  verified-pristine copy of THIS build is available to repair it from" >&2
@@ -543,23 +576,35 @@ if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; 
 fi
 
 # --- 2. tweakcc's own patches (restores from its backup first!) ---------------
-# tweakcc takes no target argument — it resolves the installation itself, from
-# `ccInstallationPath` in its config (auto-detect when null). After --update that
-# resolution can still land on the PREVIOUS version, silently patching a binary
-# nobody runs while ours stays untouched. Pin it to the binary we are working on.
+# tweakcc takes no target argument -- оно само разрешает установку. Порядок
+# приоритетов в его коде (src/installationDetection.ts:550-600 форка):
+#   1. переменная окружения TWEAKCC_CC_INSTALLATION_PATH,
+#   2. ccInstallationPath из конфига,
+#   3. `claude` на PATH,
+#   4. вшитые пути поиска.
+# После --update разрешение по пунктам 3-4 попадает на ПРЕДЫДУЩУЮ версию:
+# лаунчер намеренно ещё не переключён, и tweakcc молча патчит образ, который
+# никто не запускает, пока наш остаётся нетронутым.
+#
+# Раньше цель прибивалась пунктом 2 -- правкой конфига человека. У этого было
+# две беды, и обе исправляет пункт 1.
+#
+#   * Пункт 2 существовал ТОЛЬКО если конфиг уже есть: `if [[ -f "$TWEAKCC_CFG" ]]`.
+#     Отсутствие конфига -- это и есть определение первого запуска, то есть
+#     ровно того случая, ради которого прибивание написано. На чистой машине
+#     прибивания не было, и разрешение уходило в пункты 3-4.
+#   * Прибивание ПЕРЕЖИВАЛО наш прогон. После сборки по --target конфиг
+#     человека оставался указывающим на нашу временную цель (скажем,
+#     /tmp/cc-matrix/bin/242.wave.bin), и следующий его собственный запуск
+#     tweakcc падал с "ccInstallationPath is set to '...' but file does not
+#     exist" -- поломка, которую вносили мы, в файле, который не наш.
+#
+# Переменная окружения не имеет ни одной из этих привязок: она действует на
+# наши вызовы и умирает вместе с процессом, а конфиг человека не трогается
+# вовсе.
 if [[ $ONLY_OURS -eq 0 ]]; then
-  TWEAKCC_CFG="$HOME/.tweakcc/config.json"
-  if [[ -f "$TWEAKCC_CFG" ]]; then
-    python3 - "$TWEAKCC_CFG" "$BIN" <<'PY'
-import json, sys
-path, target = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path))
-if cfg.get('ccInstallationPath') != target:
-    cfg['ccInstallationPath'] = target
-    json.dump(cfg, open(path, 'w'), indent=2, ensure_ascii=False)
-    print(f"Pinned tweakcc to {target}")
-PY
-  fi
+  export TWEAKCC_CC_INSTALLATION_PATH="$BIN"
+  echo "Pinned tweakcc to $BIN (TWEAKCC_CC_INSTALLATION_PATH)"
   # A non-zero --list-patches meant "skip the apply", silently and with every
   # byte of its output discarded. But that subcommand failing does not imply the
   # apply would fail: a tweakcc that cannot parse its config, or that dropped
@@ -667,6 +712,36 @@ if [[ $ONLY_OURS -eq 0 ]] && grep -q -a -F "$OUR_MARKER" "$BIN"; then
   exit 1
 fi
 
+# А теперь встречный вопрос к тому же образу: легли ли на него патчи tweakcc.
+#
+# Весь разбор выше читает то, что tweakcc НАПИСАЛ О СЕБЕ: код возврата, строки
+# ✓/✗, фразу "applied with some failures". Это отчёт стороннего инструмента о
+# файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
+# TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
+# ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
+# ни одна из 117 проверок ниже этого не заметит: они пинят наш собственный
+# текст, а его пишет наш патчер, работающий по --target.
+#
+# Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
+# Маркер измерен: в пристинном 2.1.247 строки "tweakcc" ноль вхождений, в
+# собранном -- восемь.
+if [[ $ONLY_OURS -eq 0 ]]; then
+  TWEAKCC_LANDED=$(grep -c -a -F 'tweakcc' "$BIN" || true)
+  case "$TWEAKCC_LANDED" in ''|*[!0-9]*) TWEAKCC_LANDED=0 ;; esac
+  if [[ "$TWEAKCC_LANDED" -eq 0 ]]; then
+    if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]]; then
+      echo "NOTE: в цели нет ни одного следа tweakcc; CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1, продолжаю." >&2
+    else
+      echo "FATAL: стадия tweakcc отчиталась успехом, но в цели нет её следов." >&2
+      echo "  Цель: $BIN" >&2
+      echo "  Значит она патчила ДРУГОЙ файл: свой выбор она делает сама," >&2
+      echo "  а мы прибиваем его через TWEAKCC_CC_INSTALLATION_PATH -- проверьте," >&2
+      echo "  что сборка распаковщика эту переменную знает (форк, пин в шапке)." >&2
+      exit 1
+    fi
+  fi
+fi
+
 # --- 3. our patches, ALWAYS after tweakcc -------------------------------------
 # The injected code is parsed BEFORE the build: the patcher is syntactically
 # intact on its own, while a program glued from hundreds of string pieces may
@@ -738,10 +813,66 @@ if not os.path.exists(readme):
 # green" under "Porting to 2.1.237" is true of THAT build and must not be
 # rewritten to today's number.
 JOURNAL = 'judge-patch-spec.md'
-MARKERS = ('at measurement time', 'на момент замера', 'historical', 'историческ')
+# `subset` is not a softening of the gate but a name for a case it cannot decide:
+# a number near one of these nouns may be a different quantity entirely, and only
+# the author knows which. Written down and greppable beats living in a blind spot.
+MARKERS = ('at measurement time', 'на момент замера', 'historical', 'историческ',
+           'subset', 'подмножеств')
 WORDS = '|'.join(declared)
+# Masked before anything is matched: `2026-08-27` would otherwise offer `27` and
+# `2.1.247` would offer `247` to every window near one of these nouns.
+MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+')
 PAIR = re.compile(r'(\d+)\s*/\s*(\d+)\s+(' + WORDS + r')')
-ONE = re.compile(r'(\d+)\s+(' + WORDS + r')')
+# Up to three words between the number and the noun: a count with an adjective
+# in front of the noun hid from the adjacent-only form for as long as that form
+# existed. The example is not spelled out here on purpose -- this file is one of
+# the files the gate scans, and a literal pair in this very comment was the
+# first thing the widened grammar reported.
+#
+# The intervening words may not carry sentence punctuation: without that, the
+# grammar walked over a full stop and married a number from one sentence to a
+# noun in the next.
+ONE = re.compile(r'(\d+)\s+(?:[^\s.;!?]+\s+){0,3}(' + WORDS + r')')
+# The reverse grammar: the noun, then a dash or colon, then the number. This is
+# how the longest-lived stale count in this kit was written, and it is why the
+# gate had to stop reading line by line.
+#
+# A period only ends a sentence when whitespace follows it. A blanket ban on
+# periods was the first attempt, and it let a file name's own dots inside the
+# span block the match -- so the grammar still could not see the case it was
+# written for, while the gate read GREEN, because the stale number had by then
+# been corrected by hand. Green after a manual fix proves nothing about the
+# instrument; the mutation is what said otherwise.
+#
+# NOTE for whoever edits these comments: this file is one of the files the gate
+# scans, so an illustrative «number + noun» spelled out here is not an example,
+# it is a live claim, and the gate will report it. Both of these comments were
+# reported by their own regex before this line existed.
+REV = re.compile(r'(' + WORDS + r')\b(?:(?!\.\s)[^;!?]){0,64}?(?:—|:|\s-\s)\s*(\d+)\b')
+
+
+def collapse(text):
+    """Whitespace-collapsed stream plus a line number for every character.
+
+    Read line by line, this gate could not see a count whose noun ended one line
+    and whose number opened the next. Read as a stream it can -- but a finding
+    without a line number is one nobody acts on, so the mapping is carried
+    alongside rather than thrown away.
+    """
+    out, lines, ln, prev_space = [], [], 1, True
+    for ch in text:
+        if ch.isspace():
+            if not prev_space:
+                out.append(' ')
+                lines.append(ln)
+                prev_space = True
+        else:
+            out.append(ch)
+            lines.append(ln)
+            prev_space = False
+        if ch == '\n':
+            ln += 1
+    return ''.join(out), lines
 
 bad = []
 # Prose is not only in .md files. The first version of this gate read the docs
@@ -756,26 +887,44 @@ files = [readme, sys.argv[1]] + sorted(
 for path in files:
     if os.path.basename(path) == JOURNAL or not os.path.exists(path):
         continue
-    for lineno, line in enumerate(read(path).split('\n'), 1):
-        if any(marker in line for marker in MARKERS):
+    stream, lines = collapse(read(path))
+    stream = MASK.sub(lambda m: '#' * len(m.group(0)), stream)
+
+    def exempt(at):
+        # The marker is looked for AROUND the match rather than on its line:
+        # there are no lines here any more, and a marker one clause away is the
+        # same statement.
+        lo, hi = max(0, at - 120), min(len(stream), at + 120)
+        return any(marker in stream[lo:hi] for marker in MARKERS)
+
+    covered = []
+    for m in PAIR.finditer(stream):
+        covered.append((m.start(), m.end()))
+        if exempt(m.start()):
             continue
-        for m in PAIR.finditer(line):
-            want = declared[m.group(3)]
-            if m.group(1) != want or m.group(2) != want:
-                bad.append((path, lineno, m.group(0), want + '/' + want + ' ' + m.group(3)))
-        if PAIR.search(line):
-            continue
-        for m in ONE.finditer(line):
-            want = declared[m.group(2)]
-            if m.group(1) != want:
-                bad.append((path, lineno, m.group(0), want + ' ' + m.group(2)))
+        want = declared[m.group(3)]
+        if m.group(1) != want or m.group(2) != want:
+            bad.append((path, lines[m.start()], m.group(0),
+                        want + '/' + want + ' ' + m.group(3)))
+    for rx, num, noun in ((ONE, 1, 2), (REV, 2, 1)):
+        for m in rx.finditer(stream):
+            if any(a <= m.start() < b for a, b in covered):
+                continue
+            if exempt(m.start()):
+                continue
+            want = declared[m.group(noun)]
+            if m.group(num) != want:
+                bad.append((path, lines[m.start()], m.group(0),
+                            want + ' ' + m.group(noun)))
 
 if bad:
     print("ЧИСЛА В ДОКАХ РАЗОШЛИСЬ С ОБЪЯВЛЕННЫМИ:")
     for path, lineno, got, want in bad:
         print("  %s:%d  «%s» — объявлено «%s»" % (os.path.relpath(path, here), lineno, got, want))
-    print("  Если число ИСТОРИЧЕСКОЕ (запись о прошлой сборке), пометьте строку")
-    print("  словами «at measurement time» / «на момент замера» — тогда она не сверяется.")
+    print("  Если число ИСТОРИЧЕСКОЕ (запись о прошлой сборке), пометьте место")
+    print("  словами «at measurement time» / «на момент замера» / «historical».")
+    print("  Если это ДРУГАЯ величина (подсчёт подмножества, а не общий счёт) —")
+    print("  словом «subset» / «подмножеств». Пометка ищется рядом, не построчно.")
     sys.exit(1)
 print("ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (проверок %s, сценариев %s)"
       % (declared['checks'], declared['scenarios']))
@@ -2308,7 +2457,7 @@ checks = {
                                               rb'ms:globalThis\.__ccMono\(\)-__t0,sw:__o\.sw\|\|null', d))
                                           and bool(re.search(
                                               rb'en:__en\?\(__o\.sw==="enforce"\?'
-                                              rb'"env":"config"\):null', d))
+                                              rb'"env":"config"\):\(__cfgseen\?"off":"no-config"\)', d))
                                           # the judge's switch remains env: the core does not know it
                                           and bool(re.search(
                                               rb'sw:process\.env\.CLAUDE_JUDGE,', d)),
@@ -2352,7 +2501,7 @@ checks = {
                                   and bool(re.search(
                                               rb'if\(__phomeP\)\{let __c1=await __ldt\(__phomeP\+"/probes\.toml"\);'
                                               rb'if\(__c1===!1\)__cfgbad=!0;else if\(__c1\)'
-                                              rb'__cfg=\{\.\.\.__cfg,\.\.\.__eff\(__c1,__o\.dirName\)\}\}', d)),
+                                              rb'\{__cfgseen=!0;__cfg=\{\.\.\.__cfg,\.\.\.__eff\(__c1,__o\.dirName\)\}\}\}', d)),
     'judge context is structured, not prefixed': bool(re.search(
                                               rb'return\{src:__role,text:__bt\}\}\)\.filter\(Boolean\)', d))
                                           and bool(re.search(
@@ -2834,7 +2983,7 @@ checks = {
                                           and bool(re.search(
                                               rb'let __c0=await __ldt\(__phome\+"/probes\.toml"\);'
                                               rb'if\(__c0===!1\)__cfgbad=!0;else if\(__c0\)'
-                                              rb'__cfg=__eff\(__c0,__o\.dirName\)', d))
+                                              rb'\{__cfgseen=!0;__cfg=__eff\(__c0,__o\.dirName\)\}', d))
                                           # unknown enforce/fail_closed count as ON
                                           and bool(re.search(
                                               rb'__cfg\.enforce===!0\|\|__cfgbad', d))
@@ -2857,6 +3006,37 @@ checks = {
                                               rb'__deg\.push\("empty:"\+__f\)', d)),
     # broken rules are not "fall back to defaults" but a cancellation naming
     # the file
+    # Половина prompt.md -- законный текст: ни разбор, ни prompt-missing её не
+    # ловят, и вызов уехал бы с половиной свода правил. Признак несёт сам файл,
+    # а обрыв объявляется КАК ДЕФЕКТ СУЖДЕНИЯ (__degb), то есть отменяет вызов
+    # при enforce+fail_closed, наравне с отсутствующим промтом.
+    'judge tells a truncated rule-book from a whole one': bool(re.search(
+                                              rb'__sys\.indexOf\("<!-- END OF RULES -->"\)<0', d))
+                                          and bool(re.search(
+                                              rb'let __ptr="prompt-truncated:"\+\(__pdir\?__pdir:__jdir\)\+"/prompt\.md";'
+                                              rb'__deg\.push\(__ptr\);__degb\.push\(__ptr\)', d)),
+    # Инвариант рамки проверялся ТОЛЬКО на каноне (tools/emit-check.js читает
+    # файл из дерева), а развёрнутый шаблон -- ни разу и нигде. Шаблон без
+    # {{LABEL}} молча терял объявление об усечении, без {{DISPATCH}} судье
+    # уходил пустой бриф -- и оба состояния не имели записи в deg.
+    'the deployed body template is checked for its placeholders': bool(re.search(
+                                              rb'\["\{\{LABEL\}\}","\{\{CONTEXT\}\}","\{\{DISPATCH\}\}"\]'
+                                              rb'\.filter\(\(__ph\)=>__tplr\.indexOf\(__ph\)<0\)', d))
+                                          # Вместе с ОХРАНОЙ, а не только с нагрузкой: мутация
+                                          # `if(__miss.length&&!1)` оставляет оба текста на месте
+                                          # и обезоруживает ветку -- проверка, пинящая одну
+                                          # нагрузку, проходит по такой правке зелёной (измерено).
+                                          and bool(re.search(
+                                              rb'if\(__miss\.length\)\{'
+                                              rb'__deg\.push\("body-no-placeholder:"\+__miss\.join\(","\)\);__tplr=null\}', d)),
+    # Недоступный каталог записей давал строку журнала БЕЗ rec и БЕЗ deg --
+    # побайтово такую же, как при record=false. Корпус мог перестать расти
+    # навсегда, а журнал читался как здоровая установка с выключенной записью.
+    'a failed record write is a declared degradation': bool(re.search(
+                                              rb'__deg\.push\("rec-write:"\+String\(__re\?\.code\?\?""\)', d))
+                                          # в __deg, но НЕ в __degb: права на диске не отменяют чужие вызовы
+                                          and not bool(re.search(
+                                              rb'__degb\.push\("rec-write:', d)),
     'judge cancels when its rules are broken': bool(re.search(
                                               rb'if\(__degb\.length&&__en\)\{', d))
                                           and bool(re.search(
@@ -2955,8 +3135,9 @@ checks = {
 # build with nothing behind it. And an unpinned count is a number people get
 # wrong: the author of these lines twice recounted the keys with a regex that
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
-# reported 88, and was corrected by the run itself printing 89.
-EXPECTED_CHECKS = 114
+# reported 88, and was corrected by the run itself printing 89 — historical:
+# both are what was miscounted then, not a count of anything now.
+EXPECTED_CHECKS = 117
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -3234,7 +3415,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives 54 scenarios through a throwaway probes home — verdicts, degraded
+# and drives 56 scenarios through a throwaway probes home — verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #
 # It existed for weeks and proved nothing, because nothing called it. That is
@@ -3270,8 +3451,30 @@ else
     # prints NOTHING and exits 1, and the line would read "Probes:  scenarios
     # behaved as specified" -- which still matches every pattern that looks
     # for it, so the loss would be invisible to the sweep as well.
-    BENCH_N=$(grep -a -c '^[a-z][a-z0-9-]* *|' "$BENCH_LOG")
-    case "$BENCH_N" in ''|*[!0-9]*) BENCH_N="НЕИЗВЕСТНО СКОЛЬКО" ;; esac
+    # Число сценариев берётся из строки, которую печатает САМ стенд, а не
+    # пересчётом строк его таблицы. Прежний греп `^[a-z][a-z0-9-]* *|` опирался
+    # на грамматику имени сценария, которой писатель не обещал: имя `Foo-bar`
+    # или `foo_bar` таблицу не ломает, а из счёта выпадает -- и вместо отказа
+    # печаталось меньшее, вполне достоверное на вид число.
+    #
+    # Отсутствие строки итога -- ОТКАЗ. Прежняя ветка на нечисло печатала
+    # "Probes: НЕИЗВЕСТНО СКОЛЬКО scenarios behaved as specified" и ехала
+    # дальше: сводка, признающая, что ничего не измерила, всё равно проходила
+    # как успех.
+    BENCH_SUM=$(grep -a -m1 '^probe-bench: ИТОГ ' "$BENCH_LOG" || true)
+    BENCH_N=$(printf '%s' "$BENCH_SUM" | sed -n 's/.*сценариев=\([0-9][0-9]*\).*/\1/p')
+    BENCH_BAD=$(printf '%s' "$BENCH_SUM" | sed -n 's/.*расхождений=\([0-9][0-9]*\).*/\1/p')
+    if [[ -z "$BENCH_N" || -z "$BENCH_BAD" ]]; then
+      echo "FATAL: стенд проб завершился успехом, но не назвал итог." >&2
+      echo "  Ожидалась строка вида: probe-bench: ИТОГ сценариев=N расхождений=M" >&2
+      echo "  Либо формат стенда изменился, либо вывод обрезан. Лог: $BENCH_LOG" >&2
+      exit 1
+    fi
+    if [[ "$BENCH_BAD" -ne 0 ]]; then
+      echo "FATAL: стенд вышел с успехом, но сам называет $BENCH_BAD расхождений." >&2
+      echo "  Лог: $BENCH_LOG" >&2
+      exit 1
+    fi
     echo "Probes: $BENCH_N scenarios behaved as specified"
     # The bench says so itself when its bun differs from the image's: the block
     # is executed by a DIFFERENT engine than the one that will run it in
@@ -3452,4 +3655,8 @@ else
   echo "  Check it before trusting it -- tweakcc restores it blind:"
   echo "    grep -c -a -F 'baseURL:/^claude/i.test(' ~/.tweakcc/native-binary.backup"
   echo "  A non-zero count means the backup itself carries our patches."
+  echo "  A zero count alone does NOT mean it is good: a TRUNCATED backup also"
+  echo "  answers 0. Ask the second question the build asks -- does it run:"
+  echo "    ~/.tweakcc/native-binary.backup --version"
+  echo "  A complete stock image prints a version; a truncated one does not."
 fi

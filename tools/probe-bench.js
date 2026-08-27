@@ -457,6 +457,34 @@ const scenarios = [
     expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
                 degExact: MISSING_PROMPT_DEG },
   },
+  // Обрыв свода правил, а не его отсутствие. Половина prompt.md -- законный
+  // текст: ни разбор, ни prompt-missing её не поймают, и вызов уехал бы с
+  // половиной правил. Признак несёт сам файл (хвостовая строка), и его
+  // отсутствие -- дефект СУЖДЕНИЯ, а не корпуса, поэтому при enforce+fail_closed
+  // вызов отменяется, как и на пустом промте.
+  {
+    name: 'truncated-prompt-is-announced',
+    truncPrompt: true,
+    response: 'OK: бриф полон',
+    expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
+                degStartsWith: 'prompt-truncated:' },
+  },
+  // Свежая установка: каталога пробы ещё НЕТ. Ядро ловит ENOENT на дописывании
+  // журнала, создаёт каталог и повторяет -- ветка, ради которой всё это
+  // написано ("on a fresh install the judge's directory does not exist yet, and
+  // that is where cancellations are most numerous"), и единственная, в которую
+  // стенд не мог войти: он создавал каталог в каждом сценарии. Проверяется не
+  // словом, а следствием: строка журнала читается ИЗ каталога, которого перед
+  // прогоном не было. Сломай восстановление -- журнала не будет, entry станет
+  // null, и сценарий покраснеет.
+  {
+    name: 'journal-recovers-when-its-directory-is-missing',
+    omitProbeDir: true,
+    config: { enforce: false },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 1, nudges: 0,
+                degStartsWith: 'prompt-missing:' },
+  },
   // The same absence with enforce off: the degraded gate does not fire, so the
   // consultation really happens on the built-in instruction. What matters is
   // not the outcome -- the stub writes the answer -- but WHICH instruction went
@@ -642,7 +670,8 @@ const scenarios = [
   // What this scenario does NOT cover, stated precisely -- an earlier wording
   // here claimed "every watcher scenario seeds globalThis.__ccWatch itself, so
   // the initialiser never runs", and that was simply false: of the 22 `probe:
-  // 'watch'` scenarios, `watch-window-not-filled` carries no `watchState`, the
+  // 'watch'` scenarios — a subset, not the bench total — `watch-window-not-filled`
+  // carries no `watchState`, the
   // harness deletes __ccWatch before every run and re-seeds only when the
   // scenario asks, so the image's own `??={last:null,start:__now}` runs there on
   // every bench run.
@@ -771,7 +800,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 54;
+const EXPECTED_SCENARIOS = 56;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -944,54 +973,80 @@ function expectationText(expected) {
   return parts.join(', ');
 }
 
-function checkMismatch(result, expected) {
-  // No specification is a MISMATCH, not a pass. The door above should mean this
-  // is unreachable; it is here for the day the door is edited and this is the
-  // last thing between an unspecified scenario and a green bench.
-  if (!expected || typeof expected !== 'object') return true;
-  if (result.passed !== expected.passed) return true;
-  if (expected.outcome !== undefined && result.outcome !== expected.outcome) return true;
-  if (expected.sid !== undefined && result.sid !== expected.sid) return true;
-  if (expected.title !== undefined && result.title !== expected.title) return true;
-  if (expected.jmodel !== undefined && result.jmodel !== expected.jmodel) return true;
-  if (expected.msrc !== undefined && result.msrc !== expected.msrc) return true;
-  if (expected.cfg !== undefined && result.cfg !== expected.cfg) return true;
-  if (expected.poolCalls !== undefined && result.poolCalls !== expected.poolCalls) return true;
-  // The three cheap-count refusals give ONE AND THE SAME outcome; only the
-  // reason tells them apart, and without it a confused branch would pass
-  // green.
-  if (expected.by !== undefined && result.by !== expected.by) return true;
-  if (expected.nudges !== undefined && result.nudges !== expected.nudges) return true;
-  if (expected.nudgeIncludes !== undefined && !result.nudgeText.includes(expected.nudgeIncludes)) return true;
-  if (expected.errorIncludes !== undefined && !result.error.includes(expected.errorIncludes)) return true;
-  // We write the header, the caller writes the payload: both sides are
-  // checked, otherwise a forgery from the payload would pass green.
-  if (expected.headerIncludes !== undefined && !result.sentHeader.includes(expected.headerIncludes)) return true;
-  if (expected.headerExcludes !== undefined && result.sentHeader.includes(expected.headerExcludes)) return true;
-  if (expected.dispatchLen !== undefined && result.sentDispatchLen !== expected.dispatchLen) return true;
-  if (expected.dispatchIncludes !== undefined && !result.sentDispatch.includes(expected.dispatchIncludes)) return true;
-  if (expected.degStartsWith !== undefined && !result.deg?.some((item) => item.startsWith(expected.degStartsWith))) return true;
-  if (expected.degExact !== undefined && JSON.stringify(result.deg) !== JSON.stringify(expected.degExact)) return true;
-  // Same count, same order, each entry starting with its prefix AND carrying
-  // something after it: a prefix match alone would accept an entry that names
-  // the file and then says nothing about what is wrong with it.
-  if (expected.degPrefixes !== undefined) {
-    const got = result.deg ?? [];
-    if (got.length !== expected.degPrefixes.length) return true;
-    for (let i = 0; i < got.length; i += 1) {
-      if (!got[i].startsWith(expected.degPrefixes[i])) return true;
-      if (got[i].length <= expected.degPrefixes[i].length) return true;
-    }
+// Словарь сравнений -- ДАННЫМИ, и он один на двоих.
+//
+// Сравнивающий знал фактическое значение, а отчёт его выбрасывал: строка честно
+// говорила MISMATCH и печатала ОЖИДАЛОСЬ, но не то, что пришло. Человек видел
+// "заголовок=починка наблюдателя ... MISMATCH" и не знал, какой заголовок
+// пришёл на самом деле. Две функции -- «совпало ли» и «чем именно не совпало» --
+// разошлись бы через одну правку, поэтому у них общий список.
+const CHECKS = [
+  { key: 'passed',        always: true,
+    ok: (r, e) => r.passed === e.passed,
+    got: (r) => (r.passed ? 'прошёл' : 'отменён') },
+  { key: 'outcome',       ok: (r, e) => r.outcome === e.outcome,       got: (r) => String(r.outcome) },
+  { key: 'sid',           ok: (r, e) => r.sid === e.sid,               got: (r) => String(r.sid) },
+  { key: 'title',         ok: (r, e) => r.title === e.title,           got: (r) => String(r.title) },
+  { key: 'jmodel',        ok: (r, e) => r.jmodel === e.jmodel,         got: (r) => String(r.jmodel) },
+  { key: 'msrc',          ok: (r, e) => r.msrc === e.msrc,             got: (r) => String(r.msrc) },
+  { key: 'cfg',           ok: (r, e) => r.cfg === e.cfg,               got: (r) => String(r.cfg) },
+  { key: 'poolCalls',     ok: (r, e) => r.poolCalls === e.poolCalls,   got: (r) => String(r.poolCalls) },
+  // Три дешёвых отказа дают ОДИН И ТОТ ЖЕ outcome; различает их только
+  // причина, и без неё перепутанная ветка прошла бы зелёной.
+  { key: 'by',            ok: (r, e) => r.by === e.by,                 got: (r) => String(r.by) },
+  { key: 'nudges',        ok: (r, e) => r.nudges === e.nudges,         got: (r) => String(r.nudges) },
+  { key: 'nudgeIncludes', ok: (r, e) => r.nudgeText.includes(e.nudgeIncludes), got: (r) => r.nudgeText },
+  { key: 'errorIncludes', ok: (r, e) => r.error.includes(e.errorIncludes),     got: (r) => r.error },
+  // Заголовок пишем мы, полезную нагрузку -- вызывающий: проверяются обе
+  // стороны, иначе подделка со стороны нагрузки прошла бы зелёной.
+  { key: 'headerIncludes', ok: (r, e) => r.sentHeader.includes(e.headerIncludes), got: (r) => r.sentHeader },
+  { key: 'headerExcludes', ok: (r, e) => !r.sentHeader.includes(e.headerExcludes), got: (r) => r.sentHeader },
+  { key: 'dispatchLen',    ok: (r, e) => r.sentDispatchLen === e.dispatchLen, got: (r) => String(r.sentDispatchLen) },
+  { key: 'dispatchIncludes', ok: (r, e) => r.sentDispatch.includes(e.dispatchIncludes), got: (r) => r.sentDispatch },
+  { key: 'degStartsWith',  ok: (r, e) => (r.deg ?? []).some((item) => item.startsWith(e.degStartsWith)),
+    got: (r) => JSON.stringify(r.deg) },
+  { key: 'degExact',       ok: (r, e) => JSON.stringify(r.deg) === JSON.stringify(e.degExact),
+    got: (r) => JSON.stringify(r.deg) },
+  // Столько же записей, в том же порядке, каждая начинается со своего
+  // префикса И несёт что-то после него: одно совпадение префикса приняло бы
+  // запись, которая называет файл и молчит о том, что с ним не так.
+  { key: 'degPrefixes',
+    ok: (r, e) => {
+      const got = r.deg ?? [];
+      if (got.length !== e.degPrefixes.length) return false;
+      return got.every((item, i) => item.startsWith(e.degPrefixes[i]) && item.length > e.degPrefixes[i].length);
+    },
+    got: (r) => JSON.stringify(r.deg) },
+  { key: 'requestMaxTokens', ok: (r, e) => r.requestMaxTokens === e.requestMaxTokens, got: (r) => String(r.requestMaxTokens) },
+  { key: 'recordCount',    ok: (r, e) => r.recordCount === e.recordCount, got: (r) => String(r.recordCount) },
+  { key: 'recordSeeds',    ok: (r, e) => r.recordSeeds === e.recordSeeds, got: (r) => String(r.recordSeeds) },
+  { key: 'dispatchExcludes', ok: (r, e) => !r.sentDispatch.includes(e.dispatchExcludes), got: (r) => r.sentDispatch },
+  // ЧТО ОТПРАВИЛИ, а не что вернулось: заглушка пишет ответ, поэтому
+  // утверждение об outcome не отличает годную инструкцию от негодной.
+  { key: 'systemIncludes', ok: (r, e) => r.sentSystem.includes(e.systemIncludes), got: (r) => r.sentSystem },
+  { key: 'systemExcludes', ok: (r, e) => !r.sentSystem.includes(e.systemExcludes), got: (r) => r.sentSystem },
+];
+
+const clipCell = (text) => {
+  const one = String(text ?? '').replace(/\s+/g, ' ');
+  return one.length <= 160 ? one : `${one.slice(0, 160)}…`;
+};
+
+function mismatchDetails(result, expected) {
+  // Нет спецификации -- это MISMATCH, а не проход. Дверь на загрузке стенда
+  // должна делать это недостижимым; здесь -- на тот день, когда дверь правят.
+  if (!expected || typeof expected !== 'object') return ['нет спецификации'];
+  const out = [];
+  for (const check of CHECKS) {
+    if (!check.always && expected[check.key] === undefined) continue;
+    if (check.ok(result, expected)) continue;
+    out.push(`${check.key}: ожидалось ${clipCell(JSON.stringify(expected[check.key]) ?? '')}, факт ${clipCell(check.got(result))}`);
   }
-  if (expected.requestMaxTokens !== undefined && result.requestMaxTokens !== expected.requestMaxTokens) return true;
-  if (expected.recordCount !== undefined && result.recordCount !== expected.recordCount) return true;
-  if (expected.recordSeeds !== undefined && result.recordSeeds !== expected.recordSeeds) return true;
-  if (expected.dispatchExcludes !== undefined && result.sentDispatch.includes(expected.dispatchExcludes)) return true;
-  // What was SENT, not what came back: the stub writes the answer, so an
-  // outcome assertion cannot tell a usable instruction from an unusable one.
-  if (expected.systemIncludes !== undefined && !result.sentSystem.includes(expected.systemIncludes)) return true;
-  if (expected.systemExcludes !== undefined && result.sentSystem.includes(expected.systemExcludes)) return true;
-  return false;
+  return out;
+}
+
+function checkMismatch(result, expected) {
+  return mismatchDetails(result, expected).length > 0;
 }
 
 async function runScenario(probe, scenario) {
@@ -1014,7 +1069,13 @@ async function runScenario(probe, scenario) {
   try {
     const root = rootDir(tempDir, scenario);
     const probeDir = path.join(root, homeName(scenario));
-    fs.mkdirSync(probeDir, { recursive: true });
+    // Каталог пробы создаётся НЕ всегда. Ветка восстановления в ядре
+    // (ENOENT на appendFile -> mkdir -> повтор) существует ровно для свежей
+    // установки, где каталога судьи ещё нет — а стенд создавал его в КАЖДОМ
+    // сценарии, и ветка была мертва по построению: мутация "ENOENT" ->
+    // "ZZZZZ!" оставляла стенд побайтово зелёным. Сценарий с omitProbeDir
+    // -- единственный вход в неё.
+    if (!scenario.omitProbeDir) fs.mkdirSync(probeDir, { recursive: true });
     if (scenario.seedRecords) {
       const recDir = path.join(probeDir, 'records');
       fs.mkdirSync(recDir, { recursive: true });
@@ -1049,10 +1110,15 @@ async function runScenario(probe, scenario) {
     if (!scenario.omitConfig) {
       fs.writeFileSync(path.join(root, 'probes.toml'), probeConfigToml(scenario, config));
     }
-    if (!scenario.omitPrompt) {
-      const prompt = scenario.probe === 'watch'
+    if (!scenario.omitPrompt && !scenario.omitProbeDir) {
+      const body = scenario.probe === 'watch'
         ? 'Rules must contain NUDGE.\n'
         : 'Rules must contain BLOCK.\n';
+      // Хвост-признак целостности. Половина prompt.md — законный текст, и ни
+      // один разбор её не отвергнет; поэтому целостность несёт сам файл, а
+      // фикстура обязана вести себя как канон. Сценарий с truncPrompt пишет
+      // тот же текст БЕЗ хвоста — это и есть измерение обрыва.
+      const prompt = scenario.truncPrompt ? body : `${body}\n<!-- END OF RULES -->\n`;
       fs.writeFileSync(path.join(probeDir, 'prompt.md'), prompt);
     }
 
@@ -1180,7 +1246,11 @@ async function runScenario(probe, scenario) {
       expected: expectationText(scenario.expected),
       mismatch: false,
     };
-    result.mismatch = checkMismatch(result, scenario.expected);
+    // Перечень расхождений считается ОДИН раз и едет вместе с результатом:
+    // печать не пересчитывает его заново (второй вызов -- второй источник
+    // правды) и не теряет фактические значения по дороге.
+    result.details = mismatchDetails(result, scenario.expected);
+    result.mismatch = result.details.length > 0;
     return result;
   } finally {
     const step = (fn) => { try { fn(); } catch { /* one failed restore must not skip the rest */ } };
@@ -1228,6 +1298,15 @@ function printTable(results) {
   console.log(render(headers));
   console.log(widths.map((width) => '-'.repeat(width)).join('-+-'));
   for (const row of rows) console.log(render(row));
+
+  // Расхождения -- с ФАКТИЧЕСКИМИ значениями. Колонка «ожидалось» говорит,
+  // чего ждали; без этой врезки никто не говорил, что пришло, и сокращённый
+  // вывод конвейера (строки с MISMATCH) не объяснял расхождения.
+  for (const result of results) {
+    if (!result.mismatch) continue;
+    console.log(`MISMATCH ${result.scenario}:`);
+    for (const line of result.details ?? []) console.log(`  ${line}`);
+  }
 }
 
 async function main() {
@@ -1259,7 +1338,19 @@ async function main() {
       process.exitCode = 1;
     }
     if (options.json) fs.writeFileSync(options.json, `${JSON.stringify(results, null, 2)}\n`);
-    if (results.some((result) => result.mismatch)) process.exitCode = 1;
+    const bad = results.filter((result) => result.mismatch).length;
+    // Итог машинным читателем, а не пересчётом строк таблицы.
+    //
+    // Конвейер считал сценарии грепом `^[a-z][a-z0-9-]* *|` по таблице. Это
+    // договор, которого писатель никогда не давал: имя сценария — обычная
+    // строка JS, и `Foo-bar` или `foo_bar` таблицу не ломают, а из счёта
+    // выпадают. Читатель проверял только, что вышло ЧИСЛО, поэтому 53 вместо
+    // 54 печаталось как успешная сводка и конвейер ехал дальше.
+    //
+    // Число называет тот, кто его знает. Строка одна, её грамматика — часть
+    // договора, и отсутствие строки читатель обязан считать отказом.
+    console.log(`probe-bench: ИТОГ сценариев=${results.length} расхождений=${bad}`);
+    if (bad) process.exitCode = 1;
   } catch (error) {
     failSetup(error?.message ?? error);
   }

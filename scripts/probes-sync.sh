@@ -31,13 +31,38 @@ PLIST_HOME="$HOME/Library/LaunchAgents/$PLIST_NAME"
 MODE="${1:---diff}"
 case "$MODE" in --to-home|--from-home|--diff) ;; *) echo "не понял режим: $MODE" >&2; exit 1 ;; esac
 
+# Отсутствие исходной стороны -- НАЗВАННЫЙ отказ, а не тихий пропуск.
+#
+# Прежняя форма коротко замыкалась на `[[ -f "$A" ]] &&` и возвращала 0: файла
+# канона нет -- ни строки, ни кода возврата. А это единственная команда, которую
+# конвейер советует чистой машине, и человек читал её молчание как «раскатано».
+#
+# И копия ставится ПЕРЕИМЕНОВАНИЕМ. `cp` пишет поверх места назначения, и
+# прерванный `cp` оставляет в доме половину файла. Для prompt.md это худший из
+# исходов: усечённый TOML и усечённый body.json ядро замечает и объявляет
+# (unparsed:/unparsed-body:), а половина prompt.md -- законный текст, то есть
+# половина свода правил без единого признака деградации.
+FAILED=0
 sync_one() {  # $1 canon, $2 home, $3 display name
-  local A="$1" B="$2" name="$3"
+  local A="$1" B="$2" name="$3" src dst
   case "$MODE" in
-    --to-home)   [[ -f "$A" ]] && { mkdir -p "$(dirname "$B")"; cp "$A" "$B"; echo "-> $name"; } ;;
-    --from-home) [[ -f "$B" ]] && { mkdir -p "$(dirname "$A")"; cp "$B" "$A"; echo "<- $name"; } ;;
-    --diff)      diff -q "$A" "$B" >/dev/null 2>&1 || echo "расходится: $name" ;;
+    --to-home)   src="$A"; dst="$B" ;;
+    --from-home) src="$B"; dst="$A" ;;
+    --diff)      diff -q "$A" "$B" >/dev/null 2>&1 || echo "расходится: $name"; return 0 ;;
   esac
+  if [[ ! -f "$src" ]]; then
+    echo "ОТКАЗ: нет исходника для $name ($src)" >&2
+    FAILED=$((FAILED+1))
+    return 0
+  fi
+  mkdir -p "$(dirname "$dst")"
+  if cp "$src" "$dst.sync-new" && mv "$dst.sync-new" "$dst"; then
+    [[ "$MODE" == "--to-home" ]] && echo "-> $name" || echo "<- $name"
+  else
+    rm -f "$dst.sync-new"
+    echo "ОТКАЗ: не удалось записать $name ($dst)" >&2
+    FAILED=$((FAILED+1))
+  fi
   return 0
 }
 
@@ -58,4 +83,12 @@ fi
 
 [[ "$MODE" == "--diff" ]] && \
   echo "(журналы, записи, метки и bench не синхронизируются — они данные машины, а не исходник)"
+
+# Код возврата -- часть отчёта. Раскатка, у которой не нашлось части файлов,
+# прежде заканчивалась `exit 0`, и вызывающий (в том числе рецепт в хвосте
+# конвейера) не мог отличить её от полной.
+if [[ "$FAILED" -ne 0 ]]; then
+  echo "ИТОГ: не перенесено файлов: $FAILED" >&2
+  exit 1
+fi
 exit 0

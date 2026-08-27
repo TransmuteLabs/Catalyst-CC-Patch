@@ -35,8 +35,39 @@ def main():
             continue
         gz = f + '.gz'
         if os.path.exists(gz):
-            skipped += 1
-            continue
+            # Запись И её архив рядом -- это не «уже сжато», а ОБОРВАННОЕ
+            # сжатие: прогон, убитый между записью архива и удалением
+            # исходника. Прежняя ветка считала это «пропущено» -- тем же
+            # словом, что и «слишком свежая», -- и состояние не имело
+            # собственного вывода. Оно не рассасывалось: каждый следующий
+            # проход снова пропускал пару, диск не освобождался, а горизонт
+            # ядра (records_keep считает .json и .json.gz одинаково) тратил
+            # на неё два места вместо одного.
+            #
+            # Доделываем начатое, а не обходим: архив либо читается -- тогда
+            # исходник удаляется, как и должен был, -- либо не читается и
+            # удаляется сам, чтобы запись сжалась заново на этом же проходе.
+            try:
+                with gzip.open(gz, 'rt', encoding='utf-8') as fh:
+                    json.load(fh)
+            except Exception as e:
+                if a.dry_run:
+                    print(f'пересжал бы (архив рядом не читается): {os.path.basename(f)}: {e}')
+                    skipped += 1
+                    continue
+                os.unlink(gz)
+                print(f'ОБОРВАННОЕ СЖАТИЕ, архив не читается -- пересжимаю: {os.path.basename(f)}: {e}')
+            else:
+                if a.dry_run:
+                    print(f'удалил бы исходник (архив рядом целый): {os.path.basename(f)}')
+                    skipped += 1
+                    continue
+                before = os.path.getsize(f)
+                os.unlink(f)
+                saved += before - os.path.getsize(gz)
+                done += 1
+                print(f'ОБОРВАННОЕ СЖАТИЕ ДОВЕДЕНО: {os.path.basename(f)}')
+                continue
         before = os.path.getsize(f)
         if a.dry_run:
             print(f'сжал бы: {os.path.basename(f)}  {before} байт')
