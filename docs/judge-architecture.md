@@ -9,7 +9,7 @@ What is here is what you need to KNOW the mechanism, to carry it to the
 next version, and to extend it.
 
 State as of 2026-08-27, images 2.1.233 through 2.1.247, checks in
-`claude-patch-all.sh` — 117 (all green on the built image). As of 2026-08-22 the judging mechanism
+`claude-patch-all.sh` — 114 (all green on the built image). As of 2026-08-22 the judging mechanism
 has been split into a shared CORE and its callers: the core contract is
 in `probe-core.md`, and its second consumer (the fleet idle watcher) is
 in `idle-watch.md`. Everything below describes the judge; what it shares
@@ -567,7 +567,9 @@ The price is paid for with observability, not by cancelling fail-open:
   ones: previously the filter did not name the layer, and which file had
   acted had to be inferred indirectly from behavior), `sid` and `title` —
   the session and its title (`pid` is no good for addressing: the system
-  reuses it), `model` with `msrc` — the dispatch's ALLOWED model and the
+  reuses it — it is carried too, but as the WRITER'S SIGNATURE, which is
+  what lets the bench tell its own leak into the live probes home from a
+  live session's work; `sid` stays the address), `model` with `msrc` — the dispatch's ALLOWED model and the
   source of the permission (`call`/`agent`/`inherit`; previously only the
   one explicit in the call was written, and a third of the records went
   out with no model at all), `rec` — the full record's name.
@@ -906,7 +908,7 @@ silently looked successful.
 
 1. Unpack the new version's image, run `claude-patch-all.sh` — the
    locators are structural and usually apply as is.
-2. 117/117 checks must pass; any `fail` — read the locator, do not work
+2. 114/114 checks must pass; any `fail` — read the locator, do not work
    around it. The locators survived 2.1.229–2.1.238 without edits (the
    237→238 transition — on the first run). On 2.1.239 two broke: the
    adapter around the tool call, and the `$jS` name glued into a pattern

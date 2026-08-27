@@ -151,16 +151,36 @@ def run_one(task):
 
 def human_records():
     result = set()
+    skipped = 0
     try:
         with open(LABELS_PATH, encoding='utf-8') as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, 1):
                 if not line.strip():
                     continue
-                item = json.loads(line)
+                try:
+                    item = json.loads(line)
+                except ValueError as exc:
+                    # Одна битая строка теряет ОДНУ метку и называет себя
+                    # (образец — validate.py:85-114). Сам кит дописывает метки
+                    # батчем ниже по main(), и при веере адъюдикации от двух
+                    # голосов два конкурентных писателя рвут строку; ронять
+                    # из-за такого хвоста весь запуск — терять всю
+                    # накопленную разметку за один незавершённый append.
+                    sys.stderr.write(
+                        f'ВНИМАНИЕ: {LABELS_PATH}:{lineno} не разбирается ({exc}); строка пропущена\n')
+                    skipped += 1
+                    continue
+                if not isinstance(item, dict):
+                    sys.stderr.write(
+                        f'ВНИМАНИЕ: {LABELS_PATH}:{lineno} не объект; строка пропущена\n')
+                    skipped += 1
+                    continue
                 if item.get('rec') and (item.get('source') is None or item.get('source') == 'human'):
                     result.add(item['rec'])
     except FileNotFoundError:
         pass
+    if skipped:
+        sys.stderr.write(f'ВНИМАНИЕ: пропущено нечитаемых строк: {skipped}\n')
     return result
 
 
@@ -238,10 +258,41 @@ def main():
         for item in labels:
             print('DRY-RUN метка: ' + json.dumps(item, ensure_ascii=False, separators=(',', ':')))
     elif labels:
+        # Весь батч — ОДНИМ вызовом write, тем же контрактом, что у ядра кита
+        # (tweakcc-patch.js, дозапись журнала: одна строка = один write): при
+        # веере адъюдикации (штатно ≥2 голоса) в labels.jsonl пишут два
+        # конкурентных батч-писателя, и целостность логической строки не
+        # должна зависеть от того, как буферы потока решат разложить её на
+        # write(2). Цена рваной строки теперь ТИХАЯ: читатель (human_records)
+        # пропускает неразбираемые строки, и оборванная ЧЕЛОВЕЧЕСКАЯ метка
+        # невидима — поверх неё дописывается модельная, вытесняя ground
+        # truth человека. Одна запись батча = один write-вызов.
+        batch = ''.join(
+            json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n'
+            for item in labels)
         with open(LABELS_PATH, 'a', encoding='utf-8') as fh:
-            for item in labels:
-                fh.write(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n')
-                added += 1
+            # ЗАМЕРЕНО, а не предположено. Раунд 11 (A7) и раунд 12 (F7)
+            # называли механизм: длинное поле `note` перекрывает буфер потока,
+            # логическая строка уезжает в несколько write(2), и в зазор ложится
+            # строка второго процесса. На этой платформе он НЕ ВОСПРОИЗВОДИТСЯ.
+            #
+            # Три писателя по 40 строк с полем в 300 000 знаков, дозапись в один
+            # файл, до правки и после: неразбираемых строк 0 из 120 в обоих
+            # случаях. Прибор при этом ЗРЯЧИЙ -- на файле с разорванной вручную
+            # строкой он даёт 2 неразбираемых из 2. Причина: буферизованный слой
+            # CPython не режет один вызов write пополам -- строка либо целиком
+            # уходит в буфер, либо целиком raw-записью, а O_APPEND делает такую
+            # запись неделимой относительно чужой.
+            #
+            # Поэтому замка здесь НЕТ: он давал бы ложную уверенность за
+            # механизм, которого нет, и не защищал бы от единственного реального
+            # случая -- убитый писатель оставляет ОБОРВАННОЙ ПОСЛЕДНЮЮ строку.
+            # От него защищает толерантный читатель выше, а склейка батча в один
+            # вызов сужает и это окно: строк, дописанных наполовину, становится
+            # не больше одной. Контракт тот же, что у ядра кита (дозапись
+            # журнала: одна запись = один вызов).
+            fh.write(batch)
+        added += len(labels)
 
     correct = sum(row['agree'] is True for row in rows)
     wrong = sum(row['agree'] is False for row in rows)

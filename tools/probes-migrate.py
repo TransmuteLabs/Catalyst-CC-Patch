@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import tomllib
@@ -294,20 +295,50 @@ def main() -> int:
         sys.stdout.write(text)
         return 0
 
-    mode = "w" if args.force else "x"
-    try:
-        with out_path.open(mode, encoding="utf-8", newline="\n") as output:
-            output.write(text)
-    except FileExistsError:
-        print(
-            f"Ошибка: выходной файл уже существует: {out_path}; "
-            "используйте --force для перезаписи",
-            file=sys.stderr,
-        )
+    # The core re-reads probes.toml on EVERY consultation; a reader caught in
+    # the middle of a direct in-place write got a truncated — and often still
+    # PARSEABLE — TOML and silently ran with someone else's settings. Every
+    # other writer in the kit goes through tmp+rename; this one now does too.
+    # The refusal when the FINAL file already exists is checked BEFORE any
+    # write, so a refusal leaves no tmp behind.
+    # The check is lexists(), not Path.exists(): exists() follows the link and
+    # answers False for a DANGLING one, so the old check never fired and
+    # os.replace quietly put a regular file under the link's name — replacing
+    # the link itself, an outcome nobody asked for. A symlink target is
+    # refused with its own message even when it points somewhere: for a link,
+    # "safe replacement" is not defined (os.replace would swap the link, not
+    # write through it), and --force is the explicit way to say that is fine.
+    if not args.force and os.path.lexists(out_path):
+        if out_path.is_symlink():
+            print(
+                f"Ошибка: {out_path} является симлинком; безопасная замена "
+                "ссылки не определена (os.replace заменил бы саму ссылку, "
+                "а не записал по ней); используйте --force",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Ошибка: выходной файл уже существует: {out_path}; "
+                "используйте --force для перезаписи",
+                file=sys.stderr,
+            )
         return 1
+    tmp = out_path.with_name(f"{out_path.name}.tmp.{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="\n") as output:
+            output.write(text)
+        os.replace(tmp, out_path)
     except (OSError, UnicodeError) as error:
+        tmp.unlink(missing_ok=True)
         print(f"Ошибка: не удалось записать {out_path}: {error}", file=sys.stderr)
         return 1
+    except BaseException:
+        # Прерывание (KeyboardInterrupt/SystemExit) — тоже неудачная запись:
+        # уборка tmp была привязана к типам OSError/UnicodeError, и оборванный
+        # прогон оставлял probes.toml.tmp.<pid> навсегда. Исключение после
+        # уборки летит дальше как было.
+        tmp.unlink(missing_ok=True)
+        raise
     return 0
 
 

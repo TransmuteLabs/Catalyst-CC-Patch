@@ -22,6 +22,12 @@ fi
 STAMP="$(date +%Y%m%d)"
 NAME="claude-patch-kit-$VER"
 OUT="$ROOT/dist/$NAME-$STAMP.tar.gz"
+# The tmp archive name must never outlive a killed build: a tar interrupted
+# mid-write left claude-patch-kit-*.tar.gz.tmp.<pid> in dist/ forever — no
+# later run removes it (each build rolls its own pid into the name). The trap
+# covers every exit route, including set -e failures and signals; rm -f keeps
+# successful builds (where the tmp was mv'd away) a no-op.
+trap 'rm -f "$OUT.tmp.$$"' EXIT INT TERM
 STAGE="$(mktemp -d)/$NAME"
 # The judge canon lives in the project; ~/.claude/judge is the DEPLOYMENT.
 # The kit is built from the canon: otherwise whatever someone edited on the
@@ -136,7 +142,13 @@ for home in judge idle-watch; do
 done
 [ "$miss" = 0 ] || exit 1
 
-tar czf "$OUT" -C "$(dirname "$STAGE")" "$NAME"
+# The archive name is dated to the DAY: a second build of the same day wrote
+# straight over the finished tarball, and a consumer reading it at that moment
+# (unpacking, verifying) received a truncated archive. Write under a temp name
+# in the same directory and mv: a rename within one filesystem is atomic, the
+# reader always sees a complete archive — either the old one or the new one.
+tar czf "$OUT.tmp.$$" -C "$(dirname "$STAGE")" "$NAME"
+mv -f "$OUT.tmp.$$" "$OUT"
 rm -rf "$(dirname "$STAGE")"
 echo "$OUT"
 ls -l "$OUT"

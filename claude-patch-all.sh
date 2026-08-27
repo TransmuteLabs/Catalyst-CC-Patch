@@ -49,43 +49,241 @@ set -euo pipefail
 # failures and a refused build.
 #
 # The lock is per-user, not per-target: the contended resource is tweakcc's
-# state, not the binary. It is released when this shell exits, including on a
-# kill, because the descriptor dies with the process.
+# state, not the binary.
+#
+# ОСВОБОЖДЕНИЕ. Замок держит ДЕСКРИПТОР: он умирает вместе с процессом и --
+# что здесь важнее -- ДЕТИ его наследуют, поэтому переживший нас
+# `node ... --apply` продолжает держать замок, пока пишет. Утилиты flock(1) на
+# macOS нет (измерено: `command -v flock` -> rc=1 при живом контроле), но сам
+# flock(2) есть, и его берёт perl, который у кита и так в обязательных
+# инструментах. Замок-каталог остался последним рубежом на случай, когда нет ни
+# того, ни другого; этого свойства у него НЕТ.
+#
+# Почему свойство существенно. Измерено пробой: bash ИСПОЛНЯЕТ EXIT-трап на
+# SIGTERM (контроль -- трап на нормальном выходе тоже даёт след). На
+# замке-каталоге это значило, что kill свипа снимал замок, пока наши дети живы
+# и продолжают read-modify-write состояния tweakcc: следующий прогон законно
+# брал замок и входил в тот самый interleaving, который шапка выше называет
+# измеренным отказом. Прецедент в истории кита есть: переживший kill `--apply`
+# дописывал в унаследованный fd. На ядерном замке этот сценарий закрыт по
+# устройству -- проверяется прибором `tools/lock-probe.sh`.
+#
+# Добивание потомства на выходе осталось, но сменило основание: не «отпустить
+# замок» (он отпустится сам, и держать его, пока писатель жив, правильно), а
+# «не оставлять после убитого прогона `node`, который правит бинарник, никем не
+# ожидаемый». TERM, затем -- если кого-то задели -- KILL: ребёнок, игнорирующий
+# TERM, держал бы ядерный замок и после нашего выхода, а текст отказа советовал
+# бы ждать того, чего уже нет.
 __lock="${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock"
-exec 9>"$__lock"
-if ! flock -n 9 2>/dev/null; then
-  if command -v flock >/dev/null 2>&1; then
-    echo "FATAL: another claude-patch-all.sh is running (lock: $__lock)." >&2
-    echo "       tweakcc's state is shared; wait for it to finish rather than racing it." >&2
+
+# УНАСЛЕДОВАННЫЙ ЗАМОК. Законный держатель-предок ровно один --
+# tools/build-path-probe.sh: он одалживает ЖИВОЕ состояние ~/.tweakcc
+# (config.json и native-binary.backup) на всё своё время -- снимок, три полных
+# прогона конвейера, восстановление. Замок, взятый ВНУТРИ каждого прогона, эти
+# окна не закрывает: между кейсами и на восстановлении он снят. Ребёнок,
+# взявший замок заново, встал бы против собственного родителя, поэтому предок
+# передаёт владение, а оболочка не берёт замок второй раз.
+#
+# ВЛАДЕНИЕ ДОКАЗЫВАЕТСЯ САМИМ ДЕСКРИПТОРОМ, а не переменной и не pid. Прежняя
+# форма требовала «заявитель жив И замок занят» -- и это отвергало ровно
+# безвредный случай (свободный замок) и пропускало ровно вредный: занят он мог
+# быть КЕМ УГОДНО. Измерено пробой: посторонний живой `sleep`, названный в
+# переменной при честном чужом держателе, проходил мимо замка и запускал весь
+# конвейер параллельно чужому прогону -- тот самый interleaving, ради которого
+# замок написан.
+#
+# Настоящая привязка: дескриптор 9 обязан указывать НА ФАЙЛ ЗАМКА (сверка
+# устройства и инода, а не имени -- имя можно подсунуть) и flock на нём обязан
+# УДАВАТЬСЯ. Второе и есть доказательство наследования: повторный флок на своём
+# же описании -- пустая операция и всегда успех, а чужое описание, открытое кем
+# угодно на тот же файл, получило бы отказ. Переменная после этого не нужна ни
+# для чего, кроме текста сообщения; носитель переменной без дескриптора
+# отсекается по построению.
+if [[ -n "${CLAUDE_PATCH_LOCK_HELD_BY:-}" ]]; then
+  if perl -e '
+        use Fcntl ":flock";
+        open(my $fh, ">&=9") or exit 2;
+        my @a = stat($fh) or exit 3;
+        my @b = stat($ARGV[0]) or exit 4;
+        exit(5) unless $a[0] == $b[0] && $a[1] == $b[1];
+        exit(flock($fh, LOCK_EX|LOCK_NB) ? 0 : 6);
+      ' "$__lock"; then
+    __lock_held=1
+    __lock_how="унаследован по дескриптору 9 (заявитель pid $CLAUDE_PATCH_LOCK_HELD_BY)"
+  else
+    __inh_rc=$?
+    case $__inh_rc in
+      2) __why='дескриптор 9 не открыт -- переменная есть, а замка за ней нет';;
+      3) __why='не удалось снять stat с дескриптора 9';;
+      4) __why="не удалось снять stat с $__lock";;
+      5) __why='дескриптор 9 указывает на ДРУГОЙ файл, не на замок';;
+      6) __why='замок на этом файле держит другое описание -- значит не мы';;
+      *) __why="perl вернул неожиданный код $__inh_rc";;
+    esac
+    echo "FATAL: CLAUDE_PATCH_LOCK_HELD_BY=$CLAUDE_PATCH_LOCK_HELD_BY заявляет владение замком," >&2
+    echo "       но владение не подтверждается: $__why." >&2
+    echo "       Работать без замка нельзя: состояние tweakcc общее." >&2
     exit 3
   fi
-  # macOS has no flock(1). Fall back to an atomic directory create, which is
-  # equally exclusive but must be cleaned up by hand on exit.
-  __lockdir="$__lock.d"
-  if ! mkdir "$__lockdir" 2>/dev/null; then
-    # The pid lands a moment AFTER the directory, so an empty lock is either a
-    # holder caught in that window or one that was killed inside it. Waiting a
-    # second tells the two apart; without the wait, a kill in that window would
-    # leave a lock nobody can ever break.
-    __owner=''
-    for _ in 1 2 3 4 5; do
-      __owner="$(cat "$__lockdir/pid" 2>/dev/null || true)"
-      [[ -n "$__owner" ]] && break
-      sleep 0.2
-    done
-    if [[ -z "$__owner" ]] || ! kill -0 "$__owner" 2>/dev/null; then
-      # Nobody is behind it -- the lock is stale, take it over.
-      rm -rf "$__lockdir"
-      mkdir "$__lockdir" 2>/dev/null || { echo "FATAL: cannot take the patch lock ($__lockdir)." >&2; exit 3; }
+else
+  exec 9>"$__lock"
+
+# Замок берётся НАСТОЯЩИЙ -- flock(2) на дескрипторе 9, -- даже там, где нет
+# утилиты flock(1). Это не украшение: у замка-на-дескрипторе два свойства,
+# которых у замка-каталога нет по устройству, и оба измерены пробой.
+#
+#   1. Он живёт в ОПИСАНИИ ОТКРЫТОГО ФАЙЛА, а не в имени на диске. Процесс
+#      умер -- ядро отпустило. Отсюда: нет протухших замков, нет протокола их
+#      перехвата, а значит нет и гонки, в которой два претендента сносят
+#      каталоги друг друга и оба считают себя владельцами.
+#   2. ДЕТИ НАСЛЕДУЮТ дескриптор, и замок держится, пока жив хоть один из них.
+#      Это ровно тот случай, ради которого замок написан: убитый посреди шага
+#      прогон оставляет живого `node ... --apply`, который продолжает
+#      read-modify-write состояния tweakcc. Замок-каталог в этот момент уже
+#      снят (bash исполняет EXIT-трап на SIGTERM -- измерено), и следующий
+#      прогон входит в тот самый interleaving, который шапка выше называет
+#      измеренным отказом.
+#
+# Замеры (macOS, эта машина):
+#   держатель жив                      -> соперник получает отказ
+#   держатель убит SIGKILL, ребёнок жив -> соперник получает отказ
+#   ребёнок добит                       -> соперник берёт замок
+# Контроль прибора: два последовательных захвата свободного замка -- оба
+# успешны, то есть «отказ» не печатается на ровном месте.
+#
+# Порядок попыток: flock(1), если есть; иначе perl (он и так в обязательных
+# инструментах) -- он берёт flock(2) на УНАСЛЕДОВАННОМ дескрипторе 9, и замок
+# ложится на описание, общее с этой оболочкой, поэтому выход perl его НЕ
+# отпускает. Каталог-замок остаётся последним рубежом на случай, когда нет ни
+# того, ни другого.
+  __lock_busy() {
+    echo "FATAL: another claude-patch-all.sh is running (lock: $__lock, замок держит $1)." >&2
+    echo "       tweakcc's state is shared; a second run would interleave on it." >&2
+    echo "       Замок живёт, пока жив хоть один его писатель, включая уцелевших детей" >&2
+    echo "       убитого прогона -- поэтому «подождать» верный совет НЕ всегда:" >&2
+    echo "       если работы уже нет, замок держит осиротевший писатель. Кто именно:" >&2
+    echo "         lsof $__lock" >&2
+    echo "       Названного там процесса достаточно завершить -- замок отпустится сам." >&2
+    exit 3
+  }
+
+  __lock_held=0
+  __lock_how=''
+  __lockdir_owned=0
+  __lock_rc=0
+
+  # Ступень 1: утилита flock(1). На этой машине её нет, на linux-хостах есть.
+  if command -v flock >/dev/null 2>&1; then
+    if flock -n 9; then
+      __lock_held=1; __lock_how='flock(1)'
     else
-      echo "FATAL: another claude-patch-all.sh is running (pid $__owner, lock: $__lockdir)." >&2
-      echo "       tweakcc's state is shared; wait for it to finish rather than racing it." >&2
-      exit 3
+      __lock_rc=$?
+      # rc=1 -- это ОТВЕТ ядра «занято». Любой другой код -- поломка прибора, и
+      # читать её как «свободно» нельзя: различение этих двух случаев и есть
+      # единственная причина не писать здесь короткое `|| true`.
+      [[ $__lock_rc -eq 1 ]] && __lock_busy 'flock(1)'
+      echo "NOTE: flock(1) не сработал (rc=$__lock_rc) -- пробую perl." >&2
     fi
   fi
-  echo $$ > "$__lockdir/pid"
-  trap 'rm -rf "$__lockdir"' EXIT
+
+  # Ступень 2: тот же flock(2), но через perl -- он и так в обязательных
+  # инструментах, поэтому это НЕ новая зависимость. Замок ложится на описание
+  # открытого файла, общее с этой оболочкой (дескриптор 9 унаследован), поэтому
+  # завершение самого perl его НЕ отпускает.
+  if [[ $__lock_held -eq 0 ]]; then
+    if perl -e '
+          use Fcntl ":flock";
+          open(my $fh, ">&=9") or exit 2;
+          exit(flock($fh, LOCK_EX|LOCK_NB) ? 0 : 1);
+        '; then
+      __lock_held=1; __lock_how='perl flock(2)'
+    else
+      __lock_rc=$?
+      [[ $__lock_rc -eq 1 ]] && __lock_busy 'perl flock(2)'
+      echo "NOTE: perl flock(2) не сработал (rc=$__lock_rc) -- беру каталог-замок." >&2
+      echo "      Он слабее: не наследуется детьми и требует уборки за собой." >&2
+    fi
+  fi
+
+  # Ступень 3, последний рубеж: каталог. Нужен только там, где нет НИ flock(1),
+  # НИ рабочего perl -- то есть там, где кит и так не поедет. Сохранён потому,
+  # что отсутствие замка хуже слабого замка.
+  if [[ $__lock_held -eq 0 ]]; then
+    __lockdir="$__lock.d"
+    if ! mkdir "$__lockdir" 2>/dev/null; then
+      # The pid lands a moment AFTER the directory, so an empty lock is either a
+      # holder caught in that window or one that was killed inside it. Waiting a
+      # second tells the two apart; without the wait, a kill in that window would
+      # leave a lock nobody can ever break.
+      __owner=''
+      for _ in 1 2 3 4 5; do
+        __owner="$(cat "$__lockdir/pid" 2>/dev/null || true)"
+        [[ -n "$__owner" ]] && break
+        sleep 0.2
+      done
+      if [[ -z "$__owner" ]] || ! kill -0 "$__owner" 2>/dev/null; then
+        # Nobody is behind it -- the lock is stale, take it over.
+        rm -rf "$__lockdir"
+        mkdir "$__lockdir" 2>/dev/null || { echo "FATAL: cannot take the patch lock ($__lockdir)." >&2; exit 3; }
+      else
+        echo "FATAL: another claude-patch-all.sh is running (pid $__owner, lock: $__lockdir)." >&2
+        echo "       tweakcc's state is shared; wait for it to finish rather than racing it." >&2
+        exit 3
+      fi
+    fi
+    echo $$ > "$__lockdir/pid"
+    # Подтверждение владения: `rm -rf` плюс `mkdir` -- не взаимно исключающая
+    # пара, и два претендента, пришедшие одновременно, оба сносят свежий каталог
+    # соперника. Владелец -- тот, чей pid записан последним; остальные отступают.
+    sleep 0.3
+    __confirm="$(cat "$__lockdir/pid" 2>/dev/null || true)"
+    if [[ "$__confirm" != "$$" ]]; then
+      # Уходим, НЕ ТРОГАЯ каталог: он уже принадлежит победителю. Флаг владения
+      # так и остался нулём, поэтому EXIT-трап тоже его не снесёт. Без этого
+      # разделения проигравший гонки перехвата становился дворником чужого
+      # замка -- две правки разных волн (подтверждение владения и трап,
+      # снимающий каталог) уничтожали друг друга, и победитель работал с
+      # замком, которого уже нет.
+      echo "FATAL: замок перехвачен другим прогоном (в нём pid ${__confirm:-неизвестен}, у нас $$)." >&2
+      exit 3
+    fi
+    __lockdir_owned=1
+    __lock_held=1; __lock_how="каталог $__lockdir"
+  fi
 fi
+
+# Уцелевшее потомство добивается на выходе НЕ ради замка -- ядерный замок
+# отпустится сам, и держать его, пока писатель жив, правильно. Это гигиена:
+# убитый прогон не должен оставлять после себя `node`, продолжающий править
+# бинарник, которого уже никто не ждёт. На нормальном выходе детей нет, и цена
+# нулевая. Обход в глубину: внуки тоже (pnpm/npx добавляют уровень).
+__kids_hit=0
+__kill_kids() {
+  local __p="$1" __sig="$2" __c
+  for __c in $(pgrep -P "$__p" 2>/dev/null || true); do
+    __kill_kids "$__c" "$__sig"
+    if kill -"$__sig" "$__c" 2>/dev/null; then __kids_hit=$((__kids_hit + 1)); fi
+  done
+}
+__release_lock() {
+  # Одного TERM мало. Ядерный замок держится, пока жив ХОТЬ ОДИН наследник
+  # дескриптора 9, поэтому ребёнок, игнорирующий TERM или застрявший в syscall,
+  # держал бы замок и ПОСЛЕ выхода этой оболочки -- а текст отказа советовал бы
+  # следующему прогону подождать того, чего уже нет, и разорвать такой замок
+  # было бы нечем. Ту же дисциплину (TERM, пауза, KILL) держит гейт интерфейса.
+  # Пауза платится только если кого-то действительно задели: на нормальном
+  # выходе детей нет и цена нулевая.
+  __kids_hit=0
+  __kill_kids $$ TERM
+  if [[ $__kids_hit -gt 0 ]]; then
+    sleep 1
+    __kill_kids $$ KILL
+  fi
+  # Каталог сносит ТОЛЬКО его владелец: см. подтверждение владения выше.
+  [[ "${__lockdir_owned:-0}" == 1 ]] && rm -rf "$__lockdir"
+  return 0
+}
+trap '__release_lock' EXIT
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUR_PATCH="$HERE/tweakcc-patch.js"
@@ -183,7 +381,7 @@ command -v node >/dev/null || { echo "ERROR: node is required (tweakcc runs on N
 # not fetch/unpack"; a missing `codesign` leaves an unsigned image whose
 # keychain access fails much later. Name the missing tool here instead.
 MISSING=()
-for t in python3 curl tar perl script seq awk sed grep sort codesign; do
+for t in python3 curl tar perl script seq awk sed grep sort cmp shasum codesign; do
   command -v "$t" >/dev/null || MISSING+=("$t")
 done
 if (( ${#MISSING[@]} )); then
@@ -519,6 +717,12 @@ fi
 # With no backup yet, tweakcc's startupCheck creates one from
 # ccInstallationPath -- our pristine staging file -- which needs nothing from us.
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
+# Запись, по которой tweakcc решает, освежать бэкап или восстанавливать его:
+# страж ниже обязан спрашивать ЕЁ, а не версию файла бэкапа.
+TWEAKCC_CFG="$HOME/.tweakcc/config.json"
+# Дайджест бэкапа, снятый там, где восстановление применимо; пусто -- не
+# применимо. Объявлено здесь: под `set -u` пост-сверка читает его всегда.
+TWEAKCC_RESTORE_PINNED=""
 # Detection is unconditional -- including under `--only-ours`, which does not
 # invoke tweakcc and so cannot cause the poisoning, but whose user is just as
 # entitled to learn that a neighbour already did. Only the REPAIR needs a
@@ -605,6 +809,83 @@ fi
 if [[ $ONLY_OURS -eq 0 ]]; then
   export TWEAKCC_CC_INSTALLATION_PATH="$BIN"
   echo "Pinned tweakcc to $BIN (TWEAKCC_CC_INSTALLATION_PATH)"
+  # Цель названа оператором -- собрано может быть из ДРУГИХ байтов.
+  #
+  # tweakcc восстанавливает свой бэкап поверх цели до всякого патча (см.
+  # заголовок секции). Ветка выше ловит только случай «в бэкапе НАШИ патчи»;
+  # расхождение двух РАЗНЫХ стоковых образов одной версии она не видит, а
+  # именно оно и наблюдалось: цель с одной изменённой строкой собралась в
+  # образ БЕЗ этого изменения, все проверки зелёные, `Done.` напечатан.
+  # Всё, что человек проверил на своей цели, к отгруженному образу тогда не
+  # относится, и узнать об этом неоткуда.
+  #
+  # ПРЕДИКАТ БЕРЁТСЯ У ТОГО, ЧЬЁ ПОВЕДЕНИЕ ПРЕДСКАЗЫВАЕТСЯ. Первая редакция
+  # спрашивала версию у ФАЙЛА бэкапа, а tweakcc решает по ЗАПИСИ
+  # config.ccVersion (в форке: бэкап освежается из цели, когда
+  # realVersion !== config.ccVersion, и только иначе восстанавливается).
+  # Две модели давали два расхождения, оба воспроизведены: сброшенный
+  # конфиг -- tweakcc пересоздал бы бэкап из цели, подмены нет, а страж
+  # отказывал; запись совпадает, а ФАЙЛ бэкапа несёт другую версию --
+  # подмена есть, а страж молчал.
+  #
+  # Версия ЦЕЛИ снимается так, чтобы падение не убивало прогон: под
+  # `set -euo pipefail` присваивание из конвейера с неисполнимым файлом
+  # завершает скрипт кодом 126 БЕЗ единого слова (замерено). Прежний
+  # комментарий обещал здесь «пустую версию, а дальше страхует дым-гейт» --
+  # не было ни того, ни другого: до проверки пустоты не доходило.
+  #
+  # Невозможность назвать версию цели -- ОТКАЗ, а не пропуск: на ней стоит
+  # весь предикат, а образ уже прошёл image-check.py, то есть это валидный
+  # нативный образ, который обязан отвечать на --version. Молчание здесь
+  # означало бы «не знаю, что будет с байтами» -- ровно та тишина, против
+  # которой страж и написан.
+  #
+  # Отказ, а не автопочинка: два образа одной версии разошлись, и какой из
+  # них истина, знает только человек. Молча взять бэкап -- отгрузить не то,
+  # что проверяли; молча продвинуть цель в бэкап -- подменить человеку точку
+  # восстановления. Обе двери названы в сообщении.
+  #
+  # Цель с НАШИМ маркером сюда не входит: это штатная пересборка живого
+  # образа, где бэкап и есть единственный пристинный источник, а
+  # восстановление стока -- сам смысл стадии.
+  if [[ -f "$TWEAKCC_BACKUP" ]] && ! grep -q -a -F "$OUR_MARKER" "$BIN"; then
+    TGT_VER="$( { "$BIN" --version 2>/dev/null || true; } | awk 'NR==1{print $1; exit}')"
+    if [[ ! "$TGT_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+      echo "FATAL: the target does not name its version, so what tweakcc is about to" >&2
+      echo "  do with it cannot be established." >&2
+      echo "  target: $BIN" >&2
+      echo "  --version gave: '${TGT_VER:-<nothing>}'" >&2
+      echo "  tweakcc restores its backup over the target before patching, and whether" >&2
+      echo "  it does depends on this version. Refusing to build blind: the image that" >&2
+      echo "  would be shipped may not be the one you named." >&2
+      exit 1
+    fi
+    CFG_VER="$(python3 -c 'import json,sys
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8")).get("ccVersion")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
+    if [[ "$CFG_VER" == "$TGT_VER" ]]; then
+      # Восстановление ПРИМЕНИМО: освежать бэкап tweakcc не станет.
+      if ! cmp -s "$BIN" "$TWEAKCC_BACKUP"; then
+        echo "FATAL: the target and tweakcc's backup are DIFFERENT images, and tweakcc" >&2
+        echo "  is about to restore the backup over the target." >&2
+        echo "  target: $BIN (v$TGT_VER)" >&2
+        echo "  backup: $TWEAKCC_BACKUP" >&2
+        echo "  its config records ccVersion=$CFG_VER, which equals the target's version," >&2
+        echo "  so the backup will NOT be refreshed -- the build would be made from the" >&2
+        echo "  BACKUP's bytes, not from the ones you named. Anything you verified on the" >&2
+        echo "  target would not describe the image that gets shipped. Only you know which" >&2
+        echo "  of the two is the truth:" >&2
+        echo "    * the target is:  cp -p '$BIN' '$TWEAKCC_BACKUP'" >&2
+        echo "      (this also changes what 'tweakcc --restore' hands back)" >&2
+        echo "    * the backup is:  cp -p '$TWEAKCC_BACKUP' <a copy> and --target that" >&2
+        exit 1
+      fi
+      TWEAKCC_RESTORE_PINNED="$(shasum -a 256 "$TWEAKCC_BACKUP" | awk '{print $1}')"
+    fi
+  fi
   # A non-zero --list-patches meant "skip the apply", silently and with every
   # byte of its output discarded. But that subcommand failing does not imply the
   # apply would fail: a tweakcc that cannot parse its config, or that dropped
@@ -714,12 +995,40 @@ fi
 
 # А теперь встречный вопрос к тому же образу: легли ли на него патчи tweakcc.
 #
+# Гонка check/use по бэкапу.
+#
+# Страж выше проверяет бэкап ДО стадии, а читает его tweakcc ВНУТРИ неё.
+# В это окно внешний писатель -- прямой запуск tweakcc, ручное копирование,
+# синхронизация ~/.tweakcc -- может подменить файл, и сборка пойдёт из
+# байтов, которых никто не видел; воспроизведено. Замок конвейера закрывает
+# только НАШИ прогоны, чужому писателю он не указ.
+#
+# Предотвратить подмену нельзя, но можно не отгрузить её результат. Дайджест
+# снят ровно там, где восстановление применимо (иначе tweakcc сам законно
+# освежает бэкап из цели, и изменение файла ожидаемо), и сверяется здесь --
+# до наших патчей, до подписи, задолго до переключения лаунчера.
+if [[ -n "$TWEAKCC_RESTORE_PINNED" ]]; then
+  NOW_DIGEST="$( { shasum -a 256 "$TWEAKCC_BACKUP" 2>/dev/null || true; } | awk '{print $1}')"
+  if [[ "$NOW_DIGEST" != "$TWEAKCC_RESTORE_PINNED" ]]; then
+    echo "FATAL: tweakcc's backup changed WHILE the tweakcc stage was running." >&2
+    echo "  backup: $TWEAKCC_BACKUP" >&2
+    echo "  checked: $TWEAKCC_RESTORE_PINNED" >&2
+    echo "  now:     ${NOW_DIGEST:-<unreadable>}" >&2
+    echo "  Its config's ccVersion equals the target's version, so this stage had no" >&2
+    echo "  reason to refresh the backup -- somebody else wrote it. The bytes restored" >&2
+    echo "  over the target are therefore NOT the ones checked before the stage." >&2
+    echo "  Nothing has been installed. Re-run when no other tweakcc (or copy) is" >&2
+    echo "  touching ~/.tweakcc." >&2
+    exit 1
+  fi
+fi
+
 # Весь разбор выше читает то, что tweakcc НАПИСАЛ О СЕБЕ: код возврата, строки
 # ✓/✗, фразу "applied with some failures". Это отчёт стороннего инструмента о
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 117 проверок ниже этого не заметит: они пинят наш собственный
+# ни одна из 114 проверок ниже этого не заметит: они пинят наш собственный
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -759,26 +1068,77 @@ node "$(dirname "$0")/tools/emit-check.js"
 # that cannot run is not a lenient gate, it is an absent one.
 echo "==> Разбор блока проверок"
 python3 - "$0" <<'PYCOMPILE'
-import io, sys
-lines = io.open(sys.argv[1], encoding='utf-8').read().split('\n')
-# startswith, not `in`: this very heredoc mentions the marker as a string, and
-# a substring search would find the preflight instead of the block it guards.
-marker = 'python3 - "$BIN" "$OUR_PATCH" <<'
-start = next((i for i, l in enumerate(lines) if l.startswith(marker)), -1)
-if start < 0:
-    print("БЛОК ПРОВЕРОК НЕ НАЙДЕН — предполётная проверка потеряла свой якорь")
+import glob, io, os, re, sys, warnings
+
+path = sys.argv[1]
+here = os.path.dirname(os.path.abspath(path))
+lines = io.open(path, encoding='utf-8').read().split('\n')
+
+# SyntaxWarning здесь -- ОШИБКА, а не шум. `\s` в обычном литерале уже
+# сегодня печатает предупреждение в каждой сборке (пролезло раз), а в
+# будущих Python станет SyntaxError -- то есть код перестанет разбираться
+# целиком. Измерено: SyntaxWarning от compile() приходит СЮДА, в
+# except SyntaxError -- CPython превращает предупреждение компиляции в
+# ошибку того же класса, поэтому отдельная ветка была бы недостижима.
+warnings.simplefilter('error', SyntaxWarning)
+
+def check(src, name):
+    try:
+        compile(src, name, 'exec')
+    except SyntaxError as e:
+        print(f"НЕ РАЗБИРАЕТСЯ {name}: строка {e.lineno}: {e.msg}")
+        sys.exit(1)
+
+# Гейт покрывал ОДИН heredoc из восьми: остальные семь (и все отдельные
+# .py кита) могли уехать в сборку с любой синтаксической поломкой, а
+# упасть уже в бою -- в том числе ПОСЛЕ подмены образа. Поэтому здесь
+# перечисляются ВСЕ питоновские heredoc'и скрипта и все его .py-файлы.
+# Якорь начала: строка НАЧИНАЕТСЯ с вызова python3 -- упоминание тех же
+# слов внутри кода (как в этой строке) под якорь не подходит.
+# Строка обязана КОНЧАТЬСЯ открытием heredoc: так под якорь попадает и форма
+# внутри подстановки (BIN="$(python3 - <<'PY'), и не попадают упоминания тех
+# же слов в коде и комментариях -- как эта строка.
+opener = re.compile(r"^[^#]*\bpython3\b[^|;&]*<<'([A-Za-z_][A-Za-z0-9_]*)'\s*$")
+blocks, i, verify_seen = 0, 0, False
+while i < len(lines):
+    m = opener.match(lines[i])
+    if not m:
+        i += 1
+        continue
+    tag = m.group(1)
+    end = next((j for j in range(i + 1, len(lines)) if lines[j] == tag), -1)
+    if end < 0:
+        print(f"HEREDOC НЕ ЗАКРЫТ: {tag} со строки {i + 1}")
+        sys.exit(1)
+    if lines[i].startswith('python3 - "$BIN" "$OUR_PATCH" <<'):
+        verify_seen = True
+        print(f"БЛОК ПРОВЕРОК РАЗБИРАЕТСЯ ({end - i - 1} строк)")
+    check('\n'.join(lines[i + 1:end]), f'{tag}@{i + 1}')
+    blocks += 1
+    i = end + 1
+
+if not verify_seen:
+    print("БЛОК ПРОВЕРОК НЕ НАЙДЕН -- предполётная проверка потеряла свой якорь")
     sys.exit(1)
-end = next((i for i in range(start + 1, len(lines)) if lines[i] == 'PY'), -1)
-if end < 0:
-    print("БЛОК ПРОВЕРОК НЕ ЗАКРЫТ")
-    sys.exit(1)
-try:
-    compile('\n'.join(lines[start + 1:end]), 'verify-block', 'exec')
-except SyntaxError as e:
-    print(f"БЛОК ПРОВЕРОК НЕ РАЗБИРАЕТСЯ: строка {e.lineno}: {e.msg}")
-    sys.exit(1)
-print(f"БЛОК ПРОВЕРОК РАЗБИРАЕТСЯ ({end - start - 1} строк)")
+
+files = sorted(
+    f for f in glob.glob(os.path.join(here, '**', '*.py'), recursive=True)
+    if '/.git/' not in f and '/distros/' not in f
+)
+for f in files:
+    check(io.open(f, encoding='utf-8').read(), os.path.relpath(f, here))
+
+print(f"РАЗОБРАНО heredoc'ов {blocks}, файлов .py {len(files)}")
 PYCOMPILE
+
+echo "==> Стенд инструментов судьи"
+python3 "$(dirname "$0")/tools/judge-tools-bench.py" || { echo "СТЕНД ИНСТРУМЕНТОВ УПАЛ" >&2; exit 1; }
+# Зубы стенда проверяются ТУТ ЖЕ, а не по памяти автора: --self-check применяет
+# к копиям дерева мутации, воспроизводящие починенные дефекты, и требует, чтобы
+# каждая покраснела. Без этого прогона беззубый стенд неотличим от рабочего --
+# ровно тот случай, ради которого стенд и написан (13 с на сборку).
+python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check \
+  || { echo "СТЕНД ИНСТРУМЕНТОВ БЕЗ ЗУБОВ: мутация не покраснела" >&2; exit 1; }
 
 # --- 0d. the numbers stated in the docs must be the numbers that are declared --
 # A count written in prose has no reader, so it goes stale by default. This is
@@ -1730,123 +2090,6 @@ def _consumer_uses_no_core_privates(full):
     return bool(re.search(rb'catch\(__ne\)\{try\{await __svc\.log\(\{'
                           rb'outcome:"nudge_undelivered",reason:__svc\.clip\(', full))
 
-def _resumed_model_is_the_request(d):
-    """The reader must prefer the recorded request AND strip it with the
-    reader's OWN stripper.
-
-    Matching any `<name>(x.requestedModel)` would accept `String(...)`, which
-    strips nothing: the stock reader appends `[1m]` further down, so an id that
-    already carries the suffix comes back as `...[1m][1m]`. The name is
-    therefore pinned to the one the stock verdict chain uses a few characters
-    later (`||<stripper>(<model>)===<configured>`), which is the function that
-    actually removes the suffix.
-    """
-    m = re.search(rb'let ' + ID + rb'=typeof (' + ID + rb')\.requestedModel==="string"\?('
-                  + ID + rb')\(\1\.requestedModel\):\1\.message\.model,', d)
-    if not m:
-        return False
-    stripper = re.escape(m.group(2))
-    return bool(re.search(rb'\|\|' + stripper + rb'\(' + ID + rb'\)===', d[m.end():m.end() + 700]))
-
-
-def _literal_end(d, pos):
-    """Forward from INSIDE an object literal to the brace that closes it.
-
-    Quotes are skipped whole, because a string in the tail may carry braces
-    that are not structure. Returns -1 if the literal never closes, and the
-    caller must treat that as a failure rather than as "nothing found": an
-    unparsed tail proves nothing about what is in it.
-    """
-    depth, i, n = 1, pos, len(d)
-    while i < n and depth > 0:
-        c = d[i:i + 1]
-        if c in b'"\'':
-            q = c
-            i += 1
-            while i < n:
-                if d[i:i + 1] == b'\\':
-                    i += 2
-                    continue
-                if d[i:i + 1] == q:
-                    i += 1
-                    break
-                i += 1
-            continue
-        if c in b'{[(':
-            depth += 1
-        elif c in b'}])':
-            depth -= 1
-        i += 1
-    return i if depth == 0 else -1
-
-
-def _no_shadowed_request_model(d):
-    """Nothing may write requestedModel a SECOND time on the same literal.
-
-    Step 20 inserts the field BEFORE `type:"assistant"`. Upstream appends its
-    own conditional spreads AFTER it -- `advisorModel`, `effort` -- and in a JS
-    object literal the LAST key wins. So the day upstream introduces a field of
-    this name in its natural place, our value is overwritten, resume restores
-    the server's echo instead of the id that was asked for, and every other
-    check stays green: the write check only looks BACKWARD from the site, and
-    the read check only pins the reader's shape. Neither can see a later key.
-    Resolving such a collision silently -- by moving our field last -- is not
-    ours to do: a same-named upstream field may well mean something else.
-
-    The site census rides here for the same reason. The patcher pins `!== 4`
-    by its own regex and the check counts from-request sites by a different
-    heuristic, so a fifth real construction site that matched neither would
-    leave both at four and both green -- and resume landing on it would take
-    the echo again. Measured on 233/240/242/243/245/246/247 pristine and
-    patched: 8 sites, 4 of them from a request, on every one. A ninth site of
-    ANY shape now stops the build and asks for a human.
-    """
-    sites = [m.start() for m in re.finditer(rb'type:"assistant",uuid:', d)]
-    if len(sites) != 8:
-        return False
-    from_request = 0
-    for st in sites:
-        back = d[max(0, st - 400):st]
-        if b'.querySource,' not in back or b'.spawnedBySkill' not in back:
-            continue
-        from_request += 1
-        end = _literal_end(d, st)
-        # 4000 is a sanity bound, not a measurement: the real tails are 123-134
-        # bytes. A tail that long means the brace walk ran past the literal.
-        if end < 0 or end - st > 4000:
-            return False
-        if d[st:end].count(b'requestedModel') != 0:
-            return False
-    return from_request == 4
-
-
-def _every_entry_records_the_request(d):
-    """Coverage, not a count of the patched form.
-
-    Counting our own prefix four times cannot see a construction site that was
-    never patched -- the counter reads 4 either way, and a resume that lands on
-    the unpatched entry is back to restoring the echo, but only sometimes.
-
-    The site cannot be recognised by the call that precedes it: `[^)]*` does not
-    cross a `)`, so that shape also matches six unrelated calls that merely share
-    the prefix (measured: 10 hits, 4 of them real). Recognise it by the anchor it
-    ends at instead. Of the eight `type:"assistant",uuid:` sites in the image,
-    four are built FROM A REQUEST -- those carry both `.querySource,` and
-    `.spawnedBySkill` just before them -- and each of those four must record the
-    request's model. The other four build entries from something else and are not
-    ours to touch.
-    """
-    from_request = 0
-    for m in re.finditer(rb'type:"assistant",uuid:', d):
-        back = d[max(0, m.start() - 400):m.start()]
-        if b'.querySource,' not in back or b'.spawnedBySkill' not in back:
-            continue
-        from_request += 1
-        if not re.search(rb'\.\.\.typeof (' + ID + rb')\.model==="string"&&'
-                         rb'\{requestedModel:\1\.model\},$', back):
-            return False
-    return from_request == 4
-
 def _gateway_ids_are_undisguised(d):
     """Every gateway-model filter is followed by a map that RESTORES the id.
 
@@ -2245,20 +2488,6 @@ checks = {
                                               rb'let ' + ID + rb'=process\.env\.ANTHROPIC_BASE_URL&&'
                                               rb'!/\^claude/i\.test\(' + ID + rb'\)\?void 0:'
                                               rb'!\(' + ID + rb'\.has\(', d)),
-    # ...and it must come back on the id that was ASKED FOR. The transcript
-    # records the model the server echoed; for a gateway model that differs from
-    # the requested one and the gateway refuses its own echo. The reader has to
-    # prefer the recorded request and strip the suffix (the stock reader appends
-    # `[1m]` itself further down), falling back to the echo for transcripts
-    # written before this existed.
-    'resumed model is the requested id, not the echo': _resumed_model_is_the_request(d),
-    # The read side is useless unless EVERY assistant entry built from a request
-    # carries the field. Four construction sites; a count check rather than a
-    # presence check, because three out of four would leave a resume that lands
-    # on the fourth restoring the echo again -- intermittently, which is the
-    # hardest form to diagnose.
-    'every assistant entry records the model it asked for': _every_entry_records_the_request(d),
-    'nothing writes the requested model a second time': _no_shadowed_request_model(d),
     # judge part 1: the current turn (thinking included) is stashed by
     # tool_use id, because the message reaching the executor carries the
     # tool_use block alone
@@ -3137,7 +3366,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 117
+EXPECTED_CHECKS = 114
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")

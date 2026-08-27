@@ -232,15 +232,37 @@ def fetch_catalogue():
     try:
         catalogue = fetch_json(MODELS_DEV_URL)
     except Exception as error:
+        # An unreadable cache means NO cache: two concurrent syncs used to
+        # tear the file apart with a direct open("w") on the final name,
+        # and the "network down -> fall back to cache" degradation turned
+        # into a traceback instead. Warn and let the original network
+        # error surface, exactly as when no cache file exists at all.
+        # getmtime lives INSIDE this guard: the same concurrent sync that
+        # can tear the cache can remove it between os.path.exists below
+        # and getmtime, and that FileNotFoundError must land here — in the
+        # "no cache" branch that re-raises the ORIGINAL network error —
+        # not fly past it as a raw traceback.
         if os.path.exists(CACHE_PATH):
-            age_h = (time.time() - os.path.getmtime(CACHE_PATH)) / 3600
-            print(f"  models.dev unreachable ({error}); using cache, {age_h:.0f}h old")
-            with open(CACHE_PATH, encoding="utf-8") as fh:
-                return json.load(fh)
+            try:
+                age_h = (time.time() - os.path.getmtime(CACHE_PATH)) / 3600
+                print(f"  models.dev unreachable ({error}); using cache, {age_h:.0f}h old")
+                with open(CACHE_PATH, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, ValueError) as cache_error:
+                print(f"  cache is unreadable too ({cache_error}); no fallback")
+                # Re-raise the ORIGINAL network error, exactly as when no
+                # cache file exists at all: a bare `raise` here would surface
+                # the cache's JSONDecodeError instead and misreport the cause.
+                raise error from cache_error
         raise
+    # The cache is written via tmp+os.replace in the same directory (the
+    # pattern save_seen() already uses): a concurrent sync or the fallback
+    # reader above must never see a half-written catalogue.
     os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-    with open(CACHE_PATH, "w", encoding="utf-8") as fh:
+    tmp = f"{CACHE_PATH}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(catalogue, fh)
+    os.replace(tmp, CACHE_PATH)
     return catalogue
 
 
@@ -437,14 +459,49 @@ def main() -> int:
 
     remembered = load_seen()
     save_seen(remembered | set(live_ids))
+
+    print(f"Price catalog <- {MODELS_DEV_URL}")
+    catalogue = fetch_catalogue()
+
+    # Lost update: the config was read IN FULL before the network phase
+    # (proxy + models.dev, tens of seconds), while a live Claude Code session
+    # writes to ~/.claude.json more often than that — flushing the stale
+    # object below erased its writes silently and completely. The kit knows
+    # about the second writer (claude-patch-all.sh:96). So the file is re-read
+    # after the LAST network fetch, and ONLY the two keys this tool owns are
+    # applied to the FRESH object; everything else comes from that fresh read.
+    # If the re-read fails (file gone, unparseable), refuse with the reason
+    # and write nothing.
+    # The roster's owned-keys part is likewise derived from THIS object, not
+    # from the pre-network read: a model added to customModelCosts while the
+    # network phase ran was priced by nobody here, and the wholesale replace
+    # below would erase it silently — the roster moves with the re-read, so
+    # such a model is priced and rewritten instead of dropped.
+    # Honest window: narrowed, NOT closed. Between this re-read and the
+    # os.replace at the bottom lie the pricing pass and shutil.copy2 (the
+    # backup); a writer landing in that window is lost just as silently.
+    # In this kit every truncation is declared, so this one is too.
+    try:
+        with open(path, encoding="utf-8") as fh:
+            config = json.load(fh)
+    except FileNotFoundError:
+        print(f"ERROR: {path} disappeared while this tool was syncing; "
+              "nothing written", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"ERROR: {path} no longer parses ({error}); nothing written",
+              file=sys.stderr)
+        return 1
+    if not isinstance(config, dict):
+        print(f"ERROR: {path} no longer holds a JSON object; nothing written",
+              file=sys.stderr)
+        return 1
+
     if "--prune" in sys.argv:
         roster = sorted(live_ids)
     else:
         roster = sorted(set(live_ids) | remembered | set(catalogued)
                         | set(config.get("customModelCosts") or {}))
-
-    print(f"Price catalog <- {MODELS_DEV_URL}")
-    catalogue = fetch_catalogue()
 
     costs, windows, unpriced = {}, {}, []
     rows = []
@@ -502,11 +559,16 @@ def main() -> int:
         print("\n--dry-run: nothing written")
         return 0
 
+    # The backup is taken from the FRESH state: what is on disk right now is
+    # what a rollback would need to restore, not the snapshot from before
+    # the network phase.
     backup = f"{path}.backup.{time.strftime('%Y%m%d-%H%M%S')}"
     shutil.copy2(path, backup)
 
     # Replace wholesale rather than merge: a model that lost its models.dev
     # entry should fall back rather than keep a price nobody can trace.
+    # (Wholesale applies to the two OWNED keys above, not to the rest of the
+    # config — that now arrives from the fresh re-read.)
     config["customModelCosts"] = costs
     config["customModelContextWindows"] = windows
 

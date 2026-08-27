@@ -1727,65 +1727,25 @@ step('20 session model restore', () => {
   );
   applied.push(`session model restore keeps a proxy model (verdict var '${m[1]}', model var '${m[4]}')`);
 
-  // --- the id that comes back must be the id that was ASKED FOR --------------
-  // The transcript stores the model the SERVER echoed, and for a gateway model
-  // that is not the model the client asked for. Measured against the gateway on
-  // this machine: asking for `grok-4.6` succeeds and the reply says
-  // `grok-4.6-build`; asking for `grok-4.6-build` is refused outright with
-  // "unknown provider for model grok-4.6-build". So a resumed session restores a
-  // name its own gateway rejects and every request of that session fails --
-  // 2329 entries carrying that echo were counted in the local transcripts.
+  // Восстановление ОКНА при resume здесь НЕ делается -- сознательно.
   //
-  // The verdict fix above cannot help here: it decides WHETHER to restore, not
-  // WHAT. Both sides go in this one step on purpose — a write side alone stores
-  // a field nobody reads, a read side alone reads a field nobody writes, and
-  // splitting them across steps makes either half look complete on its own.
+  // Что было и почему снято (2026-08-27, решение юзера): предыдущая правка
+  // дописывала в assistant-запись транскрипта своё поле и читала его на
+  // возобновлении, а размер окна восстанавливала одним битом -- «нёс ли
+  // идентификатор приписку [1m]». Обе половины плохи. Запись -- это наши
+  // данные в стоковом файле пользователя: транскрипт переставал быть тем, что
+  // написал бы чистый клиент. Бит [1m] -- это один класс окна из всех: окно
+  // вычисляется из ИДЕНТИФИКАТОРА (шаг 10, customModelContextWindows), и в
+  // реальном парке это 258000, 424000, 924000, 972576 и далее; приписку [1m]
+  // несут 2 ключа из 538.
   //
-  // The resume loader keeps unknown fields (`let {isSidechain,parentUuid,
-  // promptId,...s}=t; return s`), so a new field survives to the reader. The two
-  // places that DO rebuild an entry field-by-field belong to the feedback
-  // sender, not to resume.
-  const stripper = siteName(m[6], 'model suffix stripper');
-
-  // Read side: prefer the requested id, fall back to the echo for transcripts
-  // written before this patch existed. The suffix is stripped because the stock
-  // reader appends `[1m]` itself further down; handing it an id that already
-  // carries one would produce `...[1m][1m]`.
-  const readRx = new RegExp(
-    `(typeof (${ID})\\.message\\?\\.model!=="string"\\|\\|\\2\\.message\\.model===${ID}\\)continue;` +
-      `let ${ID}=)\\2\\.message\\.model,`,
-  );
-  if (!readRx.test(js)) fail('session model restore: the reader does not take the model from the entry in the expected shape');
-  js = js.replace(
-    readRx,
-    `$1typeof $2.requestedModel==="string"?${stripper}($2.requestedModel):$2.message.model,`,
-  );
-
-  // Write side: every assistant entry built from a request records the id that
-  // request carried. Four sites, all inside one function, on every version from
-  // 2.1.233 to 2.1.247. The count is pinned: a fifth construction site added
-  // upstream would leave entries silently without the field, and a resume that
-  // lands on one of those would be back to restoring the echo -- exactly the
-  // failure this closes, but now only sometimes, which is worse to diagnose.
-  const writeRx = new RegExp(
-    `((${ID})\\((${ID})\\.querySource,\\3\\.spawnedBySkill[^)]*\\),)type:"assistant",uuid:`,
-    'g',
-  );
-  const writes = js.match(writeRx);
-  if (!writes || writes.length !== 4) {
-    fail(
-      `session model restore: expected 4 assistant-entry construction sites, found ` +
-        `${writes ? writes.length : 0} — the write side would cover only part of them`,
-    );
-  }
-  js = js.replace(
-    writeRx,
-    '$1...typeof $3.model==="string"&&{requestedModel:$3.model},type:"assistant",uuid:',
-  );
-  applied.push(
-    `the resumed model is the requested id, not the gateway's echo ` +
-      `(${writes.length} write sites, suffix stripper '${stripper}')`,
-  );
+  // Честный итог: восстановить окно нечем. Единственный стоковый след модели в
+  // транскрипте -- эхо сервера в message.model, и оно не равно запрошенному
+  // иду (замер: запрос `grok-4.6` -> ответ `grok-4.6-build`, и этот же ответ
+  // шлюз в запросе отвергает; для claude-модели с 1M эхо приходит без
+  // приписки). Без новых данных на диске или без смены поведения (возобновлять
+  // на ТЕКУЩЕЙ модели вместо записанной) окно вернуть нельзя. Пока такого
+  // решения нет -- здесь сток, а не половинчатый механизм.
 });
 
 // --------------------------------------------------------------------------
@@ -2304,7 +2264,13 @@ step('22 judge consulted before a subagent dispatch', () => {
     // was measurable only by watching a session with a stopwatch.
     'let __jlog=async(__oc)=>{let __ts=new Date().toISOString();' +
       'let __mv=__mdl();' +
-      'let __base={t:__ts,sid:__sid(),title:__ttl(),tool:__o.tool.name,' +
+      // pid стоит в строке журнала НЕ как адрес -- адрес это sid, а pid система
+      // переиспользует. Это ПОДПИСЬ ПИСАТЕЛЯ: стенд (tools/probe-bench.js)
+      // отличает свою протечку в живой дом проб от работы чужой сессии только
+      // по ней, а до этого журнальная половина его атрибуции была мертва --
+      // pid стоял лишь в ЗАПИСИ, и протечка, выраженная одной дозаписью
+      // журнала (запись не пишется при record=false), объявлялась чужой.
+      'let __base={t:__ts,sid:__sid(),pid:process.pid,title:__ttl(),tool:__o.tool.name,' +
         'agent:__o.input?.subagent_type,model:__mv.m,msrc:__mv.s,' +
         'cfg:__pdir||null,' +
         'ms:globalThis.__ccMono()-__t0,sw:__o.sw||null,...__oc};' +

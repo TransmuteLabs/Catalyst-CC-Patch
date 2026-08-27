@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The build-path probe: the one part of this kit the 117 checks cannot see.
+# The build-path probe: the one part of this kit the 114 checks cannot see.
 #
 # Every check in claude-patch-all.sh is a byte search over the FINISHED image, so
 # all of them are blind to how that image came to be. The sweep across versions
@@ -34,7 +34,7 @@
 # path including a kill.
 #
 # Usage:  bash tools/build-path-probe.sh [--case a|b|c] [--version 2.1.247]
-# Cost:   one full pipeline run per case (tweakcc + our patches + 117 checks +
+# Cost:   one full pipeline run per case (tweakcc + our patches + 114 checks +
 #         the interface gate + the bench), so a few minutes each.
 
 set -u
@@ -43,6 +43,7 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PIPELINE="$HERE/claude-patch-all.sh"
 OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
+
 VERSIONS="$HOME/.local/share/claude/versions"
 CASES=abc
 WANT_VER=
@@ -55,6 +56,81 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# Замок берётся ПОСЛЕ разбора аргументов. Раньше он стоял выше, и `--help` во
+# время свипа отвечал «конвейер уже работает» вместо текста использования --
+# отказ там, где ничего разделять не нужно: аргументы читаются без единого
+# касания общего состояния.
+#
+# А перед самим замком гоняется прибор замка. Зонд пути сборки опирается на то,
+# что владение передаётся детям и держится всё его время; если этот механизм
+# сломан, зонд молча измерял бы не то. Прибор дешёв (секунды), у него свой
+# TMPDIR, настоящего замка он не касается. Заодно это единственный вызывающий
+# прибора: инструмент, которого никто не зовёт, в этом ките уже трижды
+# оказывался мёртвым, и за его тишиной каждый раз лежал дефект.
+if ! bash "$(dirname "$0")/lock-probe.sh"; then
+  echo "ОТКАЗ: прибор замка не сошёлся -- не измеряю путь сборки на сломанном замке." >&2
+  exit 3
+fi
+
+# По той же причине -- страж «цель против бэкапа tweakcc». Зонд трижды
+# запускает конвейер по своим целям; если страж сломан в сторону ложного
+# срабатывания, кейсы зонда упрутся в отказ и он измерит не то, а если в
+# сторону молчания -- обе стороны будут зелены при подменённом входе. Проба
+# ничего не собирает и настоящего бэкапа не касается: секунды.
+if ! bash "$(dirname "$0")/backup-divergence-probe.sh"; then
+  echo "ОТКАЗ: страж «цель против бэкапа» не сошёлся -- не измеряю путь сборки." >&2
+  exit 3
+fi
+
+# ЗАМОК НА ВСЁ ВРЕМЯ ЗОНДА, а не внутри каждого дочернего прогона.
+#
+# Зонд одалживает ЖИВОЕ состояние `~/.tweakcc` -- снимает `config.json` и
+# `native-binary.backup`, гоняет три полных прогона конвейера, восстанавливает.
+# Замок конвейера закрывает только время самого прогона; между кейсами и на
+# восстановлении его нет. В это окно настоящий прогон (или прямой tweakcc)
+# законно обновляет backup шагом 1b и `ccVersion` в startupCheck -- а
+# восстановление зонда, которое отличает «своя порча» от «чужая работа» только
+# по `cmp`, откатывает и то и другое на снимок сорокаминутной давности.
+# Последствие ровно то, ради обнаружения которого зонд написан: откаченный
+# `ccVersion` заставляет следующий startupCheck освежить backup из
+# УСТАНОВЛЕННОГО (пропатченного) бинаря -- отравление, диагностируемое много
+# позже как «site not found».
+#
+# То же окно у seed_version_mismatch: он пишет живой конфиг ДО того, как
+# ребёнок возьмёт замок, и способен лечь между `--list-patches` и `--apply`
+# чужого прогона (каждый вызов tweakcc читает конфиг заново).
+#
+# Поэтому замок берётся ЗДЕСЬ и держится до выхода, а дочерние прогоны получают
+# его по наследству через CLAUDE_PATCH_LOCK_HELD_BY: взяв замок заново, ребёнок
+# встал бы против собственного родителя. Конвейер эту заявку проверяет, а не
+# принимает на слово (см. его преамбулу).
+LOCK_FILE="${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock"
+exec 9>"$LOCK_FILE"
+if command -v flock >/dev/null 2>&1 && flock -n 9; then
+  :
+elif perl -e '
+      use Fcntl ":flock";
+      open(my $fh, ">&=9") or exit 2;
+      exit(flock($fh, LOCK_EX|LOCK_NB) ? 0 : 1);
+    '; then
+  :
+else
+  __rc=$?
+  # «Занято» и «прибор не сработал» -- разные ответы, и второй нельзя читать как
+  # первый: молчаливое продолжение без замка и есть тот вход, на котором зонд
+  # откатывает чужую работу.
+  if [[ $__rc -eq 1 ]]; then
+    echo "ОТКАЗ: конвейер уже работает (замок $LOCK_FILE занят)." >&2
+    echo "       Зонд одалживает живой ~/.tweakcc и рядом с ним идти не может." >&2
+    echo "       Кто держит:  lsof $LOCK_FILE" >&2
+  else
+    echo "ОТКАЗ: не удалось взять замок (perl rc=$__rc)." >&2
+    echo "       Без замка зонд откатит чужую работу на свой снимок -- не иду." >&2
+  fi
+  exit 3
+fi
+export CLAUDE_PATCH_LOCK_HELD_BY=$$
 
 # `grep -c` prints 0 AND exits 1 when it finds nothing, so `|| echo 0`
 # APPENDS a second line instead of substituting one: on a clean file the

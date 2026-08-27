@@ -879,23 +879,106 @@ function setScenarioEnvironment(tempDir, scenario) {
 }
 
 // The second line: overriding HOME makes a leak impossible by construction,
-// but the check must also fail when the construction is changed. The live home
-// is fingerprinted BEFORE the run and compared AFTER.
-function homeFingerprint(realHome) {
+// but the check must also fail when the construction is changed.
+//
+// РАВЕНСТВО ЗДЕСЬ НЕ ПОДХОДИТ. Дом проб — не тихий каталог: судья пишет строку
+// журнала и запись на КАЖДОЙ консультации любой живой сессии, а прополка ядра
+// сносит старейшее. Стенд живёт минуты (чтение ~300-МБ образа плюс все
+// сценарии), поэтому одна консультация посреди прогона делала отпечаток
+// неравным — и гейт убивал версию свипа сообщением, которое называло причиной
+// протечку фикстур. Занятость машины не есть дефект стенда, а обвинять не того
+// хуже, чем молчать: человек чинит то, что цело.
+//
+// Поэтому изменения не сравниваются, а АТРИБУТИРУЮТСЯ. Основание полное, не
+// эвристическое: КАЖДЫЙ писатель зонда штампует свой pid — имя записи
+// (`"-"+process.pid+"-"`), строка журнала (`pid:process.pid`), last-request и
+// last-verdict (`."+process.pid+"."`). Стенд исполняет скомпилированный блок В
+// СВОЁМ процессе, поэтому протечка неизбежно несёт pid стенда, а работа чужой
+// сессии — чужой. Основание проверяется по образу (assertAttributionBasis):
+// исчезнет штамп — стенд откажется, а не продолжит с догадкой.
+function homeSnapshot(realHome) {
   const dir = path.join(realHome, '.claude', 'probes');
+  const files = new Map();
   const walk = (d) => {
-    let out = [];
     let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return out; }
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const e of entries.sort((x, y) => x.name.localeCompare(y.name))) {
       const full = path.join(d, e.name);
-      if (e.isDirectory()) out = out.concat(walk(full));
+      if (e.isDirectory()) walk(full);
       else { let st; try { st = fs.statSync(full); } catch { continue; }
-        out.push(`${full}:${st.size}:${st.mtimeMs}`); }
+        files.set(full, { size: st.size, mtimeMs: st.mtimeMs }); }
     }
-    return out;
   };
-  return walk(dir).join('\n');
+  walk(dir);
+  return { dir, files };
+}
+
+// Штампы, на которых стоит атрибуция, обязаны быть в самом образе, и в ОБОИХ
+// блоках. Проверка смотрит вырезанные блоки, а не наш исходник: разошлись бы
+// они -- верен образ, а стенд обязан это заметить и отказаться.
+//
+// Блоков два, и то, что сегодня они несут ОДИН И ТОТ ЖЕ текст ядра, есть
+// совпадение, а не гарантия: резка выдаёт два независимых продукта, и
+// собственный урок кита -- «правка настройкой ядром НЕ переносится,
+// потребителей перечислять поимённо». Поэтому перечисляем оба и все три марки,
+// а не одну по умолчанию.
+function assertAttributionBasis(blocks) {
+  const need = [
+    ['имя записи', '"-"+process.pid+"-"'],
+    // Именно в такой связке: `pid:process.pid` встречается и в ЗАПИСИ, где для
+    // атрибуции журнала он бесполезен. Пинится штамп в строке журнала.
+    ['строка журнала', 'sid:__sid(),pid:process.pid'],
+    ['отладочные файлы', 'process.pid+"."'],
+  ];
+  for (const kind of ['judge', 'watch']) {
+    const src = blocks[kind];
+    const missing = need.filter(([, mark]) => src.indexOf(mark) < 0).map(([what]) => what);
+    if (missing.length) {
+      throw new Error(
+        `probe-bench: в блоке ${kind} нет pid-штампа (${missing.join(', ')}), ` +
+        'а на нём стоит различение «протечка стенда» и «работа чужой сессии». ' +
+        'Без него стенд не может назвать виновника и не идёт.');
+    }
+  }
+}
+
+// Возвращает две группы: наши изменения (протечка) и чужие (законный писатель).
+function attributeHomeChanges(before, after) {
+  const mine = [];
+  const foreign = [];
+  const nameMarks = ['-' + process.pid + '-', '.' + process.pid + '.'];
+  // Метка обязана кончаться границей: без неё pid 500 совпадал бы с чужой
+  // строкой `"pid":5003`, и запись ЧУЖОГО прогона считалась бы нашей — то есть
+  // стенд молчал бы ровно там, где обязан назвать постороннего писателя.
+  // В JSON за числом всегда идёт не-цифра (`,` или `}`), поэтому граница
+  // выражается запретом цифры справа.
+  const journalMark = new RegExp('"pid":' + process.pid + '(?![0-9])');
+  const isMineName = (p) => nameMarks.some((m) => path.basename(p).includes(m));
+  for (const [full, now] of after.files) {
+    const had = before.files.get(full);
+    if (had === undefined) { (isMineName(full) ? mine : foreign).push('+ ' + full); continue; }
+    if (had.size === now.size && had.mtimeMs === now.mtimeMs) continue;
+    // Дописанный хвост читается ровно с прежней длины: строка журнала несёт pid,
+    // поэтому дозапись атрибутируется так же точно, как новый файл.
+    let tail = '';
+    if (now.size > had.size) {
+      try {
+        const fd = fs.openSync(full, 'r');
+        const buf = Buffer.alloc(now.size - had.size);
+        fs.readSync(fd, buf, 0, buf.length, had.size);
+        fs.closeSync(fd);
+        tail = buf.toString('utf8');
+      } catch { /* файл исчез под прополкой — ниже уйдёт в чужие */ }
+    }
+    (isMineName(full) || journalMark.test(tail) ? mine : foreign).push('~ ' + full);
+  }
+  for (const full of before.files.keys()) {
+    // Удаление стенд не производит: прополка ядра сносит СТАРЕЙШЕЕ, то есть
+    // заведомо не написанное этим прогоном. Протечка, вызвавшая прополку, будет
+    // поймана по добавленной записи выше.
+    if (!after.files.has(full)) foreign.push('- ' + full);
+  }
+  return { mine, foreign };
 }
 
 // The directory arrives in two spellings: logical (/var/...) and physical
@@ -1315,10 +1398,11 @@ async function main() {
     const benchVersion = assertRuntime();
     options = parseArgs(process.argv.slice(2));
     const realHome = process.env.HOME || os.homedir();
-    const homeBefore = homeFingerprint(realHome);
+    const homeBefore = homeSnapshot(realHome);
     const source = readImage(options.binary);
     warnRuntimeSkew(source, benchVersion);
     const carved = classifyBlocks(carveBlocks(source));
+    assertAttributionBasis(carved);
     // Both blocks are compiled up front, so a block that is broken on the image
     // fails setup even when no scenario happens to exercise it.
     const probes = {
@@ -1332,10 +1416,24 @@ async function main() {
     }
 
     printTable(results);
-    if (homeFingerprint(realHome) !== homeBefore) {
-      console.error('probe-bench: ПРОВАЛ — прогон изменил живой дом проб ' +
-        path.join(realHome, '.claude', 'probes') + '; фикстуры обязаны жить только во временном каталоге');
+    const homeDiff = attributeHomeChanges(homeBefore, homeSnapshot(realHome));
+    if (homeDiff.mine.length) {
+      console.error('probe-bench: ПРОВАЛ — прогон писал в живой дом проб ' + homeBefore.dir +
+        '; фикстуры обязаны жить только во временном каталоге. Изменения несут pid стенда (' +
+        process.pid + '):');
+      for (const line of homeDiff.mine) console.error('  ' + line);
       process.exitCode = 1;
+    } else if (homeDiff.foreign.length) {
+      // Не молчим: дом изменился, и человек должен знать, ПОЧЕМУ это не отказ.
+      // Префикс ВНИМАНИЕ -- не украшение: конвейер поднимает наружу только
+      // строки `^probe-bench: ВНИМАНИЕ` и сразу удаляет лог стенда. Строка без
+      // него уничтожалась бы непрочитанной — ровно тот класс, который сосед
+      // (предупреждение о перекосе рантайма) уже однажды закрыл.
+      console.log('probe-bench: ВНИМАНИЕ — живой дом проб менялся во время прогона: ' +
+        homeDiff.foreign.length + ' изменений, ни одно не несёт pid стенда (' + process.pid +
+        '), то есть это законный писатель (консультация живой сессии или прополка), а не протечка.');
+      for (const line of homeDiff.foreign.slice(0, 8)) console.log('  ' + line);
+      if (homeDiff.foreign.length > 8) console.log('  … и ещё ' + (homeDiff.foreign.length - 8));
     }
     if (options.json) fs.writeFileSync(options.json, `${JSON.stringify(results, null, 2)}\n`);
     const bad = results.filter((result) => result.mismatch).length;

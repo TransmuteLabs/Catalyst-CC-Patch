@@ -457,3 +457,36 @@ checks were run against a clean image and fail correctly.
 
 In `~/.tweakcc/config.json` these four items are disabled (backup copy
 next to it), so that when tweakcc is fixed they are not applied twice.
+
+## The build can start from bytes nobody named (measured 2026-08-27)
+
+tweakcc restores `~/.tweakcc/native-binary.backup` over the target before it
+patches anything. The pipeline knew this about ONE case — a backup carrying our
+own marker — and repaired it. It did not notice the other: two DIFFERENT stock
+images of the same version. Then the named target's bytes are discarded in
+silence and the build is made from the backup.
+
+Measured twice in a row: an image with a single equal-length edit
+(`y(a)===r` → `y(a)!==r` in the 1M gate) was passed as `--target`; the build
+printed `OK=118`, `Done.`, and the resulting image carried `===`. tweakcc's own
+extracted payload (`~/.tweakcc/native-claudejs-orig.js`) carried `===` too, so
+the substitution happened before the patch stage. The pipeline was not the
+substituter: it made no `.orig` ("No pristine copy beside the binary").
+
+Two consequences, both now closed.
+
+* Everything a human verifies on the target — pristineness, provenance, any
+  measurement — may describe a file that was never built. Guarded before the
+  tweakcc call: no marker of ours in the target + differing bytes + EQUAL
+  versions ⇒ FATAL, naming both doors (promote the target into the backup, or
+  build from the backup). A refusal rather than an automatic repair: which of
+  two same-version images is the truth only a human knows, and silently
+  promoting the target would swap the human's restore point.
+  The truth table of that guard is `tools/backup-divergence-probe.sh`.
+* **A check can NOT be controlled by mutating the input image and rebuilding.**
+  The mutation is erased and the run looks successful — the strongest kind of
+  false green, since a control that cannot fail proves nothing. The correct
+  form is to mutate the BUILT image and run the shipped check block over it:
+  `tools/checks-on-image.sh`, seconds instead of a build. That is how the
+  family-guard pin of check 118 was proven (`rc=1`, `OK=117`, exactly
+  `a resumed session keeps the 1M window it was using` red).

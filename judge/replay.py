@@ -180,7 +180,14 @@ def main():
     parser.add_argument('--timeout', type=float, default=120)
     args = parser.parse_args()
 
-    files = sorted(glob.glob(os.path.join(args.target, '*.json*'))) \
+    # Два ЯВНЫХ глоба, а не *.json*: соседний compact.py пишет архивы под
+    # временным именем <rec>.json.gz.tmp.<pid>, глоб *.json* совпадает с ним,
+    # а load() выбирает gzip-поток по endswith('.gz') — путь с pid-суффиксом
+    # кончается не на .gz, gzip-байты читаются текстом, и весь прогон падает
+    # на первом же файле (sorted ставит tmp-имя в начало). Так же уже делают
+    # adjudicate.py и validate.py.
+    files = sorted(glob.glob(os.path.join(args.target, '*.json')) +
+                   glob.glob(os.path.join(args.target, '*.json.gz'))) \
         if os.path.isdir(args.target) else [args.target]
     if args.limit:
         files = files[-args.limit:]

@@ -41,6 +41,7 @@ import io
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -201,6 +202,70 @@ def resolve_active_binary() -> Path:
         "or run with --update")
 
 
+def _sweep_stale_launcher_tmps(link: Path) -> None:
+    """Remove OTHER processes' orphaned launcher tmp symlinks from link's
+    directory before creating our own.
+
+    A repoint killed between symlink_to and os.replace leaves a
+    <name>.tmp.<pid> symlink sitting in a directory that is on PATH — it
+    outlives its own pid and every later repoint. Exactly one thing licenses
+    removal: the entry is attributable to a pid that is DEAD, so its swap
+    will never happen. A live pid is never touched (PermissionError from
+    os.kill(pid, 0) means the process is alive under another user), and a
+    non-numeric suffix is left alone — the origin of such a name is unknown,
+    and unlinking by pattern alone would sweep a file we cannot attribute.
+
+    A dangling target is deliberately NOT a licence of its own. It says
+    nothing about ownership: an entry whose pid is dead is already covered by
+    the check above, while a LIVE process is dangling for the instant between
+    its target being replaced and its own os.replace — sweeping it there
+    makes that replace raise FileNotFoundError, and it would raise AFTER the
+    image has been swapped, i.e. exactly where the pipeline can no longer
+    unwind. The price of this restraint is one inert symlink in the rare case
+    where a dead pid was reused by a live process."""
+    # Глоб шире формы писателя: `.tmp.*` ловит `.tmp.12.34`, `.tmp.pid-7`,
+    # `.tmp.²`. Имя сверяется с той же формой, что пишет repoint_launcher
+    # (`f"{link.name}.tmp.{os.getpid()}"`), иначе прополка берёт на себя файлы
+    # чужого происхождения. `str.isdigit()` для этого не годится: оно истинно
+    # для '²', а int() его отвергает — прополка падала бы на имени файла,
+    # причём ПОСЛЕ подмены образа, где конвейеру уже нечем размотать шаг.
+    form = re.compile(re.escape(link.name) + r"\.tmp\.[0-9]+\Z")
+    for stale in link.parent.glob(f"{link.name}.tmp.*"):
+        if not form.match(stale.name):
+            continue                   # происхождение имени неизвестно
+        try:
+            pid = int(stale.name.rsplit(".", 1)[-1])
+        except ValueError:
+            continue
+        # Снимок до проверки: между «pid мёртв» и unlink номер может быть
+        # переиспользован новым прогоном, который создаст СВОЙ tmp с тем же
+        # именем. Сверка inode+mtime после проверки не даёт снять чужой новый.
+        try:
+            before = stale.lstat()
+        except FileNotFoundError:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass                       # pid мёртв — свап уже не случится
+        except PermissionError:
+            continue                   # жив, под другим пользователем
+        except OverflowError:
+            continue                   # число не может быть pid этой системы
+        else:
+            continue                   # жив
+        try:
+            after = stale.lstat()
+        except FileNotFoundError:
+            continue                   # соперничающий уборщик успел раньше
+        if (after.st_ino, after.st_mtime_ns) != (before.st_ino, before.st_mtime_ns):
+            continue                   # запись подменена после проверки
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass  # a competing sweeper won the race; the goal is met
+
+
 def repoint_launcher(target: Path) -> None:
     """Symlink on posix; copy on Windows (which is what the installer does)."""
     link = launcher_path()
@@ -213,9 +278,20 @@ def repoint_launcher(target: Path) -> None:
             info(f"WARNING: {link} is in use (close all Claude Code sessions, "
                  f"including VS Code) — versioned binary is patched, launcher not updated")
     else:
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        link.symlink_to(target)
+        # Atomic repoint. unlink-then-symlink leaves a window where the
+        # launcher does NOT exist (starting `claude` at that instant is a
+        # plain ENOENT), and a concurrent second repoint hits an uncaught
+        # FileExistsError from symlink_to — under `set -e` the pipeline then
+        # dies AFTER the image has already been swapped. A symlink created
+        # under a temporary name in the same directory plus os.replace is
+        # atomic: replace over a symlink (or a file) never exposes a missing
+        # path and never fails with "already exists".
+        _sweep_stale_launcher_tmps(link)
+        tmp = link.with_name(f"{link.name}.tmp.{os.getpid()}")
+        if tmp.is_symlink() or tmp.exists():
+            tmp.unlink()
+        tmp.symlink_to(target)
+        os.replace(tmp, link)
         info(f"Repointed {link} -> {target}")
 
 
