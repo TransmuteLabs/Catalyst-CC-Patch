@@ -292,6 +292,7 @@ function probeConfigToml(scenario, config) {
 
 const OLD = () => ({ last: 0, start: Date.now() - 3600000 });
 const BROKEN_TOML_DEG = ["unparsed:<temp>/probes.toml: TOML Parse error: Expected a key but found '{'"];
+const MISSING_PROMPT_DEG = ['prompt-missing:<temp>/judge/prompt.md'];
 
 const scenarios = [
   {
@@ -419,16 +420,25 @@ const scenarios = [
     expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
                 degExact: BROKEN_TOML_DEG },
   },
+  // `expected: null` short-circuits checkMismatch to false, so these two ran and
+  // were counted among the scenarios that "behaved as specified" while having no
+  // specification at all. They are the two that matter most to this bench: both
+  // are refusals, and a refusal that silently turns permissive is exactly the
+  // failure the judge exists to prevent. Measured on a built image and pinned.
   {
     name: 'missing-prompt',
     omitPrompt: true,
     response: 'OK: бриф полон',
-    expected: null,
+    expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
+                degExact: MISSING_PROMPT_DEG },
   },
   {
     name: 'pool-throws',
     poolError: new Error('boom'),
-    expected: null,
+    // No prompt problem here, so nothing is degraded: the channel simply never
+    // produced a verdict. poolCalls is pinned at 2 -- the ladder must actually
+    // try its rungs; a single call would mean the retry was lost.
+    expected: { passed: false, outcome: 'block_no_verdict', poolCalls: 2, nudges: 0 },
   },
   {
     name: 'filtered',

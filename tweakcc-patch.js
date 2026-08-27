@@ -1601,6 +1601,13 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   );
   const mFinal = js.match(rxFinal);
   if (!mFinal) fail('streaming partial-finalize site not found');
+  // Every captured value below is spliced into a replacement string whose
+  // pattern is this 11-group RegExp, so there `$1`..`$9` are live backreferences
+  // and `$$` collapses. Five of them were escaped and six were not; the six were
+  // `$`-free on 233/240/242/246/247, which is why nothing broke. `accExpr` is the
+  // one to watch -- it captures up to 300 characters of arbitrary expression, not
+  // an identifier -- but minified identifiers may carry `$` too. repEsc on all of
+  // them, so the discipline holds by construction instead of by measurement.
   const [
     ,
     arFn,
@@ -1625,8 +1632,8 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
     // it, so the half answer is simply not finalized.
     js = js.replace(
       rxFinal,
-      `,${credited}!=="credited")${credited}="credited",${acc}+=${accExpr};` +
-        `throw ${errVar}}${repEsc(tail)}`,
+      `,${repEsc(credited)}!=="credited")${repEsc(credited)}="credited",` +
+        `${repEsc(acc)}+=${repEsc(accExpr)};throw ${repEsc(errVar)}}${repEsc(tail)}`,
     );
   } else {
     const recoverable =
@@ -1635,10 +1642,11 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
       `(${truncExpr}))`;
     js = js.replace(
       rxFinal,
-      `,${repEsc(recoverable)}?yield ${arFn}({content:${repEsc(content)},` +
+      `,${repEsc(recoverable)}?yield ${repEsc(arFn)}({content:${repEsc(content)},` +
         `error:"server_error",truncatedAfterOutput:${repEsc(truncExpr)}${repEsc(extraTail)}})` +
-        `:void 0,${credited}!=="credited")${credited}="credited",${acc}+=${accExpr};` +
-        `if(!${repEsc(recoverable)})throw ${errVar};break ${label}}${repEsc(tail)}`,
+        `:void 0,${repEsc(credited)}!=="credited")${repEsc(credited)}="credited",` +
+        `${repEsc(acc)}+=${repEsc(accExpr)};` +
+        `if(!${repEsc(recoverable)})throw ${repEsc(errVar)};break ${repEsc(label)}}${repEsc(tail)}`,
     );
   }
 
@@ -3204,7 +3212,12 @@ step('25 CLAUDE.md alternate filenames', () => {
   js =
     js.slice(0, declAt) +
     wrapper +
-    m[0].replace(`async function ${fn}(`, `async function ${inner}(`) +
+    // The pattern is a literal STRING, so `$` in it is matched verbatim and must
+    // NOT be escaped -- repEsc there would make the search fail. The replacement
+    // is the opposite: `inner` is built as `${fn}$cc`, so a loader name ending in
+    // `$` yields `$$` and collapses to one dollar. The wrapper would then call a
+    // name one character longer than the function it renamed.
+    m[0].replace(`async function ${fn}(`, `async function ${repEsc(inner)}(`) +
     js.slice(declAt + m[0].length);
   applied.push(`CLAUDE.md alternates: ${ALTS.join(', ')} (loader '${fn}')`);
 });
@@ -3319,10 +3332,30 @@ step('27 full-bypass mode keeps only the peer-machine immunity', () => {
 // was recorded and never read, so the build reported success while the patch
 // was missing (that is exactly how step 26 first shipped as a no-op).
 if (failures.length > 0) {
+  // Two very different causes produce the same list of "site not found", and
+  // they need opposite responses: a CONTAINER change (the bundle stopped being
+  // one module and became an entry plus ~1400 code-split chunks at 2.1.242, or
+  // the unpacker handed back only part of it) means no locator can match and
+  // the fix is in the unpacker; a RENAME of minified identifiers means the
+  // locators need re-grounding one by one. Saying which is cheap -- the module
+  // boundaries the unpacker inserts are countable -- and not saying it costs an
+  // hour of grepping in the wrong direction.
+  const boundaries = (js.match(/\/\*__tweakcc_module_boundary_\d+__\*\//g) || []).length;
+  const total = failures.length + applied.length;
+  const shape =
+    applied.length === 0
+      ? `\n  EVERY locator missed and the payload is ${js.length} bytes with ` +
+        `${boundaries} module boundaries. Zero boundaries on a version at or after ` +
+        `2.1.242 means the unpacker returned an incomplete bundle; a boundary count ` +
+        `in the usual range means the CONTAINER is intact and the names moved. ` +
+        `A whole-bundle grep will mislead either way -- minified names are scoped ` +
+        `to their chunk.`
+      : `\n  ${applied.length} of ${total} still applied (${boundaries} module ` +
+        `boundaries), so the container is intact and these particular sites moved.`;
   throw new Error(
-    `multi-provider patch: ${failures.length} of ${failures.length + applied.length} patches ` +
+    `multi-provider patch: ${failures.length} of ${total} patches ` +
     `could not be applied (nothing written):\n  - ${failures.join('\n  - ')}` +
-    (applied.length ? `\n  applied OK: ${applied.length}` : ''),
+    shape,
   );
 }
 

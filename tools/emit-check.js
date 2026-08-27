@@ -135,9 +135,32 @@ try {
                                    : tsc.error.message) + ')');
     process.exit(2);
   }
-  const unresolved = String(tsc.stdout || '')
-    .split('\n')
-    .filter((line) => NAME_ERRORS.test(line));
+  // `tsc.error` only covers "the process could not be created". A compiler that
+  // STARTED and then refused the job exits non-zero with a diagnostic that is
+  // not one of the four name errors -- an older tsc that does not know
+  // `--moduleResolution bundler` answers TS5023 -- and filtering stdout for
+  // name errors alone finds nothing, which reads exactly like success. The gate
+  // would then print that every name resolves on a run where nothing was
+  // checked at all. Any exit code the filter cannot account for is a refusal.
+  const out = String(tsc.stdout || '') + String(tsc.stderr || '');
+  const unresolved = out.split('\n').filter((line) => NAME_ERRORS.test(line));
+  // A non-zero exit is NOT by itself a refusal: this gate deliberately asks only
+  // about name resolution, so an ordinary run reports type errors (TS2339 on the
+  // stubs in site.d.ts) and exits 1 while having checked exactly what we asked.
+  // The question is whether the compiler ever reached OUR file. If it did, every
+  // diagnostic it emits is anchored to block.js; if it refused the job -- an
+  // older tsc that does not know `--moduleResolution bundler` answers TS5023 --
+  // there is no such line, and filtering for name errors alone would find
+  // nothing and read exactly like success.
+  const reachedOurFile = tsc.status === 0 || /block\.js\(/.test(out);
+  if (!reachedOurFile) {
+    console.error(`ПРОВЕРКА ИМЁН НЕ ВЫПОЛНЕНА: tsc вышел с кодом ${tsc.status}, не выдав`);
+    console.error('ни одной диагностики по проверяемому файлу — проверять было нечем.');
+    for (const line of out.split('\n').filter(Boolean).slice(0, 8)) {
+      console.error('  ' + line);
+    }
+    process.exit(2);
+  }
   if (unresolved.length) {
     console.error('ИМЕНА, КОТОРЫЕ НЕ РАЗРЕШАЮТСЯ В ОБЛАСТИ ВКЛЕЙКИ:');
     for (const line of unresolved) {

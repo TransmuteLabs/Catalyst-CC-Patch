@@ -11,9 +11,14 @@
 #   CLAUDE_PATCH_SKIP_MODELS=1 bash claude-patch-all.sh # skip the model price/window sync
 #
 # --target exists for the case where the binary you want to patch is the one
-# currently RUNNING your session: patching in place rewrites a live executable
-# and can kill it. Instead, build into a staging file and swap it in with a
-# rename, which the running process (holding the old inode) never notices:
+# currently RUNNING your session, and it guards against two different harms.
+# The first is the obvious one: patching in place rewrites a live executable and
+# can kill the process reading it. The second is quieter and lasts longer --
+# between the tweakcc stage and ours the file on disk is a valid binary with
+# only HALF the patches, so a session started in that window has no
+# multi-provider routing and dies on "unknown provider"; and a run interrupted
+# there leaves the launcher target in that state permanently. Instead, build
+# into a staging file and swap it in with a rename, which the running process (holding the old inode) never notices:
 #
 #   V=~/.local/share/claude/versions/2.1.222
 #   cp -p "$V.orig" "$V.staging"
@@ -91,8 +96,17 @@ BUNDLE_ID="com.anthropic.claude-code"
 # ~/.claude.json is rewritten by the model sync (and by Claude Code itself), so
 # every run leaves a timestamped backup. Keep the three most recent.
 prune_config_backups() {
-  local count
-  count=$(ls ~/.claude.json.backup.* 2>/dev/null | wc -l)
+  # `ls` exits 1 when the glob matches nothing, and under `set -euo pipefail`
+  # that kills the whole script -- at a point that runs AFTER the launcher has
+  # already been repointed. The first --update in a fresh home would then end
+  # with no output, no `Done.` and a non-zero status, looking like a failed
+  # install of a build that is in fact installed and live. Count with a glob the
+  # shell expands itself; a non-matching glob leaves the literal behind, which
+  # the -e test rejects.
+  local count=0 f
+  for f in "$HOME"/.claude.json.backup.*; do
+    [[ -e "$f" ]] && count=$((count + 1))
+  done
   if [[ $count -gt 3 ]]; then
     echo "==> Cleaning old config backups (keeping 3 most recent)"
     ls -t ~/.claude.json.backup.* | tail -n +4 | while read -r f; do rm -v "$f"; done
@@ -162,6 +176,20 @@ done
 
 [[ -f "$OUR_PATCH" ]] || { echo "ERROR: tweakcc-patch.js not found next to this script"; exit 1; }
 command -v node >/dev/null || { echo "ERROR: node is required (tweakcc runs on Node)"; exit 1; }
+# Everything below is used by a gate or by the install step, and each one fails
+# in a way that reads like something else when it is absent: a missing `perl`,
+# `script` or `seq` makes the interface gate exit in a second and report "never
+# reached a render within 150s"; a missing `curl` or `tar` surfaces as "could
+# not fetch/unpack"; a missing `codesign` leaves an unsigned image whose
+# keychain access fails much later. Name the missing tool here instead.
+MISSING=()
+for t in python3 curl tar perl script seq awk sed grep sort codesign; do
+  command -v "$t" >/dev/null || MISSING+=("$t")
+done
+if (( ${#MISSING[@]} )); then
+  echo "ERROR: these tools are required and were not found on PATH: ${MISSING[*]}" >&2
+  exit 1
+fi
 
 # --- 0. optionally install a pristine Claude Code -----------------------------
 if [[ -n "$TARGET" ]]; then
@@ -278,7 +306,7 @@ ensure_tweakcc() {
     mkdir -p "$dir.tmp"
     # No `curl | tar`: a pipe reports the LAST stage's exit code, and a failed
     # download would read as a successful extraction of nothing.
-    curl -fsSL -o "$dir.tmp/src.tar.gz" \
+    curl -fsSL --connect-timeout 20 --max-time 300 -o "$dir.tmp/src.tar.gz" \
       "https://codeload.github.com/$CATALYST_TWEAKCC_REPO/tar.gz/$CATALYST_TWEAKCC_SHA" \
       || { echo "ERROR: could not fetch $CATALYST_TWEAKCC_REPO @ $CATALYST_TWEAKCC_SHA"; exit 1; }
     tar -xzf "$dir.tmp/src.tar.gz" -C "$dir.tmp" --strip-components=1 \
@@ -325,7 +353,16 @@ if cfg.get('ccInstallationPath') != target:
     print(f"Pinned tweakcc to {target}")
 PY
   fi
-  if "${TWEAKCC[@]}" --list-patches >/dev/null 2>&1; then
+  # A non-zero --list-patches meant "skip the apply", silently and with every
+  # byte of its output discarded. But that subcommand failing does not imply the
+  # apply would fail: a tweakcc that cannot parse its config, or that dropped
+  # this subcommand, still patches. Skipping the entire third-party stage
+  # without saying why leaves a build carrying none of those patches and a
+  # perfectly clean `Done.` -- the same silence the rest of this block exists to
+  # end, one level up.
+  TWEAKCC_LIST_OUT="$(mktemp)"
+  if "${TWEAKCC[@]}" --list-patches >"$TWEAKCC_LIST_OUT" 2>&1; then
+    rm -f "$TWEAKCC_LIST_OUT"
     echo "==> Applying tweakcc's configured patches"
     # A patch of tweakcc's that cannot find its site prints a ✗ row and marks
     # itself failed -- and then the CLI exits 0 anyway. Nothing downstream looks
@@ -375,6 +412,15 @@ PY
       echo "  the failure check below is now blind. Inspect: $TWEAKCC_OUT" >&2
       echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
       exit 1
+    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]] \
+         && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
+      # The hatch is legitimate -- it exists for building against a version where
+      # something is known not to apply yet -- but it must not be invisible. It
+      # only ever announced itself in the non-zero-exit branch, so a build where
+      # tweakcc exited 0 with a ✗ row went out with a patch missing and nothing
+      # in the log to say a gate had been turned off.
+      echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 — these tweakcc patches did NOT apply:" >&2
+      grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
     elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
          && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
       echo "FATAL: a configured tweakcc patch did not apply:" >&2
@@ -385,6 +431,12 @@ PY
       exit 1
     fi
     rm -f "$TWEAKCC_OUT"
+  else
+    echo "FATAL: tweakcc could not list its patches, so its whole stage would be" >&2
+    echo "       skipped and the build would carry none of them:" >&2
+    tail -n 12 "$TWEAKCC_LIST_OUT" | sed 's/^/  /' >&2
+    rm -f "$TWEAKCC_LIST_OUT"
+    exit 1
   fi
 fi
 
@@ -616,9 +668,16 @@ def _judge_catch_scope(d):
 
 def _captured_names(src):
     # Names captured by a regex, and everything built from them.
-    n = set(re.findall(r'const (\w+) = [^;\n]*\[\d+\]', src))
+    #
+    # The spacing around `=` is NOT part of the thing being detected. Requiring
+    # it made the whole check depend on a formatting habit: a single
+    # `const x=m[1]` would drop that name from the set, and since the check ends
+    # in `return not bad`, an empty set makes it green no matter how many bare
+    # `${...}` sit in the templates. `\s*` costs nothing and removes a way for
+    # the guarantee to evaporate silently.
+    n = set(re.findall(r'const (\w+)\s*=\s*[^;\n]*\[\d+\]', src))
     for _ in range(3):
-        for m in re.finditer(r'const (\w+) =\s*(`[^`]*`)', src):
+        for m in re.finditer(r'const (\w+)\s*=\s*(`[^`]*`)', src):
             if any(g in n for g in re.findall(r'\$\{(\w+)\}', m.group(2))):
                 n.add(m.group(1))
     return n
@@ -642,21 +701,64 @@ def _escaped_interpolations(src):
     # pattern that cannot match. So siteName counts for js.replace and never for
     # new RegExp.
     refused = set(re.findall(r'const (\w+) = siteName\(', src))
-    names, lines, bad = _captured_names(src), src.split('\n'), []
-    for i, ln in enumerate(lines):
-        hits = [x for x in names if '${%s}' % x in ln]
-        if not hits:
-            continue
-        for j in range(i, max(-1, i - 6), -1):
-            t = lines[j]
-            if 'applied.push(' in t or 'fail(' in t:
-                break
-            if 'new RegExp(' in t:
-                bad += hits
-                break
-            if 'js.replace(' in t:
-                bad += [x for x in hits if x not in refused]
-                break
+    names = _captured_names(src)
+    bad = []
+
+    # `.replace(pattern, replacement)` has TWO slots with OPPOSITE rules, and
+    # conflating them is not conservative -- it is wrong in both directions.
+    # In a LITERAL string pattern `$` is matched verbatim, so escaping it there
+    # would make the search fail; in the replacement `$` is syntax, so NOT
+    # escaping it substitutes someone else's capture. The old form flagged every
+    # name near any `.replace(`, which demanded repEsc on a literal pattern --
+    # a change that would have broken the very site it was pointing at.
+    def args_at(pos):
+        """Split the argument list starting at the '(' that follows pos."""
+        k = src.index('(', pos)
+        depth, out, cur, i2 = 0, [], [], k
+        quote = None
+        while i2 < len(src):
+            ch = src[i2]
+            if quote:
+                if ch == '\\':
+                    cur.append(src[i2:i2 + 2]); i2 += 2; continue
+                if ch == quote:
+                    quote = None
+                cur.append(ch); i2 += 1; continue
+            if ch in '\'"`':
+                quote = ch; cur.append(ch); i2 += 1; continue
+            if ch in '([{':
+                depth += 1
+                if depth == 1:
+                    i2 += 1; continue
+            elif ch in ')]}':
+                depth -= 1
+                if depth == 0:
+                    out.append(''.join(cur)); return out
+            elif ch == ',' and depth == 1:
+                out.append(''.join(cur)); cur = []; i2 += 1; continue
+            cur.append(ch); i2 += 1
+        return out
+
+    def slots(call_pos, kind):
+        """Which argument slots of this call are dangerous for a bare name."""
+        a = args_at(call_pos)
+        if kind == 'regexp':          # new RegExp(source, flags)
+            return a[:1]
+        if not a:
+            return []
+        pat = a[0].lstrip()
+        # A literal-string pattern is a verbatim search: safe slot.
+        literal = pat[:1] in ('`', '"', "'")
+        return (a[1:2] if literal else a[:2])
+
+    for m in re.finditer(r'new RegExp\s*\(', src):
+        for slot in slots(m.end() - 1, 'regexp'):
+            bad += [x for x in names if '${%s}' % x in slot]
+
+    for m in re.finditer(r'\.replace\s*\(', src):
+        for slot in slots(m.end() - 1, 'replace'):
+            bad += [x for x in names if '${%s}' % x in slot and x not in refused]
+
     return not bad
 
 def _judge_both_shapes(src):
@@ -1130,6 +1232,180 @@ def _consumer_uses_no_core_privates(full):
     return bool(re.search(rb'catch\(__ne\)\{try\{await __svc\.log\(\{'
                           rb'outcome:"nudge_undelivered",reason:__svc\.clip\(', full))
 
+def _resumed_model_is_the_request(d):
+    """The reader must prefer the recorded request AND strip it with the
+    reader's OWN stripper.
+
+    Matching any `<name>(x.requestedModel)` would accept `String(...)`, which
+    strips nothing: the stock reader appends `[1m]` further down, so an id that
+    already carries the suffix comes back as `...[1m][1m]`. The name is
+    therefore pinned to the one the stock verdict chain uses a few characters
+    later (`||<stripper>(<model>)===<configured>`), which is the function that
+    actually removes the suffix.
+    """
+    m = re.search(rb'let ' + ID + rb'=typeof (' + ID + rb')\.requestedModel==="string"\?('
+                  + ID + rb')\(\1\.requestedModel\):\1\.message\.model,', d)
+    if not m:
+        return False
+    stripper = re.escape(m.group(2))
+    return bool(re.search(rb'\|\|' + stripper + rb'\(' + ID + rb'\)===', d[m.end():m.end() + 700]))
+
+
+def _every_entry_records_the_request(d):
+    """Coverage, not a count of the patched form.
+
+    Counting our own prefix four times cannot see a construction site that was
+    never patched -- the counter reads 4 either way, and a resume that lands on
+    the unpatched entry is back to restoring the echo, but only sometimes.
+
+    The site cannot be recognised by the call that precedes it: `[^)]*` does not
+    cross a `)`, so that shape also matches six unrelated calls that merely share
+    the prefix (measured: 10 hits, 4 of them real). Recognise it by the anchor it
+    ends at instead. Of the eight `type:"assistant",uuid:` sites in the image,
+    four are built FROM A REQUEST -- those carry both `.querySource,` and
+    `.spawnedBySkill` just before them -- and each of those four must record the
+    request's model. The other four build entries from something else and are not
+    ours to touch.
+    """
+    from_request = 0
+    for m in re.finditer(rb'type:"assistant",uuid:', d):
+        back = d[max(0, m.start() - 400):m.start()]
+        if b'.querySource,' not in back or b'.spawnedBySkill' not in back:
+            continue
+        from_request += 1
+        if not re.search(rb'\.\.\.typeof (' + ID + rb')\.model==="string"&&'
+                         rb'\{requestedModel:\1\.model\},$', back):
+            return False
+    return from_request == 4
+
+def _gateway_ids_are_undisguised(d):
+    """Every gateway-model filter is followed by a map that RESTORES the id.
+
+    The disguise is a prefix plus a reversal, so undoing it is
+    `[...<x>.id.slice(18)].reverse().join("")`. Each of the three parts is load
+    bearing; a map that keeps the entry untouched satisfies a check that only
+    looks for the prefix.
+    """
+    undisguise = len(re.findall(
+        rb'\.map\(\((' + ID + rb')\)=>\1\.id\.startsWith\("claude-fable-5-dd-"\)\?'
+        rb'\{\.\.\.\1,id:\[\.\.\.\1\.id\.slice\(18\)\]\.reverse\(\)\.join\(""\)\}:\1\)', d))
+    filters = len(re.findall(rb'/\(claude\|anthropic\)/i\.test\(', d))
+    return undisguise == filters > 0
+
+
+def _chevron_colour_follows_state(d):
+    """The chevron's colour is the themed colour when loading, a literal when not.
+
+    Pinned to the chevron's own destructuring (`themeColor:<t>}=<props>,<c>=<t>??
+    void 0`) rather than to the ternary's shape, so a restored stock chevron
+    cannot be covered by an unrelated `color:X?Y:"z",dimColor:!1` elsewhere.
+    """
+    m = re.search(rb'color:(' + ID + rb')\?(' + ID + rb'):"[^"]*",dimColor:!1', d)
+    if not m:
+        return False
+    colour = re.escape(m.group(2))
+    head = d[max(0, m.start() - 900):m.start()]
+    return bool(re.search(rb'themeColor:(' + ID + rb')\}=' + ID + rb',' + colour + rb'=\1\?\?void 0', head))
+
+
+def _sudo_refusal_is_neutralised(d):
+    """Both sites, by their consequents.
+
+    Absence of the stock phrase looks like the obvious test and is not available:
+    the refusal text lives in the image's STRING POOL, not only in the code that
+    reads it, so neutralising the branch leaves the sentence in the file forever
+    (measured on every version -- `root/sudo privileges` is present in the pool of
+    each patched image). Requiring its absence could therefore never pass.
+
+    What the step actually does is turn each consequent into `void 0`, at TWO
+    sites: the bypass-option guard and the setup path. Requiring both is what
+    makes this mean something -- one alone would go green with the other refusal
+    still alive.
+    """
+    guarded = re.search(rb'if\(' + ID + rb'\.isRootOutsideDeliberateSandbox\(\)\)void 0', d)
+    setup = re.search(rb'process\.getuid\(\)===0&&process\.env\.IS_SANDBOX!=="1"&&'
+                      rb'!' + ID + rb'\.CLAUDE_CODE_BUBBLEWRAP\)void 0', d)
+    return bool(guarded and setup)
+
+def _claude_md_alternates_are_tried(d):
+    """The full alternate list AND the descriptor that must not be handed over.
+
+    Two adjacent names in a literal prove neither. The part that can produce a
+    WRONG answer rather than a missing one is the fourth argument: passing the
+    storage descriptor to an alternate makes the loader serve CLAUDE.md's own
+    bytes under another name, so the step passes `void 0` there deliberately.
+    """
+    names = b'["AGENTS.md","GEMINI.md","CRUSH.md","QWEN.md","IFLOW.md","WARP.md","copilot-instructions.md"]'
+    if names not in d:
+        return False
+    return bool(re.search(rb'await ' + ID + rb'\$tw\(__sw\(__p,__n\),' + ID + rb','
+                          rb'__c\?__sw\(__c,__n\):' + ID + rb',void 0\)', d))
+
+
+def _cancellation_rule_is_whole(d):
+    """The whole rule, not its first clause.
+
+    Each pinned fragment is a separate instruction the main loop needs; any one
+    of them can be dropped without touching the others, and the opening clause
+    alone proves none of them.
+    """
+    if not re.search(rb'\.\.\.\(process\.env\.CLAUDE_JUDGE&&' + ID
+                     + rb'\?\.agentContext\?\.agentType==="main"\?\['
+                     rb'"A subagent dispatch may be reviewed before it runs\.', d):
+        return False
+    for clause in (b'treat that reason as a correction to apply',
+                   b'Reissue the dispatch only with the change it names',
+                   b'never repeat the identical call',
+                   b'separate from the permission system'):
+        if clause not in d:
+            return False
+    return True
+
+
+def _statusline_throttle_raised(d):
+    """The constant the debounce actually reads, in the debounce's OWN module.
+
+    Minified names are chunk-local, so `var <name>=500` anywhere in the bundle
+    is not evidence about this one: another chunk is free to bind the same
+    letters to something unrelated. The step deliberately edits within the
+    module; the check has to look there too, or a same-named constant elsewhere
+    keeps it green while the status line is throttled at the stock value again.
+    """
+    m = re.search(rb'\.setTimeout\(\(\)=>\{this\.#' + ID + rb'=null,this\.#' + ID
+                  + rb'\(\)\},(' + ID + rb')\)\}', d)
+    if not m:
+        return False
+    lo = d.rfind(b'/*__tweakcc_module_boundary_', 0, m.start())
+    hi = d.find(b'/*__tweakcc_module_boundary_', m.start())
+    module = d[lo if lo >= 0 else 0:hi if hi >= 0 else len(d)]
+    return bool(re.search(rb'var ' + re.escape(m.group(1)) + rb'=500\b', module))
+
+
+def _dispatch_keeps_its_model(d):
+    """The model chosen for a dispatch reaches the record the launch writes.
+
+    The old half of this pair looked for `Date.now(),<v>=<f>()?void 0:` -- a shape
+    with ZERO occurrences on 2.1.247, pristine as well as patched, so it could not
+    become false and the name's promise rested entirely on the other half.
+
+    The record's SHAPE is not stable across the range: `parentModel:` only exists
+    from 2.1.242 (measured: absent on 233 and 240, where the value travels as
+    `model:<v>??(...)` instead), so pinning that field would have made this check
+    a 242+ check wearing a range-wide name. What is stable is the variable: it is
+    initialised from the dispatch's model at the depth-check and appears as
+    `model:<v>` within the launch function. Both ends are required, so dropping it
+    at either one fails -- `void 0` cannot match the identifier pattern, and a
+    record built with `model:void 0` no longer names the variable.
+    """
+    m = re.search(rb'Date\.now\(\),(' + ID + rb')=(' + ID + rb'),' + ID + rb'=' + ID
+                  + rb'\(' + ID + rb'\.agentContext\)', d)
+    if not m:
+        return False
+    var = re.escape(m.group(1))
+    # Bounded to the launch function: the names here are one letter long, so an
+    # unbounded search would find someone else's `model:f` in another chunk.
+    return bool(re.search(rb'model:' + var + rb'(?![\w$.])', d[m.end():m.end() + 8000]))
+
 _probe_full = d
 _probe_dup = re.findall(rb'/\*__ccCore0\*/[\s\S]*?/\*__ccCore1\*/', d)
 for _b in _probe_dup[1:]:
@@ -1137,11 +1413,11 @@ for _b in _probe_dup[1:]:
 
 checks = {
     'routing (claude-* -> subscription)': _routing_agrees_with_connection(d),
-    'captured names are escaped into patterns': _escaped_interpolations(src),
+    'patch source escapes every captured name': _escaped_interpolations(src),
     'patch source keeps both dispatcher shapes': _judge_both_shapes(src),
     'full bypass keeps peer-machine immunity': _bypass_no_immunity(d),
     'agent model schema relaxed':         _agent_model_schema_relaxed(d),
-    'every launch carries effort':        _every_launch_carries_effort(d),
+    'each launch site carries effort by one route or the other':        _every_launch_carries_effort(d),
     'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
     # Two-sided: the stock branch must be gone AND the widened one must still
     # test the "inherit" sentinel. The negative alone passed a build where the
@@ -1157,14 +1433,21 @@ checks = {
     # made this check stricter than the step it verifies: step 6 became
     # colour-agnostic when tweakcc started writing this edit first, so setting
     # chevronIdleThemeColor to anything else would pass the step and fail here.
-    'input chevron colour':               bool(re.search(rb'color:' + ID + rb'\?' + ID + rb':"[^"]*",dimColor:!1', d)),
+    # Anchored to the chevron itself, not to the shape of a ternary: `color:X?Y:"z"
+    # ,dimColor:!1` occurs wherever someone writes one, so the stock chevron could
+    # be restored and a lookalike elsewhere would keep this green.
+    'input chevron colour':               _chevron_colour_follows_state(d),
     'session memory forced on':           _session_memory_ungated(d),
     # every override read must now be a merge: `{...X().additionalModelCostsCache,...X().customModelCosts}`
     'custom model costs':                 len(re.findall(rb'\{\.\.\.' + ID + rb'\(\)\.additionalModelCostsCache,\.\.\.' + ID + rb'\(\)\.customModelCosts\}', d))
                                           == len(re.findall(ID + rb'\(\)\.additionalModelCostsCache', d)) > 0,
     # every gateway-model filter must be followed by the de-disguise map
-    'gateway model de-disguise':          len(re.findall(rb'\.map\(\(' + ID + rb'\)=>' + ID + rb'\.id\.startsWith\("claude-fable-5-dd-"\)', d))
-                                          == len(re.findall(rb'/\(claude\|anthropic\)/i\.test\(', d)) > 0,
+    # ...and the map must actually UNDO the disguise. Counting maps that merely
+    # mention the prefix accepts `?h:h` and accepts dropping `.reverse()`: the
+    # gateway id stays masked, the filter above still reads as patched, and the
+    # feature is gone with the gate green. The transformation is what the step
+    # promises, so the transformation is what is pinned.
+    'gateway model de-disguise':          _gateway_ids_are_undisguised(d),
     # One site, two lookups (raw id, then canonical name), read through a
     # guarded local at the HEAD of the function. Counting `().customModelContext
     # Windows?.[` was satisfied by the old tail placement, where four earlier
@@ -1193,9 +1476,8 @@ checks = {
                                               + ID + rb'\.Authorization=null,' + ID + rb'\["X-Api-Key"\]=null;', d)),
     # no path may still discard the caller's model: not coordinator mode, and
     # not the fork path (whose flag is whatever is_fork reports)
-    'dispatch keeps its model':           not re.search(rb'Date\.now\(\),' + ID + rb'=' + ID + rb'\(\)\?void 0:', d)
-                                          and _fork_drops_are_gone(d),
-    'fork sweep stayed near its anchor':  _fork_sweep_stayed_near_its_anchor(d),
+    'dispatch keeps its model': _dispatch_keeps_its_model(d) and _fork_drops_are_gone(d),
+    'Vertex project resolution intact (fork-sweep tripwire)':  _fork_sweep_stayed_near_its_anchor(d),
     # effort must be DECLARED (schema), CARRIED (call handler) and USED (spliced
     # into the definition the runtime reads) — declaring it alone would satisfy
     # a routing gate while the request still went at the vendor default
@@ -1313,16 +1595,13 @@ checks = {
     # prefer the recorded request and strip the suffix (the stock reader appends
     # `[1m]` itself further down), falling back to the echo for transcripts
     # written before this existed.
-    'resumed model is the requested id, not the echo': bool(re.search(
-                                              rb'let ' + ID + rb'=typeof (' + ID + rb')\.requestedModel==="string"\?'
-                                              rb'' + ID + rb'\(\1\.requestedModel\):\1\.message\.model,', d)),
+    'resumed model is the requested id, not the echo': _resumed_model_is_the_request(d),
     # The read side is useless unless EVERY assistant entry built from a request
     # carries the field. Four construction sites; a count check rather than a
     # presence check, because three out of four would leave a resume that lands
     # on the fourth restoring the echo again -- intermittently, which is the
     # hardest form to diagnose.
-    'every assistant entry records the model it asked for': (
-        len(re.findall(rb'\.\.\.typeof ' + ID + rb'\.model==="string"&&\{requestedModel:', d)) == 4),
+    'every assistant entry records the model it asked for': _every_entry_records_the_request(d),
     # judge part 1: the current turn (thinking included) is stashed by
     # tool_use id, because the message reaching the executor carries the
     # tool_use block alone
@@ -1349,7 +1628,7 @@ checks = {
     # number of copies including the drifted ones it was written to forbid.
     # (Copies across sites are compared byte for byte by the entry above; this
     # one is what keeps a single site from accumulating two.)
-    'probe core defined once per site': len(re.findall(
+    'exactly one probe core survives the collapse': len(re.findall(
                                               rb'globalThis\.__ccProbe\?\?=async function\(__o\)\{', d)) == 1,
     # The verdict vocabulary is set by the CALLER: the judge and the watcher
     # have different ones, and a vocabulary hardcoded into the core would
@@ -1478,7 +1757,7 @@ checks = {
                                               rb'let __base=\{t:__ts,rx:', d),
     # a WARN never reaches the model and a fail-open skip leaves no trace,
     # so both are only observable through the append-only journal
-    'judge journals every consultation': bool(re.search(
+    'judge has a journal sink': bool(re.search(
                                               rb'appendFile\(__jdir\+"/journal\.jsonl"', d)),
     # a journal line has to say which switch armed enforcement and what the
     # consultation cost — without both, `block` and `block_not_enforced` are
@@ -1536,10 +1815,20 @@ checks = {
                                               rb'__pb=Math\.floor\(__b\*0\.35\),__sb=Math\.floor\(__b\*0\.3\);', d)),
     # the main loop is told the RULE, not the judge: a cancelled dispatch was
     # once read as the routing gate firing and blindly retried
-    'dispatch-cancellation rule reaches the main loop': bool(re.search(
-                                              rb'\.\.\.\(process\.env\.CLAUDE_JUDGE&&[A-Za-z_$][\w$]*'
-                                              rb'\?\.agentContext\?\.agentType==="main"\?\['
-                                              rb'"A subagent dispatch may be reviewed', d)),
+    # The opening of the sentence is not the rule. Truncate it after "may be
+    # reviewed." and the gate stays green while the part that carries the
+    # instruction -- reissue only with the named change, never repeat the
+    # identical call, this is not the permission system -- is gone. The clauses
+    # that make it actionable are pinned individually.
+    'dispatch-cancellation rule reaches the main loop': _cancellation_rule_is_whole(d),
+    # Step 12 also rewrites what the schema TELLS the model about a fork's model
+    # override; stock says the override is ignored, which is false once the code
+    # honours it. Nothing measured that, so restoring the stock sentence left all
+    # gates green and the model reading the opposite of how the tool behaves.
+    'fork model override is documented as working': bool(re.search(
+                                              rb'For subagent_type: "fork" it selects the model the fork '
+                                              rb'runs on', d))
+                                          and not re.search(rb'forks always inherit the parent model', d),
     # a record has to be REPLAYABLE, so it carries the endpoint, the sending
     # process, and what every rung was fed — not just the body that answered
     'judge keeps the full consultation': bool(re.search(
@@ -1887,24 +2176,34 @@ checks = {
     # a bare 'var X=500' matches six unrelated constants in the PRISTINE binary,
     # so the check has to reach the debounce site first and then assert on the
     # constant that site actually names
-    'statusline throttle raised': (lambda mm: bool(mm) and bool(re.search(
-                                              # the captured name may contain `$`, which is an
-                                              # ANCHOR in a pattern: the same class the patch
-                                              # script closes with rxEsc, missed here. On 2.1.245
-                                              # the constant is named `$Ke` and this check
-                                              # reported a false FAIL for a correctly patched
-                                              # binary. It is the only unescaped interpolation in
-                                              # this file — the other .group() uses are haystacks.
-                                              rb'var ' + re.escape(mm.group(1)) + rb'=500\b', d)))(
-                                          re.search(rb'\.setTimeout\(\(\)=>\{this\.#' + ID
-                                                    + rb'=null,this\.#' + ID + rb'\(\)\},('
-                                                    + ID + rb')\)\}', d)),
-    'root/sudo refusal neutralised': not re.search(
-                                              rb'cannot be used with root/sudo privileges'
-                                              rb' for security reasons"\),process\.exit\(1\)', d),
-    'CLAUDE.md alternates tried': bool(re.search(
-                                              rb'"AGENTS\.md","GEMINI\.md"', d)),
+    # The escaping note the old form carried still holds and now lives inside
+    # the helper; what it could not do is keep the search inside the module the
+    # step edits.
+    'statusline throttle raised': _statusline_throttle_raised(d),
+    # One-sided: the exact stock phrase is gone. Rewrite the refusal in any other
+    # words and it stays green while the refusal is alive again. The positive
+    # half asserts what should be there instead -- the guard evaluating to
+    # `void 0` -- and the step's own second anchor (the bare phrase) is checked
+    # too, so a reworded upstream cannot pass unnoticed.
+    'root/sudo refusal neutralised': _sudo_refusal_is_neutralised(d),
+    # Two adjacent names in a literal proved neither the full list nor the part
+    # that can give a WRONG answer instead of a missing one: the alternates are
+    # read with `void 0` in place of the storage descriptor, and swapping that
+    # back makes the loader serve CLAUDE.md's bytes under another name. Both are
+    # pinned now.
+    'CLAUDE.md alternates tried': _claude_md_alternates_are_tried(d),
 }
+# The count is an invariant, not a running total. `all({}.values())` is True,
+# so a merge that drops the dictionary -- or a block of it -- leaves a green
+# build with nothing behind it. And an unpinned count is a number people get
+# wrong: the author of these lines twice recounted the keys with a regex that
+# breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
+# reported 88, and was corrected by the run itself printing 89.
+EXPECTED_CHECKS = 89
+if len(checks) != EXPECTED_CHECKS:
+    print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
+          f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
+    sys.exit(1)
 for name, ok in checks.items():
     print(f"  [{'OK' if ok else 'FAIL'}] {name}")
 sys.exit(0 if all(checks.values()) else 1)
@@ -2122,6 +2421,18 @@ done
 
 if [[ $GATE_EXITED -eq 0 ]]; then
   kill -TERM -"$GATE_PID" 2>/dev/null || kill -TERM "$GATE_PID" 2>/dev/null || true
+  # GATE_BUDGET bounds the POLLING, not this. A child that ignores TERM -- or is
+  # stuck in a syscall -- leaves the bare `wait` below waiting forever, and the
+  # FATAL that explains the timeout sits after it and never prints. Give TERM a
+  # few seconds, then take the process group out with KILL.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$GATE_PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$GATE_PID" 2>/dev/null; then
+    echo "  the interface gate ignored TERM; killing it" >&2
+    kill -KILL -"$GATE_PID" 2>/dev/null || kill -KILL "$GATE_PID" 2>/dev/null || true
+  fi
   wait $GATE_PID 2>/dev/null || true
   GATE_RC=0
 fi
@@ -2143,16 +2454,27 @@ case "$GATE_STATE" in
     exit 1
     ;;
   *)
-    echo "FATAL: the interface gate never reached a render within ${GATE_BUDGET}s," >&2
-    echo "       so it proves nothing — refusing to call this build good." >&2
-    echo "       Raise CLAUDE_PATCH_GATE_BUDGET if the machine is simply slow." >&2
+    # Three different faults arrive here, and only one of them is "the machine is
+    # slow": the child may never have started (a helper missing from PATH exits
+    # 127 in the first second), it may have exited non-zero without drawing, or
+    # it may genuinely still be starting when the budget runs out. Advising a
+    # bigger budget for the first two sends the reader in the wrong direction.
+    if [[ $GATE_EXITED -eq 1 ]]; then
+      echo "FATAL: the interface gate exited ${GATE_RC:-?} without drawing anything." >&2
+      echo "       That is not a timeout — the run ended on its own." >&2
+      tail -n 12 "$GATE_LOG" 2>/dev/null | sed 's/^/  /' >&2
+    else
+      echo "FATAL: the interface gate never reached a render within ${GATE_BUDGET}s," >&2
+      echo "       so it proves nothing — refusing to call this build good." >&2
+      echo "       Raise CLAUDE_PATCH_GATE_BUDGET if the machine is simply slow." >&2
+    fi
     echo "  capture kept at $GATE_LOG" >&2
     exit 1
     ;;
 esac
 
 # --- 5a3. the probes must BEHAVE, not merely be present -----------------------
-# The 86 checks above are text checks on the image and the interface gate only
+# The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
 # and drives 37 scenarios through a throwaway probes home — verdicts, degraded
@@ -2169,7 +2491,13 @@ esac
 # ReferenceError and returns null. A green build said nothing about any of it.
 #
 # It runs in under a second, so there is no cost worth trading for the silence.
-if [[ "${CLAUDE_PATCH_SKIP_BENCH:-0}" != "1" ]]; then
+if [[ "${CLAUDE_PATCH_SKIP_BENCH:-0}" == "1" ]]; then
+  # An escape hatch that leaves no trace is indistinguishable from a gate that
+  # ran. This one is inheritable from a shell profile or an earlier diagnostic
+  # run, and the build would otherwise end on `Done.` with no hint that the only
+  # gate which EXECUTES the judge and the watcher never ran.
+  echo "Probes: SKIPPED — CLAUDE_PATCH_SKIP_BENCH=1; judge and watcher behaviour is UNVERIFIED" >&2
+else
   BENCH="$(dirname "$0")/tools/probe-bench.js"
   if ! command -v bun >/dev/null; then
     # The bench must run under bun: the image is a single-file bun executable
@@ -2182,10 +2510,22 @@ if [[ "${CLAUDE_PATCH_SKIP_BENCH:-0}" != "1" ]]; then
   BENCH_LOG="$(mktemp)"
   if bun "$BENCH" --binary "$BIN" >"$BENCH_LOG" 2>&1; then
     echo "Probes: $(grep -c '^[a-z][a-z0-9-]* *|' "$BENCH_LOG") scenarios behaved as specified"
+    # The bench says so itself when its bun differs from the image's: the block
+    # is executed by a DIFFERENT engine than the one that will run it in
+    # production, so runtime-level differences are not covered. That warning
+    # went to the log, and the success branch deleted the log unread.
+    grep '^probe-bench: ВНИМАНИЕ' "$BENCH_LOG" >&2 || true
     rm -f "$BENCH_LOG"
   else
     echo "FATAL: the probe bench found behaviour that does not match its specification:" >&2
-    grep -E 'MISMATCH|probe-bench:' "$BENCH_LOG" | sed 's/^/  /' >&2
+    # `grep` exits 1 when nothing matches, and under `set -euo pipefail` that
+    # ends the script before the next line -- so the one failure mode we cannot
+    # classify (bun killed by a signal, a runtime crash with no MISMATCH line)
+    # would print a bare FATAL and swallow the path to the log that explains it.
+    if ! grep -E 'MISMATCH|probe-bench:' "$BENCH_LOG" | sed 's/^/  /' >&2; then
+      echo "  (no MISMATCH or probe-bench line — the bench failed some other way)" >&2
+      tail -n 15 "$BENCH_LOG" | sed 's/^/  /' >&2
+    fi
     echo "  full table kept at $BENCH_LOG" >&2
     echo "  Set CLAUDE_PATCH_SKIP_BENCH=1 to build without this gate." >&2
     exit 1
@@ -2200,6 +2540,16 @@ fi
 # "unknown provider for model claude-opus-5" (observed 2026-08-18). The checks
 # above are the gate: `set -e` aborts before this line if any of them failed.
 if [[ $DO_UPDATE -eq 1 ]]; then
+  # The installer hands back a `.staging` path when the requested version was
+  # already installed -- the live file was left untouched while we patched a
+  # copy. Swap it in now, with a rename: atomic, and it takes effect on the next
+  # launch rather than under a running process.
+  if [[ "$BIN" == *.staging ]]; then
+    FINAL="${BIN%.staging}"
+    mv "$BIN" "$FINAL"
+    echo "Swapped the verified build over the previous one: $FINAL"
+    BIN="$FINAL"
+  fi
   python3 "$HERE/claude_patch.py" --repoint "$BIN"
 fi
 
@@ -2226,18 +2576,31 @@ if [[ $DO_UPDATE -eq 1 ]]; then
   # Enumerate pids and ask about each: `lsof -c claude` returns nothing on
   # macOS for these processes (verified 2026-08-12, which is how a running
   # 2.1.226 got unlinked), while `lsof -p <pid>` reports the text image fine.
-  IN_USE="$(for p in $(pgrep -x claude 2>/dev/null); do
-      lsof -p "$p" 2>/dev/null | awk '$4=="txt"{print $NF}'
-    done | sort -u)"
-  for old in "$VERSIONS_DIR"/2.1.*; do
-    base="$(basename "$old")"
-    [[ "$base" == "$CURRENT_VER" || "$base" == "$CURRENT_VER.orig" ]] && continue
-    if grep -qxF "$old" <<<"$IN_USE"; then
-      echo "  kept (a running session is executing it): $base"
-      continue
-    fi
-    rm -v "$old"
-  done
+  # Both halves of that answer are silent when they fail. A missing `pgrep`
+  # inside the `for` substitution yields an empty list and status 0, which is
+  # indistinguishable from "no claude is running"; a missing `grep` sits in an
+  # `if` condition, where `set -e` does not look, so the test reads false and
+  # the `rm` runs anyway. Either way the deletion the comment above forbids --
+  # unlinking a binary a live session is executing -- happens quietly. Ask for
+  # the tools first: a stale binary costs disk, an unlinked live one costs the
+  # session.
+  if ! command -v pgrep >/dev/null || ! command -v lsof >/dev/null; then
+    echo "  skipped: without pgrep and lsof, 'is a live session executing it?'" >&2
+    echo "  cannot be answered — refusing to delete old versions on a guess." >&2
+  else
+    IN_USE="$(for p in $(pgrep -x claude 2>/dev/null); do
+        lsof -p "$p" 2>/dev/null | awk '$4=="txt"{print $NF}'
+      done | sort -u)"
+    for old in "$VERSIONS_DIR"/2.1.*; do
+      base="$(basename "$old")"
+      [[ "$base" == "$CURRENT_VER" || "$base" == "$CURRENT_VER.orig" ]] && continue
+      if grep -qxF "$old" <<<"$IN_USE"; then
+        echo "  kept (a running session is executing it): $base"
+        continue
+      fi
+      rm -v "$old"
+    done
+  fi
   prune_config_backups
 fi
 
@@ -2254,7 +2617,11 @@ fi
 # Never fatal. The sync needs the proxy up (for its model listing) and
 # models.dev reachable; neither has anything to do with whether the binary was
 # patched correctly, so a failure is a warning and the old numbers stay.
-if [[ "${CLAUDE_PATCH_SKIP_MODELS:-0}" != "1" && -f "$COSTS_SYNC" ]]; then
+if [[ "${CLAUDE_PATCH_SKIP_MODELS:-0}" == "1" ]]; then
+  echo "Model data: SKIPPED — CLAUDE_PATCH_SKIP_MODELS=1; prices and context windows are stale"
+elif [[ ! -f "$COSTS_SYNC" ]]; then
+  echo "Model data: SKIPPED — $(basename "$COSTS_SYNC") is not in this kit; prices and context windows are stale" >&2
+elif true; then
   echo
   echo "==> Refreshing model prices and context windows"
   MODELS_LOG="$(mktemp)"
@@ -2277,4 +2644,12 @@ echo "Done. Re-run this script after ANY of:"
 echo "  * a Claude Code update      (bash $(basename "$0") --update)"
 echo "  * running tweakcc's TUI or --apply (it restores from backup and drops our patches)"
 echo "  * the proxy gaining a model (or just: bash $(basename "$0") --only-ours)"
-echo "Restore the pristine binary with:  cp \"$BIN.orig\" \"$BIN\""
+# `.orig` is created by the installer, so it exists on the --update path only.
+# The default and --target paths patch in place and leave tweakcc's own backup
+# under ~/.tweakcc instead. Printing the cp unconditionally hands the reader a
+# recovery step that fails exactly when they need it.
+if [[ -f "$BIN.orig" ]]; then
+  echo "Restore the pristine binary with:  cp \"$BIN.orig\" \"$BIN\""
+else
+  echo "No pristine copy beside the binary; tweakcc keeps its own backup under ~/.tweakcc."
+fi

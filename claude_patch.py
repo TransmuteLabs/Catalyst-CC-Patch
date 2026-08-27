@@ -337,9 +337,37 @@ def main(argv: list[str]) -> None:
         # the byte-neutral ones this script normally applies).
         version = argv[1] if len(argv) > 1 else latest_version()
         target = versions_dir() / version
+        backup = target.with_name(target.name + ".orig")
+        # When the requested version is ALREADY installed, `target` is the file
+        # the launcher resolves to -- and download_binary opens its destination
+        # with "wb", truncating it in place. Writing pristine bytes there puts
+        # the live installation on an unpatched image for the whole run (every
+        # new session then sends claude-* to the proxy under the subscription
+        # bearer and dies on "unknown provider"), and an interrupted run leaves
+        # it that way for good. Deferring the launcher repoint cannot help: the
+        # launcher already points AT the file being clobbered.
+        #
+        # This is not a rare mistake to make. `--update` without a version
+        # resolves to npm's latest, which equals the installed version whenever
+        # nothing new was published, and a version-matrix sweep passes explicit
+        # versions that may include the live one.
+        #
+        # So when the target exists, download beside it and hand the caller the
+        # staging file. The pipeline patches THAT and renames it over the target
+        # once every gate has passed.
+        if target.exists():
+            staging = target.with_name(target.name + ".staging")
+            download_binary(version, staging)
+            info(f"{version} is already installed; built pristine beside it -> {staging}")
+            if not backup.exists():
+                # The installed file may already carry our patches, so it cannot
+                # serve as the pristine backup. The bytes just downloaded can.
+                shutil.copy2(staging, backup)
+                info(f"Backed up pristine -> {backup}")
+            print(staging)
+            return
         download_binary(version, target)
         info(f"Installed pristine {version} -> {target}")
-        backup = target.with_name(target.name + ".orig")
         if not backup.exists():
             shutil.copy2(target, backup)
             info(f"Backed up pristine -> {backup}")
