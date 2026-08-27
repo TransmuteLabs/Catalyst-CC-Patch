@@ -590,6 +590,18 @@ per-process counter separate everything else — across processes and
 inside one. Readers must keep treating `rec` as opaque; nothing may parse
 a meaning back out of the name.
 
+**The directory is bounded.** One record per consultation, ~28 KB each,
+about 130 a day — measured on the live install at 31 MB across 1134 files
+with nothing anywhere that ever deleted one. After each successful write
+the directory is listed and everything past the newest `records_keep`
+(default 500) is unlinked; record names begin with a fixed-width ISO
+stamp, so a lexicographic sort is chronological. The prune rides the
+WRITE on purpose: `record = false` means "stop writing", not "erase what
+is already there", and a switch that quietly destroyed an existing corpus
+would be a worse surprise than a directory that stops growing. A prune
+failure is reported on the same channel as a failed record write and
+never swallowed.
+
 The record schema grew over the campaign: the corpus's first seven
 records lack the `url`, `cwd`, and `attempts` fields — these appeared
 later. Every consumer of the corpus must tolerate this and say so out
@@ -654,6 +666,49 @@ If you dictate the call yourself, the judge sees a user sanction and
 answers `OK` where you expect a cancellation. Only the one who formulates
 the dispatch themselves and has not read the test plan can test a
 cancellation.
+
+## 9b. What leaves the machine
+
+The judge sends the current turn to a model over the proxy. What exactly
+goes was never written down, and "the judge sees the dispatch" reads as
+though only the dispatch goes. It does not. Stated plainly, because a
+mechanism whose outbound content is inferred rather than declared is one
+nobody can consent to:
+
+| Sent | Form | Limit |
+|------|------|-------|
+| user and assistant text | verbatim | none per block |
+| the model's `thinking` | verbatim, prefixed `[thinking]` | none per block |
+| every `tool_use` | tool name + its input serialized as JSON | first **400** characters |
+| every `tool_result` | the result content | first **300** characters |
+| the dispatch itself | `JSON.stringify(input)` — prompt, subagent_type, description, model | `dispatch_chars`, default 16000 |
+| the rules | `prompt.md`, or `CLAUDE_JUDGE_PROMPT`, or the built-in fallback | none |
+| the whole transcript | after the above, as one string | `context_chars`, default 60000 |
+
+So the output of commands, the paths and arguments the tools were called
+with, and the beginnings of files that were read all leave the machine
+whenever they are in the turn the judge is asked about. The judge does
+not open any path of its own — it reads only `prompt.md`, `probes.toml`
+and `body.json` — but material already present in a `tool_result` is
+material it forwards.
+
+There is **no content-based filtering**: `filter` in the config decides
+whether to consult at all (by dispatch class and agent type), not what to
+strip. The only reduction anywhere on this path is truncation by length.
+
+Everything sent is also written to disk beside the journal, in the record
+(§9), whose `request` field holds the outbound body verbatim.
+
+Two consequences worth stating. First, the destination is whatever the
+configured model id routes to through the local proxy — one consultation
+may walk the whole ladder and hand the same material to several vendors
+in turn (§5). Second, the material is NOT reflected back in a visible
+error: on an HTTP failure only the status code is raised, and on a pool
+failure only up to 300 characters of the channel's own reply.
+
+If a turn must not leave the machine, the lever is `enabled = false` or a
+`filter` that refuses the class — not an expectation that the judge
+redacts, because it does not.
 
 ## 10. Neighboring mechanisms
 

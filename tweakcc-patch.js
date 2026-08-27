@@ -882,17 +882,47 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   // spare and is 250x smaller than the miss it excludes. A build that moves a
   // drop site outside this radius fails the count bound loudly, which is the
   // outcome to want: this sweep must never again be free to roam.
-  const droppedRx = new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?void 0:(${ID})`, 'g');
+  // `|` and `&` join the exclusion, and that is what the radius was standing in
+  // for. Where the flag is the RIGHT operand of someone else's condition the
+  // drop is not ours: `O||L?void 0:process.env.ANTHROPIC_VERTEX_PROJECT_ID` on
+  // 233 (`L` is GOOGLE_APPLICATION_CREDENTIALS there) and `ae||A?void 0:u` in
+  // yoga-layout on 247. Measured on 233/240/242/243/245/246/247: with this
+  // exclusion there is not ONE hit outside the radius on any version, while
+  // without it there are exactly those two. So the radius stopped being the
+  // thing that tells ours from theirs, which it was never able to do -- it
+  // only measured distance -- and became a bound the sweep must stay inside.
+  const droppedRx = new RegExp(`(?<![$\\w|&])${rxEsc(fork)}\\?void 0:(${ID})`, 'g');
   const anchorIdx = js.search(new RegExp(`is_fork:${rxEsc(fork)},`));
   if (anchorIdx < 0) fail('fork telemetry anchor vanished between match and sweep');
   const [mStart, mEnd] = moduleSliceAround(js, anchorIdx);
   const SWEEP_RADIUS = 20000;
   const lo = Math.max(mStart, anchorIdx - SWEEP_RADIUS);
   const hi = Math.min(mEnd, anchorIdx + SWEEP_RADIUS);
+  // A real drop that moved out of the radius was invisible to BOTH sides: the
+  // patcher still counted >=2 inside and the check only ever looked inside, so
+  // the guarantee would be gone with the build green. The module is scanned
+  // whole and anything outside the window stops the build.
+  const strays = [...js.slice(mStart, mEnd).matchAll(new RegExp(droppedRx.source, 'g'))]
+    .filter((mm) => mm.index + mStart < lo || mm.index + mStart >= hi);
+  if (strays.length > 0) {
+    fail(
+      `fork value-drop outside the sweep radius: ${strays.length} site(s) — ` +
+        'a drop moved away from the is_fork anchor',
+    );
+  }
   let body = js.slice(lo, hi);
-  const droppedHits = body.match(droppedRx) ?? [];
-  if (droppedHits.length < 2 || droppedHits.length > 6)
-    fail(`fork value-drop sites: expected 2..6, found ${droppedHits.length}`);
+  const droppedAll = [...body.matchAll(new RegExp(droppedRx.source, 'g'))];
+  // 2..3, not 2..6. Measured: 2 on 233/240, 3 on 242..247. The old upper bound
+  // left three free slots inside a 20 KB window, so a new same-letter site that
+  // was not a fork drop would be rewritten and counted as one -- which is how
+  // Vertex resolution was altered on 233 with 79/79 green.
+  if (droppedAll.length < 2 || droppedAll.length > 3)
+    fail(`fork value-drop sites: expected 2..3, found ${droppedAll.length}`);
+  // The one that matters by name. A build where `model:` is no longer among the
+  // dropped fields has stopped doing the thing this sweep exists for, and a
+  // count alone cannot notice that.
+  if (!droppedAll.some((mm) => body.slice(Math.max(0, mm.index - 6), mm.index) === 'model:'))
+    fail('fork value-drop sites: the dispatch model is not among them');
   body = body.replace(droppedRx, '$1');
   if (new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?void 0:`).test(body))
     fail('fork value-drop sites survived the sweep');
@@ -1811,8 +1841,14 @@ step('21 current turn reachable at tool dispatch', () => {
 //     was the first design; the lane changed and the paragraph did not. What
 //     makes the helper reachable is that its definition and both probe homes
 //     share one module, which patch 22 now asserts rather than assumes.)
-//     OFF unless CLAUDE_JUDGE is set; every failure path is fail-open, so a
-//     dead proxy degrades to today's behaviour instead of breaking dispatch.
+//     OFF unless CLAUDE_JUDGE is set. Fail-open is the DEFAULT, not a
+//     property of every path: with `enforce` and `fail_closed` both on, the
+//     obligation is armed (`__jarm`) and a consultation that reaches no
+//     decision cancels the dispatch -- that is what fail_closed is for, and
+//     `onNoVerdict`/`onFail` throw. Without them a dead proxy degrades to
+//     today's behaviour instead of breaking dispatch. The paragraph used to
+//     say "every failure path is fail-open", which described the first design
+//     and had been false since fail_closed existed.
 //     Subagent dispatches are not judged (agentType must be "main").
 // --------------------------------------------------------------------------
 step('22 judge consulted before a subagent dispatch', () => {
@@ -2036,7 +2072,8 @@ step('22 judge consulted before a subagent dispatch', () => {
     // record both are indistinguishable from a judge that was never asked —
     // the "switched off at both ends" failure. Declared OUTSIDE the try so
     // the catch can still record why a consultation was skipped.
-    'let __t0=Date.now(),__jfs=null,__jrec=!0,__jgz=!1,__jreq=null,__jres=null,__jst=null,' +
+    'let __t0=Date.now(),__jfs=null,__jrec=!0,__jgz=!1,__jkeep=500,__nseen={},' +
+    '__jreq=null,__jres=null,__jst=null,' +
     // __jtry=0, not 1: before the first attempt there are ZERO attempts. A one
     // claimed an attempt where the throw happened BEFORE the ladder.
     // __pdir is declared HERE, not inside the try: the catch is a neighboring
@@ -2054,11 +2091,38 @@ step('22 judge consulted before a subagent dispatch', () => {
     // journal as the deg field; the ones touching THE JUDGMENT ITSELF are
     // gathered separately and cancel the call.
     '__deg=[],__degb=[],' +
+    // Every numeric setting was read as `Number(x||default)`, which normalizes
+    // the falsy typos and lets through the two that matter. A NEGATIVE value
+    // passes: `threshold=-1` makes `__n>=__th` always true and indexes the
+    // window past its end, so nextAt becomes NaN and the watcher goes
+    // PERMANENTLY silent -- the one mechanism answering for the fleet, mute
+    // with nothing in the journal. A non-numeric value passes too, the other
+    // way: `threshold="abc"` yields NaN, `__n>=NaN` is false, and the gate
+    // stops applying at all. `||` cannot tell "absent" from "invalid"; this
+    // does, keeps the default, and says so in the journal, because a setting
+    // silently ignored is a guarantee silently dropped.
+    // No `let` here and a comma at the end: this whole block is ONE declaration
+    // list (`let __t0=…,__jtry=…,__deg=[],…,__jdir=…;`), so a second `let`
+    // inside it parses as a binding NAMED `let` — a strict-mode reserved word,
+    // and the emit gate refuses the block outright.
+    '__num=(__k,__v,__d,__min,__q)=>{if(__v===void 0||__v===null||__v==="")return __d;' +
+      'let __x=Number(__v);' +
+      'if(!Number.isFinite(__x)||__x<__min){' +
+        'if(!__q&&!__nseen[__k]){__nseen[__k]=1;' +
+          '__deg.push("bad-setting:"+__k+"="+String(__v).slice(0,24)+" (need >="+__min+"), using "+__d)}' +
+        'return __d}' +
+      'return __x},' +
     // The degradation list is cut with a declaration: a silently dropped sixth
     // line means the human fixes five files, restarts, and gets the
     // cancellation again.
-    '__dcut=(__l,__k)=>__l.length<=__k?__l:__l.slice(0,__k).concat('+
-      '"[\\u043f\\u043e\\u043a\\u0430\\u0437\\u0430\\u043d\\u044b \\u043d\\u0435 \\u0432\\u0441\\u0435: \\u0435\\u0449\\u0451 "+(__l.length-__k)+"]"),' +
+    // Two bounds, not one: __k caps HOW MANY lines are kept and 300 caps how
+    // long each of them may be. Only the count was capped before, so one entry
+    // built from a parser message plus a path was unbounded — and an unbounded
+    // journal line is what makes an append from two sessions able to tear,
+    // there being no flock in node:fs/promises to fall back on.
+    '__dcut=(__l,__k)=>(__l.length<=__k?__l:__l.slice(0,__k)).map((__i)=>__clip(__i,300))'+
+      '.concat(__l.length<=__k?[]:('+
+      '["[\\u043f\\u043e\\u043a\\u0430\\u0437\\u0430\\u043d\\u044b \\u043d\\u0435 \\u0432\\u0441\\u0435: \\u0435\\u0449\\u0451 "+(__l.length-__k)+"]"])),' +
     // Every truncation in the journal and the record is declared — by the same
     // convention as trimming the transcript: a verdict cut mid-word reads as a
     // complete verdict, and a truncated failed-attempt reply as its whole
@@ -2141,7 +2205,14 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __out=__data;' +
         'if(__jgz){try{let __z=await import("node:zlib");__out=__z.gzipSync(Buffer.from(__data))}' +
           'catch{__n=__n.replace(/\\.gz$/,"")}}' +
-        'await __jfs.writeFile(__jdir+"/records/"+__n,__out);return __n}' +
+        'await __jfs.writeFile(__jdir+"/records/"+__n,__out);' +
+        'try{let __ls=await __jfs.readdir(__jdir+"/records");' +
+          'if(__ls.length>__jkeep){__ls.sort();' +
+            'for(let __old of __ls.slice(0,__ls.length-__jkeep))' +
+              'await __jfs.unlink(__jdir+"/records/"+__old)}}' +
+        'catch(__pe){try{console.error(__o.tag+" record prune failed: "' +
+          '+(__pe?.message??__pe))}catch{}}' +
+        'return __n}' +
       'catch(__re){try{console.error(__o.tag+" record write failed: "+(__re?.message??__re))}catch{}return null}};' +
     // `ms` and `sw` exist because both were unobservable before: a `block`
     // line and a `block_not_enforced` line differ only by a state the record
@@ -2153,6 +2224,11 @@ step('22 judge consulted before a subagent dispatch', () => {
         'agent:__o.input?.subagent_type,model:__mv.m,msrc:__mv.s,' +
         'cfg:__pdir||null,' +
         'ms:Date.now()-__t0,sw:__o.sw||null,...__oc};' +
+      // Bound every string the line carries, whatever put it there.
+      'for(let __k2 in __base){let __v2=__base[__k2];' +
+        'if(typeof __v2==="string")__base[__k2]=__clip(__v2,400);' +
+        'else if(Array.isArray(__v2))__base[__k2]=__v2.slice(0,8)' +
+          '.map((__x)=>typeof __x==="string"?__clip(__x,300):__x)}' +
       'let __rn=await __jsave(__ts,__base);' +
       'let __r=JSON.stringify(__rn?{...__base,rec:__rn}:__base);' +
       // On a fresh install the judge's directory does not exist yet, and that
@@ -2182,7 +2258,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     // Per-consultation, not global: __jlog closes over THIS call's
     // directory, tag and timers, so a shared copy would attribute one
     // consultation's lines to another whenever two overlap.
-    'let __svc={log:__jlog,clip:__clip};' +
+    'let __svc={log:__jlog,clip:__clip,num:__num};' +
     'try{' +
       // The turn snapshot is the JUDGE's material and the judge's alone, so the
       // core only asks its caller for it. It used to read and DELETE the stash
@@ -2282,7 +2358,11 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __tp=globalThis.Bun?.TOML?.parse;' +
         'if(typeof __tp!=="function"){__deg.push("no-toml-parser:"+__f);' +
           '__degb.push("no-toml-parser:"+__f);return !1}' +
-        'try{return __tp(__x)}catch(__pe){__deg.push("unparsed:"+__f+": "+' +
+        'try{return __tp(__x)}catch(__pe){' +
+        'let __x2=await __rdj(__f);' +
+        'if(__x2!==null&&__x2!==__x){if(__x2.charCodeAt(0)===65279)__x2=__x2.slice(1);' +
+          'try{return __tp(__x2)}catch{}}' +
+        '__deg.push("unparsed:"+__f+": "+' +
           '__clip(__pe?.message??__pe,60));' +
           '__degb.push("unparsed:"+__f+": "+__clip(__pe?.message??__pe,60));return !1}};' +
       // A probe's effective settings: [defaults] under its own table, the
@@ -2300,6 +2380,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       'if(__cfg.enabled===!1){await __jlog({outcome:"skip_disabled"});return}' +
       'if(__cfg.record===!1)__jrec=!1;' +
       'if(__cfg.record_gzip===!0)__jgz=!0;' +
+      '__jkeep=__num("records_keep",__cfg.records_keep,500,1);' +
       'let __ask=!0;' +
       'if(__cfg.filter){let __f=__cfg.filter,__pm=String(__o.input?.prompt??""),' +
         '__cl=(/\\[dispatch-class:([\\w-]+)\\]/.exec(__pm)||[])[1]||"",' +
@@ -2312,14 +2393,16 @@ step('22 judge consulted before a subagent dispatch', () => {
           '(Array.isArray(__f.agents_judge)&&__f.agents_judge.length>0)){' +
           'if(!(__mt(__f.classes_judge,__cl)||__mt(__f.agents_judge,__ag)))' +
             '__by=__cl?"not_in_judge_list":"no_class_marker"}' +
-        'if(__by){__ask=!1;await __jlog({outcome:"filtered",by:__by,cls:__cl||null})}}' +
+        'if(__by){__ask=!1;await __jlog({outcome:"filtered",by:__by,cls:__cl||null,' +
+          '...(__deg.length?{deg:__dcut(__deg,5)}:{})})}}' +
       // The probe's own cheap count: receives the ALREADY-read settings and
       // returns a reason not to call the model. The judge does not set one —
       // its consultation is unconditional; without it the watcher's
       // consultation would become a permanent expense line on every tool call.
-      'if(__ask&&__o.gate){let __g=null;try{__g=await __o.gate(__cfg)}catch(__ge){' +
+      'if(__ask&&__o.gate){let __g=null;try{__g=await __o.gate(__cfg,__svc)}catch(__ge){' +
         '__g="gate-failed:"+String(__ge?.message??__ge)}' +
-        'if(__g){__ask=!1;await __jlog({outcome:"filtered",by:String(__g),cls:null})}}' +
+        'if(__g){__ask=!1;await __jlog({outcome:"filtered",by:String(__g),cls:null,' +
+          '...(__deg.length?{deg:__dcut(__deg,5)}:{})})}}' +
       // The transcript is built AFTER the filter and the cheap count, not
       // before them: the watcher is called on every tool call, and parsing the
       // whole history for the sake of an immediate refusal would be paying for
@@ -2501,7 +2584,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           '__dd=new Array(__a.length).fill(!1);' +
           '__a.unshift({src:"injected",text:__mt()})}' +
         'return JSON.stringify(__a)};' +
-      'let __max=Number(__cfg.context_chars||60000);' +
+      'let __max=__num("context_chars",__cfg.context_chars,60000,0);' +
       'let __ctx=__cut(__max);' +
       // Dispatch trimming is declared by the same convention as transcript
       // trimming. The dispatch is the one object whose completeness the judge
@@ -2510,7 +2593,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // and one BLOCK cancelled a sound call over our own truncation.
       'let __dsrc=String(__o.payload!==void 0?(typeof __o.payload==="function"?' +
         'await __o.payload():__o.payload):JSON.stringify(__o.input));' +
-      'let __dmax=Number(__cfg.dispatch_chars||16000);' +
+      'let __dmax=__num("dispatch_chars",__cfg.dispatch_chars,16000,0);' +
       'let __dtr=__dsrc.length>__dmax;' +
       'let __disp=__dtr?__dsrc.slice(0,__dmax):__dsrc;' +
       // The declaration sits in the block's HEADER, not its tail: the tail is
@@ -2589,10 +2672,12 @@ step('22 judge consulted before a subagent dispatch', () => {
         // are silent no-ops — measured twice: first with the model, then with
         // a 1200-token ceiling that truncated a cancel verdict into silence.
         'let __obj=JSON.parse(__tpl);__obj.model=__mdl;' +
-        'let __mt=__e.max_tokens||__cfg.max_tokens;if(__mt)__obj.max_tokens=Number(__mt);' +
+        'let __mt=__e.max_tokens||__cfg.max_tokens;' +
+        'if(__mt)__obj.max_tokens=__num("max_tokens",__mt,__obj.max_tokens??1200,1);' +
         'if(__e.effort)__obj.reasoning_effort=__e.effort;' +
         'return JSON.stringify(__obj)}catch{' +
-        'return JSON.stringify({model:__mdl,max_tokens:Number(__e.max_tokens||__cfg.max_tokens||300),' +
+        'return JSON.stringify({model:__mdl,' +
+          'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,300,1),' +
           'messages:[{role:"system",content:__sys},' +
           '{role:"user",content:"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp}]})}};' +
       'let __pool=typeof ' + QM + '==="function"?' + QM + ':null;' +
@@ -2603,10 +2688,11 @@ step('22 judge consulted before a subagent dispatch', () => {
       // channel must degrade, not go silent.
       'let __http=!!(__o.urlEnv||__cfg.url||__cfg.raw_http===!0)||!__pool;' +
       '__jurl=__http?__purl:"pool";' +
-      'let __tmo=Number(__o.tmoEnv||__cfg.timeout_ms||8000);' +
+      'let __tmo=__num("timeout_ms",__o.tmoEnv||__cfg.timeout_ms,8000,1);' +
       'let __call=async(__cx,__ms,__e)=>{' +
         'let __s0=Date.now(),__a={model:__e.model,via:__http?"http":"pool",ctx_chars:__cx.length,' +
-          'timeout_ms:__ms,max_tokens:__e.max_tokens||__cfg.max_tokens||null,' +
+          'timeout_ms:__ms,' +
+          'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,null,1,!0),' +
           'effort:__e.effort||null};__jatt.push(__a);' +
         'let __ac=new AbortController(),__mine=!1,' +
         '__to=setTimeout(()=>{__mine=!0;__ac.abort()},__ms);' +
@@ -2617,7 +2703,8 @@ step('22 judge consulted before a subagent dispatch', () => {
         '__jres=null;__jst=null;' +
         'try{' +
           'if(__http){let __b=__mkb(__cx,__e);__jreq=__b;' +
-            'if(__o.dbg)try{await __fs.writeFile(__dir+"/last-request.json",__b)}catch{}' +
+            'if(__o.dbg)try{await __fs.writeFile(' +
+              '__dir+"/last-request."+process.pid+".json",__b)}catch{}' +
             'let __r=await fetch(__purl,{method:"POST",signal:__ac.signal,' +
               'headers:{"content-type":"application/json"},body:__b});' +
             'let __t=await __r.text();__jst=__r.status;__jres=__t;__a.resp=__clip(__t,800);' +
@@ -2628,7 +2715,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           // maxOutputTokensOverride, also the single budget home on this path.
           'let __ut="=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp;' +
           '__jreq=JSON.stringify({via:"pool",model:__e.model,effort:__e.effort||null,' +
-            'max_tokens:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
+            'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,1200,1),' +
             'messages:[{role:"system",content:__sys},{role:"user",content:__ut}]});' +
           'let __r2=await __pool({messages:[{type:"user",message:{role:"user",content:__ut},' +
               'uuid:(globalThis.crypto?.randomUUID?.()||String(Date.now())),' +
@@ -2636,7 +2723,7 @@ step('22 judge consulted before a subagent dispatch', () => {
             'systemPrompt:[__sys],thinkingConfig:{type:"disabled"},tools:[],signal:__ac.signal,' +
             'options:{model:__e.model,isNonInteractiveSession:!0,hasAppendSystemPrompt:!1,' +
               'agents:[],mcpTools:[],querySource:"hook_prompt",toolChoice:void 0,' +
-              'maxOutputTokensOverride:Number(__e.max_tokens||__cfg.max_tokens||1200),' +
+              'maxOutputTokensOverride:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,1200,1),' +
               'effortValue:__e.effort||void 0,agentId:__o.ctx?.agentId,agentContext:__o.ctx?.agentContext,' +
               'getToolPermissionContext:async()=>__o.ctx?.getAppState?.()?.toolPermissionContext}});' +
           'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__clip(__t2,800);' +
@@ -2725,8 +2812,9 @@ step('22 judge consulted before a subagent dispatch', () => {
       'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
         'try{__jtry=__i+1;__jm=__e.model;' +
-          '__raw=await __call(__e.context_chars?__cut(Number(__e.context_chars)):__ctx,' +
-            'Number(__e.timeout_ms||__tmo),__e);' +
+          '__raw=await __call(__e.context_chars?' +
+            '__cut(__num("rung.context_chars",__e.context_chars,__max,0)):__ctx,' +
+            '__num("rung.timeout_ms",__e.timeout_ms,__tmo,1),__e);' +
           '__v=__pv(__raw);if(__v)break;' +
           // A 2xx with no verdict (budget spent on reasoning, finish_reason
           // "length") is a failure like any other — the chain must move on, or
@@ -2738,20 +2826,21 @@ step('22 judge consulted before a subagent dispatch', () => {
       // spelled out — last model, short tail — kept so that a ladder written
       // without one still survives an oversized transcript. `retry_context_chars: 0`
       // switches it off for a ladder that already ends in a short-tail rung.
-      'if(!__v&&Number(__cfg.retry_context_chars??8000)>0){' +
+      'if(!__v&&__num("retry_context_chars",__cfg.retry_context_chars,8000,0)>0){' +
         'let __e=__mdls[__mdls.length-1];' +
         '__jtry=__mdls.length+1;__jm=__e.model;__jerr1=__errs.join(" | ")||null;' +
         // The retry is wrapped the same way as a rung: unwrapped, its failure
         // went to the outer catch, which wrote "skip" and did NOT cancel the
         // call — a silent pass exactly where fail_closed exists to prevent one.
-        'try{__raw=await __call(__cut(Number(__cfg.retry_context_chars??8000)),' +
-          'Number(__e.timeout_ms||__tmo),__e);__v=__pv(__raw);' +
+        'try{__raw=await __call(__cut(__num("retry_context_chars",__cfg.retry_context_chars,8000,0)),' +
+          '__num("rung.timeout_ms",__e.timeout_ms,__tmo,1),__e);__v=__pv(__raw);' +
           'if(!__v)__errs.push(__jm+": empty verdict")}' +
         'catch(__ce){__raw=null;__errs.push(__jm+": "+String(__ce?.name||"Error")+": "+' +
           '__clip(__ce?.message??__ce,80))}}' +
       '__jerr1=__errs.join(" | ")||null;' +
       'if(__o.dbg){console.error(__o.tag+" "+__v.slice(0,300));' +
-        'try{await __fs.writeFile(__dir+"/last-verdict.txt",__v)}catch{}}' +
+        'try{await __fs.writeFile(' +
+          '__dir+"/last-verdict."+process.pid+".txt",__v)}catch{}}' +
       // The judge does not rewrite the dispatch — it CANCELS it and says why.
       // Rewriting would produce a model/effort pair that nothing validates:
       // the deterministic gate runs earlier in this same function, so a
@@ -2884,12 +2973,12 @@ step('22 judge consulted before a subagent dispatch', () => {
       // exactly one number and not a single file.
       'pre:()=>{let __s=globalThis.__ccWatch;' +
         'return __s&&__s.nextAt>Date.now()?"not-yet":null},' +
-      'gate:(__c)=>{let __now=Date.now(),' +
-        '__w=Number(__c.window_min||30)*60000,__th=Number(__c.threshold||1),' +
-        '__cd=Number(__c.cooldown_min||30)*60000,' +
-        '__lth=Number(__c.live_threshold||1),' +
+      'gate:(__c,__svc)=>{let __now=Date.now(),' +
+        '__w=__svc.num("window_min",__c.window_min,30,1)*60000,__th=__svc.num("threshold",__c.threshold,1,1),' +
+        '__cd=__svc.num("cooldown_min",__c.cooldown_min,30,1)*60000,' +
+        '__lth=__svc.num("live_threshold",__c.live_threshold,1,1),' +
         '__lk=__c.live_kinds||["local_agent","remote_agent","in_process_teammate"],' +
-        '__rc=Number(__c.live_recheck_ms||60000);' +
+        '__rc=__svc.num("live_recheck_ms",__c.live_recheck_ms,60000,1000);' +
         'let __s=globalThis.__ccWatch??={last:0,start:__now};' +
         '__s.w=__w;' +
         'let __tr=null;try{__tr=$4?.taskRegistry?.all?.()}catch{}' +

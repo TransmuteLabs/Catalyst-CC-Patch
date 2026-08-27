@@ -556,7 +556,82 @@ const scenarios = [
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'skip_degraded', poolCalls: 0, nudges: 0,
                 degExact: BROKEN_TOML_DEG } },
+  // Every number used to be read as `Number(x||default)`, which normalizes the
+  // falsy typos and lets through the two that actually break the mechanism.
+  // A NEGATIVE threshold passed: `0>=-1` is true on every call, so the gate
+  // returned fleet-busy forever and the watcher — the one mechanism answering
+  // for the fleet — went PERMANENTLY mute with nothing in the journal to say
+  // why. Here the same config must reach the model instead.
+  { name: 'watch-threshold-negative', probe: 'watch', toolName: 'Read', watchState: OLD,
+    config: { threshold: -1 },
+    response: 'SILENT: причина',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
+                degExact: ['bad-setting:threshold=-1 (need >=1), using 1'] } },
+  // The other direction: `Number("abc")` is NaN, `1>=NaN` is false, and the
+  // threshold stopped applying at all — the gate never refused however busy
+  // the fleet was. With one mark and the default restored it must refuse, and
+  // the report must survive on THAT line: the gate refuses on most calls by
+  // design, so a deg attached only to consultations would evaporate exactly
+  // where it is produced.
+  { name: 'watch-threshold-not-a-number', probe: 'watch', toolName: 'Read', watchState: OLD,
+    config: { threshold: 'abc' },
+    fleet: () => [Date.now()],
+    response: 'NUDGE: не должно дойти',
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
+                by: 'fleet-busy:1',
+                degExact: ['bad-setting:threshold=abc (need >=1), using 1'] } },
+  // Positive control for the two above: a valid non-default value must be
+  // taken AS GIVEN and report NOTHING. Without this a sanitiser that flagged
+  // every setting, or silently replaced good ones with defaults, would pass
+  // both scenarios above unnoticed.
+  { name: 'watch-threshold-valid-nondefault', probe: 'watch', toolName: 'Read', watchState: OLD,
+    config: { threshold: 2 },
+    fleet: () => [Date.now(), Date.now()],
+    response: 'NUDGE: не должно дойти',
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
+                by: 'fleet-busy:2', degExact: null } },
+  // One record per consultation, ~28 KB each, and until now nothing ever
+  // removed one: 31 MB across 1134 files on the live install. Three seeded plus
+  // one written, keep 2 — so the prune must both fire and stop, and the file it
+  // just wrote must survive.
+  { name: 'records-pruned', seedRecords: 3, config: { records_keep: 2 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', recordCount: 2, degExact: null } },
+  // The complement, and the reason the limit is sanitised with min 1 rather
+  // than min 0: a typo must not be able to mean "keep nothing". Zero is
+  // refused, reported, and the default keeps everything present.
+  { name: 'records-keep-zero-refused', seedRecords: 3, config: { records_keep: 0 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', recordCount: 4,
+                degExact: ['bad-setting:records_keep=0 (need >=1), using 500'] } },
+  // The budget travels to the provider. A negative one used to go as given and
+  // come back a 400 attributed to the channel; now it is replaced by the
+  // default and the config is named as the cause.
+  { name: 'budget-negative', config: { max_tokens: -5 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', requestMaxTokens: 1200,
+                degExact: ['bad-setting:max_tokens=-5 (need >=1), using 1200'] } },
 ];
+
+// The same invariant the check registry carries, for the same reason it was
+// added there: a scenario dropped in a bad merge leaves the bench printing
+// "N scenarios behaved as specified" and exiting green, and the guarantee it
+// pinned is gone with nothing to say so. A count is cheap; the alternative is
+// trusting that nobody ever edits an array badly. Duplicate names are guarded
+// with it because two entries under one name report as one line: the second
+// silently stands in for the first.
+const EXPECTED_SCENARIOS = 43;
+if (scenarios.length !== EXPECTED_SCENARIOS) {
+  console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
+    + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
+  process.exit(2);
+}
+const dupeNames = scenarios.map((s) => s.name)
+  .filter((n, i, a) => a.indexOf(n) !== i);
+if (dupeNames.length > 0) {
+  console.error(`probe-bench: повторяющиеся имена сценариев: ${dupeNames.join(', ')}`);
+  process.exit(2);
+}
 
 // HOME is included in the save set but NOT in the delete list: a layered
 // scenario overrides it (the settings root is derived from HOME), while an
@@ -693,6 +768,7 @@ function expectationText(expected) {
   if (expected.degStartsWith !== undefined) parts.push(`деградация начинается с «${expected.degStartsWith}»`);
   if (expected.degExact !== undefined) parts.push(`деградация=${JSON.stringify(expected.degExact)}`);
   if (expected.requestMaxTokens !== undefined) parts.push(`бюджет запроса=${expected.requestMaxTokens}`);
+  if (expected.recordCount !== undefined) parts.push(`записей в каталоге=${expected.recordCount}`);
   return parts.join(', ');
 }
 
@@ -722,6 +798,7 @@ function checkMismatch(result, expected) {
   if (expected.degStartsWith !== undefined && !result.deg?.some((item) => item.startsWith(expected.degStartsWith))) return true;
   if (expected.degExact !== undefined && JSON.stringify(result.deg) !== JSON.stringify(expected.degExact)) return true;
   if (expected.requestMaxTokens !== undefined && result.requestMaxTokens !== expected.requestMaxTokens) return true;
+  if (expected.recordCount !== undefined && result.recordCount !== expected.recordCount) return true;
   return false;
 }
 
@@ -744,6 +821,14 @@ async function runScenario(probe, scenario) {
     const root = rootDir(tempDir, scenario);
     const probeDir = path.join(root, homeName(scenario));
     fs.mkdirSync(probeDir, { recursive: true });
+    if (scenario.seedRecords) {
+      const recDir = path.join(probeDir, 'records');
+      fs.mkdirSync(recDir, { recursive: true });
+      for (let i = 0; i < scenario.seedRecords; i += 1) {
+        fs.writeFileSync(
+          path.join(recDir, `2020-01-01T00-00-0${i}-000Z-seed-0-${i}.json`), '{}');
+      }
+    }
     setScenarioEnvironment(tempDir, scenario);
     if (scenario.withoutTomlParser) globalThis.Bun.TOML = undefined;
     // The project layer is reproduced ONLY by changing the working directory:
@@ -862,6 +947,9 @@ async function runScenario(probe, scenario) {
       sentDispatchLen: sentDispatch.length,
       sentDispatch,
       requestMaxTokens,
+      recordCount: fs.existsSync(path.join(probeDir, 'records'))
+        ? fs.readdirSync(path.join(probeDir, 'records')).length
+        : 0,
       result: passed ? 'прошёл' : 'отменён',
       outcome: entry?.outcome ?? null,
       sid: entry === null ? undefined : (entry.sid ?? null),

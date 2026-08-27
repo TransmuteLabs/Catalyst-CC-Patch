@@ -448,6 +448,36 @@ fi
 echo "==> Разбор вклеиваемого кода"
 node "$(dirname "$0")/tools/emit-check.js"
 
+# The verify block is a python heredoc, and NOTHING was looking inside it:
+# `bash -n` treats a heredoc as data and `node --check` has no opinion about
+# python. So a stray parenthesis in a check was found only AFTER the patch stage
+# had already rewritten the image -- minutes in, with a SyntaxError where the
+# verdict should have been, and 94 checks that never ran. Compile it here, for
+# the same reason the injected JS is parsed before anything is written: a gate
+# that cannot run is not a lenient gate, it is an absent one.
+echo "==> Разбор блока проверок"
+python3 - "$0" <<'PYCOMPILE'
+import io, sys
+lines = io.open(sys.argv[1], encoding='utf-8').read().split('\n')
+# startswith, not `in`: this very heredoc mentions the marker as a string, and
+# a substring search would find the preflight instead of the block it guards.
+marker = 'python3 - "$BIN" "$OUR_PATCH" <<'
+start = next((i for i, l in enumerate(lines) if l.startswith(marker)), -1)
+if start < 0:
+    print("БЛОК ПРОВЕРОК НЕ НАЙДЕН — предполётная проверка потеряла свой якорь")
+    sys.exit(1)
+end = next((i for i in range(start + 1, len(lines)) if lines[i] == 'PY'), -1)
+if end < 0:
+    print("БЛОК ПРОВЕРОК НЕ ЗАКРЫТ")
+    sys.exit(1)
+try:
+    compile('\n'.join(lines[start + 1:end]), 'verify-block', 'exec')
+except SyntaxError as e:
+    print(f"БЛОК ПРОВЕРОК НЕ РАЗБИРАЕТСЯ: строка {e.lineno}: {e.msg}")
+    sys.exit(1)
+print(f"БЛОК ПРОВЕРОК РАЗБИРАЕТСЯ ({end - start - 1} строк)")
+PYCOMPILE
+
 echo "==> Applying our multi-provider patches"
 "${TWEAKCC[@]}" adhoc-patch \
   --script "@$OUR_PATCH" \
@@ -839,7 +869,22 @@ def _stream_finalize_ok(d):
     # guard that was a strict subset of the reader read as correct.
     cond = (rb'\((' + ID + rb')\.isNonInteractiveSession&&\(\1\.querySource\?\.startsWith\('
             rb'"repl_main_thread"\)\|\|\1\.querySource==="sdk"\)&&\([^()]{0,80}\)\)')
-    if b'truncatedAfterOutput' not in d:
+    # WHICH branch is decided by the finalize site knowing the field, not by the
+    # bytes existing somewhere in the image. A build's string pool outlives the
+    # code that read the string -- measured on step 24, where `root/sudo
+    # privileges` still reads out of the pool after the branch was neutralised.
+    # A marker that landed in the pool with no recovery would have sent this
+    # check down the 246 branch, demanded a guarded yield that the 233-shaped
+    # build has no reason to contain, and printed a form change as a lost
+    # guarantee. Measured: exactly one `truncatedAfterOutput:` within 3000 bytes
+    # of the finalize anchor on 246/247 (748 away), zero on 233/240/242/243/245,
+    # pristine and patched alike.
+    _fin = [mm.start() for mm in re.finditer(rb'tengu_streaming_partial_finalized', d)]
+    _marker_at_the_site = any(
+        _fin and min(abs(mm.start() - a) for a in _fin) <= 3000
+        for mm in re.finditer(rb'truncatedAfterOutput:', d)
+    )
+    if not _marker_at_the_site:
         if re.search(rb',error:"server_error"\}\),' + ID + rb'!=="credited"', d):
             return False
         return bool(re.search(
@@ -1251,6 +1296,77 @@ def _resumed_model_is_the_request(d):
     return bool(re.search(rb'\|\|' + stripper + rb'\(' + ID + rb'\)===', d[m.end():m.end() + 700]))
 
 
+def _literal_end(d, pos):
+    """Forward from INSIDE an object literal to the brace that closes it.
+
+    Quotes are skipped whole, because a string in the tail may carry braces
+    that are not structure. Returns -1 if the literal never closes, and the
+    caller must treat that as a failure rather than as "nothing found": an
+    unparsed tail proves nothing about what is in it.
+    """
+    depth, i, n = 1, pos, len(d)
+    while i < n and depth > 0:
+        c = d[i:i + 1]
+        if c in b'"\'':
+            q = c
+            i += 1
+            while i < n:
+                if d[i:i + 1] == b'\\':
+                    i += 2
+                    continue
+                if d[i:i + 1] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c in b'{[(':
+            depth += 1
+        elif c in b'}])':
+            depth -= 1
+        i += 1
+    return i if depth == 0 else -1
+
+
+def _no_shadowed_request_model(d):
+    """Nothing may write requestedModel a SECOND time on the same literal.
+
+    Step 20 inserts the field BEFORE `type:"assistant"`. Upstream appends its
+    own conditional spreads AFTER it -- `advisorModel`, `effort` -- and in a JS
+    object literal the LAST key wins. So the day upstream introduces a field of
+    this name in its natural place, our value is overwritten, resume restores
+    the server's echo instead of the id that was asked for, and every other
+    check stays green: the write check only looks BACKWARD from the site, and
+    the read check only pins the reader's shape. Neither can see a later key.
+    Resolving such a collision silently -- by moving our field last -- is not
+    ours to do: a same-named upstream field may well mean something else.
+
+    The site census rides here for the same reason. The patcher pins `!== 4`
+    by its own regex and the check counts from-request sites by a different
+    heuristic, so a fifth real construction site that matched neither would
+    leave both at four and both green -- and resume landing on it would take
+    the echo again. Measured on 233/240/242/243/245/246/247 pristine and
+    patched: 8 sites, 4 of them from a request, on every one. A ninth site of
+    ANY shape now stops the build and asks for a human.
+    """
+    sites = [m.start() for m in re.finditer(rb'type:"assistant",uuid:', d)]
+    if len(sites) != 8:
+        return False
+    from_request = 0
+    for st in sites:
+        back = d[max(0, st - 400):st]
+        if b'.querySource,' not in back or b'.spawnedBySkill' not in back:
+            continue
+        from_request += 1
+        end = _literal_end(d, st)
+        # 4000 is a sanity bound, not a measurement: the real tails are 123-134
+        # bytes. A tail that long means the brace walk ran past the literal.
+        if end < 0 or end - st > 4000:
+            return False
+        if d[st:end].count(b'requestedModel') != 0:
+            return False
+    return from_request == 4
+
+
 def _every_entry_records_the_request(d):
     """Coverage, not a count of the patched form.
 
@@ -1289,7 +1405,8 @@ def _gateway_ids_are_undisguised(d):
     undisguise = len(re.findall(
         rb'\.map\(\((' + ID + rb')\)=>\1\.id\.startsWith\("claude-fable-5-dd-"\)\?'
         rb'\{\.\.\.\1,id:\[\.\.\.\1\.id\.slice\(18\)\]\.reverse\(\)\.join\(""\)\}:\1\)', d))
-    filters = len(re.findall(rb'/\(claude\|anthropic\)/i\.test\(', d))
+    filters = len(re.findall(
+        rb'\.filter\(\((' + ID + rb')\)=>/\(claude\|anthropic\)/i\.test\(\1\.id\)\)', d))
     return undisguise == filters > 0
 
 
@@ -1539,15 +1656,18 @@ checks = {
     # length to the dependencies (closing the deadlock the same way) and then
     # capped the scan with a give-up counter, which the patch now steps over
     # while the search UI is open
-    'resume search pages in the tail': bool(re.search(
+    'resume search pages in the tail': (bool(re.search(
                                               rb'if\((' + ID + rb')==="search"\|\|(' + ID + rb')\+(' + ID + rb')>='
                                               rb'(' + ID + rb')\.length\)(' + ID + rb')\((' + ID + rb')\*3\)\},'
                                               rb'\[\2,\6,\4\.length,\5,\1,(' + ID + rb')\.length\]\),\7\.length===0', d))
-                                          or bool(re.search(
+                                          # exactly one, not "either": both shapes present
+                                          # means one is dead and the live UI may be running
+                                          # a third the check has never seen
+                                          + bool(re.search(
                                               rb'if\((' + ID + rb')==="search"\|\|\((' + ID + rb')\+(' + ID + rb')>='
                                               rb'(' + ID + rb')\.length&&(' + ID + rb')\.current\.empty<' + ID + rb'\)\)'
                                               rb'\5\.current\.empty\+\+,(' + ID + rb')\((' + ID + rb')\*3\)\},'
-                                              rb'\[\2,\7,\4\.length,(' + ID + rb'),\6,\1\]\),' + ID + rb'\.length===0', d)),
+                                              rb'\[\2,\7,\4\.length,(' + ID + rb'),\6,\1\]\),' + ID + rb'\.length===0', d))) == 1,
     # a NAMED dispatch becomes an in-process teammate, whose record is built
     # from a different literal than a plain local agent; the agent type has to
     # reach it through the spawn directive or the row shows only the model
@@ -1602,6 +1722,7 @@ checks = {
     # on the fourth restoring the echo again -- intermittently, which is the
     # hardest form to diagnose.
     'every assistant entry records the model it asked for': _every_entry_records_the_request(d),
+    'nothing writes the requested model a second time': _no_shadowed_request_model(d),
     # judge part 1: the current turn (thinking included) is stashed by
     # tool_use id, because the message reaching the executor carries the
     # tool_use block alone
@@ -1727,7 +1848,11 @@ checks = {
     # are two different outcomes.
     'watcher journals why it stayed cheap': bool(re.search(
                                               rb'await __jlog\(\{outcome:"filtered",by:String\(__g\),'
-                                              rb'cls:null\}\)', d)),
+                                              rb'cls:null,\.\.\.\(__deg\.length\?\{deg:__dcut\(__deg,5\)\}:'
+                                              rb'\{\}\)\}\)', d))
+                                          # both filtered lines, not just the gate's
+                                          and len(re.findall(
+                                              rb'outcome:"filtered",by:[^}]*?__deg\.length', d)) == 2,
     # The outcome word in the journal is the class named by the model, not the
     # judge's "block": the vocabulary comes from the caller, and a hardcoded
     # word would write the watcher's silence with the same characters as a real
@@ -1783,7 +1908,8 @@ checks = {
     # a silent no-op without this override — that silence once ate a cancellation
     'judge budget has one home': bool(re.search(
                                               rb'let __mt=__e\.max_tokens\|\|__cfg\.max_tokens;'
-                                              rb'if\(__mt\)__obj\.max_tokens=Number\(__mt\)', d)),
+                                              rb'if\(__mt\)__obj\.max_tokens=__num\("max_tokens",__mt,'
+                                              rb'__obj\.max_tokens\?\?1200,1\)', d)),
     'judge treats a verdictless reply as a failure': bool(re.search(
                                               rb'__v=__pv\(__raw\);if\(__v\)break;', d))
                                           and bool(re.search(
@@ -1792,8 +1918,10 @@ checks = {
     # because the reasons a rung fails differ
     'judge ladder rungs carry their own limits': bool(re.search(
                                               rb'__raw=await __call\(__e\.context_chars\?'
-                                              rb'__cut\(Number\(__e\.context_chars\)\):__ctx,'
-                                              rb'Number\(__e\.timeout_ms\|\|__tmo\),__e\)', d)),
+                                              rb'__cut\(__num\("rung\.context_chars",__e\.context_chars,'
+                                              rb'__max,0\)\):__ctx,'
+                                              rb'__num\("rung\.timeout_ms",__e\.timeout_ms,__tmo,1\),'
+                                              rb'__e\)', d)),
     'judge retries a failed consultation': bool(re.search(
                                               rb'for\(let __i=0;__i<__mdls\.length;__i\+\+\)\{', d))
                                           and bool(re.search(
@@ -1931,6 +2059,73 @@ checks = {
                                           and bool(re.search(rb'\(__cd=__ctd\(\)\)\?', d)),
     # the failure path reads only names declared above the try (see the helper)
     'judge fail-open path stays in scope': _judge_catch_scope(d),
+    # Every number came in as `Number(x||default)`, which normalizes the falsy
+    # typos and lets through the two that break the mechanism: a NEGATIVE
+    # threshold makes `__n>=__th` always true and the watcher goes permanently
+    # mute, a non-numeric one yields NaN and the threshold stops applying at
+    # all. `||` cannot tell "absent" from "invalid". The positive control for
+    # the absence half is the count on the same line: a payload without our
+    # code scores zero and fails rather than passing as "nothing bad found".
+    'numeric settings are sanitised, not coerced': (
+                                              # per KEY, not one total: a count that only
+                                              # adds up says nothing about WHICH home lost
+                                              # its guard. Counts are taken on the collapsed
+                                              # payload, so they equal the source's.
+                                              len(re.findall(rb'__num\("context_chars"', d)) == 1
+                                          and len(re.findall(rb'__num\("dispatch_chars"', d)) == 1
+                                          and len(re.findall(rb'__num\("retry_context_chars"', d)) == 2
+                                          and len(re.findall(rb'__num\("records_keep"', d)) == 1
+                                          and len(re.findall(rb'__num\("max_tokens"', d)) == 5
+                                          and len(re.findall(rb'__num\("timeout_ms"', d)) == 1
+                                          and len(re.findall(rb'__num\("rung\.context_chars"', d)) == 1
+                                          and len(re.findall(rb'__num\("rung\.timeout_ms"', d)) == 2
+                                          # no home left reading its number raw
+                                          and len(re.findall(rb'Number\(__cfg\.', d)) == 0
+                                          and len(re.findall(rb'Number\(__e\.', d)) == 0
+                                          and len(re.findall(rb'Number\(__mt\)', d)) == 0
+                                          and len(re.findall(rb'Number\(__o\.tmoEnv', d)) == 0
+                                          and len(re.findall(rb'Number\(__c\.', d)) == 0
+                                          # one report per SETTING, not per reader: five
+                                          # rungs read the same budget, and five identical
+                                          # lines crowd the five-line cut
+                                          and bool(re.search(rb'if\(!__q&&!__nseen\[__k\]\)\{__nseen\[__k\]=1;', d))
+                                          # the attempt ledger RECORDS a budget, it does not
+                                          # choose one: its default is null, and reporting
+                                          # from there told the human "using null" while the
+                                          # send path had already used 1200
+                                          and bool(re.search(
+                                              rb'max_tokens:__num\("max_tokens",'
+                                              rb'__e\.max_tokens\|\|__cfg\.max_tokens,null,1,!0\)', d))
+                                          and bool(re.search(
+                                              rb'__num=\(__k,__v,__d,__min,__q\)=>\{if\(__v===void 0\|\|'
+                                              rb'__v===null\|\|__v===""\)return __d;', d))
+                                          and bool(re.search(
+                                              rb'if\(!Number\.isFinite\(__x\)\|\|__x<__min\)\{'
+                                              rb'if\(!__q&&!__nseen\[__k\]\)\{__nseen\[__k\]=1;'
+                                              rb'__deg\.push\("bad-setting:"', d))
+                                          # the watcher's gate is a callback closed over ITS
+                                          # splice site, so the sanitiser reaches it only as a
+                                          # handed-over service -- and both ends must agree
+                                          and bool(re.search(rb'__svc=\{log:__jlog,clip:__clip,num:__num\}', d))
+                                          and bool(re.search(rb'__g=await __o\.gate\(__cfg,__svc\)', d))
+                                          and bool(re.search(rb'gate:\(__c,__svc\)=>', d))
+                                          and len(re.findall(rb'__svc\.num\("', d)) == 5),
+    # One record per consultation, ~28 KB each, ~130 a day, and nothing ever
+    # deleted them: 31 MB and 1134 files measured on the live install. The prune
+    # rides the WRITE -- `record = false` means "stop writing", not "erase what
+    # is there" -- and its failure is reported on the same channel as a failed
+    # record write, never swallowed.
+    'the records directory is bounded': (
+                                              bool(re.search(
+                                                  rb'__ls=await __jfs\.readdir\(__jdir\+"/records"\)', d))
+                                          and bool(re.search(
+                                                  rb'if\(__ls\.length>__jkeep\)\{__ls\.sort\(\);', d))
+                                          and bool(re.search(
+                                                  rb'__ls\.slice\(0,__ls\.length-__jkeep\)\)'
+                                                  rb'await __jfs\.unlink\(', d))
+                                          and bool(re.search(rb'record prune failed: ', d))
+                                          and bool(re.search(
+                                                  rb'__jkeep=__num\("records_keep",__cfg\.records_keep,500,1\)', d))),
     # a channel failure under fail_closed = CANCELLATION, not a pass: the retry
     # on a short transcript was not wrapped, its crash was written up as a
     # regular skip and the dispatch went through
@@ -1938,8 +2133,8 @@ checks = {
                                               rb'if\(__ask\)\{__jarm=!!__o\.arm&&__en&&__fcl;', d))
                                           # the retry is wrapped the same way as a rung
                                           and bool(re.search(
-                                              rb'try\{__raw=await __call\(__cut\(Number\('
-                                              rb'__cfg\.retry_context_chars\?\?8000\)\)', d))
+                                              rb'try\{__raw=await __call\(__cut\(__num\("retry_context_chars",'
+                                              rb'__cfg\.retry_context_chars,8000,0\)\)', d))
                                           # the obligation is released LAST
                                           and bool(re.search(
                                               rb'await __o\.onAct\(__bl\[1\]\.trim\(\),__svc\);__jarm=!1;\}\}catch', d))
@@ -1995,6 +2190,15 @@ checks = {
     'every journal line names the applied config layer': bool(re.search(
                                               rb'msrc:__mv\.s,cfg:__pdir\|\|null,', d))
                                           and len(re.findall(rb'cfg:__pdir\|\|null', d)) == 1,
+    'the journal line is bounded whatever fills it': (
+                                              bool(re.search(
+                                                  rb'for\(let __k2 in __base\)\{let __v2=__base\[__k2\];'
+                                                  rb'if\(typeof __v2==="string"\)__base\[__k2\]=__clip\(__v2,400\);', d))
+                                          and bool(re.search(
+                                                  rb'else if\(Array\.isArray\(__v2\)\)__base\[__k2\]='
+                                                  rb'__v2\.slice\(0,8\)', d))
+                                          # the join key is added AFTER the walk and must stay whole
+                                          and bool(re.search(rb'__rn\?\{\.\.\.__base,rec:__rn\}:__base', d))),
     'session title is shape-guarded': bool(re.search(
                                               rb'__ttl=\(\)=>\{try\{let __i=__sid\(\);', d))
                                           and bool(re.search(
@@ -2076,8 +2280,18 @@ checks = {
                                               rb'if\(typeof __tp!=="function"\)\{'
                                               rb'__deg\.push\("no-toml-parser:"\+__f\);'
                                               rb'__degb\.push\("no-toml-parser:"\+__f\);return !1\}', d)),
+    'debug artefacts do not collide between processes': (
+                                              bool(re.search(
+                                                  rb'__dir\+"/last-request\."\+process\.pid\+"\.json"', d))
+                                          and bool(re.search(
+                                                  rb'__dir\+"/last-verdict\."\+process\.pid\+"\.txt"', d))
+                                          and len(re.findall(rb'"/last-request\.json"', d)) == 0
+                                          and len(re.findall(rb'"/last-verdict\.txt"', d)) == 0),
     'judge tells a broken config from a missing one': bool(re.search(
                                               rb'let __ldt=async\(__f\)=>\{let __x=await __rdj\(__f\)', d))
+                                          and bool(re.search(
+                                              rb'let __x2=await __rdj\(__f\);'
+                                              rb'if\(__x2!==null&&__x2!==__x\)\{', d))
                                           and bool(re.search(
                                               rb'let __c0=await __ldt\(__phome\+"/probes\.toml"\);'
                                               rb'if\(__c0===!1\)__cfgbad=!0;else if\(__c0\)'
@@ -2136,8 +2350,9 @@ checks = {
                                               rb'"prompt-missing:"\+__dir\+"/prompt\.md"', d))
                                           # degradation lists are cut with a declaration
                                           and bool(re.search(
-                                              rb'__dcut=\(__l,__k\)=>__l\.length<=__k\?__l:'
-                                              rb'__l\.slice\(0,__k\)\.concat\(', d))
+                                              rb'__dcut=\(__l,__k\)=>\(__l\.length<=__k\?__l:'
+                                              rb'__l\.slice\(0,__k\)\)\.map\(\(__i\)=>__clip\(__i,300\)\)'
+                                              rb'\.concat\(', d))
                                           and len(re.findall(rb'__deg\.slice\(0,5\)', d)) == 0
                                           and len(re.findall(rb'__degb\.slice\(0,3\)', d)) == 0
                                           and bool(re.search(rb'deg:__dcut\(__deg,5\)', d))
@@ -2199,7 +2414,7 @@ checks = {
 # wrong: the author of these lines twice recounted the keys with a regex that
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89.
-EXPECTED_CHECKS = 89
+EXPECTED_CHECKS = 94
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")

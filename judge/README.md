@@ -32,8 +32,11 @@ documented override would silently stop working whenever a template exists
 (which is exactly what happened before 2026-08-20).
 
 Debug files (written only under `CLAUDE_JUDGE_DEBUG=1`):
-`last-request.json`, `last-response.json` (HTTP status + raw body),
-`last-verdict.txt`.
+`last-request.<pid>.json` and `last-verdict.<pid>.txt`. The pid is in the name
+because two sessions used to write both files under one name and the one you
+read was whichever finished last. There is no `last-response.json`: the reply
+is in the record (`response`), together with the request that produced it, and
+a second copy under a fixed name would only be another thing to keep in step.
 
 ## Enabling
 
