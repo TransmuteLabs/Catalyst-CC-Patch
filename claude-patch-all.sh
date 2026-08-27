@@ -1855,8 +1855,25 @@ def _every_cut_is_named(d):
     blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', d)
     if len(blocks) != 2:
         return False
+    def _closes(b, start):
+        i, depth = start, 1
+        while i < len(b) and depth:
+            c = b[i:i + 1]
+            if c == b'(':
+                depth += 1
+            elif c == b')':
+                depth -= 1
+            i += 1
+        return None if depth else i - 1
+
     found = {}
     for b in blocks:
+        surs = []
+        for m in re.finditer(rb'__sur\(', b):
+            e = _closes(b, m.end())
+            if e is None:
+                return False
+            surs.append((m.end(), e))
         for m in re.finditer(rb'\.slice\(', b):
             i, depth = m.end(), 1
             while i < len(b) and depth:
@@ -1869,19 +1886,28 @@ def _every_cut_is_named(d):
             if depth:
                 return False
             arg = b[m.end():i - 1]
-            found[arg] = found.get(arg, 0) + 1
+            # Second axis: is this cut inside a `__sur(...)` call, the seam
+            # repair? A cut is measured in UTF-16 code units and lands between
+            # the halves of a surrogate pair whenever it feels like it, so every
+            # cut of TEXT must go through it and every cut that is not text must
+            # not. One argument text, `0,__k`, belongs to two different sites
+            # (__clip cuts characters, __dcut cuts a list) and only this axis
+            # tells them apart.
+            key = (arg, any(s <= m.start() < e for s, e in surs))
+            found[key] = found.get(key, 0) + 1
     return found == {
-        b'': 1,                            # array copy before the trim walk
-        b'-256': 1,                        # the fleet ring keeps its last marks
-        b'-8': 1,                          # key suffix inside the record name
-        b'-__tl': 1,                       # declared middle-cut, tail half
-        b'0,-1': 1,                        # trailing lone high surrogate
-        b'0,__dmax': 1,                    # dispatch head, declared on the label
-        b'0,__h': 1,                       # declared middle-cut, head half
-        b'0,__k': 2,                       # __dcut and __clip, both declare
-        b'0,__ls.length-__jkeep+1': 1,     # prune victims, not text
-        b'1': 4,                           # three BOM strips, one low surrogate
-        b'1,-1': 1,                        # JSON.stringify quote pair
+        (b'', False): 1,                          # array copy before the trim walk
+        (b'-256', False): 1,                      # the fleet ring keeps its last marks
+        (b'-8', False): 1,                        # key suffix inside the record name
+        (b'-__tl', True): 1,                      # declared middle-cut, tail half
+        (b'0,-1', False): 1,                      # inside __sur itself
+        (b'0,__dmax', True): 1,                   # dispatch head, declared on the label
+        (b'0,__h', True): 1,                      # declared middle-cut, head half
+        (b'0,__k', True): 1,                      # __clip: characters
+        (b'0,__k', False): 1,                     # __dcut: a list, no seam
+        (b'0,__ls.length-__jkeep+1', False): 1,   # prune victims, not text
+        (b'1', False): 4,                         # three BOM strips, one low surrogate
+        (b'1,-1', False): 1,                      # JSON.stringify quote pair
     }
 
 _probe_full = d
@@ -2698,14 +2724,27 @@ checks = {
                                               rb'__sur\(__x\.slice\(0,__k\)\)', d))
                                           and bool(re.search(
                                               rb'__sur\(__t\.slice\(0,__h\)\)', d)),
+    # Both halves of the phase, not just the comparison. Pinning `>__b` alone
+    # left `__fit(...-(__tot+__mc-__n))` free to keep cutting by the raw request
+    # while the loop measured by the floor -- green, and over-cutting by the
+    # whole floor at context_chars=0.
     'the marker phase measures by the same floor': bool(re.search(
                                               rb'__tot\+__mc>__b', d))
                                           and len(re.findall(
-                                              rb'__tot\+__mc>__n', d)) == 0,
-    'the retry runs on half its rung': bool(re.search(
-                                              rb'Math\.round\(__num\("rung\.timeout_ms"', d))
+                                              rb'__tot\+__mc>__n', d)) == 0
                                           and bool(re.search(
-                                              rb'__tmo,1\)/2\)\)', d)),
+                                              rb'__tot\+__mc-__b', d))
+                                          and len(re.findall(
+                                              rb'__tot\+__mc-__n', d)) == 0,
+    # The floor is pinned with the half. Pinning `/2` alone let the 1000 ms
+    # floor be raised to anything -- including past every shipped rung, which
+    # would delete the half while the name still promised it -- and left the
+    # rung-under-2s case, where the floor made the retry longer than the rung,
+    # invisible.
+    'the retry runs on half its rung': bool(re.search(
+                                              rb'__rt=__num\("rung\.timeout_ms"', d))
+                                          and bool(re.search(
+                                              rb'Math\.min\(__rt,Math\.max\(1000,Math\.round\(__rt/2\)\)\)', d)),
     # One expression per core copy, and no second name for the same string.
     'the probes home is computed once': len(re.findall(
                                               rb'__phome=__o\.dirEnv\|\|\(\(process\.env\.HOME', d)) == 1
@@ -2728,8 +2767,13 @@ checks = {
                                           # the dispatch is cut ONLY with a declaration
                                           and bool(re.search(
                                               rb'__dtr=__dsrc\.length>__dmax;', d))
+                                          # Through __sur: the declaration says
+                                          # how many characters were shown, and a
+                                          # cut that leaves half a surrogate pair
+                                          # shows one character that was never
+                                          # there.
                                           and bool(re.search(
-                                              rb'__disp=__dtr\?__dsrc\.slice\(0,__dmax\):__dsrc', d))
+                                              rb'__disp=__dtr\?__sur\(__dsrc\.slice\(0,__dmax\)\):__dsrc', d))
                                           and bool(re.search(
                                               rb'__lbl=String\(__o\.label\|\|"DISPATCH"\)\+\(__dtr\?', d))
                                           and len(re.findall(

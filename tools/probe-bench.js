@@ -639,11 +639,19 @@ const scenarios = [
   // hides behind `window-not-filled` and shows only to whoever raised the
   // cooldown in their own probes.toml.
   //
-  // What this scenario does NOT cover: every watcher scenario seeds
-  // globalThis.__ccWatch itself, so the image's own `??={last:null,...}`
-  // initialiser never runs here. This pins the GUARD; the initialiser is
-  // pinned by the check block, which goes red on a `last:0`. Two halves,
-  // two instruments -- neither alone is the guarantee.
+  // What this scenario does NOT cover, stated precisely -- an earlier wording
+  // here claimed "every watcher scenario seeds globalThis.__ccWatch itself, so
+  // the initialiser never runs", and that was simply false: of the 22 `probe:
+  // 'watch'` scenarios, `watch-window-not-filled` carries no `watchState`, the
+  // harness deletes __ccWatch before every run and re-seeds only when the
+  // scenario asks, so the image's own `??={last:null,start:__now}` runs there on
+  // every bench run.
+  //
+  // What no scenario can do is tell the SENTINEL apart. The gate tests the
+  // window before the cooldown, and that scenario's `start` is fresh, so it
+  // answers window-not-filled with `last` at null or at 0 alike. This scenario
+  // pins the GUARD; the sentinel is pinned by the check block, which goes red on
+  // a `last:0`. Two halves, two instruments -- neither alone is the guarantee.
   { name: 'watch-never-spoke-no-cooldown', probe: 'watch', toolName: 'Read',
     watchState: () => ({ last: null, start: mono() - 3600000 }),
     config: { cooldown_min: 600 },
@@ -767,6 +775,19 @@ const EXPECTED_SCENARIOS = 54;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
+  process.exit(2);
+}
+// A scenario without `expected` used to run and be counted as conforming: see
+// checkMismatch. The count above catches a hole in the ARRAY; this catches a
+// hole in a SCENARIO, which the count cannot see -- add one, forget the
+// specification, keep the number right, and the bench reports it as behaving as
+// specified while no specification exists.
+const unspecified = scenarios
+  .filter((s) => !s.expected || typeof s.expected !== 'object')
+  .map((s) => s.name);
+if (unspecified.length > 0) {
+  console.error('probe-bench: сценарии без expected: ' + unspecified.join(', ')
+    + ' — без спецификации сценарий не проверяет ничего');
   process.exit(2);
 }
 const dupeNames = scenarios.map((s) => s.name)
@@ -924,7 +945,10 @@ function expectationText(expected) {
 }
 
 function checkMismatch(result, expected) {
-  if (!expected) return false;
+  // No specification is a MISMATCH, not a pass. The door above should mean this
+  // is unreachable; it is here for the day the door is edited and this is the
+  // last thing between an unspecified scenario and a green bench.
+  if (!expected || typeof expected !== 'object') return true;
   if (result.passed !== expected.passed) return true;
   if (expected.outcome !== undefined && result.outcome !== expected.outcome) return true;
   if (expected.sid !== undefined && result.sid !== expected.sid) return true;

@@ -2159,9 +2159,17 @@ step('22 judge consulted before a subagent dispatch', () => {
     // of a surrogate pair and leave an unpaired one at the seam. That is not a
     // cosmetic loss: the fragment goes into JSON and then into text a model
     // reads, where an unpaired surrogate is either an error or a replacement
-    // character standing where an emoji was. Every slice in this code runs
-    // through here, so the seam is repaired in ONE place: a trailing high half
-    // and a leading low half are dropped.
+    // character standing where an emoji was. Every cut of TEXT A MODEL WILL
+    // READ runs through here -- the clip, both halves of the transcript trim,
+    // and the dispatch head -- so the seam is repaired in ONE place: a
+    // trailing high half and a leading low half are dropped.
+    //
+    // The sentence used to say "every slice", which was false in both
+    // directions: cuts that are not text (the fleet ring, the prune victim
+    // list, the key suffix of a record name, the JSON quote pair) must NOT
+    // pass through here -- they have no seam -- and the dispatch head, which
+    // should have, did not. The pipeline's cut census records both facts per
+    // site, so neither half of that can drift again unnoticed.
     '__sur=(__x)=>{let __s0=String(__x);' +
       'if(__s0.length){let __c0=__s0.charCodeAt(0);' +
         'if(__c0>=56320&&__c0<=57343)__s0=__s0.slice(1)}' +
@@ -2667,7 +2675,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           'let __mc=__cs({src:"injected",text:__mt()})+120;' +
           'for(let __g=0;__g<20000&&__tot+__mc>__b&&__a.length>0;__g++){' +
             'let __i=__long(()=>!0);if(__i<0)break;' +
-            'if(__w[__i]>120&&__fit(__i,Math.max(60,__w[__i]-(__tot+__mc-__n))))continue;' +
+            'if(__w[__i]>120&&__fit(__i,Math.max(60,__w[__i]-(__tot+__mc-__b))))continue;' +
             'let __h4=__head();' +
             'if(__cnt(()=>!0)<=1&&(__h4<0||!__fit(__h4,Math.max(24,__b-__mc-4))))break;' +
             'let __h3=__head();if(__h3<0||__cnt(()=>!0)<=1)break;__del(__h3,__pr(__a[__h3]))}' +
@@ -2681,13 +2689,27 @@ step('22 judge consulted before a subagent dispatch', () => {
       // Dispatch trimming is declared by the same convention as transcript
       // trimming. The dispatch is the one object whose completeness the judge
       // actually judges, and a mute cut mid-word must be read by it as an
-      // unfinished brief. Measured 2026-08-23: 29% of dispatches hit the cap,
-      // and one BLOCK cancelled a sound call over our own truncation.
+      // unfinished brief.
+      //
+      // Counted in the judge's own records: with the cap at 4000, 34 of the 163
+      // dispatches on 2026-08-23 were cut (63 of 709 overall), and record
+      // 2026-08-23T18-52-35-972Z-bSujKvKU is one of them -- a sound call
+      // cancelled with "бриф -- последний пункт раздела «Rules of this
+      // dispatch» оборван на середине слова". That BLOCK is what this
+      // declaration exists for.
+      //
+      // Untested in the field since: the cap is 16000 now and the largest
+      // dispatch on record is 7447 characters, so nothing has been cut since it
+      // was raised. The bench is the only thing exercising this path.
       'let __dsrc=String(__o.payload!==void 0?(typeof __o.payload==="function"?' +
         'await __o.payload():__o.payload):JSON.stringify(__o.input));' +
       'let __dmax=__num("dispatch_chars",__cfg.dispatch_chars,16000,0);' +
       'let __dtr=__dsrc.length>__dmax;' +
-      'let __disp=__dtr?__dsrc.slice(0,__dmax):__dsrc;' +
+      // Through the seam repair, like every other cut of text a model reads.
+      // Without it the brief the judge decides on could end in half a
+      // surrogate pair -- a replacement character standing where an emoji
+      // was, or a parse error, depending on whose JSON reads it next.
+      'let __disp=__dtr?__sur(__dsrc.slice(0,__dmax)):__dsrc;' +
       // The declaration sits in the block's HEADER, not its tail: the tail is
       // the caller's text, and a brief ending in such a line would declare
       // itself truncated BY US and beg for leniency the judge is bound by its
@@ -2998,8 +3020,13 @@ step('22 judge consulted before a subagent dispatch', () => {
         // and a retry that can cost as much as the thing it is rescuing is not
         // a cheap salvage, it is a fourth attempt. The tail it sends is short
         // by construction, so the shorter clock matches the work.
+        // Bound above by the rung, not only below by a second: with a rung under
+        // two seconds the bare floor made the salvage cost MORE than the attempt
+        // it salvages. Read once into __rt -- twice in one statement is the
+        // defect named four lines up for __rcc.
+        'let __rt=__num("rung.timeout_ms",__e.timeout_ms,__tmo,1);' +
         'try{__raw=await __call(__cut(__rcc),' +
-          'Math.max(1000,Math.round(__num("rung.timeout_ms",__e.timeout_ms,__tmo,1)/2)),' +
+          'Math.min(__rt,Math.max(1000,Math.round(__rt/2))),' +
           '__e);__v=__pv(__raw);' +
           'if(!__v)__errs.push(__jm+": empty verdict")}' +
         'catch(__ce){__raw=null;__errs.push(__jm+": "+String(__ce?.name||"Error")+": "+' +

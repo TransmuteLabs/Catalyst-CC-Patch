@@ -119,8 +119,23 @@ fi
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe.XXXXXX")"
 BACKUP_SNAP="$ROOT/native-binary.backup.snapshot"
 [[ -f "$TWEAKCC_BACKUP" ]] && cp -p "$TWEAKCC_BACKUP" "$BACKUP_SNAP"
+TWEAKCC_CFG="$HOME/.tweakcc/config.json"
+CFG_SNAP="$ROOT/config.json.snapshot"
+[[ -f "$TWEAKCC_CFG" ]] && cp -p "$TWEAKCC_CFG" "$CFG_SNAP"
 
 cleanup() {
+  # Restore the borrowed config first: it carries the seeded version, and leaving
+  # a bogus one behind makes the next real tweakcc run refresh its backup from
+  # whatever binary happens to be installed -- the exact poisoning this probe is
+  # about, caused by the probe.
+  if [[ -f "$CFG_SNAP" ]]; then
+    if ! cmp -s "$CFG_SNAP" "$TWEAKCC_CFG" 2>/dev/null; then
+      cp -p "$CFG_SNAP" "$TWEAKCC_CFG.probe-restore" \
+        && mv "$TWEAKCC_CFG.probe-restore" "$TWEAKCC_CFG" \
+        && echo "restored $TWEAKCC_CFG from the probe's snapshot" \
+        || echo "WARNING: could not restore $TWEAKCC_CFG from $CFG_SNAP" >&2
+    fi
+  fi
   # Restore the borrowed backup before anything else, and SAY whether it worked:
   # a silent failure here leaves the human with a poisoned tweakcc restore and no
   # idea this probe was the cause.
@@ -148,7 +163,26 @@ stage_dir() {
   rm -rf "$ROOT/$1"; mkdir -p "$d"
   echo "$d"
 }
+# tweakcc's startupCheck refreshes its backup from `ccInstallationPath` only
+# when the recorded version differs from the installed one. Without a mismatch
+# the backup is never rewritten, so "the backup is still stock" holds in every
+# case for a reason that has nothing to do with what is being tested -- and the
+# control could not redden it no matter what it disabled. Seeded before EVERY
+# run, because tweakcc records the real version once it refreshes and would not
+# fire a second time.
+seed_version_mismatch() {
+  [[ -f "$TWEAKCC_CFG" ]] || return 0
+  python3 - "$TWEAKCC_CFG" <<'PY'
+import json, sys
+p = sys.argv[1]
+cfg = json.load(open(p))
+cfg['ccVersion'] = '0.0.0-probe'
+json.dump(cfg, open(p, 'w'), indent=2, ensure_ascii=False)
+PY
+}
+
 run_pipeline() {  # <script> <bindir> <logfile>
+  seed_version_mismatch
   ( PATH="$2:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     CLAUDE_PATCH_SKIP_MODELS=1 bash "$1" ) >"$3" 2>&1
 }
@@ -175,9 +209,17 @@ case_a() {
   [[ "$(marks "$d/claude")" != 0 ]] \
     && ok 'the build that landed carries our patches' \
     || bad 'the build that landed carries NO patches'
-  [[ "$(marks "$TWEAKCC_BACKUP")" == 0 ]] \
-    && ok "tweakcc's backup is still stock" \
-    || bad "tweakcc's backup now holds OUR build -- --restore would hand out patched bytes"
+  # `marks` answers 0 for a stock file AND for one that is not there (its own
+  # self-test asserts exactly that), so testing only the count lets ABSENCE pass
+  # as cleanliness. After a full pipeline run the backup exists -- tweakcc makes
+  # it -- and its disappearance is its own finding, with its own words.
+  if [[ ! -f "$TWEAKCC_BACKUP" ]]; then
+    bad "tweakcc's backup is GONE -- there is nothing to restore from"
+  elif [[ "$(marks "$TWEAKCC_BACKUP")" == 0 ]]; then
+    ok "tweakcc's backup is still stock"
+  else
+    bad "tweakcc's backup now holds OUR build -- --restore would hand out patched bytes"
+  fi
 }
 
 # --- case b: nothing to preserve ---------------------------------------------
@@ -215,10 +257,22 @@ case_c() {
     ln -sfn "$f" "$kit/$(basename "$f")"
   done
   rm -f "$kit/claude-patch-all.sh"
-  sed 's/&& grep -q -a -F "\$OUR_MARKER" "\$BIN"; then/\&\& false; then/' \
+  # Anchored to 0b's trigger, which is a CONTINUATION line beginning with `&&`.
+  # The unanchored form also rewrote the post-stage assertion, which begins
+  # `if [[ $ONLY_OURS -eq 0 ]] && grep -q ...` -- so the control silently
+  # disabled a second guard and then read the result as evidence about the
+  # first. Faithfulness of a mutation is not a matter of intent: it is counted.
+  sed -E 's/^([[:space:]]*)&& grep -q -a -F "\$OUR_MARKER" "\$BIN"; then$/\1\&\& false; then/' \
     "$PIPELINE" > "$kit/claude-patch-all.sh"
-  if cmp -s "$PIPELINE" "$kit/claude-patch-all.sh"; then
+  local changed
+  changed=$(diff "$PIPELINE" "$kit/claude-patch-all.sh" | grep -c '^< ' || true)
+  case "$changed" in ''|*[!0-9]*) changed=0 ;; esac
+  if [[ "$changed" -eq 0 ]]; then
     bad 'the mutation did not apply -- 0b no longer has the expected trigger, so this control proves nothing'
+    return
+  fi
+  if [[ "$changed" -ne 1 ]]; then
+    bad "the mutation rewrote $changed lines, not 1 -- it is disabling more than 0b, so nothing it shows is about 0b"
     return
   fi
 
@@ -230,15 +284,23 @@ case_c() {
   run_pipeline "$kit/claude-patch-all.sh" "$d" "$log"; rc=$?
   ino_after="$(inode "$d/claude")"
 
-  grep -q 'rebuilding from the pristine copy' "$log" || { reddened=$((reddened+1)); note 'red' 'staging branch not taken'; }
+  # The REQUIRED red is named, and it is the one 0b is: without 0b the pipeline
+  # cannot announce a staging rebuild. Counting "at least one" let any mutant
+  # that merely crashes the pipeline -- a syntax error, a missing bun, an
+  # unrelated guard tripping -- pass as proof about the staging branch.
+  local required=0
+  grep -q 'rebuilding from the pristine copy' "$log" || { required=1; note 'red' 'staging branch not taken'; }
   [[ "$ino_before" == "$ino_after" ]] && { reddened=$((reddened+1)); note 'red' "patched in place (inode $ino_after)"; }
   [[ "$(marks "$TWEAKCC_BACKUP")" != 0 ]] && { reddened=$((reddened+1)); note 'red' "tweakcc's backup poisoned"; }
-  [[ $rc -ne 0 ]] && { reddened=$((reddened+1)); note 'red' "pipeline refused (rc=$rc)"; }
+  # Reported, never counted: a pipeline that refused says nothing about which
+  # assertion has teeth, and it is the most likely way a future mutation goes
+  # wrong without anyone noticing.
+  [[ $rc -ne 0 ]] && note 'info' "pipeline refused (rc=$rc) -- not counted as evidence"
 
-  if [[ $reddened -gt 0 ]]; then
-    ok "the mutation reddens $reddened of case (a)'s assertions"
+  if [[ $required -eq 1 ]]; then
+    ok "the mutation reddens the staging assertion, and $reddened more of case (a)'s"
   else
-    bad 'the mutation changed NOTHING: case (a) passes with 0b disabled, so it is not testing 0b'
+    bad 'the mutation changed NOTHING about the staging branch: case (a) is not testing 0b'
   fi
 }
 
