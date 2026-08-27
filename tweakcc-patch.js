@@ -209,12 +209,35 @@ step('1 routing', () => {
 //    token requirement INSIDE a discovery that is already running.
 // --------------------------------------------------------------------------
 step('2 discovery', () => {
-  const rx = /(let ([A-Za-z_$][\w$]*)=[\w$]*\.ANTHROPIC_AUTH_TOKEN,([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\(\);if\(!)\2(&&!\3\)return)/;
-  const m = js.match(rx);
+  // ДВЕ ФОРМЫ ОХРАННИКА, потому что кит патчит и старые версии.
+  //
+  // До 2.1.248 охранник читался одной строкой:
+  //   let <t>=<ns>.ANTHROPIC_AUTH_TOKEN,<r>=<f>();if(!<t>&&!<r>)return;
+  // В 2.1.248 апстрим переписал его: появились промежуточные значения и
+  // ранний выход стал блоком с журналированием:
+  //   let <r>=<ns>.ANTHROPIC_AUTH_TOKEN,<o>=<f>(),<u>=...,<p>=<r>||<u>,
+  //   <g>=<h>()?.trim()||<u>;if(!<p>&&!<g>){<log>(...);return}
+  // Обе формы гасятся одинаково -- первый конъюнкт становится ложью, ранний
+  // выход не срабатывает, открытие моделей идёт дальше. Перебираем формы
+  // по очереди и отказываемся, только если НЕ подошла ни одна: иначе новая
+  // форма молча оставила бы образ без патча.
+  const shapes = [
+    /(let ([A-Za-z_$][\w$]*)=[\w$]*\.ANTHROPIC_AUTH_TOKEN,([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\(\);if\(!)\2(&&!\3\)return)/,
+    /(let ([A-Za-z_$][\w$]*)=[\w$]*\.ANTHROPIC_AUTH_TOKEN,[^;]{0,240};if\(!)([A-Za-z_$][\w$]*)(&&![A-Za-z_$][\w$]*\)\{)/,
+  ];
+  let m = null;
+  let shape = -1;
+  for (let i = 0; i < shapes.length; i++) {
+    m = js.match(shapes[i]);
+    if (m) { shape = i; break; }
+  }
   if (!m) fail('discovery guard not found');
 
+  // В обеих формах группа 1 кончается на `if(!`, а дальше идёт имя, которое
+  // мы и заменяем на `1`; хвост группы 4 несёт остаток условия.
+  const guarded = shape === 0 ? m[2] : m[3];
   js = js.slice(0, m.index) + m[1] + '1' + m[4] + js.slice(m.index + m[0].length);
-  applied.push(`discovery (guard !${m[2]} -> !1)`);
+  applied.push(`discovery (guard !${guarded} -> !1, форма ${shape === 0 ? 'до 2.1.248' : '2.1.248+'})`);
 });
 
 // --------------------------------------------------------------------------
@@ -714,12 +737,26 @@ step('11 proxy lane survives an expired login', () => {
 
   // The class, found by the message it is constructed with rather than by its
   // minified name.
-  const clsMatch = js.match(
+  // ДВЕ ФОРМЫ ОБЪЯВЛЕНИЯ. До 2.1.248 бандлер заворачивал модуль в ленивый
+  // инициализатор, и класс объявлялся присваиванием в заранее объявленную
+  // переменную: `<X>=class <X> extends Error{...}`. В 2.1.248 бандл ушёл на
+  // настоящие ESM-чанки (обёрток `__esm`/`__commonJS` в нагрузке ноль), и класс
+  // стал обычным объявлением: `class <X> extends Error{...}`. Ищем по СООБЩЕНИЮ,
+  // а не по минифицированному имени -- оно локально для чанка.
+  let clsMatch = js.match(
     new RegExp(
       `(${ID})=class \\1 extends Error\\{constructor\\(\\)\\{` +
         `super\\("OAuth refresh token is no longer valid`,
     ),
   );
+  if (!clsMatch) {
+    clsMatch = js.match(
+      new RegExp(
+        `class (${ID}) extends Error\\{constructor\\(\\)\\{` +
+          `super\\("OAuth refresh token is no longer valid`,
+      ),
+    );
+  }
   if (!clsMatch) fail('OAuthRefreshDeadError class not found');
   const cls = clsMatch[1];
 
@@ -837,8 +874,31 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   const coord = new RegExp(
     `(let ${ID}=Date\\.now\\(\\),${ID}=)(?:${ID}\\(\\)\\?void 0:)?(${ID},${ID}=${ID}\\(${ID}\\.agentContext\\))`,
   );
-  if (!coord.test(js)) fail('coordinator-mode model suppression site not found');
-  js = js.replace(coord, `$1$2`);
+  if (coord.test(js)) {
+    js = js.replace(coord, `$1$2`);
+  } else {
+    // 2.1.248 ПЕРЕПИСАЛ этот участок, и подавление там больше не безусловное:
+    //   async call({prompt:<p>,subagent_type:<t>,...,model:<m>,...},<ctx>,...){
+    //     let <n>=Date.now();
+    //     if(<isCoordinator>()&&<ns>.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)<m>=void 0;
+    //     let <b>=<m>,<j>=<f>(<ctx>.agentContext),...
+    // То есть выбранная модель гасится ТОЛЬКО при явно выставленной переменной
+    // окружения -- по умолчанию диспатч уже волен выбирать модель, ради чего
+    // эта нога и существовала. Удалять env-ветку мы не имеем оснований: это
+    // ручка пользователя, а не дефект, и её снятие отняло бы у координаторских
+    // сессий заявленное поведение.
+    //
+    // Но проверка участка остаётся ОБЯЗАТЕЛЬНОЙ: если завтра подавление снова
+    // станет безусловным, а якорь будет удалён «за ненадобностью», патч
+    // промолчит и образ уедет с погашенной моделью. Поэтому здесь -- утверждение
+    // присутствия: участок обязан существовать в одной из двух форм.
+    const coord248 = new RegExp(
+      `let ${ID}=Date\\.now\\(\\);if\\(${ID}\\(\\)&&${ID}\\.` +
+        `CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL\\)(${ID})=void 0;` +
+        `let ${ID}=\\1,${ID}=${ID}\\(${ID}\\.agentContext\\)`,
+    );
+    if (!coord248.test(js)) fail('coordinator-mode model suppression site not found');
+  }
 
   // (b) the fork flag is whatever the launch telemetry reports as is_fork
   const forkMatch = js.match(new RegExp(`is_fork:(${ID}),`));
@@ -1059,15 +1119,46 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   const before = js.length;
 
-  const exportMatch = js.match(new RegExp(`isCoordinatorMode:\\(\\)=>(${ID})`));
+  // ДВЕ ФОРМЫ ЭКСПОРТА. До 2.1.248 -- баррель бандлера
+  // (`isCoordinatorMode:()=><local>`); в 2.1.248 -- настоящее ESM-предложение
+  // (`export{...,<local> as isCoordinatorMode,...}`). Нам нужно ЛОКАЛЬНОЕ имя,
+  // и обе формы его дают; грепать по всему образу нельзя -- минифицированные
+  // имена локальны для чанка, поэтому привязка берётся из самого экспорта.
+  let exportMatch = js.match(new RegExp(`isCoordinatorMode:\\(\\)=>(${ID})`));
+  if (!exportMatch) exportMatch = js.match(new RegExp(`(${ID}) as isCoordinatorMode`));
   if (!exportMatch) fail('isCoordinatorMode export not found');
   const isCoordinator = exportMatch[1];
 
-  const scope13 = moduleTextAt(exportMatch.index);
+  // ЦЕПОЧКА ЧАНКОВ (2.1.248). Раньше экспорт, предикат и гейт лежали в одном
+  // модуле, и области видимости хватало. В 2.1.248 бандл разложен на ~193
+  // ESM-чанка, и экспорт стоит в чанке-ФАСАДЕ: он лишь импортирует имя из
+  // соседнего чанка и переэкспортирует его
+  // (`import{W3,...}from"...chunk-q9dprqyd.js";export{...,W3 as isCoordinatorMode}`).
+  // Определение предиката при этом лежит в 16 МБ от экспорта. Имя локально для
+  // чанка -- в нагрузке три РАЗНЫХ `function js(){...}`, -- поэтому связывать
+  // по имени глобально нельзя: определяющим считается только тот чанк, который
+  // это имя ЭКСПОРТИРУЕТ, и таких обязан быть ровно один.
+  let anchor13 = exportMatch.index;
+  let scope13 = moduleTextAt(anchor13);
 
   const aliasRx = new RegExp(`function ${rxEsc(isCoordinator)}\\(\\)\\{return (${ID})\\(\\)\\}`);
-  const aliasMatch = scope13.match(aliasRx);
-  if (!aliasMatch) fail(`coordinator predicate ${isCoordinator}() is not a plain alias`);
+  let aliasMatch = scope13.match(aliasRx);
+  if (!aliasMatch) {
+    const owners = [...js.matchAll(new RegExp(aliasRx.source, 'g'))].filter(hit =>
+      new RegExp(
+        `export\\{[^}]*(?<![$\\w])${rxEsc(isCoordinator)}(?![$\\w])[^}]*\\}`,
+      ).test(moduleTextAt(hit.index)),
+    );
+    if (owners.length !== 1) {
+      fail(
+        `coordinator predicate ${isCoordinator}() is not a plain alias ` +
+          `(модулей, экспортирующих это имя вместе с определением: ${owners.length})`,
+      );
+    }
+    anchor13 = owners[0].index;
+    scope13 = moduleTextAt(anchor13);
+    aliasMatch = scope13.match(aliasRx);
+  }
   const gate = aliasMatch[1];
 
   // (a) let the mode survive an interactive session when explicitly opted in.
@@ -1083,10 +1174,23 @@ step('13 coordinator mode may run interactively (fork preserved)', () => {
     `(function ${rxEsc(gate)}\\(\\)\\{if\\(!(${ID})\\(process\\.env\\.CLAUDE_CODE_COORDINATOR_MODE\\)\\)return!1;` +
       `if\\(${ID}\\(\\)&&!${ID}\\(\\)&&!${ID}\\.CLAUDE_CODE_REMOTE)(\\)return!1;return!0\\})`,
   );
-  const gateMatch = scope13.match(gateRx);
-  if (!gateMatch) fail('coordinator interactive veto not found');
+  // Гейт тоже может жить в СВОЁМ чанке (2.1.248: предикат в одном, гейт в
+  // другом, помощник в третьем). Ищем его по ФОРМЕ, а не по имени, и требуем
+  // ровно одно совпадение на всю нагрузку: имя `gate` уже вшито в форму через
+  // rxEsc, так что найденное совпадение привязано к предикату, а единственность
+  // не даёт спутать его с одноимённой функцией другого чанка.
+  let anchorGate = anchor13;
+  let gateMatch = scope13.match(gateRx);
+  if (!gateMatch) {
+    const found = [...js.matchAll(new RegExp(gateRx.source, 'g'))];
+    if (found.length !== 1) {
+      fail(`coordinator interactive veto not found (совпадений формы: ${found.length})`);
+    }
+    anchorGate = found[0].index;
+    gateMatch = found[0];
+  }
   const envTruthy = gateMatch[2];
-  editModuleAt(exportMatch.index, body =>
+  editModuleAt(anchorGate, body =>
     body.replace(
       gateRx,
       `$1&&!${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_INTERACTIVE)$3`,
@@ -1176,13 +1280,42 @@ step('14 environment overrides a resumed session mode', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   const before = js.length;
 
-  const exportMatch = js.match(new RegExp(`isCoordinatorMode:\\(\\)=>(${ID})`));
+  // ДВЕ ФОРМЫ ЭКСПОРТА. До 2.1.248 -- баррель бандлера
+  // (`isCoordinatorMode:()=><local>`); в 2.1.248 -- настоящее ESM-предложение
+  // (`export{...,<local> as isCoordinatorMode,...}`). Нам нужно ЛОКАЛЬНОЕ имя,
+  // и обе формы его дают; грепать по всему образу нельзя -- минифицированные
+  // имена локальны для чанка, поэтому привязка берётся из самого экспорта.
+  let exportMatch = js.match(new RegExp(`isCoordinatorMode:\\(\\)=>(${ID})`));
+  if (!exportMatch) exportMatch = js.match(new RegExp(`(${ID}) as isCoordinatorMode`));
   if (!exportMatch) fail('isCoordinatorMode export not found');
   const isCoordinator = exportMatch[1];
 
-  const matcherMatch = js.match(new RegExp(`matchSessionMode:\\(\\)=>(${ID})`));
+  // Обе формы экспорта, как и у предиката выше: баррель бандлера до 2.1.248 и
+  // ESM-предложение начиная с неё.
+  let matcherMatch = js.match(new RegExp(`matchSessionMode:\\(\\)=>(${ID})`));
+  if (!matcherMatch) matcherMatch = js.match(new RegExp(`(${ID}) as matchSessionMode`));
   if (!matcherMatch) fail('matchSessionMode export not found');
   const matcher = matcherMatch[1];
+
+  // Как и в шаге 13: экспорт может стоять в чанке-фасаде, а определение -- в
+  // том чанке, который это имя экспортирует. Правим именно его.
+  let anchor14 = matcherMatch.index;
+  let scope14 = moduleTextAt(anchor14);
+  if (!new RegExp(`function ${rxEsc(matcher)}\\(`).test(scope14)) {
+    const defs = [...js.matchAll(new RegExp(`function ${rxEsc(matcher)}\\(`, 'g'))].filter(hit =>
+      new RegExp(`export\\{[^}]*(?<![$\\w])${rxEsc(matcher)}(?![$\\w])[^}]*\\}`).test(
+        moduleTextAt(hit.index),
+      ),
+    );
+    if (defs.length !== 1) {
+      fail(
+        `resume mode matcher ${matcher}() is not defined in a module that exports it ` +
+          `(кандидатов: ${defs.length})`,
+      );
+    }
+    anchor14 = defs[0].index;
+    scope14 = moduleTextAt(anchor14);
+  }
 
   // The same env-truthy helper as #13, re-derived from the gate rather than
   // handed over between steps: this must not depend on step order, and the
@@ -1195,16 +1328,45 @@ step('14 environment overrides a resumed session mode', () => {
   // coordinator export, this matcher and the helper) share one module on every
   // version in range, and on 2.1.233/240 there is only one module at all; that
   // is what makes the capture correct, and it is asserted rather than assumed.
-  const helperMatch = moduleTextAt(matcherMatch.index).match(
+  const helperMatch = scope14.match(
     new RegExp(`\\{if\\(!(${ID})\\(process\\.env\\.CLAUDE_CODE_COORDINATOR_MODE\\)\\)return!1;`),
   );
-  if (!helperMatch) {
-    fail(
-      'coordinator env-truthy helper is not in the module that holds the resume ' +
-        'matcher — a name captured from another chunk would not resolve here',
+  // Выражение, которым проверяется наша переменная. Если помощник виден в этом
+  // же чанке -- зовём его по имени, как раньше.
+  let force;
+  if (helperMatch) {
+    force = `${repEsc(helperMatch[1])}(process.env.CLAUDE_CODE_COORDINATOR_FORCE)`;
+  } else {
+    // 2.1.248: помощник живёт в СВОЁМ чанке и в чанк матчера не импортируется
+    // (проверено: среди 45 его импортов чанка-помощника нет). Вписать туда имя
+    // из чужого чанка нельзя -- оно там не разрешится, и это ровно тот случай,
+    // от которого предупреждает отказ выше.
+    //
+    // Поэтому подставляется НЕ пересказ семантики, а ЕЁ ЖЕ тело: помощник
+    // ищется по форме, форма обязана быть единственной на всю нагрузку
+    // (измерено: по одному вхождению и в 2.1.247, и в 2.1.248), и список
+    // истинных значений берётся из него же. Если апстрим изменит помощника,
+    // форма перестанет совпадать и патч откажет вслух, а не разойдётся с
+    // продуктом молча.
+    const truthyRx = new RegExp(
+      `function (${ID})\\((${ID})\\)\\{if\\(!\\2\\)return!1;` +
+        `if\\(typeof \\2==="boolean"\\)return \\2;` +
+        `let (${ID})=String\\(\\2\\)\\.toLowerCase\\(\\)\\.trim\\(\\);` +
+        `return\\["1","true","yes","on"\\]\\.includes\\(\\3\\)\\}`,
+      'g',
     );
+    const truthy = [...js.matchAll(truthyRx)];
+    if (truthy.length !== 1) {
+      fail(
+        'coordinator env-truthy helper: ожидалась ровно одна функция известной формы, ' +
+          `найдено ${truthy.length} — отказываюсь вписывать семантику, которую не опознал`,
+      );
+    }
+    if (js.includes('__ccForce')) fail('__ccForce already present — refusing to shadow it');
+    force =
+      '(()=>{let __ccForce=process.env.CLAUDE_CODE_COORDINATOR_FORCE;if(!__ccForce)return!1;' +
+      'return["1","true","yes","on"].includes(String(__ccForce).toLowerCase().trim())})()';
   }
-  const envTruthy = helperMatch[1];
 
   // Anchored on the shape, not on the message literals: the guard, the live
   // read of the predicate and the "coordinator" comparison identify the
@@ -1213,15 +1375,10 @@ step('14 environment overrides a resumed session mode', () => {
     `(function ${rxEsc(matcher)}\\((${ID})\\)\\{if\\(!\\2\\)return;)` +
       `(let ${ID}=${rxEsc(isCoordinator)}\\(\\),${ID}=\\2==="coordinator";)`,
   );
-  if (!matcherRx.test(moduleTextAt(matcherMatch.index))) {
+  if (!matcherRx.test(scope14)) {
     fail(`resume mode matcher ${matcher}() does not have the expected shape`);
   }
-  editModuleAt(matcherMatch.index, body =>
-    body.replace(
-      matcherRx,
-      `$1if(${repEsc(envTruthy)}(process.env.CLAUDE_CODE_COORDINATOR_FORCE))return;$3`,
-    ),
-  );
+  editModuleAt(anchor14, body => body.replace(matcherRx, `$1if(${force})return;$3`));
 
   applied.push(
     `environment overrides a resumed session mode via CLAUDE_CODE_COORDINATOR_FORCE ` +

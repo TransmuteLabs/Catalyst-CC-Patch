@@ -1324,6 +1324,43 @@ def _same_env_helper(d):
         return False
     return bool(re.search(re.escape(m.group(1)) + rb'\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)', d))
 
+def _env_overrides_resumed_mode(d):
+    """Возобновление сессии подчиняется переменной окружения.
+
+    Проверяется ГАРАНТИЯ, а не запись: в матчере режима, до сравнения с
+    "coordinator", стоит выход по CLAUDE_CODE_COORDINATOR_FORCE, и истинность
+    этой переменной понимается ТАК ЖЕ, как её понимает сам продукт.
+
+    Две формы -- потому что связь имён поменялась. До 2.1.248 помощник разбора
+    виден в том же модуле, и вставка зовёт его по имени; сверка `_same_env_helper`
+    доказывает, что имя то же самое, что гейтит режим. С 2.1.248 бандл разложен
+    на ESM-чанки, помощник живёт в чужом чанке и в модуль матчера не
+    импортируется -- имя там не разрешилось бы, -- поэтому вставлено его же
+    тело. Здесь это тело сверяется со СЛОВАРЁМ настоящего помощника из того же
+    образа: разойдутся -- проверка красная, и разойтись молча они не могут.
+    """
+    call = re.search(rb'\{if\(!(' + ID + rb')\)return;'
+                     rb'if\((' + ID + rb')\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)\)return;'
+                     rb'let ' + ID + rb'=' + ID + rb'\(\),' + ID + rb'=\1==="coordinator";', d)
+    if call:
+        return _same_env_helper(d)
+
+    inline = re.search(rb'\{if\(!(' + ID + rb')\)return;'
+                       rb'if\(\(\(\)=>\{let __ccForce=process\.env\.CLAUDE_CODE_COORDINATOR_FORCE;'
+                       rb'if\(!__ccForce\)return!1;'
+                       rb'return(\[[^\]]{0,80}\])\.includes\(String\(__ccForce\)\.toLowerCase\(\)\.trim\(\)\)\}\)\(\)\)return;'
+                       rb'let ' + ID + rb'=' + ID + rb'\(\),' + ID + rb'=\1==="coordinator";', d)
+    if not inline:
+        return False
+
+    helper = re.search(rb'if\(!' + ID + rb'\)return!1;if\(typeof ' + ID + rb'==="boolean"\)return ' + ID
+                       + rb';let ' + ID + rb'=String\(' + ID + rb'\)\.toLowerCase\(\)\.trim\(\);'
+                       rb'return(\[[^\]]{0,80}\])\.includes\(', d)
+    if not helper:
+        return False
+    return inline.group(2) == helper.group(1)
+
+
 def _probe_uses_the_images_own_names(full):
     """The probe's free names must be the image's own bindings, byte for byte.
 
@@ -2213,7 +2250,20 @@ def _dispatch_keeps_its_model(d):
     m = re.search(rb'Date\.now\(\),(' + ID + rb')=(' + ID + rb'),' + ID + rb'=' + ID
                   + rb'\(' + ID + rb'\.agentContext\)', d)
     if not m:
-        return False
+        # 2.1.248 переписал этот участок: `Date.now()` кончается точкой с
+        # запятой, подавление стало отдельным `if` под переменной окружения, и
+        # только потом идёт `let <v>=<model>,<n>=<f>(<ctx>.agentContext)`.
+        # Проверяемая гарантия не изменилась -- переменная, из которой растёт
+        # запись запуска, инициализируется моделью диспатча, -- поэтому вторая
+        # форма даёт ту же пару «имя переменной + её появление как model:<v>».
+        m = re.search(rb'Date\.now\(\);if\(' + ID + rb'\(\)&&' + ID
+                      + rb'\.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL\)(' + ID
+                      + rb')=void 0;let (' + ID + rb')=\1,' + ID + rb'=' + ID
+                      + rb'\(' + ID + rb'\.agentContext\)', d)
+        if not m:
+            return False
+        var = re.escape(m.group(2))
+        return bool(re.search(rb'model:' + var + rb'(?![\w$.])', d[m.end():m.end() + 8000]))
     var = re.escape(m.group(1))
     # Bounded to the launch function: the names here are one letter long, so an
     # unbounded search would find someone else's `model:f` in another chunk.
@@ -2314,7 +2364,12 @@ checks = {
     'full bypass keeps peer-machine immunity': _bypass_no_immunity(d),
     'agent model schema relaxed':         _agent_model_schema_relaxed(d),
     'each launch site carries effort by one route or the other':        _every_launch_carries_effort(d),
-    'gateway discovery without token':    bool(re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)),
+    # Две формы охранника (см. шаг 2): до 2.1.248 -- одна строка с ранним
+    # `return`, с 2.1.248 -- цепочка промежуточных значений и блок. Гарантия в
+    # обеих одна: первый конъюнкт погашен, ранний выход не срабатывает.
+    'gateway discovery without token':    bool(
+                                              re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)
+                                              or re.search(rb'ANTHROPIC_AUTH_TOKEN,[^;]{0,240};if\(!1&&!' + ID + rb'\)\{', d)),
     # Two-sided: the stock branch must be gone AND the widened one must still
     # test the "inherit" sentinel. The negative alone passed a build where the
     # sentinel test had been dropped from the ternary -- `"inherit"` is truthy,
@@ -2415,12 +2470,7 @@ checks = {
     # a resumed session must not be able to drag the process out of the mode the
     # environment asked for; the bail sits before the first read of the live
     # predicate, so nothing is flipped and no warning is produced
-    'env overrides resumed mode':         bool(re.search(
-                                              rb'\{if\(!(' + ID + rb')\)return;'
-                                              rb'if\((' + ID + rb')\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)\)return;'
-                                              rb'let ' + ID + rb'=' + ID + rb'\(\),' + ID + rb'=\1==="coordinator";', d))
-                                          # parsed by the same helper that gates the mode itself
-                                          and _same_env_helper(d),
+    'env overrides resumed mode':         _env_overrides_resumed_mode(d),
     # a row must carry what was actually spawned: the agent type and the model,
     # the latter falling back to the agent definition when the dispatch did not
     # override it (the normal case for the pinned vendor agents)
