@@ -1145,6 +1145,11 @@ python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check \
 # its reader. Twice already a wave raised EXPECTED_CHECKS and left every
 # sentence about it behind; the second time the correction itself went stale
 # within one wave.
+#
+# A count also has an OWNER. Three benches now declare counts of their own, so
+# a number is compared with the constant of the bench named NEAREST to it, and
+# the grammar that finds those numbers is itself run against synthetic cases
+# with known answers before it is let near a real file.
 echo "==> Сверка чисел в доках"
 python3 - "$0" <<'PYDOCS'
 import io, os, re, sys, glob
@@ -1152,72 +1157,58 @@ import io, os, re, sys, glob
 here = os.path.dirname(os.path.abspath(sys.argv[1]))
 read = lambda p: io.open(p, encoding='utf-8').read()
 
-checks = re.search(r'^EXPECTED_CHECKS = (\d+)$', read(sys.argv[1]), re.M)
-bench_path = os.path.join(here, 'tools', 'probe-bench.js')
-scenarios = (re.search(r'^const EXPECTED_SCENARIOS = (\d+);$', read(bench_path), re.M)
-             if os.path.exists(bench_path) else None)
-if not checks or not scenarios:
-    print("ЧИСЛА НЕ ОБЪЯВЛЕНЫ: не найдено EXPECTED_CHECKS и/или EXPECTED_SCENARIOS")
-    sys.exit(1)
-declared = {'checks': checks.group(1), 'проверок': checks.group(1),
-            'проверки': checks.group(1), 'scenarios': scenarios.group(1),
-            'сценариев': scenarios.group(1), 'сценария': scenarios.group(1)}
+# --- кто объявляет число ------------------------------------------------------
+# Число в прозе принадлежит ОДНОМУ объявляющему месту. Пока счётчик сценариев
+# был один, владельца можно было держать неявным. С тремя стендами, у каждого
+# свои константы, неявный владелец заставляет гейт сверять утверждение про один
+# стенд с константой другого -- ровно так честная строка README про
+# corpus-tools-bench была предъявлена как расхождение с числом probe-bench.
+OWNERS = (
+    # id, имена в прозе, файл (None = сам конвейер), {величина: регексп объявления}
+    ('pipeline', (), None,
+     {'checks': r'^EXPECTED_CHECKS = (\d+)$'}),
+    ('probe-bench', ('probe-bench',), ('tools', 'probe-bench.js'),
+     {'scenarios': r'^const EXPECTED_SCENARIOS = (\d+);$'}),
+    ('judge-tools-bench', ('judge-tools-bench',), ('tools', 'judge-tools-bench.py'),
+     {'scenarios': r'^EXPECTED_SCENARIOS = (\d+)$',
+      'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
+    ('corpus-tools-bench', ('corpus-tools-bench',), ('tools', 'corpus-tools-bench.sh'),
+     {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
+      'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
+    ('docnum-bench', ('docnum-bench',), ('tools', 'docnum-bench.py'),
+     {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
+)
+# Существительное -> величина. Единственного числа здесь нет намеренно: «1 check»
+# как утверждение не пишут, а слово в единственном числе стоит в прозе на каждом
+# шагу и тянет за собой ложные совпадения.
+NOUNS = {'checks': 'checks', 'проверок': 'checks', 'проверки': 'checks',
+         'scenarios': 'scenarios', 'сценариев': 'scenarios', 'сценария': 'scenarios',
+         'mutations': 'mutations', 'мутаций': 'mutations', 'мутации': 'mutations'}
+# Насколько далеко от числа ищется имя владельца. Строка таблицы README и абзац
+# комментария укладываются в это окно; дальше имя рядом не стоит.
+WINDOW = 400
+# Только для сценариев: в этом ките «стенд» без уточнения исторически значил
+# probe-bench, и все безымянные счета сценариев -- его. Для мутаций такой
+# истории нет, поэтому неназванный владелец у счёта мутаций -- отказ, а не
+# догадка: гейт, который догадывается, сверяет не с тем числом.
+DEFAULTS = {'scenarios': 'probe-bench'}
 
-readme = os.path.join(here, 'README.md')
-if not os.path.exists(readme):
-    # Declared, not silent: the script may legitimately be deployed alone.
-    print("СВЕРКА ЧИСЕЛ ПРОПУЩЕНА — README.md рядом со скриптом не найден")
-    sys.exit(0)
-
-# The campaign journal records past builds by date: a line reading "N checks
-# green" under "Porting to 2.1.237" is true of THAT build and must not be
-# rewritten to today's number.
+# Журнал кампании записывает прошлые сборки по датам: строка «N checks green»
+# под заголовком «Porting to 2.1.237» верна для ТОЙ сборки и не переписывается.
 JOURNAL = 'judge-patch-spec.md'
-# `subset` is not a softening of the gate but a name for a case it cannot decide:
-# a number near one of these nouns may be a different quantity entirely, and only
-# the author knows which. Written down and greppable beats living in a blind spot.
+# `subset` -- не послабление гейта, а имя случая, который он не может решить:
+# число рядом с существительным может быть вовсе другой величиной, и знает об
+# этом только автор. Записанное и грепаемое лучше слепого пятна.
 MARKERS = ('at measurement time', 'на момент замера', 'historical', 'историческ',
            'subset', 'подмножеств')
-WORDS = '|'.join(declared)
-# Masked before anything is matched: `2026-08-27` would otherwise offer `27` and
-# `2.1.247` would offer `247` to every window near one of these nouns.
-MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+')
-PAIR = re.compile(r'(\d+)\s*/\s*(\d+)\s+(' + WORDS + r')')
-# Up to three words between the number and the noun: a count with an adjective
-# in front of the noun hid from the adjacent-only form for as long as that form
-# existed. The example is not spelled out here on purpose -- this file is one of
-# the files the gate scans, and a literal pair in this very comment was the
-# first thing the widened grammar reported.
-#
-# The intervening words may not carry sentence punctuation: without that, the
-# grammar walked over a full stop and married a number from one sentence to a
-# noun in the next.
-ONE = re.compile(r'(\d+)\s+(?:[^\s.;!?]+\s+){0,3}(' + WORDS + r')')
-# The reverse grammar: the noun, then a dash or colon, then the number. This is
-# how the longest-lived stale count in this kit was written, and it is why the
-# gate had to stop reading line by line.
-#
-# A period only ends a sentence when whitespace follows it. A blanket ban on
-# periods was the first attempt, and it let a file name's own dots inside the
-# span block the match -- so the grammar still could not see the case it was
-# written for, while the gate read GREEN, because the stale number had by then
-# been corrected by hand. Green after a manual fix proves nothing about the
-# instrument; the mutation is what said otherwise.
-#
-# NOTE for whoever edits these comments: this file is one of the files the gate
-# scans, so an illustrative «number + noun» spelled out here is not an example,
-# it is a live claim, and the gate will report it. Both of these comments were
-# reported by their own regex before this line existed.
-REV = re.compile(r'(' + WORDS + r')\b(?:(?!\.\s)[^;!?]){0,64}?(?:—|:|\s-\s)\s*(\d+)\b')
 
 
 def collapse(text):
-    """Whitespace-collapsed stream plus a line number for every character.
+    """Поток без повторных пробелов плюс номер строки для каждого символа.
 
-    Read line by line, this gate could not see a count whose noun ended one line
-    and whose number opened the next. Read as a stream it can -- but a finding
-    without a line number is one nobody acts on, so the mapping is carried
-    alongside rather than thrown away.
+    Построчно этот гейт не видел счёт, у которого существительное кончало одну
+    строку, а число открывало следующую. Потоком видит -- но находка без номера
+    строки та, по которой никто не пойдёт, поэтому отображение едет рядом.
     """
     out, lines, ln, prev_space = [], [], 1, True
     for ch in text:
@@ -1234,61 +1225,251 @@ def collapse(text):
             ln += 1
     return ''.join(out), lines
 
-bad = []
-# Prose is not only in .md files. The first version of this gate read the docs
-# alone and left three present-tense counts standing in the code -- two of them
-# in the header of the very tool that exists because the checks cannot see the
-# build path, while naming the wrong number of checks.
-files = [readme, sys.argv[1]] + sorted(
-    sum((glob.glob(os.path.join(here, *parts))
-         for parts in (('docs', '*.md'), ('tools', '*.sh'), ('tools', '*.js'),
-                       ('tools', '*.py'), ('judge', '*.py'))), [])
-    + [os.path.join(here, name) for name in ('tweakcc-patch.js', 'claude_patch.py')])
-for path in files:
-    if os.path.basename(path) == JOURNAL or not os.path.exists(path):
-        continue
-    stream, lines = collapse(read(path))
+
+def scan(text, table, aliases, defaults):
+    """Все расхождения «число + существительное» в одном тексте.
+
+    Вынесено функцией не ради красоты: у грамматики ниже уже трижды находилась
+    дыра, которую замечали не гейтом, а руками. Функция позволяет прогнать её
+    по синтетическим случаям с известным ответом ДО того, как она пойдёт по
+    настоящим файлам (самопроверка ниже).
+    """
+    nouns = sorted([n for n in NOUNS if NOUNS[n] in table], key=len, reverse=True)
+    WORDS = '|'.join(nouns)
+    # Маскируется до любого сопоставления: дата иначе предложит своё число, а
+    # версия -- своё, каждому существительному по соседству.
+    MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+')
+    # Левая граница у числа обязательна во всех трёх грамматиках: без неё
+    # `scenario_12` отдаёт свои цифры как самостоятельный счёт, и мутации
+    # первым же прогоном женились на хвосте имени функции. Пример здесь
+    # литеральный намеренно -- он попадает и в настоящий проход, поэтому
+    # откат этой границы краснит гейт дважды: самопроверкой и находкой в
+    # собственном исходнике.
+    PAIR = re.compile(r'(?<!\w)(\d+)\s*/\s*(\d+)\s+(' + WORDS + r')')
+    # До трёх слов между числом и существительным: счёт с прилагательным перед
+    # существительным прятался от «только вплотную» ровно столько, сколько та
+    # форма существовала. Пример не выписан намеренно -- этот файл сам входит в
+    # число сканируемых, и литеральная пара в комментарии была бы живым
+    # утверждением; расширенная грамматика первым делом предъявила именно её.
+    #
+    # Промежуточные слова обязаны быть СЛОВАМИ -- буквы, цифры, дефис и
+    # ничего больше. Запрет одного лишь знака конца предложения этого не
+    # давал: сканируется не только проза, и в коде «return 1» через пару
+    # токенов от строки со словом «мутации» читалось как счёт мутаций. Точка
+    # внутри токена теперь тоже его отбрасывает, так что граница предложения
+    # держится тем же правилом, а не отдельным.
+    ONE = re.compile(r'(?<!\w)(\d+)\s+(?:[\w-]+\s+){0,3}(' + WORDS + r')')
+    # Обратная грамматика: существительное, затем тире или двоеточие, затем
+    # число. Так был написан самый долгоживущий протухший счёт в этом ките, и
+    # из-за него гейт перестал читать построчно.
+    #
+    # Точка кончает предложение только когда за ней пробел. Запрет на точку
+    # вообще был первой попыткой, и он позволил точкам внутри имени файла
+    # блокировать совпадение -- грамматика не видела случая, ради которого
+    # писалась, а гейт светил зелёным, потому что протухшее число к тому
+    # времени поправили руками. Зелёный после ручной правки не говорит о
+    # приборе ничего; сказала мутация.
+    REV = re.compile(r'(' + WORDS + r')\b(?:(?!\.\s)[^;!?]){0,64}?(?:—|:|\s-\s)\s*(?<!\w)(\d+)\b')
+
+    stream, lines = collapse(text)
     stream = MASK.sub(lambda m: '#' * len(m.group(0)), stream)
 
     def exempt(at):
-        # The marker is looked for AROUND the match rather than on its line:
-        # there are no lines here any more, and a marker one clause away is the
-        # same statement.
+        # Пометка ищется ВОКРУГ совпадения, а не на его строке: строк здесь уже
+        # нет, а пометка в соседнем придаточном -- то же самое утверждение.
         lo, hi = max(0, at - 120), min(len(stream), at + 120)
         return any(marker in stream[lo:hi] for marker in MARKERS)
+
+    def owner(at, quantity):
+        by = table[quantity]
+        if len(by) == 1:
+            return sorted(by)[0], None
+        lo, hi = max(0, at - WINDOW), min(len(stream), at + WINDOW)
+        best, best_d, tie = None, None, False
+        for alias, oid in aliases:
+            if oid not in by:
+                continue
+            start = lo
+            while True:
+                i = stream.find(alias, start, hi)
+                if i < 0:
+                    break
+                d = abs(i - at)
+                if best_d is None or d < best_d:
+                    best, best_d, tie = oid, d, False
+                elif d == best_d and oid != best:
+                    tie = True
+                start = i + 1
+        if tie:
+            return None, 'рядом два стенда на равном расстоянии — назовите владельца счёта'
+        if best:
+            return best, None
+        if quantity in defaults:
+            return defaults[quantity], None
+        return None, ('владелец счёта не назван — припишите рядом имя стенда ('
+                      + ' / '.join(sorted(by)) + ')')
+
+    bad = []
+
+    def check(at, got, nums, noun):
+        oid, why = owner(at, NOUNS[noun])
+        if why:
+            bad.append((lines[at], got, why))
+            return
+        want = table[NOUNS[noun]][oid]
+        if any(n != want for n in nums):
+            bad.append((lines[at], got,
+                        'объявлено «%s %s» (владелец %s)' % (want, noun, oid)))
 
     covered = []
     for m in PAIR.finditer(stream):
         covered.append((m.start(), m.end()))
-        if exempt(m.start()):
-            continue
-        want = declared[m.group(3)]
-        if m.group(1) != want or m.group(2) != want:
-            bad.append((path, lines[m.start()], m.group(0),
-                        want + '/' + want + ' ' + m.group(3)))
+        if not exempt(m.start()):
+            check(m.start(), m.group(0), (m.group(1), m.group(2)), m.group(3))
     for rx, num, noun in ((ONE, 1, 2), (REV, 2, 1)):
         for m in rx.finditer(stream):
             if any(a <= m.start() < b for a, b in covered):
                 continue
             if exempt(m.start()):
                 continue
-            want = declared[m.group(noun)]
-            if m.group(num) != want:
-                bad.append((path, lines[m.start()], m.group(0),
-                            want + ' ' + m.group(noun)))
+            check(m.start(), m.group(0), (m.group(num),), m.group(noun))
+    return bad
+
+
+# --- самопроверка грамматики --------------------------------------------------
+# Гейт трижды молчал не потому, что чисел не было, а потому, что грамматика их
+# не видела; каждую дыру находили руками. Это её положительный контроль: набор
+# синтетических текстов с известным ответом, прогоняемый ДО настоящих файлов.
+#
+# Существительные здесь собираются из кусков намеренно: этот файл сам входит в
+# список сканируемых, и литеральная пара «число + существительное» в коде
+# самопроверки была бы живым утверждением, которое гейт предъявит.
+SC = 'scen' + 'arios'
+MU = 'mut' + 'ations'
+SELF_TABLE = {SC: {'probe-bench': '56', 'corpus-tools-bench': '12'},
+              MU: {'judge-tools-bench': '10', 'corpus-tools-bench': '6'}}
+SELF_ALIASES = [('probe-bench', 'probe-bench'),
+                ('judge-tools-bench', 'judge-tools-bench'),
+                ('corpus-tools-bench', 'corpus-tools-bench')]
+SELF_DEFAULTS = {SC: 'probe-bench'}
+# Набивка СЧИТАЕТСЯ, а не подбирается: оба имени обязаны стоять от числа на
+# равном расстоянии, иначе случай молча выродится в «побеждает ближнее» и
+# единственный вход в ветку неоднозначности останется непройденным. Поток к
+# этому моменту уже схлопнут по пробелам, поэтому длины считаются по одному
+# пробелу между словами. Ожидается не просто находка, а её причина.
+_LEAD, _TRAIL, _MID = 'corpus-tools-bench', 'probe-bench', '12 ' + SC
+TIE = (_LEAD + ' ' + _MID + ' ' + 'x' * (len(_LEAD) - len(_MID) - 1)
+       + ' ' + _TRAIL)
+SELF_CASES = (
+    ('`tools/corpus-tools-bench.sh` — 12 ' + SC, 0, '', 'владелец рядом, счёт верный'),
+    ('`tools/corpus-tools-bench.sh` — 13 ' + SC, 1, 'corpus-tools-bench',
+     'владелец рядом, счёт разошёлся'),
+    ('the bench drives 56 ' + SC, 0, '', 'владелец не назван — берётся по умолчанию'),
+    ('the bench drives 12 ' + SC, 1, 'probe-bench',
+     'счёт чужого стенда без имени владельца не проходит'),
+    ('corpus-tools-bench: ' + 'x' * 60 + ' probe-bench 56 ' + SC, 0, '',
+     'из двух имён выигрывает ближнее'),
+    ('probe-bench: ' + 'x' * 60 + ' corpus-tools-bench 56 ' + SC, 1,
+     'corpus-tools-bench', 'ближнее имя выигрывает и когда счёт от него уходит'),
+    (TIE, 1, 'равном расстоянии', 'равное расстояние до двух имён — отказ'),
+    ('judge-tools-bench: SELF-CHECK — 10 ' + MU, 0, '', 'обратная грамматика'),
+    ('judge-tools-bench: SELF-CHECK — 11 ' + MU, 1, 'judge-tools-bench',
+     'обратная грамматика ловит расхождение'),
+    ('the bench records 6 ' + MU, 1, 'не назван',
+     'счёт мутаций без имени владельца — отказ, а не догадка'),
+    ('corpus-tools-bench 12/12 ' + SC, 0, '', 'дробная форма'),
+    ('corpus-tools-bench 12/13 ' + SC, 1, 'corpus-tools-bench',
+     'дробная форма ловит расхождение'),
+    ('corpus-tools-bench 9 ' + SC + ' at measurement time', 0, '',
+     'историческое число помечено'),
+    ('probe-bench 2.1.247 ' + SC, 0, '', 'версия не число сценариев'),
+    ('corpus-tools-bench has 13 gates. Its ' + SC + ' are green', 0, '',
+     'через точку число с существительным не женится'),
+    ('corpus-tools-bench: scenario_18 сценариев', 0, '',
+     'цифры внутри имени не самостоятельный счёт'),
+    ('corpus-tools-bench: return 1 say(x) без мутаций', 0, '',
+     'токены кода между числом и существительным не проза'),
+)
+broken = []
+for text, want_n, want_why, name in SELF_CASES:
+    got = scan(text, SELF_TABLE, SELF_ALIASES, SELF_DEFAULTS)
+    if len(got) != want_n or (want_why and want_why not in got[0][2]):
+        broken.append((name, want_n, want_why, got))
+if broken:
+    print("ГРАММАТИКА ЧИСЕЛ БЕЗ ЗУБОВ: самопроверка не сошлась")
+    for name, want_n, want_why, got in broken:
+        print("  %s: ожидалось находок %d%s, получено %r"
+              % (name, want_n, (' с «%s»' % want_why) if want_why else '', got))
+    sys.exit(1)
+print("ГРАММАТИКА ЧИСЕЛ: самопроверка %d/%d" % (len(SELF_CASES), len(SELF_CASES)))
+
+# --- что объявлено ------------------------------------------------------------
+table, aliases = {}, []
+for oid, names, parts, counts in OWNERS:
+    path = sys.argv[1] if parts is None else os.path.join(here, *parts)
+    if not os.path.exists(path):
+        print("ЧИСЛА НЕ ОБЪЯВЛЕНЫ: нет файла %s (владелец %s)"
+              % (os.path.relpath(path, here), oid))
+        sys.exit(1)
+    text = read(path)
+    for quantity, rx in sorted(counts.items()):
+        m = re.search(rx, text, re.M)
+        if not m:
+            print("ЧИСЛА НЕ ОБЪЯВЛЕНЫ: %s не объявляет свою величину «%s»"
+                  % (os.path.relpath(path, here), quantity))
+            sys.exit(1)
+        table.setdefault(quantity, {})[oid] = m.group(1)
+    for alias in names:
+        aliases.append((alias, oid))
+
+readme = os.path.join(here, 'README.md')
+if not os.path.exists(readme):
+    # Объявлено, а не молча: скрипт может законно ехать один.
+    print("СВЕРКА ЧИСЕЛ ПРОПУЩЕНА — README.md рядом со скриптом не найден")
+    sys.exit(0)
+
+# Проза живёт не только в .md. Первая версия гейта читала одни доки и оставила
+# три счёта в настоящем времени стоять в коде -- два из них в шапке того самого
+# инструмента, который существует потому, что проверки не видят путь сборки.
+files = [readme, sys.argv[1]] + sorted(
+    sum((glob.glob(os.path.join(here, *parts))
+         for parts in (('docs', '*.md'), ('tools', '*.sh'), ('tools', '*.js'),
+                       ('tools', '*.py'), ('judge', '*.py'))), [])
+    + [os.path.join(here, name) for name in ('tweakcc-patch.js', 'claude_patch.py')])
+
+bad = []
+for path in files:
+    if os.path.basename(path) == JOURNAL or not os.path.exists(path):
+        continue
+    for lineno, got, why in scan(read(path), table, aliases, DEFAULTS):
+        bad.append((path, lineno, got, why))
 
 if bad:
     print("ЧИСЛА В ДОКАХ РАЗОШЛИСЬ С ОБЪЯВЛЕННЫМИ:")
-    for path, lineno, got, want in bad:
-        print("  %s:%d  «%s» — объявлено «%s»" % (os.path.relpath(path, here), lineno, got, want))
+    for path, lineno, got, why in bad:
+        print("  %s:%d  «%s» — %s" % (os.path.relpath(path, here), lineno, got, why))
     print("  Если число ИСТОРИЧЕСКОЕ (запись о прошлой сборке), пометьте место")
     print("  словами «at measurement time» / «на момент замера» / «historical».")
     print("  Если это ДРУГАЯ величина (подсчёт подмножества, а не общий счёт) —")
     print("  словом «subset» / «подмножеств». Пометка ищется рядом, не построчно.")
+    print("  Если число про конкретный стенд — имя стенда должно стоять рядом с")
+    print("  числом: владелец выбирается по БЛИЖАЙШЕМУ имени в окне.")
     sys.exit(1)
-print("ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (проверок %s, сценариев %s)"
-      % (declared['checks'], declared['scenarios']))
+print("ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (%s)" % '; '.join(
+    '%s: %s' % (quantity, ', '.join('%s=%s' % (oid, val)
+                                    for oid, val in sorted(by.items())))
+    for quantity, by in sorted(table.items())))
 PYDOCS
+
+# --- 0e. и у этого гейта должны быть зубы -----------------------------------
+# Внутри гейта живёт положительный контроль его грамматики, но грамматика,
+# сходящаяся на синтетике, ничего не говорит о СВЯЗКЕ с деревом: о README, о
+# константах стендов, о выборе владельца по ближайшему имени. Стенд проверяет
+# связку на копии кита: пристинный кит обязан быть зелёным, затем каждая
+# записанная мутация обязана покраснить гейт своей причиной (1 с на сборку).
+echo "==> Зубы гейта чисел"
+python3 "$(dirname "$0")/tools/docnum-bench.py" \
+  || { echo "ГЕЙТ ЧИСЕЛ БЕЗ ЗУБОВ: мутация не покраснела" >&2; exit 1; }
 
 echo "==> Applying our multi-provider patches"
 "${TWEAKCC[@]}" adhoc-patch \
@@ -1336,8 +1517,10 @@ def _env_overrides_resumed_mode(d):
     доказывает, что имя то же самое, что гейтит режим. С 2.1.248 бандл разложен
     на ESM-чанки, помощник живёт в чужом чанке и в модуль матчера не
     импортируется -- имя там не разрешилось бы, -- поэтому вставлено его же
-    тело. Здесь это тело сверяется со СЛОВАРЁМ настоящего помощника из того же
-    образа: разойдутся -- проверка красная, и разойтись молча они не могут.
+    тело. Здесь оно сверяется с телом настоящего помощника из того же образа:
+    сравнивается ВЕСЬ текст функции (без имени), а не только список истинных
+    значений. Прежняя редакция сверяла один список -- вставка с тем же списком,
+    но с потерянной веткой прошла бы зелёной.
     """
     call = re.search(rb'\{if\(!(' + ID + rb')\)return;'
                      rb'if\((' + ID + rb')\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)\)return;'
@@ -1345,20 +1528,26 @@ def _env_overrides_resumed_mode(d):
     if call:
         return _same_env_helper(d)
 
+    # Вставка: то же тело, что у продукта, без имени, вызванное на переменной.
+    # Скобки тела берутся ЦЕЛИКОМ (`(\{.{0,400}?\})` до закрывающей скобки
+    # вызова), чтобы сравнивать текст, а не отдельные приметы.
     inline = re.search(rb'\{if\(!(' + ID + rb')\)return;'
-                       rb'if\(\(\(\)=>\{let __ccForce=process\.env\.CLAUDE_CODE_COORDINATOR_FORCE;'
-                       rb'if\(!__ccForce\)return!1;'
-                       rb'return(\[[^\]]{0,80}\])\.includes\(String\(__ccForce\)\.toLowerCase\(\)\.trim\(\)\)\}\)\(\)\)return;'
-                       rb'let ' + ID + rb'=' + ID + rb'\(\),' + ID + rb'=\1==="coordinator";', d)
+                       rb'if\(\(function \((' + ID + rb')\)(\{.{0,400}?\})\)'
+                       rb'\(process\.env\.CLAUDE_CODE_COORDINATOR_FORCE\)\)return;'
+                       rb'let ' + ID + rb'=' + ID + rb'\(\),' + ID + rb'=\1==="coordinator";', d, re.S)
     if not inline:
         return False
 
-    helper = re.search(rb'if\(!' + ID + rb'\)return!1;if\(typeof ' + ID + rb'==="boolean"\)return ' + ID
-                       + rb';let ' + ID + rb'=String\(' + ID + rb'\)\.toLowerCase\(\)\.trim\(\);'
-                       rb'return(\[[^\]]{0,80}\])\.includes\(', d)
+    # Настоящий помощник образа: имя отбрасывается, сравнивается тело.
+    helper = re.search(rb'function ' + ID + rb'\((' + ID + rb')\)(\{if\(!\1\)return!1;'
+                       rb'if\(typeof \1==="boolean"\)return \1;'
+                       rb'let (' + ID + rb')=String\(\1\)\.toLowerCase\(\)\.trim\(\);'
+                       rb'return\[[^\]]{0,80}\]\.includes\(\3\)\})', d)
     if not helper:
         return False
-    return inline.group(2) == helper.group(1)
+    # Имя параметра у продукта и во вставке -- одно и то же (вставка сделана из
+    # его текста), поэтому тела обязаны совпасть побайтно.
+    return inline.group(2) == helper.group(1) and inline.group(3) == helper.group(2)
 
 
 def _probe_uses_the_images_own_names(full):
@@ -1799,12 +1988,30 @@ def _fork_drops_are_gone(d):
     Stated the way the patch states it: within the radius the sweep is allowed
     to touch, `<fork>?void 0:` must not occur. That fails on all four pristine
     payloads (the sites are there) and passes only once they are cleared.
+
+    Радиус здесь -- МОДУЛЬ якоря, ровно тот же, что у самой правки
+    (`moduleSliceAround` в шаге 12), а не ±20000 байт вокруг него. Байтовое окно
+    шире модуля: имя локально для чанка, поэтому `<та же буква>?void 0:` в
+    СОСЕДНЕМ чанке -- другое связывание, которое шаг 12 законно не трогает, а
+    проверка на нём краснела бы на верно собранном образе. Ложный отказ, не
+    ложный зелёный, -- но проверка обязана мерить то же, что правка. На
+    измеренном корпусе окно и модуль совпадают (на 2.1.248 все три вхождения
+    лежат в пределах 1.2 КБ до якоря), так что правка ничего не ослабляет.
     """
     m = re.search(rb'is_fork:(' + ID + rb'),', d)
     if not m:
         return False
     fork = re.escape(m.group(1))
-    lo, hi = max(0, m.start() - 20000), m.start() + 20000
+    lo = d.rfind(b'/*__tweakcc_module_boundary_', 0, m.start())
+    hi = d.find(b'/*__tweakcc_module_boundary_', m.start())
+    if lo < 0 and hi < 0:
+        # Маркеров нет вовсе -- распаковщик их не расставил. Тогда модуля не
+        # видно, и честнее вернуться к прежнему байтовому окну, чем молча
+        # объявить модулем весь образ.
+        lo, hi = max(0, m.start() - 20000), m.start() + 20000
+    else:
+        lo = lo if lo >= 0 else 0
+        hi = hi if hi >= 0 else len(d)
     return not re.search(rb'(?<![\w$])' + fork + rb'\?void 0:', d[lo:hi])
 
 
@@ -2425,8 +2632,16 @@ checks = {
                                           and bool(re.search(
                                               rb'&&!/\^claude/i\.test\(' + ID + rb'\)&&process\.env\.ANTHROPIC_BASE_URL\)'
                                               + ID + rb'\.Authorization=null,' + ID + rb'\["X-Api-Key"\]=null;', d)),
-    # no path may still discard the caller's model: not coordinator mode, and
-    # not the fork path (whose flag is whatever is_fork reports)
+    # Обе половины про одно: значение модели доезжает до записи запуска.
+    # ВАЖНО, что именно пинится на каждой записи бандла. До 2.1.248 подавление
+    # было безусловным, и шаг 12 его вырезал -- половина модели краснеет на
+    # пристинном образе. С 2.1.248 апстрим сам сделал подавление env-условным
+    # (`if(<предикат>()&&<ns>.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)`),
+    # мы его НЕ трогаем, и на новой записи эта половина -- пин чужой ветки: она
+    # одинаково истинна и до, и после наших правок. Красноту на пристинном
+    # образе там держит вторая половина, снос fork-ветки. Формулировка «никакой
+    # путь не отбрасывает модель» была верна для старой записи и лгала для новой,
+    # где env-путь отбрасывания обязан остаться на месте.
     'dispatch keeps its model': _dispatch_keeps_its_model(d) and _fork_drops_are_gone(d),
     'Vertex project resolution intact (fork-sweep tripwire)':  _fork_sweep_stayed_near_its_anchor(d),
     # effort must be DECLARED (schema), CARRIED (call handler) and USED (spliced

@@ -37,6 +37,8 @@ Platform notes:
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
 import os
@@ -148,6 +150,48 @@ def latest_version() -> str:
     return tags["latest"]
 
 
+def _verify_tarball(blob: bytes, dist: dict, what: str) -> None:
+    """Check the downloaded archive against the digest the registry published.
+
+    Without this the only integrity the download had was structural: gzip and
+    tar had to decode and the member had to exist. A truncated-but-valid
+    archive, or a body swapped anywhere between the registry and here, passed
+    that test -- and the bytes went on to become an installed binary and, for
+    the sweep, the pinned reference the whole measurement base rests on.
+
+    npm publishes `dist.integrity` (`<alg>-<base64>`, sha512 for anything
+    recent) and the legacy `dist.shasum` (sha1). Whichever is present is
+    checked; a package that carries NEITHER is refused rather than trusted,
+    because "no digest" and "digest matches" must not read the same.
+    """
+    integrity = dist.get("integrity")
+    if integrity:
+        alg, _, b64 = integrity.partition("-")
+        if not b64:
+            die(f"{what}: unreadable dist.integrity ({integrity!r})")
+        try:
+            want = base64.b64decode(b64, validate=True)
+        except Exception as exc:                       # noqa: BLE001
+            die(f"{what}: unreadable dist.integrity ({integrity!r}): {exc}")
+        try:
+            got = hashlib.new(alg, blob).digest()
+        except ValueError:
+            die(f"{what}: dist.integrity names an unknown algorithm {alg!r}")
+        if got != want:
+            die(f"{what}: archive does not match dist.integrity "
+                f"({alg}: got {base64.b64encode(got).decode()}, want {b64})")
+        return
+    shasum = dist.get("shasum")
+    if shasum:
+        got = hashlib.sha1(blob).hexdigest()
+        if got != shasum:
+            die(f"{what}: archive does not match dist.shasum "
+                f"(got {got}, want {shasum})")
+        return
+    die(f"{what}: the registry published no integrity or shasum for this "
+        f"archive -- refusing to trust it")
+
+
 def download_binary(version: str, dest: Path) -> None:
     """Fetch the per-platform package (the main npm pkg is only a downloader)."""
     pkg = npm_platform_pkg()
@@ -156,6 +200,7 @@ def download_binary(version: str, dest: Path) -> None:
     tarball = meta["dist"]["tarball"]
     with urllib.request.urlopen(tarball, timeout=600) as r:
         blob = r.read()
+    _verify_tarball(blob, meta.get("dist", {}), f"{pkg}@{version}")
     member_name = f"package/{binary_name()}"
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
         try:

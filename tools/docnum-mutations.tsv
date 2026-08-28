@@ -1,0 +1,22 @@
+# Мутации гейта чисел (0d): id, файл, что заменить, на что, чем гейт обязан
+# ответить. Поля разделены табуляцией.
+#
+# Почему таблица лежит ОТДЕЛЬНО от кода стенда: вход каждой мутации -- это
+# нарочно неверное утверждение о счёте, а гейт сканирует прозу в .md, .sh,
+# .js и .py. Записанное в коде стенда, оно было бы живым утверждением и
+# предъявлялось бы при каждой сборке. Данные (как corpus-versions.txt) гейт
+# не читает -- поэтому мутации живут здесь, читаемыми, а не собранными из
+# кусков ради обхода собственного гейта.
+#
+# Каждая строка обязана и ПРИМЕНИТЬСЯ (вход найден дословно), и покраснить
+# гейт ИМЕННО своей причиной: красное не по той причине -- это провал стенда,
+# а не подтверждение.
+D1	README.md	12 scenarios on a toy corpus	13 scenarios on a toy corpus	владелец corpus-tools-bench
+D2	README.md	6 recorded mutations	7 recorded mutations	mutations» (владелец corpus-tools-bench)
+D3	README.md	`tools/corpus-tools-bench.sh` | the bench for the two corpus tools	`tools/judge-tools-bench.sh` | the bench for the two corpus tools	владелец judge-tools-bench
+D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 56;	const EXPECTED_SCENARIOS = 57;	владелец probe-bench
+D5	claude-patch-all.sh	ONE = re.compile(r'(?<!\w)(\d+)	ONE = re.compile(r'(\d+)	12 сценариев» (владелец corpus-tools-bench)
+D6	claude-patch-all.sh	'x' * (len(_LEAD) - len(_MID) - 1)	'x' * (len(_LEAD) - len(_MID))	равном расстоянии
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=6	EXPECTED_MUTATION_COUNT=6	не объявляет свою величину
+D8	claude-patch-all.sh	DEFAULTS = {'scenarios': 'probe-bench'}	DEFAULTS = {}	владелец счёта не назван
+D9	claude-patch-all.sh	(?:[\w-]+\s+){0,3}	(?:[^\s.;!?]+\s+){0,3}	6 мутаций» (владелец corpus-tools-bench)

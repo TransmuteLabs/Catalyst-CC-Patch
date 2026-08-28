@@ -740,9 +740,17 @@ step('11 proxy lane survives an expired login', () => {
   // ДВЕ ФОРМЫ ОБЪЯВЛЕНИЯ. До 2.1.248 бандлер заворачивал модуль в ленивый
   // инициализатор, и класс объявлялся присваиванием в заранее объявленную
   // переменную: `<X>=class <X> extends Error{...}`. В 2.1.248 бандл ушёл на
-  // настоящие ESM-чанки (обёрток `__esm`/`__commonJS` в нагрузке ноль), и класс
-  // стал обычным объявлением: `class <X> extends Error{...}`. Ищем по СООБЩЕНИЮ,
-  // а не по минифицированному имени -- оно локально для чанка.
+  // настоящие ESM-чанки, и класс стал обычным объявлением:
+  // `class <X> extends Error{...}`. Ищем по СООБЩЕНИЮ, а не по
+  // минифицированному имени -- оно локально для чанка.
+  //
+  // Различитель записи -- НЕ строки `__esm`/`__commonJS`: их в нагрузке поровну
+  // (измерено на пристинных образах: `__esm` 4 и 4, `__commonJS` 18 и 18 в
+  // 2.1.247 и 2.1.248) -- это рантайм bun и вендорный npm внутри него, а не
+  // обёртки модулей продукта. Ленивая обёртка 247 выглядит как `w(()=>{<X>=...`.
+  // Настоящие различители: `import.meta.require("/$bunfs/root/chunk-` -- 0 в 247
+  // и 358 в 248 (193 разных чанка); баррель `имя:()=>X` против `export{X as имя}`;
+  // и сама форма объявления класса ниже.
   let clsMatch = js.match(
     new RegExp(
       `(${ID})=class \\1 extends Error\\{constructor\\(\\)\\{` +
@@ -874,8 +882,10 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   const coord = new RegExp(
     `(let ${ID}=Date\\.now\\(\\),${ID}=)(?:${ID}\\(\\)\\?void 0:)?(${ID},${ID}=${ID}\\(${ID}\\.agentContext\\))`,
   );
+  let coordNote;
   if (coord.test(js)) {
     js = js.replace(coord, `$1$2`);
+    coordNote = 'coordinator suppression removed';
   } else {
     // 2.1.248 ПЕРЕПИСАЛ этот участок, и подавление там больше не безусловное:
     //   async call({prompt:<p>,subagent_type:<t>,...,model:<m>,...},<ctx>,...){
@@ -898,6 +908,10 @@ step('12 dispatch may choose model and effort (forks included)', () => {
         `let ${ID}=\\1,${ID}=${ID}\\(${ID}\\.agentContext\\)`,
     );
     if (!coord248.test(js)) fail('coordinator-mode model suppression site not found');
+    // Ветка ничего не вырезала -- и строка журнала обязана это сказать. Прежде
+    // журнал печатал «coordinator suppression removed» на обеих ветках, то есть
+    // на 2.1.248 сообщал о правке, которой не было.
+    coordNote = 'coordinator suppression is env-gated upstream, left alone';
   }
 
   // (b) the fork flag is whatever the launch telemetry reports as is_fork
@@ -1080,7 +1094,7 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   js = js.replace(toolDoc, '; it runs on your model unless you pass a \\`model\\` override)');
 
   applied.push(
-    `dispatch model+effort (fork flag '${fork}', coordinator suppression removed, ` +
+    `dispatch model+effort (fork flag '${fork}', ${coordNote}, ` +
       `+${js.length - before} bytes)`,
   );
 });
@@ -1324,10 +1338,15 @@ step('14 environment overrides a resumed session mode', () => {
   // Captured from the module the call is injected INTO, not from the whole
   // image. A minified name is scoped to its chunk, so a helper found first
   // somewhere else would be spliced in here as letters that mean something
-  // different -- or nothing -- at this site. Today all three sites (the
-  // coordinator export, this matcher and the helper) share one module on every
-  // version in range, and on 2.1.233/240 there is only one module at all; that
-  // is what makes the capture correct, and it is asserted rather than assumed.
+  // different -- or nothing -- at this site.
+  //
+  // Где эти места лежат -- зависит от версии, и предполагать нельзя ничего.
+  // На 233/240 модуль вообще один. На 242..247 предикат, матчер и помощник
+  // соседи в одном модуле, и вызов по имени законен. На 248 их четыре разных
+  // места: помощник в своём чанке, гейт в другом, определения предиката и
+  // матчера в третьем, фасад с реэкспортом -- в 16 МБ от них. Поэтому поиск
+  // помощника ограничен модулем вставки, и его ОТСУТСТВИЕ там -- не отказ, а
+  // переход на вторую ветку ниже.
   const helperMatch = scope14.match(
     new RegExp(`\\{if\\(!(${ID})\\(process\\.env\\.CLAUDE_CODE_COORDINATOR_MODE\\)\\)return!1;`),
   );
@@ -1342,12 +1361,16 @@ step('14 environment overrides a resumed session mode', () => {
     // из чужого чанка нельзя -- оно там не разрешится, и это ровно тот случай,
     // от которого предупреждает отказ выше.
     //
-    // Поэтому подставляется НЕ пересказ семантики, а ЕЁ ЖЕ тело: помощник
-    // ищется по форме, форма обязана быть единственной на всю нагрузку
-    // (измерено: по одному вхождению и в 2.1.247, и в 2.1.248), и список
-    // истинных значений берётся из него же. Если апстрим изменит помощника,
-    // форма перестанет совпадать и патч откажет вслух, а не разойдётся с
-    // продуктом молча.
+    // Поэтому подставляется ЕГО ЖЕ ТЕЛО, дословно: помощник ищется по форме,
+    // форма обязана быть единственной на всю нагрузку (измерено: по одному
+    // вхождению и в 2.1.247, и в 2.1.248), и найденный текст функции целиком
+    // становится вызываемым на месте выражением -- у него снимается только имя,
+    // чтобы ничего не затенять. Прежняя редакция вписывала ПЕРЕСКАЗ с тем же
+    // списком значений, и одна ветка продукта (`typeof === "boolean"`) в нём
+    // отсутствовала: на аргументе из process.env она недостижима, но текст
+    // расходился с телом, о котором говорил этот же комментарий. Если апстрим
+    // изменит помощника, форма перестанет совпадать и патч откажет вслух, а не
+    // разойдётся с продуктом молча.
     const truthyRx = new RegExp(
       `function (${ID})\\((${ID})\\)\\{if\\(!\\2\\)return!1;` +
         `if\\(typeof \\2==="boolean"\\)return \\2;` +
@@ -1362,10 +1385,15 @@ step('14 environment overrides a resumed session mode', () => {
           `найдено ${truthy.length} — отказываюсь вписывать семантику, которую не опознал`,
       );
     }
-    if (js.includes('__ccForce')) fail('__ccForce already present — refusing to shadow it');
-    force =
-      '(()=>{let __ccForce=process.env.CLAUDE_CODE_COORDINATOR_FORCE;if(!__ccForce)return!1;' +
-      'return["1","true","yes","on"].includes(String(__ccForce).toLowerCase().trim())})()';
+    // Имя снимается, тело остаётся байт в байт. `repEsc` обязателен: текст
+    // уходит в строку замены `String.replace`, где `$` -- управляющий символ, а
+    // в минифицированных именах он законен.
+    const helperText = truthy[0][0];
+    const anon = helperText.replace(/^function\s+[A-Za-z_$][\w$]*/, 'function ');
+    if (anon === helperText) {
+      fail('coordinator env-truthy helper: не снять имя с найденной функции');
+    }
+    force = `(${repEsc(anon)})(process.env.CLAUDE_CODE_COORDINATOR_FORCE)`;
   }
 
   // Anchored on the shape, not on the message literals: the guard, the live
