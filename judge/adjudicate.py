@@ -69,15 +69,29 @@ def url_for(record):
 # The verdict dictionary lives in the image; validate.verdict_vocabulary is
 # its only reader. A literal copy would drift from the image silently.
 DEFAULT_IMAGE = '~/.local/bin/claude'
-RX_VALUES, ACT_VALUES = replay.verdict_vocabulary(
-    os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE, DEFAULT_PROBE)
+# Словарь читается в main(), а не НА ИМПОРТЕ: чтение на импорте выполнялось до
+# argparse -- машина без образа по умолчанию падала SystemExit прежде, чем
+# `--image` успевал помочь. И промт рендерился судейскими классами навсегда:
+# main() перечитывал словарь под `--probe`, а текст промта оставался прежним,
+# так что адъюдикатору наблюдателя показывали чужой словарь, и каждый ответ
+# `WRONG:` был непарсибелен (круг 20, D-5).
+RX_VALUES: list[str] = []
+ACT_VALUES: list[str] = []
+PROBE_ID = DEFAULT_PROBE
+REVIEW_TEMPLATE = REVIEW_PROMPT
+REVIEW_PROMPT = ''
 
 
-REVIEW_PROMPT = REVIEW_PROMPT.replace('{RX}', '|'.join(RX_VALUES))
+def load_vocabulary(image, probe):
+    global RX_VALUES, ACT_VALUES, PROBE_ID, REVIEW_PROMPT
+    RX_VALUES, ACT_VALUES = replay.verdict_vocabulary(image, probe)
+    PROBE_ID = probe
+    REVIEW_PROMPT = REVIEW_TEMPLATE.replace('{RX}', '|'.join(RX_VALUES))
+    return REVIEW_PROMPT
 
 
 def recorded_class(verdict):
-    value = replay.klass(verdict)
+    value = replay.klass(verdict, PROBE_ID)
     return ACT_VALUES[0] if value in ACT_VALUES else value
 
 
@@ -138,6 +152,8 @@ def run_one(task):
             'ms': sent['ms'],
             'cost_usd': sent['cost_usd'],
             'error': error,
+            # Что полоса не выполнила из запрошенного (бюджет вывода на pool).
+            'notes': sent.get('notes') or [],
         }
     except Exception as exc:
         row = {
@@ -220,8 +236,7 @@ def main():
                         help='образ, из которого читается словарь вердиктов')
     args = parser.parse_args()
     configure_paths(args.home, args.probe)
-    global RX_VALUES, ACT_VALUES
-    RX_VALUES, ACT_VALUES = replay.verdict_vocabulary(args.image, args.probe)
+    load_vocabulary(args.image, args.probe)
     if args.jobs < 1:
         raise SystemExit('--jobs должен быть не меньше 1')
 
@@ -235,6 +250,13 @@ def main():
 
     for row in rows:
         print(json.dumps(row, ensure_ascii=False, separators=(',', ':')))
+
+    declared = {}
+    for row in rows:
+        for note in row.get('notes') or []:
+            declared[note] = declared.get(note, 0) + 1
+    for note, count in sorted(declared.items()):
+        print(f'полоса не выполнила запрошенное ({count} прогонов): {note}')
 
     if not args.dry_run:
         out = os.path.expanduser(args.out) if args.out else default_output(args.model)

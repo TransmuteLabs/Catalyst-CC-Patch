@@ -50,7 +50,12 @@ VERDICT = _VerdictPattern()
 
 def verdict_pattern(probe='judge'):
     rx, _ = verdict_vocabulary(probe=probe)
-    return re.compile(r'^\s*(?:' + '|'.join(re.escape(v) for v in rx) + r'):.*$', re.M)
+    # re.I -- потому что образ компилирует свой словарь с "gmi" (act -- с "mi").
+    # Без флага живой судья принимал `ok: причина`, а реплика той же записи
+    # объявляла «вердикта нет»: метрика расхождения показывала разницу, которой
+    # в образе не было (круг 20, D-4).
+    return re.compile(r'^\s*(?:' + '|'.join(re.escape(v) for v in rx) + r'):.*$',
+                      re.M | re.I)
 
 
 def load(path):
@@ -59,21 +64,24 @@ def load(path):
         return json.load(fh)
 
 
-def _verdict_in_text(text):
-    matches = VERDICT.findall(str(text or ''))
-    return (matches[0] if matches else str(text or '')).strip()
+def _verdict_in_text(text, probe='judge'):
+    # Нет строки вердикта -- НЕТ вердикта, как и в образе (`return ""`). Прежде
+    # возвращался весь текст, и потребитель, сравнивающий вердикт записи с
+    # вердиктом реплики, сравнивал несравнимое (круг 20, D-4).
+    matches = verdict_pattern(probe).findall(str(text or ''))
+    return (matches[0] if matches else '').strip()
 
 
-def verdict_of(raw):
+def verdict_of(raw, probe='judge'):
     """The first line of content/result is the decision; without content the
     last verdict line from reasoning is taken, so an intermediate variant does
     not override the conclusion."""
     try:
         data = json.loads(raw)
     except Exception:
-        return _verdict_in_text(raw)
+        return _verdict_in_text(raw, probe)
     if isinstance(data, dict) and 'result' in data:
-        return _verdict_in_text(data.get('result'))
+        return _verdict_in_text(data.get('result'), probe)
     message = ((data.get('choices') or [{}])[0].get('message') or {}) \
         if isinstance(data, dict) else {}
     content = message.get('content')
@@ -81,13 +89,16 @@ def verdict_of(raw):
         content = ''.join(
             item.get('text', '') for item in content
             if isinstance(item, dict) and isinstance(item.get('text'), str))
-    matches = VERDICT.findall(str(content or ''))
+    pattern = verdict_pattern(probe)
+    matches = pattern.findall(str(content or ''))
     if matches:
         return matches[0].strip()
     reasoning = '\n'.join(
         value for value in (message.get('reasoning'), message.get('reasoning_content')) if value)
-    matches = VERDICT.findall(reasoning)
-    return (matches[-1] if matches else str(content or '')).strip()
+    matches = pattern.findall(reasoning)
+    # Ни в содержимом, ни в рассуждении строки вердикта нет -- вердикта нет.
+    # Возврат сырого содержимого расходился с образом (круг 20, D-4).
+    return (matches[-1] if matches else '').strip()
 
 
 # The channel rejects the urllib User-Agent with a perimeter stub; an external
@@ -159,13 +170,21 @@ def replay(rec, args):
         timeout=args.timeout,
         body_template=body,
     )
-    return sent, verdict_of(sent['raw']) if not sent['error'] else ''
+    return sent, verdict_of(sent['raw'], args.probe) if not sent['error'] else ''
 
 
 def klass(verdict, probe='judge'):
     rx, _ = verdict_vocabulary(probe=probe)
-    match = re.match(r'\s*(' + '|'.join(re.escape(v) for v in rx) + r')', verdict or '')
-    return match.group(1) if match else 'EMPTY'
+    # Двоеточие ОБЯЗАТЕЛЬНО и регистр не важен -- ровно как в образе. Без
+    # двоеточия «OKAY, данных не хватает» классифицировалось как OK; без
+    # регистра `ok:` не классифицировалось вовсе (круг 20, D-4). Возвращается
+    # КАНОНИЧЕСКОЕ написание словаря: потребители сравнивают с ним литералами.
+    match = re.match(r'\s*(' + '|'.join(re.escape(v) for v in rx) + r')\s*:',
+                     verdict or '', re.I)
+    if not match:
+        return 'EMPTY'
+    seen = match.group(1).lower()
+    return next((v for v in rx if v.lower() == seen), match.group(1))
 
 
 def main():
@@ -178,6 +197,10 @@ def main():
     parser.add_argument('--channel', choices=('pool', 'http', 'auto'), default='auto')
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--timeout', type=float, default=120)
+    # Идентичность пробы протянута до конца: словарь вердиктов у каждой пробы
+    # СВОЙ, а разбор шёл судейским независимо от того, чьи это записи -- записи
+    # наблюдателя размечались чужим словарём (круг 20, D-5).
+    parser.add_argument('--probe', default='judge', help='идентификатор пробы')
     args = parser.parse_args()
 
     # Два ЯВНЫХ глоба, а не *.json*: соседний compact.py пишет архивы под
@@ -201,9 +224,10 @@ def main():
             failed += 1
             print(f'{os.path.basename(path)}  ОШИБКА ПОВТОРА: {sent["error"]}  via={sent["via"]}')
             continue
-        changed = klass(was) != klass(now)
+        changed = klass(was, args.probe) != klass(now, args.probe)
         same, diff = (same, diff + 1) if changed else (same + 1, diff)
-        print(f'{os.path.basename(path)}  {klass(was)} -> {klass(now)}  via={sent["via"]}'
+        print(f'{os.path.basename(path)}  {klass(was, args.probe)} -> '
+              f'{klass(now, args.probe)}  via={sent["via"]}'
               f'{"  ИЗМЕНИЛОСЬ" if changed else ""}')
         if changed or len(files) == 1:
             print(f'   было:  {was[:300]}')

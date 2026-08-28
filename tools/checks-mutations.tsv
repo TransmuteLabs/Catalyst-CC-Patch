@@ -1,0 +1,31 @@
+# Зубы реестра проверок: каждая строка -- мутация СОБРАННОГО образа, которая
+# обязана покраснить названную проверку и ТОЛЬКО её. Формат: id, имя проверки,
+# вид, якорь, замена, пометка -- через табуляцию. Вид `literal` -- байтовая
+# подстановка (замена дополняется пробелами до длины якоря; длиннее якоря --
+# отказ прибора). Вид `derived` -- мутация считается в самом приборе: имя,
+# которое она правит, минифицировано и живёт только в конкретной версии.
+#
+# Шестое поле -- ЕЩЁ ОЖИДАЕМЫЕ красные (через `;`, пусто -- ровно одна дверь):
+# свойство иногда сторожат две проверки, и тогда честный ответ -- назвать обе,
+# а не подобрать мутацию поуже. Седьмое -- пометка.
+#
+# Дополнение до длины якоря идёт ПРОБЕЛАМИ В КОНЕЦ замены, поэтому замена,
+# соседствующая с чужим якорем, пишется с внутренними пробелами: хвост из
+# пробелов разорвал бы соседнюю проверку и покрасил её чужой причиной.
+#
+# Каждая мутация ВОСПРОИЗВОДИТ дефект, названный кругом 20 (линза C): проверка
+# зелена, а свойство, которое обещает её имя, мертво.
+C1	a content array reads like a content string	literal	?__mm.content.filter((__b)=>__b?.type==="text"	?String(__mm.content)		истинная ветка снова отдаёт "[object Object]"
+C2	judge does not read command output as the human	literal	?"tool-output":__M?.isCompactSummary?	?"user"       :__M?.isCompactSummary?		вывод команды снова подан как человек
+C3	an answer cut at the output cap says so	literal	if(__c1)return __c1.trim()+__cut1;	if(__c1)return __c1.trim();		объявление обрыва не приклеено к вердикту
+C4	the model that answered is recorded	literal	if(__sv&&__sv!==__e.model)__a.served=__clip(__sv,80)	if(__sv&&__sv!==__e.model)__a.served=1		записана константа вместо ответившей модели
+C5	judge keeps the reason of a failed rung	literal	"api error from the pool: "+(__clip(__et,300)||	"api error from the pool: "+(""||		причина провала ноги выброшена
+C6	every cut in the probe is named	literal	\u0432\u044b\u0440\u0435\u0437\u0430\u043d\u043e	.substring(0,9)		необъявленный срез другим именем метода
+C7	watcher spends nothing before the cheap count	literal	}}let __uw=[];let __arr=[	}}await __h();let __arr=[		между воротами и разбором истории появилась работа
+C8	intervals are monotonic, moments are not	literal	let __now=globalThis.__ccMono(),	let __now=Date.now(),		окно наблюдателя переведено на стенные часы
+C9	judge retries a failed consultation	literal	try{__raw=await __call(__cut(__rcc),	try{__raw=null;(	judge cancels when it cannot decide	повтора нет, счётчик и ладдер на месте
+C10	statusline throttle raised	derived	@derived	@derived		дебаунс вернулся к стоковому значению, приманка того же имени лежит вдали
+D2	an answer cut at the output cap says so	literal	__j?.message?.stop_reason==="max_tokens"	__j?.message?.stop_reason==="none"		полоса pool снова не объявляет обрыв на потолке
+D3	a disabled probe says so in the journal	literal	if(!(__pv&&__pv.s===__sg&&__pv.u>globalThis.__ccMono())){	if(!(false)){                                            		выключенная проба снова платит полную цену каждого вызова
+D8	dispatch class is taken unambiguously	literal	__amb=__cls.length>1,	__amb=false,		неоднозначный маркер снова уводит вызов мимо судьи
+D11	an evicted turn is declared	literal	if(!__t.length&&__o.turnLost&&__o.turnLost())	if(false)		вытеснение хода снова необъявлено

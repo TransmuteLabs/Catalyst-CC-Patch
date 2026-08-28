@@ -607,6 +607,25 @@ const scenarios = [
     expected: { passed: true, outcome: 'skip_disabled', poolCalls: 0, nudges: 0 },
   },
   {
+    // Памятка гасит ПОВТОР строки, а не саму пробу: два одинаковых вызова
+    // подряд оставляют ОДНУ строку журнала (круг 20, D-3).
+    name: 'disabled-memo-holds',
+    config: { enabled: false },
+    runs: 2,
+    response: 'OK: не должно дойти',
+    expected: { passed: true, outcome: 'skip_disabled', poolCalls: 0, nudges: 0, journalLines: 1 },
+  },
+  {
+    // ...и правка настроек отменяет её немедленно: подпись настроек входит в
+    // памятку, поэтому вторая строка появляется, не дожидаясь срока.
+    name: 'disabled-memo-yields-to-settings',
+    config: { enabled: false },
+    runs: 2,
+    configOnRerun: { enabled: false, records_keep: 7 },
+    response: 'OK: не должно дойти',
+    expected: { passed: true, outcome: 'skip_disabled', poolCalls: 0, nudges: 0, journalLines: 2 },
+  },
+  {
     name: 'no-toml-parser',
     withoutTomlParser: true,
     response: 'OK: не должно дойти',
@@ -817,7 +836,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 56;
+const EXPECTED_SCENARIOS = 58;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1129,6 +1148,10 @@ const CHECKS = [
   // утверждение об outcome не отличает годную инструкцию от негодной.
   { key: 'systemIncludes', ok: (r, e) => r.sentSystem.includes(e.systemIncludes), got: (r) => r.sentSystem },
   { key: 'systemExcludes', ok: (r, e) => !r.sentSystem.includes(e.systemExcludes), got: (r) => r.sentSystem },
+  // СКОЛЬКО строк журнала оставил сценарий. Памятка выключенной пробы гасит
+  // ПОВТОР строки, и без счёта строк её отсутствие неотличимо от исправности:
+  // сценарий с одним прогоном зелен и с памяткой, и без неё.
+  { key: 'journalLines', ok: (r, e) => r.journalLines === e.journalLines, got: (r) => r.journalLines },
 ];
 
 // Дверь загрузки на опечатку в ключе expected: сравнивающий читает только
@@ -1311,13 +1334,30 @@ async function runScenario(probe, scenario) {
       ? () => { throw new Error('session not ready'); }
       : () => 'a1';
 
+    // Сценарий может просить НЕСКОЛЬКО консультаций подряд: памятки и всё
+    // прочее, что живёт между вызовами в одном процессе, на одном вызове не
+    // проверяются вовсе. `configOnRerun` переписывает настройки перед вторым
+    // прогоном -- так измеряется, что правка настроек отменяет памятку.
+    const runs = scenario.runs ?? 1;
     try {
-      await probe({ tool, input, context, key: 'tool-use-1', pool, notify, agentId, sessionTitle });
+      for (let pass = 0; pass < runs; pass += 1) {
+        if (pass > 0 && scenario.configOnRerun !== undefined) {
+          fs.writeFileSync(
+            path.join(root, 'probes.toml'),
+            probeConfigToml(scenario, { ...baseConfig(scenario), ...scenario.configOnRerun }),
+          );
+        }
+        await probe({ tool, input, context, key: 'tool-use-1', pool, notify, agentId, sessionTitle });
+      }
     } catch (error) {
       passed = false;
       errorText = sanitizeText(error?.message ?? error, tempDir);
     }
 
+    const journalFile = path.join(probeDir, 'journal.jsonl');
+    const journalLines = fs.existsSync(journalFile)
+      ? fs.readFileSync(journalFile, 'utf8').split(/\r?\n/).filter(Boolean).length
+      : 0;
     const journal = readLastJournal(probeDir);
     const entry = journal.entry ? sanitizeValue(journal.entry, tempDir) : null;
     if (!errorText && journal.error) errorText = sanitizeText(journal.error, tempDir);
@@ -1336,6 +1376,7 @@ async function runScenario(probe, scenario) {
     const result = {
       scenario: scenario.name,
       passed,
+      journalLines,
       sentHeader,
       sentSystem: undoLatin1(sentSystem),
       sentDispatchLen: sentDispatch.length,
@@ -1476,7 +1517,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 56;', to: 'EXPECTED_SCENARIOS = 55;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 58;', to: 'EXPECTED_SCENARIOS = 57;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },

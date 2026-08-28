@@ -44,7 +44,7 @@ def _pool_usage(data):
 
 
 def _result(via, started, *, text='', http=None, raw='', error=None,
-            tokens_in=None, tokens_out=None, cost_usd=None):
+            tokens_in=None, tokens_out=None, cost_usd=None, notes=()):
     return {
         'text': text,
         'via': via,
@@ -55,6 +55,10 @@ def _result(via, started, *, text='', http=None, raw='', error=None,
         'tokens_in': tokens_in,
         'tokens_out': tokens_out,
         'cost_usd': cost_usd,
+        # Всё, чего полоса не смогла выполнить из запрошенного. Молча ронять
+        # часть запроса нельзя: расхождение реплики с живым прогоном потом
+        # списывают на модель или промт (круг 20, D-10).
+        'notes': list(notes),
     }
 
 
@@ -101,8 +105,14 @@ def _send_http(system, user, model, effort, max_tokens, url, timeout, body_templ
         return _result('http', started, error=str(exc))
 
 
-def _send_pool(system, user, model, effort, timeout):
+def _send_pool(system, user, model, effort, timeout, max_tokens=None):
     started = time.perf_counter()
+    # У клиента нет ручки потолка вывода (в его `--help` только `--max-budget-usd`
+    # и `--autocompact`), поэтому записанный бюджет на этой полосе НЕ
+    # применяется. Это объявляется, а не замалчивается: реплика без потолка
+    # отвечает полностью там, где живой прогон был обрезан.
+    notes = ([] if max_tokens in (None, '') else
+             [f'бюджет max_tokens={max_tokens} не применён: полоса pool не несёт потолок вывода'])
     workdir = tempfile.mkdtemp()
     command = [
         'claude', '-p', user, '--model', model,
@@ -117,25 +127,26 @@ def _send_pool(system, user, model, effort, timeout):
         raw = completed.stdout
         if completed.returncode:
             detail = completed.stderr.strip() or raw.strip() or f'exit {completed.returncode}'
-            return _result('pool', started, raw=raw, error=detail)
+            return _result('pool', started, raw=raw, error=detail, notes=notes)
         try:
             data = json.loads(raw)
         except Exception as exc:
-            return _result('pool', started, raw=raw, error=f'не разобран JSON: {exc}')
+            return _result('pool', started, raw=raw, error=f'не разобран JSON: {exc}', notes=notes)
         text = str(data.get('result') or '')
         if data.get('is_error'):
-            return _result('pool', started, raw=raw, error=text or 'клиент вернул is_error')
+            return _result('pool', started, raw=raw, error=text or 'клиент вернул is_error', notes=notes)
         tokens_in, tokens_out = _pool_usage(data)
         cost = data.get('total_cost_usd')
         return _result('pool', started, text=text, raw=raw,
-                       tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost)
+                       tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
+                       notes=notes)
     except subprocess.TimeoutExpired as exc:
         raw = exc.stdout or ''
         if isinstance(raw, bytes):
             raw = raw.decode('utf-8', 'replace')
-        return _result('pool', started, raw=raw, error=f'таймаут через {timeout} с')
+        return _result('pool', started, raw=raw, error=f'таймаут через {timeout} с', notes=notes)
     except Exception as exc:
-        return _result('pool', started, error=str(exc))
+        return _result('pool', started, error=str(exc), notes=notes)
     finally:
         shutil.rmtree(workdir)
 
@@ -147,7 +158,7 @@ def send(system: str, user: str, model: str, *, effort: str | None,
     if chosen == 'auto':
         chosen = 'pool' if model.lower().startswith('claude') else 'http'
     if chosen == 'pool':
-        return _send_pool(system, user, model, effort, timeout)
+        return _send_pool(system, user, model, effort, timeout, max_tokens)
     if chosen == 'http':
         return _send_http(system, user, model, effort, max_tokens, url, timeout, body_template)
     started = time.perf_counter()

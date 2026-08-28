@@ -246,8 +246,10 @@ def run_one(task):
             timeout=args.timeout,
             body_template=body,
         )
-        verdict = replay.verdict_of(sent['raw']) if not sent['error'] else ''
-        result_class = replay.klass(verdict) if not sent['error'] else 'ERROR'
+        # Проба называется явно: судейский словарь на записях наблюдателя
+        # размечал их чужими классами (круг 20, D-5).
+        verdict = replay.verdict_of(sent['raw'], PROBE_ID) if not sent['error'] else ''
+        result_class = replay.klass(verdict, PROBE_ID) if not sent['error'] else 'ERROR'
     except Exception as exc:
         sent = {
             'via': args.channel, 'ms': 0, 'http': None, 'error': str(exc),
@@ -276,6 +278,10 @@ def run_one(task):
         'tokens_out': sent['tokens_out'],
         'layer_missing': layer_missing,
         'url_from': url_from,
+        # То, чего полоса не выполнила из запрошенного (бюджет вывода на pool).
+        # Без переноса в строку объявление канала не доходило бы до читателя
+        # сводки -- объявление в никуда объявлением не является.
+        'notes': sent.get('notes') or [],
     }
     return index, result
 
@@ -363,12 +369,23 @@ def print_summary(rows, model_order=None, recorded_classes=None):
         latencies = [row['ms'] for row in selected if isinstance(row.get('ms'), (int, float))]
         errors = sum(row.get('klass') == 'ERROR' for row in selected)
         empty = sum(row.get('klass') == 'EMPTY' for row in selected)
-        misses = sum(row_truth(row, 'human') == 'BLOCK' and effective_class(row.get('klass')) != 'BLOCK'
+        # Метка истины проходит ту же нормализацию, что и класс ответа:
+        # `--truth` принимает ВЕСЬ словарь отмены (BLOCK/STOP/DENY), а
+        # сравнение шло с литералом 'BLOCK' -- запись с truth=STOP не попадала
+        # ни в промахи, ни в ложные отмены, и точность завышалась молча
+        # (круг 20, D-9). Согласие с записанным вердиктом считается так же:
+        # соседние метрики сравнивали сырой класс.
+        cancel = effective_class(ACT_VALUES[0]) if ACT_VALUES else 'BLOCK'
+        misses = sum(effective_class(row_truth(row, 'human')) == cancel
+                     and effective_class(row.get('klass')) != cancel
                      for row in selected)
-        false_blocks = sum(row_truth(row, 'human') == 'OK' and effective_class(row.get('klass')) == 'BLOCK'
+        false_blocks = sum(effective_class(row_truth(row, 'human')) == 'OK'
+                           and effective_class(row.get('klass')) == cancel
                            for row in selected)
         comparable = [row for row in selected if row['rec'] in recorded_classes]
-        recorded_match = sum(row.get('klass') == recorded_classes[row['rec']] for row in comparable)
+        recorded_match = sum(effective_class(row.get('klass'))
+                             == effective_class(recorded_classes[row['rec']])
+                             for row in comparable)
         repeats = {}
         for row in selected:
             repeats.setdefault(row['rec'], set()).add(row.get('klass'))
@@ -394,6 +411,12 @@ def print_summary(rows, model_order=None, recorded_classes=None):
     print('* согласие с записанным вердиктом; записанный вердикт истиной не является')
     pool_runs = sum(row.get('via') == 'pool' for row in rows)
     print(f'канал pool: {pool_runs} прогонов; вход не совпадает с исходным из-за контекста старта сессии')
+    declared = {}
+    for row in rows:
+        for note in row.get('notes') or []:
+            declared[note] = declared.get(note, 0) + 1
+    for note, count in sorted(declared.items()):
+        print(f'полоса не выполнила запрошенное ({count} прогонов): {note}')
 
     distinct = {}
     for row in rows:

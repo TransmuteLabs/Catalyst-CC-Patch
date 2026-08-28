@@ -49,8 +49,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=72
-EXPECTED_MUTATIONS=72
+EXPECTED_SCENARIOS=78
+EXPECTED_MUTATIONS=78
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -300,6 +300,25 @@ echo "stub build-path-probe rc=${STUB_PROBE_RC:-0}"
 exit "${STUB_PROBE_RC:-0}"
 PROBESTUB
   chmod +x "$dir/tools/build-path-probe.sh"
+  mv "$dir/tools/checks-teeth.py" "$dir/tools/checks-teeth.real.py"
+  # Прибор зубов реестра -- тоже ЗАГЛУШКА: настоящему нужен СОБРАННЫЙ образ и
+  # минуты на мутации, а стенд меряет предполётную ДВЕРЬ свипа -- позвали ли,
+  # как прочли КЛАСС ответа, объявлен ли пропуск. Отметка «позвали» кладётся на
+  # диск, как у зонда пути сборки.
+  cat > "$dir/tools/checks-teeth.py" <<'TEETHSTUB'
+#!/usr/bin/env python3
+import os
+import sys
+
+mark = os.environ.get('STUB_TEETH_MARK', '')
+if mark:
+    with open(mark, 'w', encoding='utf-8') as fh:
+        fh.write('прибор зубов звался\n')
+rc = int(os.environ.get('STUB_TEETH_RC', '0') or 0)
+print('stub checks-teeth rc=%d' % rc)
+sys.exit(rc)
+TEETHSTUB
+  chmod +x "$dir/tools/checks-teeth.py"
   # И САМ СТЕНД -- заглушка, по той же причине. Предполёт свипа зовёт стенд
   # корпусных инструментов; свип здесь запускается ИЗ стенда, то есть настоящий
   # стенд позвал бы сам себя, упёрся в собственный замок и встал на бюджете
@@ -333,7 +352,7 @@ BENCHSTUB
 # по ЖИВОМУ ~/.tweakcc, и диск ушёл в ноль -- восстановление живого состояния
 # не дописалось. Инструмент обязан мерить одно и то же, откуда бы его ни
 # позвали.
-SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF)
+SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF -u SWEEP_LAST_N)
 
 # Ручки ПРОПУСКА у сценариев свои (BENCH_SKIP_PROBE/BENCH_SKIP_TOOLS): прежде
 # пусковой пробрасывал операторские SWEEP_SKIP_* «как есть», и человек, честно
@@ -353,6 +372,9 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     STUB_BENCH_RC="${STUB_BENCH_RC:-0}" STUB_BENCH_MARK="${STUB_BENCH_MARK:-}" \
     SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" \
     SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP_PROBE:-}" \
+    SWEEP_LAST_N="${BENCH_LAST_N:-}" \
+    STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
+    SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     bash "$kit/tools/sweep.sh" "$@" 2>&1 9>&-
 }
 
@@ -1041,7 +1063,7 @@ scenario_66() {   # стенд, позванный ИЗ свипа, меряет
   # Образец СКЛЕИВАЕТСЯ: написанный дословно, он был бы вторым вхождением
   # объявления в этом же файле -- и счёт «ровно одно объявление» никогда не
   # сошёлся бы, а мутация зубов правила бы не то место (измерено 2026-08-28).
-  decl=$(grep -c "SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP""_SELF)" "$src")
+  decl=$(grep -c "SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP""_SELF -u SWEEP_LAST_N)" "$src")
   uses=$(grep -c '"${SWEEP_ENV_SCRUB\[@\]}"' "$src")
   if [[ "$decl" != "1" || "$uses" != "2" ]]; then
     LAST_EVID="ФОРМА_СНЯТИЯ_РАЗОШЛАСЬ :: объявлений=$decl использований=$uses (ждали 1 и 2)"
@@ -1168,6 +1190,150 @@ scenario_71() {   # операторская ручка пропуска не п
   ok "71 операторская ручка пропуска не проникает в сценарии стенда"
 }
 
+# Свой корпус на семь версий: набор по умолчанию (пять) виден только там, где
+# версий БОЛЬШЕ пяти, а общий игрушечный корпус держит две -- на нём «последние
+# пять» и «все» неотличимы.
+mk_lastn_corpus() {   # каталог
+  local d=$1 v plat h
+  rm -rf "$d"; mkdir -p "$d/corpus"
+  plat=$(grep '^# platform:' "$C/versions.txt")
+  { echo "# игрушечный список набора"
+    echo "$plat"
+    # Порядок строк НЕ по номеру: свип обязан брать последние по ВЕРСИИ, а не
+    # хвост файла (строку в список дописывают руками).
+    for v in 913 910 916 912 914 911 915; do
+      toy_image "$d/corpus/0.0.$v.pristine" "0.0.$v"
+      h=$(shasum -a 256 "$d/corpus/0.0.$v.pristine" | awk '{print $1}')
+      echo "$v 0.0.$v $h"
+    done
+  } > "$d/versions.txt"
+}
+
+scenario_73() {   # набор по умолчанию -- пять САМЫХ НОВЫХ версий корпуса
+  # Решение юзера 2026-08-28: прогон без аргументов меряет не весь корпус.
+  # Молчаливое сужение читалось бы как вердикт обо всём корпусе, поэтому
+  # проверяются три вещи разом: сколько измерено, КАКИЕ именно, и объявлено ли
+  # это в потоке и в сводке.
+  local d out rc n sum
+  d="$C/lastn"; mk_lastn_corpus "$d"
+  out=$(run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 91[0-9]: exit=')
+  sum="$d/corpus/state/log/sweep-summary.txt"
+  LAST_EVID="rc=$rc :: измерено=$n :: $out"
+  if (( rc != 0 )); then
+    bad "73 набор по умолчанию: прогон отказал ($rc)"; return
+  fi
+  if [[ "$n" != "5" ]]; then
+    LAST_EVID="ИЗМЕРЕНО_НЕ_ПЯТЬ :: измерено=$n :: $out"
+    bad "73 набор по умолчанию: измерено $n версий вместо пяти"; return
+  fi
+  if [[ "$out" == *"SWEEP 910:"* || "$out" == *"SWEEP 911:"* ]]; then
+    LAST_EVID="ИЗМЕРЕНО_ЛИШНЕЕ :: $out"
+    bad "73 набор по умолчанию: измерены и старые версии"; return
+  fi
+  if [[ "$out" != *"SWEEP набор: последние 5 версий корпуса -- 912 913 914 915 916"* ]]; then
+    LAST_EVID="НАБОР_НЕ_ОБЪЯВЛЕН :: $out"
+    bad "73 набор по умолчанию: сужение не объявлено в потоке"; return
+  fi
+  if [[ ! -f "$sum" ]] || ! grep -q '^# набор: последние 5 версий корпуса' "$sum"; then
+    LAST_EVID="СВОДКА_МОЛЧИТ :: $(cat "$sum" 2>/dev/null | tr '\n' '|')"
+    bad "73 набор по умолчанию: сводка не называет измеренный набор"; return
+  fi
+  ok "73 без аргументов меряются пять самых новых версий, и это объявлено"
+}
+
+scenario_74() {   # ручка набора достижима: ноль -- весь корпус
+  # Объявленная ручка обязана быть ДОСТИЖИМА: SWEEP_LAST_N=0 -- единственный
+  # способ померить весь корпус без перечисления версий руками.
+  local d out rc n
+  d="$C/lastn"; mk_lastn_corpus "$d"
+  out=$(BENCH_LAST_N=0 run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 91[0-9]: exit=')
+  LAST_EVID="rc=$rc :: измерено=$n :: $out"
+  if (( rc != 0 )); then
+    bad "74 ручка набора: прогон отказал ($rc)"; return
+  fi
+  if [[ "$n" != "7" ]]; then
+    LAST_EVID="ЗНАЧЕНИЕ_РУЧКИ_ПРОИГНОРИРОВАНО :: измерено=$n вместо 7 :: $out"
+    bad "74 ручка набора: SWEEP_LAST_N=0 измерил $n версий вместо всего корпуса"; return
+  fi
+  if [[ "$out" != *"SWEEP набор: ВЕСЬ корпус"* ]]; then
+    LAST_EVID="ЗНАЧЕНИЕ_РУЧКИ_ПРОИГНОРИРОВАНО :: набор не объявлен :: $out"
+    bad "74 ручка набора: полный корпус не объявлен"; return
+  fi
+  ok "74 SWEEP_LAST_N=0 меряет весь корпус и объявляет это"
+}
+
+scenario_75() {   # прибор зубов реестра зовётся по умолчанию, вердикт объявлен
+  local out rc mark
+  mark="$C/teeth.called"; rm -f "$mark"
+  out=$(STUB_TEETH_MARK="$mark" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: прибор=$([[ -e "$mark" ]] && echo звался || echo НЕ_ЗВАЛСЯ) :: $out"
+  if (( rc != 0 )); then
+    bad "75 предполёт зубов: прогон отказал ($rc) -- дверь не измерена"; return
+  fi
+  if [[ ! -e "$mark" ]]; then
+    LAST_EVID="ПРИБОР_НЕ_ЗВАЛСЯ :: $out"
+    bad "75 предполёт зубов: прибор не звался"; return
+  fi
+  if [[ "$out" != *"зубы реестра проверок: ЗЕЛЁНО"* ]]; then
+    LAST_EVID="ВЕРДИКТ_НЕ_ОБЪЯВЛЕН :: $out"
+    bad "75 предполёт зубов: вердикт не объявлен"; return
+  fi
+  ok "75 предполёт зовёт прибор зубов реестра и объявляет его вердикт"
+}
+
+scenario_76() {   # красный прибор зубов останавливает свип ДО первой сборки
+  local out rc
+  out=$(STUB_TEETH_RC=1 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )) || [[ "$out" == *"SWEEP DONE"* ]]; then
+    LAST_EVID="КРАСНЫЙ_НЕ_ОСТАНОВИЛ :: rc=$rc :: $out"
+    bad "76 красный прибор зубов: свип не остановлен (rc=$rc)"; return
+  fi
+  if [[ "$out" != *"прошла мутацию молча либо покраснела чужой дверью"* ]]; then
+    LAST_EVID="ПРИЧИНА_НЕ_НАЗВАНА :: $out"
+    bad "76 красный прибор зубов: причина не названа"; return
+  fi
+  ok "76 красный прибор зубов реестра останавливает свип"
+}
+
+scenario_77() {   # выключатель прибора зубов ОБЪЯВЛЯЕТСЯ
+  local out rc mark
+  mark="$C/teeth.called"; rm -f "$mark"
+  out=$(BENCH_SKIP_TEETH=1 STUB_TEETH_MARK="$mark" \
+        run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: прибор=$([[ -e "$mark" ]] && echo ЗВАЛСЯ_ВОПРЕКИ || echo не звался) :: $out"
+  if (( rc != 0 )); then
+    bad "77 выключатель зубов: прогон отказал ($rc)"; return
+  fi
+  if [[ -e "$mark" ]]; then
+    bad "77 выключатель зубов: прибор всё равно звался"; return
+  fi
+  if [[ "$out" != *"зубы реестра проверок ПРОПУЩЕНЫ по ручке"* ]]; then
+    LAST_EVID="ПРОПУСК_НЕ_ОБЪЯВЛЕН :: $out"
+    bad "77 выключатель зубов: пропуск не объявлен"; return
+  fi
+  ok "77 выключатель прибора зубов объявляет пропуск"
+}
+
+scenario_78() {   # «мерить нечем» у прибора зубов -- свой КЛАСС, а не красный прогон
+  # Прибор не может мерить (нет образа, уехал якорь) и красный реестр --
+  # разные починки; общий код смешивал бы «почини кит» с «почини машину».
+  local out rc
+  out=$(STUB_TEETH_RC=2 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 2 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ :: rc=$rc :: $out"
+    bad "78 «мерить нечем» у зубов: код возврата $rc, ждали 2"; return
+  fi
+  if [[ "$out" != *"прибор зубов НЕ МЕРИЛ"* ]]; then
+    LAST_EVID="ПРИЧИНА_НЕ_НАЗВАНА :: $out"
+    bad "78 «мерить нечем» у зубов: причина не названа"; return
+  fi
+  ok "78 «мерить нечем» у прибора зубов -- свой класс, а не красный прогон"
+}
+
 run_all() {
   scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6
   scenario_7; scenario_8; scenario_9; scenario_10; scenario_11; scenario_12
@@ -1182,6 +1348,8 @@ run_all() {
   scenario_58; scenario_59; scenario_60; scenario_61; scenario_62
   scenario_63; scenario_64; scenario_65; scenario_66
   scenario_67; scenario_68; scenario_69; scenario_70; scenario_71; scenario_72
+  scenario_73; scenario_74
+  scenario_75; scenario_76; scenario_77; scenario_78
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -1528,7 +1696,11 @@ MUT_FILE=(x
   # Волна 22: класс кода при неполноте от замка (9), занятый предполётный
   # стенд (67), класс отказа конвейера в вердикте (68).
   tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/fetch-corpus.sh
-  tools/corpus-list.py tools/corpus-tools-bench.real.sh tools/sweep.sh)
+  tools/corpus-list.py tools/corpus-tools-bench.real.sh tools/sweep.sh
+  # Волна 23: набор по умолчанию (73), достижимость ручки набора (74) и
+  # предполёт прибора зубов реестра (75-78).
+  tools/sweep.sh tools/sweep.sh
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -1595,14 +1767,20 @@ MUT_PAT=(x
   '    2\) echo "SWEEP ОТКАЗ: зонд пути сборки НЕ МЕРИЛ'
   '    2\) echo "SWEEP ОТКАЗ: стенд корпусных инструментов НЕ МЕРИЛ'
   '    6\) echo "SWEEP ОТКАЗ: машинерия замка стенда сломана'
-  'SWEEP_ENV_SCRUB=\(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF\)'
+  'SWEEP_ENV_SCRUB=\(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF -u SWEEP_LAST_N\)'
   '  if \(\( RED == 0 \)\); then'
   '    3\) echo "SWEEP ОТКАЗ: стенд корпусных инструментов занят'
   '        2\) why\+=\("конвейер вернул 2: контракт вызова нарушен или прибор гейта не мерил"\) ;;'
   '    sys\.exit\(2\)'
   "        die\('не определить платформу \(%s\)' % exc, 2\)"
   '    SWEEP_SKIP_BUILD_PROBE="\$\{BENCH_SKIP_PROBE:-\}"'
-  '    \[\[ "\$\{tw:-0\}" != "0" \]\] \|\| why\+=\("tweakcc не применил ни одного патча"\)')
+  '    \[\[ "\$\{tw:-0\}" != "0" \]\] \|\| why\+=\("tweakcc не применил ни одного патча"\)'
+  '    SRC=\("\$\{__sorted\[\@\]: -__n\}"\)'
+  '  __n="\$\{SWEEP_LAST_N:-\$SWEEP_LAST_N_DEFAULT\}"'
+  '    0\) echo "SWEEP зубы реестра проверок: ЗЕЛЁНО \(лог \$TEETH_LOG\)"'
+  '    \*\) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
+  '  echo "SWEEP зубы реестра проверок ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH=\$\{SWEEP_SKIP_CHECKS_TEETH\}"'
+  '    2\) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ')
 
 MUT_REP=(x
   'if false; then'
@@ -1669,7 +1847,13 @@ MUT_REP=(x
   '    sys.exit(1)'
   "        die('не определить платформу (%s)' % exc)"
   '    SWEEP_SKIP_BUILD_PROBE="${SWEEP_SKIP_BUILD_PROBE:-}"'
-  '    :')
+  '    :'
+  '    SRC=("${ALL[@]}")'
+  '  __n="$SWEEP_LAST_N_DEFAULT"'
+  '    0) :'
+  '    9) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
+  '  :'
+  '    22) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -1680,7 +1864,8 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                46 47 48 49 50 51 52 53 54 55 56
                1 3 5 6 10 12 57 58 59 60 61 62
                63 64 65 66
-               9 67 68 69 70 71 72)
+               9 67 68 69 70 71 72
+               73 74 75 76 77 78)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -1753,7 +1938,13 @@ MUT_CAUSE=(x
   'КЛАСС_НЕ_ТОТ'
   'КЛАСС_НЕ_ТОТ'
   'ФОРМА_РУЧКИ_РАЗОШЛАСЬ'
-  'SWEEP DONE')
+  'SWEEP DONE'
+  'ИЗМЕРЕНО_НЕ_ПЯТЬ'
+  'ЗНАЧЕНИЕ_РУЧКИ_ПРОИГНОРИРОВАНО'
+  'ВЕРДИКТ_НЕ_ОБЪЯВЛЕН'
+  'КРАСНЫЙ_НЕ_ОСТАНОВИЛ'
+  'ПРОПУСК_НЕ_ОБЪЯВЛЕН'
+  'КЛАСС_НЕ_ТОТ')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

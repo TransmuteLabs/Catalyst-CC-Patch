@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import io
 import importlib.util
 import json
 import os
@@ -35,8 +36,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 18
-EXPECTED_MUTATIONS = 10
+EXPECTED_SCENARIOS = 27
+EXPECTED_MUTATIONS = 20
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -258,8 +259,12 @@ def scenario_8(outputs: list[dict[str, int]]) -> None:
 def scenario_9(outputs: list[dict[str, int]]) -> None:
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
+        # Хвост имени -- ЗАВЕДОМО мёртвый pid. Со случайным хвостом покраснение
+        # мутации, снимающей проверку формы, зависело от того, жив ли процесс с
+        # таким номером на чужой машине -- ровно та гонка, которую стенд себе
+        # запретил (круг 20, D-7).
         names = (
-            "a.json.gz.tmp.12.34",
+            f"a.json.gz.tmp.12.{dead_pid()}",
             "a.json.gz.tmp.²",
             "a.json.gz.tmp.99999999999999999999",
         )
@@ -312,7 +317,8 @@ def scenario_12(module: ModuleType) -> None:
 def scenario_13(module: ModuleType) -> None:
     with tempfile.TemporaryDirectory() as raw:
         link = Path(raw) / "claude"
-        names = ("claude.tmp.²", "claude.tmp.12.34", "claude.tmp.99999999999999999999")
+        names = ("claude.tmp.²", f"claude.tmp.12.{dead_pid()}",
+                 "claude.tmp.99999999999999999999")
         for name in names:
             make_stale_link(link.parent / name)
         module._sweep_stale_launcher_tmps(link)
@@ -411,6 +417,253 @@ def scenario_18() -> None:
     require("vanished" not in arm.split("print(")[0], "ветка снова считает «исчезло под руками»")
 
 
+def sync_diff(root: Path, home: Path, tools: Path, agents: Path) -> tuple[int, str]:
+    """Прогон scripts/probes-sync.sh --diff на игрушечных домах."""
+    env = dict(os.environ)
+    env["CLAUDE_PROBES_DIR"] = str(home)
+    env["CLAUDE_JUDGE_TOOLS_DIR"] = str(tools)
+    env["CLAUDE_LAUNCH_AGENTS_DIR"] = str(agents)
+    done = subprocess.run(
+        ["bash", str(root / "scripts" / "probes-sync.sh"), "--diff"],
+        capture_output=True, text=True, env=env,
+    )
+    return done.returncode, done.stdout + done.stderr
+
+
+def scenario_19() -> None:
+    """Сверка раскатки отвечает КЛАССОМ: нет дома, дрейф, неполнота, чужой агент."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        home, tools, agents = base / "p", base / "t", base / "la"
+        agents.mkdir()
+
+        rc, out = sync_diff(ROOT, home, tools, agents)
+        require(rc == 5, f"пустая машина обязана давать «мерить нечего» (5), а дала {rc}")
+        require("не раскатан" in out, "пустая машина не названа классом «не раскатан»")
+
+        env = dict(os.environ)
+        env.update(CLAUDE_PROBES_DIR=str(home), CLAUDE_JUDGE_TOOLS_DIR=str(tools),
+                   CLAUDE_LAUNCH_AGENTS_DIR=str(agents))
+        done = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "probes-sync.sh"), "--to-home"],
+            capture_output=True, text=True, env=env,
+        )
+        require(done.returncode == 0, f"раскатка в игрушечный дом провалилась: {done.stderr}")
+
+        rc, out = sync_diff(ROOT, home, tools, agents)
+        require(rc == 0, f"сошедшийся дом обязан давать 0, а дал {rc}: {out}")
+
+        # дрейф: файл есть, байты другие
+        drifted = tools / "compact.py"
+        drifted.write_text(drifted.read_text(encoding="utf-8") + "# дрейф\n", encoding="utf-8")
+        rc, out = sync_diff(ROOT, home, tools, agents)
+        require(rc == 1, f"дрейф обязан краснить (1), а дал {rc}")
+        require("расходится: judge/compact.py" in out, "дрейф не назван по имени файла")
+        shutil.copy2(ROOT / "judge" / "compact.py", drifted)
+
+        # неполнота: файла нет вовсе, но дом заведён
+        (tools / "replay.py").unlink()
+        rc, out = sync_diff(ROOT, home, tools, agents)
+        require(rc == 1, f"неполная раскатка обязана краснить (1), а дала {rc}")
+        require("раскатка неполная" in out, "неполнота не названа своим классом")
+        shutil.copy2(ROOT / "judge" / "replay.py", tools / "replay.py")
+
+        # заведённый агент показывает НЕ на раскатанный инструмент
+        sample = (ROOT / "judge" / "com.transmutelabs.judge-compact.plist").read_text(
+            encoding="utf-8")
+        stray = agents / "com.stray.judge-compact.plist"
+        stray.write_text(
+            sample.replace("/Users/YOUR-USER/.claude/judge", "/gone/elsewhere"),
+            encoding="utf-8")
+        rc, out = sync_diff(ROOT, home, tools, agents)
+        require(rc == 1, f"агент мимо раскатки обязан краснить (1), а дал {rc}")
+        require("агент com.stray.judge-compact.plist запускает НЕ" in out,
+                "чужая цель агента не названа")
+
+        stray.write_text(sample.replace("/Users/YOUR-USER/.claude/judge", str(tools)),
+                         encoding="utf-8")
+        rc, out = sync_diff(ROOT, home, tools, agents)
+        require(rc == 0, f"агент, показывающий на раскатку, не должен краснить, а дал {rc}: {out}")
+
+
+def scenario_20() -> None:
+    """Гейт конвейера зовёт сверку и снимает тест-ручки домов.
+
+    Свойство ФОРМЫ: сам стенд исполняет копию кита, а гейт живёт в конвейере,
+    который стенд не запускает. Пин по тексту -- объявленная замена прогону.
+    """
+    text = (ROOT / "claude-patch-all.sh").read_text(encoding="utf-8")
+    call = text.find("scripts/probes-sync.sh\" --diff")
+    require(call >= 0, "конвейер не зовёт probes-sync.sh --diff")
+    head = text[max(0, call - 400):call]
+    require("env -u CLAUDE_JUDGE" + "_TOOLS_DIR" in head,
+            "гейт не снимает тест-ручку дома инструментов")
+    require("env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH" + "_AGENTS_DIR" in head,
+            "гейт не снимает тест-ручку каталога агентов")
+    tail = text[call:call + 700]
+    require("5)" in tail and "пропуск" in tail,
+            "гейт не отличает «раскатки нет» от расхождения")
+
+
+
+def import_tool(name: str) -> ModuleType:
+    """Импорт одного из judge/*.py из ТОГО ЖЕ дерева, что меряет стенд."""
+    path = ROOT / "judge" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"judge_tools_bench_{name}", path)
+    require(spec is not None and spec.loader is not None, f"не удалось создать spec для {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def seeded_replay(vocab: dict[str, tuple[list[str], list[str]]]) -> tuple[ModuleType, str]:
+    """replay с ПОДСТАВЛЕННЫМ словарём: стенд герметичен и образа не читает."""
+    module = import_tool("replay")
+    handle, path = tempfile.mkstemp(prefix="judge-bench-image.")
+    os.close(handle)
+    real = os.path.realpath(path)
+    for probe, values in vocab.items():
+        module._VOCAB_CACHE[(real, probe)] = values
+    os.environ["CLAUDE_JUDGE_IMAGE"] = real
+    return module, path
+
+
+def scenario_21() -> None:
+    """Разметка вердикта повторяет ОБРАЗ: двоеточие обязательно, регистр не важен."""
+    module, image = seeded_replay({"judge": (["OK", "BLOCK", "WARN"], ["BLOCK"])})
+    try:
+        require(module.klass("OKAY, данных не хватает") == "EMPTY",
+                "слово без двоеточия снова классифицируется как вердикт")
+        require(module.klass("ok: причина") == "OK",
+                "строчный вердикт не разобран либо возвращён не в каноне словаря")
+        require(module.verdict_of("свободный текст модели") == "",
+                "текст без строки вердикта снова выдаётся за вердикт")
+        raw = '{"choices":[{"message":{"content":"ok: всё в порядке"}}]}'
+        require(module.verdict_of(raw) == "ok: всё в порядке", "вердикт из содержимого потерян")
+    finally:
+        os.unlink(image)
+        os.environ.pop("CLAUDE_JUDGE_IMAGE", None)
+
+
+def scenario_22() -> None:
+    """Идентичность пробы протянута: словарь чужой пробы не размечает записи."""
+    module, image = seeded_replay({
+        "judge": (["OK", "BLOCK"], ["BLOCK"]),
+        "idle-watch": (["ASK", "SKIP"], ["ASK"]),
+    })
+    try:
+        require(module.klass("ask: пора спросить", "idle-watch") == "ASK",
+                "словарь пробы не применён")
+        require(module.klass("ask: пора спросить") == "EMPTY",
+                "судейский словарь принял чужой класс")
+        helped = subprocess.run([sys.executable, str(ROOT / "judge" / "replay.py"), "--help"],
+                                capture_output=True, text=True)
+        require("--probe" in helped.stdout, "у replay.py нет аргумента --probe")
+
+        adj = import_tool("adjudicate")
+        adj.replay._VOCAB_CACHE.update(module._VOCAB_CACHE)
+        prompt = adj.load_vocabulary(image, "idle-watch")
+        require("ASK" in prompt and "BLOCK" not in prompt,
+                "промт адъюдикатора не перерисован под словарь пробы")
+
+        text = (ROOT / "judge" / "validate.py").read_text(encoding="utf-8")
+        # Свойство ФОРМЫ: путь метрик тянет за собой сеть и записи, поэтому
+        # проба здесь пинится текстом вызова, и это объявлено.
+        require("replay.verdict_of(sent['raw'], PROBE_ID)" in text
+                and "replay.klass(verdict, PROBE_ID)" in text,
+                "validate размечает записи судейским словарём независимо от --probe")
+    finally:
+        os.unlink(image)
+        os.environ.pop("CLAUDE_JUDGE_IMAGE", None)
+
+
+def scenario_23() -> None:
+    """adjudicate импортируется на машине БЕЗ образа: словарь читается в main."""
+    env = dict(os.environ, CLAUDE_JUDGE_IMAGE="/nonexistent/claude-image")
+    done = subprocess.run([sys.executable, "-c", "import adjudicate"],
+                          cwd=str(ROOT / "judge"), capture_output=True, text=True, env=env)
+    require(done.returncode == 0,
+            f"импорт adjudicate требует образа: {(done.stderr or '').strip()[:200]}")
+
+
+def scenario_24() -> None:
+    """Полоса pool ОБЪЯВЛЯЕТ бюджет, который не умеет применить."""
+    module = import_tool("channel")
+    payload = json.dumps({"result": "ok: да", "total_cost_usd": 0.01})
+
+    class Fake:
+        returncode = 0
+        stdout = payload
+        stderr = ""
+
+    original = module.subprocess.run
+    module.subprocess.run = lambda *a, **k: Fake()
+    try:
+        got = module.send("s", "u", "claude-x", effort=None, max_tokens=1234,
+                          channel="pool", url=None, timeout=5, body_template=None)
+        require(any("max_tokens=1234" in n for n in got.get("notes", [])),
+                "потолок вывода уронен молча")
+        bare = module.send("s", "u", "claude-x", effort=None, max_tokens=None,
+                           channel="pool", url=None, timeout=5, body_template=None)
+        require(bare.get("notes") == [], "объявление появилось там, где ронять было нечего")
+    finally:
+        module.subprocess.run = original
+
+
+def scenario_25() -> None:
+    """Метка истины нормализуется так же, как класс ответа (BLOCK/STOP/DENY)."""
+    module = import_tool("validate")
+    module.ACT_VALUES = ["BLOCK", "STOP", "DENY"]
+    rows = [{
+        "rec": "r1", "model": "m", "effort": None, "rep": 1, "klass": "OK",
+        "verdict": "ok: да", "via": "http", "ms": 10, "http": 200, "cost_usd": None,
+        "error": None, "truth": "STOP", "truth_human": "STOP", "truth_model": None,
+        "layer": None, "cfg": None, "tokens_in": None, "tokens_out": None,
+        "layer_missing": False, "url_from": "record", "notes": [],
+    }]
+    buffer = io.StringIO()
+    stdout = sys.stdout
+    sys.stdout = buffer
+    try:
+        module.print_summary(rows)
+    finally:
+        sys.stdout = stdout
+    out = buffer.getvalue()
+    require("пропусков 1" in out,
+            "метка STOP не засчитана как отмена -- точность завышается молча:\n" + out[-400:])
+
+
+def scenario_26() -> None:
+    """--dry-run не снимает сироту tmp -- он вообще ничего не пишет."""
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        orphan = directory / f"a.json.gz.tmp.{dead_pid()}"
+        orphan.write_text("tmp", encoding="utf-8")
+        counters, _ = run_compact(directory, dry_run=True)
+        require(orphan.exists(), "dry-run СНЁС сироту tmp")
+        require(counters["orphans"] == 1, "dry-run не назвал сироту, которую снял бы")
+        counters, _ = run_compact(directory)
+        require(not orphan.exists(), "боевой прогон сироту не снял")
+
+
+def scenario_27() -> None:
+    """Ветки гонок прополки пинятся ФОРМОЙ: стенд гоняет compact.py сабпроцессом.
+
+    Подменить файл между `os.stat` и `os.unlink` внутри чужого процесса стенду
+    нечем -- приём с monkeypatch достаёт только до claude_patch.py. Поэтому
+    свойство пинится текстом, и это объявлено (тот же приём, что у сценариев
+    17-18): исчезнувшее свойство краснит стенд, даже если исполнить его нельзя.
+    """
+    text = (ROOT / "judge" / "compact.py").read_text(encoding="utf-8")
+    require("if (after.st_ino, after.st_mtime_ns) != (before.st_ino, before.st_mtime_ns):"
+            in text, "сверка подмены сироты между замером и снятием пропала")
+    require(text.count("except FileNotFoundError:") >= 4,
+            "ветки исчезновения файла под руками схлопнулись")
+    require("исходник исчез" in text or "src_gone" in text,
+            "счётчик исчезнувшего до замера исходника пропал")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -433,6 +686,15 @@ def run_scenarios() -> int:
         (16, lambda: scenario_16(outputs)),
         (17, scenario_17),
         (18, scenario_18),
+        (19, scenario_19),
+        (20, scenario_20),
+        (21, scenario_21),
+        (22, scenario_22),
+        (23, scenario_23),
+        (24, scenario_24),
+        (25, scenario_25),
+        (26, scenario_26),
+        (27, scenario_27),
     ]
     mismatches = 0
     for number, case in cases:
@@ -557,6 +819,103 @@ def mutation_m10(root: Path) -> None:
     )
 
 
+# M11-M13 -- зубы сверки раскатки (круг 20, D-1). До них у scripts/probes-sync.sh
+# не было НИ ОДНОГО стенда, и его нога plist молчала всегда: она сравнивала дом
+# с каноническим ИМЕНЕМ файла, которого в доме не бывает.
+def mutation_m11(root: Path) -> None:
+    replace_once(
+        root / "scripts" / "probes-sync.sh",
+        'if [[ ! -f "$B" ]]; then\n',
+        'if false; then\n',
+        "M11",
+    )
+
+
+def mutation_m12(root: Path) -> None:
+    replace_once(
+        root / "scripts" / "probes-sync.sh",
+        '    if grep -qF "$TOOLS_HOME/compact.py" "$__pl"; then\n',
+        '    if true; then\n',
+        "M12",
+    )
+
+
+def mutation_m13(root: Path) -> None:
+    replace_once(
+        root / "claude-patch-all.sh",
+        'env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \\\n  bash',
+        'bash',
+        "M13",
+    )
+
+
+# M14-M20 -- зубы волны 23: у replay/validate/adjudicate/channel не было ни
+# одного сценария, и все двери, чинившиеся в этой волне, не краснили ничего
+# (круг 20, D-6).
+def mutation_m14(root: Path) -> None:
+    replace_once(
+        root / "judge" / "replay.py",
+        "'|'.join(re.escape(v) for v in rx) + r')\\s*:',\n                     verdict or '', re.I)",
+        "'|'.join(re.escape(v) for v in rx) + r')',\n                     verdict or '', re.I)",
+        "M14",
+    )
+
+
+def mutation_m15(root: Path) -> None:
+    replace_once(
+        root / "judge" / "replay.py",
+        "    return (matches[0] if matches else '').strip()",
+        "    return (matches[0] if matches else str(text or '')).strip()",
+        "M15",
+    )
+
+
+def mutation_m16(root: Path) -> None:
+    replace_once(
+        root / "judge" / "adjudicate.py",
+        "    REVIEW_PROMPT = REVIEW_TEMPLATE.replace('{RX}', '|'.join(RX_VALUES))",
+        "    REVIEW_PROMPT = REVIEW_TEMPLATE.replace('{RX}', 'OK|BLOCK')",
+        "M16",
+    )
+
+
+def mutation_m17(root: Path) -> None:
+    replace_once(
+        root / "judge" / "channel.py",
+        "    notes = ([] if max_tokens in (None, '') else",
+        "    notes = ([] if max_tokens in (None, '') or True else",
+        "M17",
+    )
+
+
+def mutation_m18(root: Path) -> None:
+    replace_once(
+        root / "judge" / "validate.py",
+        "        misses = sum(effective_class(row_truth(row, 'human')) == cancel",
+        "        misses = sum(row_truth(row, 'human') == 'BLOCK'",
+        "M18",
+    )
+
+
+def mutation_m19(root: Path) -> None:
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if a.dry_run:\n            print(f'снёс бы сироту tmp: ",
+        "        if a.dry_run:\n            os.unlink(t)\n            print(f'снёс бы сироту tmp: ",
+        "M19",
+    )
+
+
+def mutation_m20(root: Path) -> None:
+    replace_once(
+        root / "judge" / "compact.py",
+        "            if (after.st_ino, after.st_mtime_ns) != (before.st_ino, before.st_mtime_ns):\n"
+        "                continue               # файл подменён после проверки -- не наш\n",
+        "",
+        "M20",
+    )
+
+
 # Каждая мутация обязана покраснить СВОЙ сценарий СВОЕЙ причиной. Голый
 # `rc == 1` этого не доказывает: тот же код даёт необработанное исключение
 # внутри копии стенда и мутация, свалившая ЧУЖУЮ дверь. Сценарий и причина
@@ -573,6 +932,16 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M8", mutation_m8, 18, "исчезнувший до замера исходник снова не имеет своего счётчика"),
     ("M9", mutation_m9, 15, "снята запись живого процесса чужого пользователя"),
     ("M10", mutation_m10, 16, "PermissionError"),
+    ("M11", mutation_m11, 19, "пустая машина обязана давать «мерить нечего» (5)"),
+    ("M12", mutation_m12, 19, "агент мимо раскатки обязан краснить"),
+    ("M13", mutation_m13, 20, "гейт не снимает тест-ручку дома инструментов"),
+    ("M14", mutation_m14, 21, "слово без двоеточия снова классифицируется как вердикт"),
+    ("M15", mutation_m15, 21, "текст без строки вердикта снова выдаётся за вердикт"),
+    ("M16", mutation_m16, 22, "промт адъюдикатора не перерисован под словарь пробы"),
+    ("M17", mutation_m17, 24, "потолок вывода уронен молча"),
+    ("M18", mutation_m18, 25, "метка STOP не засчитана как отмена"),
+    ("M19", mutation_m19, 26, "dry-run СНЁС сироту tmp"),
+    ("M20", mutation_m20, 27, "сверка подмены сироты между замером и снятием пропала"),
 ]
 
 
@@ -588,11 +957,25 @@ def fail_segment(output: str, scenario: int) -> str | None:
 
 
 def copy_tree(root: Path) -> None:
+    # Копия несёт РОВНО то, что читают сценарии: мутации правят её, а не живое
+    # дерево. Со сценариями 19-20 в неё вошли сверка раскатки и конвейер --
+    # мутация, которой не во что примениться, «проходит» молча (круг 18, §6).
     (root / "judge").mkdir()
     (root / "tools").mkdir()
+    (root / "scripts").mkdir()
     shutil.copy2(COMPACT, root / "judge" / "compact.py")
     shutil.copy2(PATCHER, root / "claude_patch.py")
     shutil.copy2(BENCH, root / "tools" / "judge-tools-bench.py")
+    shutil.copy2(ROOT / "claude-patch-all.sh", root / "claude-patch-all.sh")
+    shutil.copy2(ROOT / "scripts" / "probes-sync.sh", root / "scripts" / "probes-sync.sh")
+    for name in ("replay.py", "validate.py", "channel.py", "adjudicate.py",
+                 "README.md", "com.transmutelabs.judge-compact.plist"):
+        shutil.copy2(ROOT / "judge" / name, root / "judge" / name)
+    for rel in ("probes.toml", "judge/prompt.md", "judge/body.json",
+                "idle-watch/prompt.md"):
+        dst = root / "probes" / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "probes" / rel, dst)
 
 
 def run_copy(root: Path) -> subprocess.CompletedProcess[str]:

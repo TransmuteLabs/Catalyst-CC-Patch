@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The build-path probe: the one part of this kit the 114 checks cannot see.
+# The build-path probe: the one part of this kit the 116 checks cannot see.
 #
 # Every check in claude-patch-all.sh is a byte search over the FINISHED image, so
 # all of them are blind to how that image came to be. The sweep across versions
@@ -29,6 +29,14 @@
 #      red -- otherwise those assertions are decoration and this probe proves
 #      nothing. The probe names which ones reddened.
 #   d  the same control for case (b): 0b disabled, live binary pristine.
+#   p  a `--target` run handed bytes that are NOT stock -> must refuse with code
+#      4 BEFORE the unpacker and tweakcc's stage, and leave the named file
+#      byte-for-byte as it was. Twice on 2026-08-28 it did not: a `--target` at
+#      the live install had tweakcc restore its backup over patched bytes and
+#      die FATAL, leaving the installation mutated, and a staging file a LATE
+#      gate had refused over was still fed back in. Its control disables the
+#      guard alone and stubs the first gate past it, so the walk past the site
+#      costs seconds rather than a build.
 #   u  the installer's own `--update` path, offline and in seconds: it must
 #      build BESIDE the target and swap by rename, never download over the live
 #      file. Its control is a copy of claude_patch.py with the staging removed.
@@ -63,8 +71,8 @@
 # invisible to every check in the pipeline, and a tool nobody calls has been
 # dead three times in this kit.
 #
-# Usage:  bash tools/build-path-probe.sh [--case abcdurx] [--version 2.1.247]
-# Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 114
+# Usage:  bash tools/build-path-probe.sh [--case abcdurxp] [--version 2.1.247]
+# Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 116
 #         checks + the interface gate + the bench), so a few minutes each; case
 #         (r) and (x) build nothing and answer in milliseconds.
 
@@ -76,7 +84,7 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdurx
+CASES=abcdurxp
 WANT_VER=
 
 while [[ $# -gt 0 ]]; do
@@ -506,7 +514,7 @@ os.replace(tmp, p)
 PY
 }
 
-run_pipeline() {  # <script> <bindir> <logfile>
+run_pipeline() {  # <script> <bindir> <logfile> [аргументы конвейера...]
   seed_version_mismatch
   # Люки конвейера снимаются на запуске: зонд обязан мерить КИТ, а не среду
   # оператора. Тот же список и то же основание, что у свипа (раунд 19, В-5).
@@ -517,7 +525,7 @@ run_pipeline() {  # <script> <bindir> <logfile>
     # Объявленный пропуск: каждая сборка зонда идёт без sync цен, и это
     # снятое покрытие (раунд 18, G-1). Строка печатается зондом, а не только
     # прячется в логе случая.
-    CLAUDE_PATCH_SKIP_MODELS=1 bash "$1" ) >"$3" 2>&1
+    CLAUDE_PATCH_SKIP_MODELS=1 bash "$1" "${@:4}" ) >"$3" 2>&1
 }
 
 # --- case a: live patched, pristine copy beside it ---------------------------
@@ -916,6 +924,86 @@ MUTX
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 }
 
+case_p() {   # --target на НЕ пристинных байтах: отказ ДО того, как их трогают
+  # Материал настоящий: $PATCHED -- образ, который несёт наши патчи (иначе зонд
+  # не дошёл бы сюда, см. блок material). Подделывать вход не нужно и нельзя.
+  local d log rc before after kit changed logm rcm f
+  echo "case p: a --target run refuses non-pristine bytes before anything touches them"
+  d="$(stage_dir p)"; log="$ROOT/p.log"
+  cp -p "$PATCHED" "$d/claude"
+  before="$(shasum -a 256 "$d/claude" | awk '{print $1}')"
+  run_pipeline "$PIPELINE" "$d" "$log" --target "$d/claude"; rc=$?
+  after="$(shasum -a 256 "$d/claude" | awk '{print $1}')"
+
+  [[ $rc -eq 4 ]] \
+    && ok 'refused with code 4: the bytes are not the kind the flag names' \
+    || bad "answered rc=$rc instead of 4 (see $log)"
+  grep -q 'already carries' "$log" \
+    && ok 'the refusal names its cause' \
+    || bad "the refusal does not name its cause: $(tail -1 "$log")"
+  if [[ -n "$before" && "$before" == "$after" ]]; then
+    ok 'the named target is byte-for-byte untouched'
+  else
+    bad "the target changed under a refusing run (${before:-нечитаем} -> ${after:-нечитаем})"
+  fi
+  # Порядок и есть предмет: отказ обязан прийти РАНЬШЕ распаковщика и стадии
+  # tweakcc. Именно эта стадия 2026-08-28 переписала живую установку, а прогон
+  # при этом доложил отказ -- «отказано» и «цела» перестали быть одним и тем же.
+  if grep -q '^Unpacker:' "$log" || grep -q 'Applying tweakcc' "$log"; then
+    bad 'the refusal came only AFTER tweakcc had been reached'
+  else
+    ok 'nothing was unpacked or applied before the refusal'
+  fi
+  # Вторая половина стража -- образ, несущий ТОЛЬКО стадию tweakcc, -- на машине
+  # без сборки не материализуется, поэтому пинится ПО ФОРМЕ, и это объявляется:
+  # проверяется текст конвейера, а не его поведение.
+  grep -qF "elif LC_ALL=C grep -q -a -F 'tweakcc' \"\$BIN\"; then" "$PIPELINE" \
+    && ok 'the tweakcc-only half of the guard is there (pinned by FORM, not run)' \
+    || bad 'the tweakcc-only half of the guard is gone'
+
+  # --- контроль: тот же прогон по копии конвейера без стража ------------------
+  # Мутация одна и считается: триггер стража -> `if false`. Чтобы контроль стоил
+  # секунды, а не сборку, в копии кита ПЕРВЫЙ гейт после места стража подменён
+  # заглушкой: её код и её строка в логе означают ровно «прогон ДОШЁЛ сюда
+  # вместо отказа кодом 4». Это объявленная граница контроля, а не измерение
+  # гейта разбора.
+  kit="$ROOT/kit-p"; rm -rf "$kit"; mkdir -p "$kit/tools"
+  for f in "$HERE"/* "$HERE"/.[!.]*; do
+    [[ -e "$f" ]] || continue
+    [[ "$(basename "$f")" == tools ]] && continue
+    ln -sfn "$f" "$kit/$(basename "$f")"
+  done
+  for f in "$HERE"/tools/*; do ln -sfn "$f" "$kit/tools/$(basename "$f")"; done
+  rm -f "$kit/claude-patch-all.sh" "$kit/tools/emit-check.js"
+  cat > "$kit/tools/emit-check.js" <<'STUB'
+// Заглушка КОНТРОЛЯ случая (p) зонда пути сборки: первый гейт после места
+// стража пристинности. Ничего не измеряет -- ограничивает прогон мутанта
+// секундами и оставляет в логе строку, по которой видно, что прогон дошёл
+// сюда, а не отказал кодом 4 выше.
+console.error('ЗОНД-ЗАГЛУШКА: прогон дошёл до первого гейта после места стража');
+process.exit(1);
+STUB
+  sed -E 's/^if \[\[ -n "\$TARGET" && \$ONLY_OURS -eq 0 \]\]; then$/if false; then/' \
+    "$PIPELINE" > "$kit/claude-patch-all.sh"
+  changed=$(diff "$PIPELINE" "$kit/claude-patch-all.sh" | grep -c '^< ' || true)
+  case "$changed" in ''|*[!0-9]*) changed=0 ;; esac
+  if [[ "$changed" -ne 1 ]]; then
+    echo "  ОТКАЗ: контроль случая (p) НЕ ИЗМЕРЯЛ -- мутация тронула $changed строк вместо 1" >&2
+    __DONE=1; exit 2
+  fi
+
+  d="$(stage_dir p-control)"; logm="$ROOT/p-control.log"
+  cp -p "$PATCHED" "$d/claude"
+  run_pipeline "$kit/claude-patch-all.sh" "$d" "$logm" --target "$d/claude"; rcm=$?
+  if [[ $rcm -eq 4 ]]; then
+    bad 'the control did NOT redden: the 4 does not come from the guard'
+  elif grep -q 'ЗОНД-ЗАГЛУШКА' "$logm"; then
+    ok 'the control reddens it by its own cause: without the guard the run walks past the site'
+  else
+    bad "the control reddened by a FOREIGN cause (rc=$rcm): $(tail -1 "$logm")"
+  fi
+}
+
 echo "build-path-probe: во ВСЕХ случаях сборки sync цен пропущен (CLAUDE_PATCH_SKIP_MODELS=1)"
 [[ -n "${KEEP_ROOT:-}" ]] && echo "build-path-probe: KEEP_ROOT=${KEEP_ROOT} -- рабочий корень $ROOT останется на диске"
 for c in $(echo "$CASES" | grep -o .); do
@@ -927,6 +1015,7 @@ for c in $(echo "$CASES" | grep -o .); do
     u) case_u ;;
     r) case_r ;;
     x) case_x ;;
+    p) case_p ;;
     *) echo "unknown case: $c" >&2; exit 2 ;;
   esac
 done
@@ -936,10 +1025,10 @@ if [[ $FAILED -eq 0 ]]; then
   # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d), (u) и
   # (x) -- мутационные контроли, и без них зелёная строка обещала бы
   # доказательство, которого прогон не получал (раунд 18, H-2).
-  if [[ "$CASES" == *c* || "$CASES" == *d* || "$CASES" == *u* || "$CASES" == *x* || "$CASES" == *r* ]]; then
+  if [[ "$CASES" == *c* || "$CASES" == *d* || "$CASES" == *u* || "$CASES" == *x* || "$CASES" == *r* || "$CASES" == *p* ]]; then
     echo "build path ($CASES): every assertion held, and the control shows they have teeth"
   else
-    echo "build path ($CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r) не гонялся -- зубы не доказаны"
+    echo "build path ($CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p) не гонялся -- зубы не доказаны"
   fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2

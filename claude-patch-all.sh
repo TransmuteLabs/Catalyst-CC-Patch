@@ -42,6 +42,18 @@
 #   bash claude-patch-all.sh --target "$V.staging"
 #   mv "$V.staging" "$V"        # atomic; takes effect on the next launch
 #
+# That discipline is now CHECKED rather than trusted (0b2): a --target naming
+# bytes that already carry our patches or tweakcc's stage is refused with code
+# 4, before the unpacker and before tweakcc's stage. Both halves were paid for
+# on 2026-08-28 -- a --target at the LIVE install had tweakcc restore its backup
+# over patched bytes, die FATAL and leave the installation mutated while the run
+# reported a refusal; and a staging file that a late gate had refused over still
+# carried tweakcc's stage, so feeding it back in would have patched a patched
+# image. For the same reason everything that merely VALIDATES the kit -- the
+# parse gates, the forms gate, the benches, the number gates -- is asked BEFORE
+# the image is touched at all: a refusal there can no longer leave a rewritten
+# target behind.
+#
 # ORDER MATTERS AND IS NOT NEGOTIABLE:
 #   `tweakcc --apply` RESTORES Claude Code from tweakcc's backup before applying
 #   its own patches, which wipes anything else in the binary. So our patches must
@@ -689,7 +701,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 114 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 116 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -810,437 +822,47 @@ echo "Source digest: $SOURCE_SHA  $BIN"
 # stock bytes are guaranteed to be at hand.
 PRISTINE_SRC="${BIN%.staging}.orig"
 
-# --- which tweakcc unpacks the image -----------------------------------------
-# Claude Code 2.1.242 split the bundle from one 28 MB module into an ESM entry
-# plus ~1400 chunks. Published tweakcc (4.3.3 and every release after it as of
-# this writing) extracts the entry ALONE, so all 25 locators search a 20 KB stub
-# and the whole set fails at once — a failure that reads like 25 broken patches
-# rather than one broken unpacker, which is exactly how it was first misread.
-# Our fork joins the entry with its chunks; on 2.1.241 and earlier its selection
-# is a single module and it behaves identically to the published one.
-#
-# This is the second time the unpacker, not the patches, was the thing that
-# broke: 4.3.2 could not read the container Claude Code ships from 2.1.231 on
-# (bun bumped, the binary grew ~5 MB) and aborted with "Failed to extract
-# JavaScript from native installation" before any patch was evaluated. That one
-# was fixable by raising a version floor; this one was not, which is why there
-# is a fork.
-#
-# The fork is pinned BY COMMIT, never by branch. The unpacker decides what every
-# locator sees, so "whatever main happens to be today" would silently make two
-# runs of this script incomparable. A commit SHA is content-addressed, so the
-# pin is its own integrity check: GitHub cannot serve a different tree under it.
-# Bump it deliberately, the way any dependency is bumped.
-CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0}"
-# Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
-# качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
-# чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
-[[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0" ]] \
-  || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
-CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
-
-# TWEAKCC_LOCAL is the development escape hatch: point it at a built
-# dist/index.mjs to try an unpacker change before it is pushed and pinned. It is
-# an EXPLICIT opt-in and it announces itself — an implicit "use the sibling
-# checkout if one happens to be there" would make the run depend on the shape of
-# somebody's disk.
-ensure_tweakcc() {
-  if [[ -n "${TWEAKCC_LOCAL:-}" ]]; then
-    [[ -f "$TWEAKCC_LOCAL" ]] || { echo "ERROR: TWEAKCC_LOCAL=$TWEAKCC_LOCAL does not exist"; exit 1; }
-    TWEAKCC=(node "$TWEAKCC_LOCAL")
-    echo "Unpacker: local build via TWEAKCC_LOCAL ($TWEAKCC_LOCAL)"
-    return
+# --- 0b2. a --target run must name PRISTINE bytes -----------------------------
+# 0b стажирует путь по умолчанию, чтобы tweakcc никогда не увидел пропатченный
+# образ. У --target такого шага нет ПО ЗАМЫСЛУ (стажированием владеет
+# вызывающий), и никто не спрашивал, стоковые ли байты он назвал. За один день
+# 2026-08-28 не стоковые оказались дважды: --target на ЖИВОЙ установке (tweakcc
+# восстановил свой бэкап поверх уже пропатченных байт, прогон умер FATAL и
+# ОСТАВИЛ установку изменённой) и --target на staging-файле, над которым уже
+# отработала стадия tweakcc, потому что прогон отказал ПОЗЖЕ неё.
+# Байты читаются здесь: до установки распаковщика и задолго до стадии tweakcc.
+# Код 4 -- «байты не те, что названы»: файл не того рода, что обещает флаг.
+# --only-ours исключён сознательно: он не зовёт tweakcc вовсе, а метка tweakcc
+# на его цели ШТАТНА (в том и смысл флага); пропатченную нами цель отвергает
+# сам наш патчер.
+if [[ -n "$TARGET" && $ONLY_OURS -eq 0 ]]; then
+  __why=""
+  if LC_ALL=C grep -q -a -F "$OUR_MARKER" "$BIN"; then
+    __why="our patches"
+  elif LC_ALL=C grep -q -a -F 'tweakcc' "$BIN"; then
+    __why="tweakcc's stage"
   fi
-
-  local dir="$CATALYST_TWEAKCC_CACHE/$CATALYST_TWEAKCC_SHA"
-  if [[ ! -f "$dir/dist/index.mjs" ]]; then
-    echo "==> Fetching the unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
-    # Built in .tmp and renamed into place only once dist/index.mjs exists, so an
-    # interrupted fetch can never leave a cache entry that looks complete.
-    rm -rf "$dir.tmp"
-    mkdir -p "$dir.tmp"
-    # No `curl | tar`: a pipe reports the LAST stage's exit code, and a failed
-    # download would read as a successful extraction of nothing.
-    curl -fsSL --connect-timeout 20 --max-time 300 -o "$dir.tmp/src.tar.gz" \
-      "https://codeload.github.com/$CATALYST_TWEAKCC_REPO/tar.gz/$CATALYST_TWEAKCC_SHA" \
-      || { echo "ERROR: could not fetch $CATALYST_TWEAKCC_REPO @ $CATALYST_TWEAKCC_SHA"; exit 1; }
-    tar -xzf "$dir.tmp/src.tar.gz" -C "$dir.tmp" --strip-components=1 \
-      || { echo "ERROR: could not unpack the unpacker tarball"; exit 1; }
-    rm -f "$dir.tmp/src.tar.gz"
-    ( cd "$dir.tmp" \
-      && npx -y pnpm@latest install --frozen-lockfile \
-      && npx -y pnpm@latest run build ) \
-      || { echo "ERROR: unpacker build failed in $dir.tmp"; exit 1; }
-    [[ -f "$dir.tmp/dist/index.mjs" ]] \
-      || { echo "ERROR: unpacker build produced no dist/index.mjs"; exit 1; }
-    rm -rf "$dir"
-    mv "$dir.tmp" "$dir"
-    echo "Unpacker cached in $dir"
-  fi
-
-  TWEAKCC=(node "$dir/dist/index.mjs")
-  echo "Unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
-  prune_tweakcc_cache 2
-}
-ensure_tweakcc
-
-# --- 1. let the user pick tweakcc's patches ----------------------------------
-if [[ $CONFIGURE -eq 1 ]]; then
-  echo "==> Opening tweakcc's UI — pick the patches you want, save, and quit."
-  "${TWEAKCC[@]}" || true
-fi
-
-# --- 1b. tweakcc's backup decides what the build starts from -----------------
-# Its `--apply` calls restoreNativeBinaryFromBackup() unconditionally for native
-# installs (patches/index.ts, pinned SHA): it writes the backup's bytes over
-# whatever ccInstallationPath names, and only then patches. Step 0b points that
-# path at OUR staging file, so the pristine copy we just made is overwritten
-# before tweakcc's first patch lands. Staging alone therefore guarantees
-# nothing -- the file the build really starts from is this backup, and it is the
-# one that has to be verified. Hence BEFORE the stage: an earlier version of this
-# check ran after it, and would have repaired the backup for next time while
-# this build had already been made from the poisoned bytes.
-#
-# With no backup yet, tweakcc's startupCheck creates one from
-# ccInstallationPath -- our pristine staging file -- which needs nothing from us.
-TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
-# Запись, по которой tweakcc решает, освежать бэкап или восстанавливать его:
-# страж ниже обязан спрашивать ЕЁ, а не версию файла бэкапа.
-TWEAKCC_CFG="$HOME/.tweakcc/config.json"
-# Дайджест бэкапа, снятый там, где восстановление применимо; пусто -- не
-# применимо. Объявлено здесь: под `set -u` пост-сверка читает его всегда.
-TWEAKCC_RESTORE_PINNED=""
-# Detection is unconditional -- including under `--only-ours`, which does not
-# invoke tweakcc and so cannot cause the poisoning, but whose user is just as
-# entitled to learn that a neighbour already did. Only the REPAIR needs a
-# verified source, and only a real tweakcc run needs to abort.
-if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; then
-  # "Free of OUR marker" is not "pristine". A `.orig` snapshotted from a binary
-  # that had been through tweakcc's stage carries none of our bytes and every
-  # one of theirs -- exactly the case claude_patch.py refuses to CREATE, and
-  # promoting such a file into the backup would restore a patch while reporting
-  # a removal. Nor is a copy of another build a valid restore for this one: ask
-  # both for their version.
-  BACKUP_OK=0
-  if [[ -f "$PRISTINE_SRC" ]] \
-     && ! grep -q -a -F "$OUR_MARKER" "$PRISTINE_SRC" \
-     && ! grep -q -a -F 'tweakcc' "$PRISTINE_SRC"; then
-    SRC_VER="$("$PRISTINE_SRC" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
-    BLD_VER="$("$BIN" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
-    [[ -n "$SRC_VER" && "$SRC_VER" == "$BLD_VER" ]] && BACKUP_OK=1
-  fi
-  if [[ $BACKUP_OK -eq 1 ]]; then
-    # Staged and renamed, not written in place: a `cp` killed halfway leaves a
-    # TRUNCATED backup, and truncated bytes contain no marker either -- so every
-    # later run of this very check would read it as healthy while a restore
-    # wrote a broken binary and reported success.
-    # The message is INSIDE the success branch, and a failed repair is fatal.
-    # `set -e` does not fire when an AND-OR list short-circuits on its first
-    # command -- measured, not assumed: with `set -euo pipefail` and an
-    # unwritable destination, `cp` failed, `mv` was skipped, and the script ran
-    # on to exit 0. So the old shape printed "restored it from ..." over a
-    # backup that still held the patch, and then built from those bytes.
-    if cp -p "$PRISTINE_SRC" "$TWEAKCC_BACKUP.repair" \
-       && mv "$TWEAKCC_BACKUP.repair" "$TWEAKCC_BACKUP"; then
-      echo "NOTE: tweakcc's backup held a PATCHED image; restored it from $PRISTINE_SRC." >&2
-      echo "      This build starts from those bytes, and 'tweakcc --restore' would" >&2
-      echo "      have returned the patch until now." >&2
-    else
-      rm -f "$TWEAKCC_BACKUP.repair"
-      echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image and the" >&2
-      echo "       repair from $PRISTINE_SRC FAILED (no space, no permission?)." >&2
-      echo "       Refusing to build: the build would start from patched bytes, and" >&2
-      echo "       'tweakcc --restore' would keep handing out the patch." >&2
-      exit 1
-    fi
-  else
-    echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image, and no" >&2
-    echo "  verified-pristine copy of THIS build is available to repair it from" >&2
-    echo "  ($PRISTINE_SRC is missing, patched, tweakcc-staged, or another version)." >&2
-    echo "  tweakcc restores that backup over the target before patching, so the" >&2
-    echo "  build would be made FROM our own patched bytes -- and 'tweakcc" >&2
-    echo "  --restore' would hand a human the patch while reporting a removal." >&2
-    echo "  Fetch stock bytes for this version and try again:" >&2
-    echo "    python3 claude_patch.py --download-only <version>" >&2
-    [[ $ONLY_OURS -eq 1 ]] || exit 1
+  if [[ -n "$__why" ]]; then
+    echo "ERROR: --target names an image that already carries $__why." >&2
+    echo "  target: $BIN" >&2
+    echo "  tweakcc's stage restores ITS backup over this path and patches it" >&2
+    echo "  again, so the build would begin from bytes nobody named -- and the" >&2
+    echo "  target is left rewritten even when a later gate refuses." >&2
+    echo "  Hand over stock bytes instead (a run that died after tweakcc's stage" >&2
+    echo "  leaves exactly this state -- recreate the copy before retrying):" >&2
+    echo "    cp -p <pristine image> '$BIN'" >&2
+    exit 4
   fi
 fi
 
-# --- 2. tweakcc's own patches (restores from its backup first!) ---------------
-# tweakcc takes no target argument -- оно само разрешает установку. Порядок
-# приоритетов в его коде (src/installationDetection.ts:550-600 форка):
-#   1. переменная окружения TWEAKCC_CC_INSTALLATION_PATH,
-#   2. ccInstallationPath из конфига,
-#   3. `claude` на PATH,
-#   4. вшитые пути поиска.
-# После --update разрешение по пунктам 3-4 попадает на ПРЕДЫДУЩУЮ версию:
-# лаунчер намеренно ещё не переключён, и tweakcc молча патчит образ, который
-# никто не запускает, пока наш остаётся нетронутым.
-#
-# Раньше цель прибивалась пунктом 2 -- правкой конфига человека. У этого было
-# две беды, и обе исправляет пункт 1.
-#
-#   * Пункт 2 существовал ТОЛЬКО если конфиг уже есть: `if [[ -f "$TWEAKCC_CFG" ]]`.
-#     Отсутствие конфига -- это и есть определение первого запуска, то есть
-#     ровно того случая, ради которого прибивание написано. На чистой машине
-#     прибивания не было, и разрешение уходило в пункты 3-4.
-#   * Прибивание ПЕРЕЖИВАЛО наш прогон. После сборки по --target конфиг
-#     человека оставался указывающим на нашу временную цель (скажем,
-#     /tmp/cc-matrix/bin/242.wave.bin), и следующий его собственный запуск
-#     tweakcc падал с "ccInstallationPath is set to '...' but file does not
-#     exist" -- поломка, которую вносили мы, в файле, который не наш.
-#
-# Переменная окружения не имеет ни одной из этих привязок: она действует на
-# наши вызовы и умирает вместе с процессом, а конфиг человека не трогается
-# вовсе.
-if [[ $ONLY_OURS -eq 0 ]]; then
-  export TWEAKCC_CC_INSTALLATION_PATH="$BIN"
-  echo "Pinned tweakcc to $BIN (TWEAKCC_CC_INSTALLATION_PATH)"
-  # Цель названа оператором -- собрано может быть из ДРУГИХ байтов.
-  #
-  # tweakcc восстанавливает свой бэкап поверх цели до всякого патча (см.
-  # заголовок секции). Ветка выше ловит только случай «в бэкапе НАШИ патчи»;
-  # расхождение двух РАЗНЫХ стоковых образов одной версии она не видит, а
-  # именно оно и наблюдалось: цель с одной изменённой строкой собралась в
-  # образ БЕЗ этого изменения, все проверки зелёные, `Done.` напечатан.
-  # Всё, что человек проверил на своей цели, к отгруженному образу тогда не
-  # относится, и узнать об этом неоткуда.
-  #
-  # ПРЕДИКАТ БЕРЁТСЯ У ТОГО, ЧЬЁ ПОВЕДЕНИЕ ПРЕДСКАЗЫВАЕТСЯ. Первая редакция
-  # спрашивала версию у ФАЙЛА бэкапа, а tweakcc решает по ЗАПИСИ
-  # config.ccVersion (в форке: бэкап освежается из цели, когда
-  # realVersion !== config.ccVersion, и только иначе восстанавливается).
-  # Две модели давали два расхождения, оба воспроизведены: сброшенный
-  # конфиг -- tweakcc пересоздал бы бэкап из цели, подмены нет, а страж
-  # отказывал; запись совпадает, а ФАЙЛ бэкапа несёт другую версию --
-  # подмена есть, а страж молчал.
-  #
-  # Версия ЦЕЛИ снимается так, чтобы падение не убивало прогон: под
-  # `set -euo pipefail` присваивание из конвейера с неисполнимым файлом
-  # завершает скрипт кодом 126 БЕЗ единого слова (замерено). Прежний
-  # комментарий обещал здесь «пустую версию, а дальше страхует дым-гейт» --
-  # не было ни того, ни другого: до проверки пустоты не доходило.
-  #
-  # Невозможность назвать версию цели -- ОТКАЗ, а не пропуск: на ней стоит
-  # весь предикат, а образ уже прошёл image-check.py, то есть это валидный
-  # нативный образ, который обязан отвечать на --version. Молчание здесь
-  # означало бы «не знаю, что будет с байтами» -- ровно та тишина, против
-  # которой страж и написан.
-  #
-  # Отказ, а не автопочинка: два образа одной версии разошлись, и какой из
-  # них истина, знает только человек. Молча взять бэкап -- отгрузить не то,
-  # что проверяли; молча продвинуть цель в бэкап -- подменить человеку точку
-  # восстановления. Обе двери названы в сообщении.
-  #
-  # Цель с НАШИМ маркером сюда не входит: это штатная пересборка живого
-  # образа, где бэкап и есть единственный пристинный источник, а
-  # восстановление стока -- сам смысл стадии.
-  if [[ -f "$TWEAKCC_BACKUP" ]] && ! grep -q -a -F "$OUR_MARKER" "$BIN"; then
-    TGT_VER="$( { "$BIN" --version 2>/dev/null || true; } | awk 'NR==1{print $1; exit}')"
-    if [[ ! "$TGT_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-      echo "FATAL: the target does not name its version, so what tweakcc is about to" >&2
-      echo "  do with it cannot be established." >&2
-      echo "  target: $BIN" >&2
-      echo "  --version gave: '${TGT_VER:-<nothing>}'" >&2
-      echo "  tweakcc restores its backup over the target before patching, and whether" >&2
-      echo "  it does depends on this version. Refusing to build blind: the image that" >&2
-      echo "  would be shipped may not be the one you named." >&2
-      exit 1
-    fi
-    CFG_VER="$(python3 -c 'import json,sys
-try:
-    v = json.load(open(sys.argv[1], encoding="utf-8")).get("ccVersion")
-except Exception:
-    v = None
-print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
-    if [[ "$CFG_VER" == "$TGT_VER" ]]; then
-      # Восстановление ПРИМЕНИМО: освежать бэкап tweakcc не станет.
-      if ! cmp -s "$BIN" "$TWEAKCC_BACKUP"; then
-        echo "FATAL: the target and tweakcc's backup are DIFFERENT images, and tweakcc" >&2
-        echo "  is about to restore the backup over the target." >&2
-        echo "  target: $BIN (v$TGT_VER)" >&2
-        echo "  backup: $TWEAKCC_BACKUP" >&2
-        echo "  its config records ccVersion=$CFG_VER, which equals the target's version," >&2
-        echo "  so the backup will NOT be refreshed -- the build would be made from the" >&2
-        echo "  BACKUP's bytes, not from the ones you named. Anything you verified on the" >&2
-        echo "  target would not describe the image that gets shipped. Only you know which" >&2
-        echo "  of the two is the truth:" >&2
-        echo "    * the target is:  cp -p '$BIN' '$TWEAKCC_BACKUP'" >&2
-        echo "      (this also changes what 'tweakcc --restore' hands back)" >&2
-        echo "    * the backup is:  cp -p '$TWEAKCC_BACKUP' <a copy> and --target that" >&2
-        exit 1
-      fi
-      TWEAKCC_RESTORE_PINNED="$(shasum -a 256 "$TWEAKCC_BACKUP" | awk '{print $1}')"
-    fi
-  fi
-  # A non-zero --list-patches meant "skip the apply", silently and with every
-  # byte of its output discarded. But that subcommand failing does not imply the
-  # apply would fail: a tweakcc that cannot parse its config, or that dropped
-  # this subcommand, still patches. Skipping the entire third-party stage
-  # without saying why leaves a build carrying none of those patches and a
-  # perfectly clean `Done.` -- the same silence the rest of this block exists to
-  # end, one level up.
-  TWEAKCC_LIST_OUT="$(mktemp)"
-  if "${TWEAKCC[@]}" --list-patches >"$TWEAKCC_LIST_OUT" 2>&1; then
-    rm -f "$TWEAKCC_LIST_OUT"
-    echo "==> Applying tweakcc's configured patches"
-    # A patch of tweakcc's that cannot find its site prints a ✗ row and marks
-    # itself failed -- and then the CLI exits 0 anyway. Nothing downstream looks
-    # at it either: none of our checks below cover tweakcc's own output. So a
-    # patch could stop applying entirely and the build would still be declared
-    # good, with the feature simply gone. That is the same silence the interface
-    # gate exists to end, except the gate only sees a CRASH: a clean skip renders
-    # the stock interface and passes it.
-    #
-    # Every patch in the config is there because it is wanted, so a ✗ is a
-    # failure of the build. The escape hatch is for deliberately running against
-    # a version where something is known not to apply yet.
-    TWEAKCC_OUT="$(mktemp)"
-    set +e
-    "${TWEAKCC[@]}" --apply -y 2>&1 | tee "$TWEAKCC_OUT"
-    TWEAKCC_RC=${PIPESTATUS[0]}
-    set -e
-    if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" && $TWEAKCC_RC -ne 0 ]]; then
-      # A non-zero exit means the whole stage died, so NONE of its patches
-      # applied -- strictly worse than the single ✗ the branches below treat as
-      # fatal, yet this branch used to print a note and let the build continue.
-      # The note guessed "no config yet?", a case the no-result-rows branch below
-      # already reports properly; the guess only served to make a crash look
-      # routine. It hid a real one: handed a shell wrapper instead of an image,
-      # tweakcc threw "No VERSION strings found", this branch waved it through,
-      # and the run went on to fail in our patcher with a message that pointed
-      # nowhere near the actual cause.
-      echo "FATAL: tweakcc --apply exited $TWEAKCC_RC -- not one of its patches applied." >&2
-      tail -n 20 "$TWEAKCC_OUT" | sed 's/^/  /' >&2
-      # On a machine with no ~/.tweakcc yet this is the FIRST thing a human sees,
-      # and the only exit it used to name was the hatch -- which builds without
-      # that whole stage. Name the two real answers first, so the hatch stays
-      # what it is: a deliberate choice, not the obvious way out.
-      echo "  If this is a first run, tweakcc has no saved customizations yet:" >&2
-      echo "    bash claude-patch-all.sh --configure   # pick its patches, save, quit" >&2
-      echo "  To build only OUR patches and skip that stage on purpose:" >&2
-      echo "    bash claude-patch-all.sh --only-ours" >&2
-      echo "  To build anyway, with the stage failing: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1" >&2
-      rm -f "$TWEAKCC_OUT"
-      exit 1
-    elif [[ $TWEAKCC_RC -ne 0 ]]; then
-      echo "NOTE: tweakcc --apply exited $TWEAKCC_RC; CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 is set, continuing with ours only." >&2
-    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
-         && ! grep -qE '^    [✓✗] ' "$TWEAKCC_OUT"; then
-      # The failure detector below is a one-sided text anchor on another
-      # program's human-facing output: a glyph, an indent, an English phrase.
-      # If any of those drift, `grep -q '✗'` finds nothing and the build is
-      # declared good -- the very "clean skip renders the stock interface and
-      # passes" hole the interface gate was added to close, reopened from the
-      # other end. So require the positive counterpart first: if we cannot see a
-      # single row of EITHER kind, we did not read the output at all, and the
-      # absence of a ✗ proves nothing.
-      echo "FATAL: could not read tweakcc's apply output -- no result rows found." >&2
-      echo "  Either no patches are configured, or its output format changed and" >&2
-      echo "  the failure check below is now blind. Inspect: $TWEAKCC_OUT" >&2
-      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
-      exit 1
-    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]] \
-         && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
-      # The hatch is legitimate -- it exists for building against a version where
-      # something is known not to apply yet -- but it must not be invisible. It
-      # only ever announced itself in the non-zero-exit branch, so a build where
-      # tweakcc exited 0 with a ✗ row went out with a patch missing and nothing
-      # in the log to say a gate had been turned off.
-      echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 — these tweakcc patches did NOT apply:" >&2
-      grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
-    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
-         && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
-      echo "FATAL: a configured tweakcc patch did not apply:" >&2
-      grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
-      grep -E '^patch: ' "$TWEAKCC_OUT" | sed 's/^/  /' >&2
-      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
-      rm -f "$TWEAKCC_OUT"
-      exit 1
-    fi
-    rm -f "$TWEAKCC_OUT"
-  else
-    echo "FATAL: tweakcc could not list its patches, so its whole stage would be" >&2
-    echo "       skipped and the build would carry none of them:" >&2
-    tail -n 12 "$TWEAKCC_LIST_OUT" | sed 's/^/  /' >&2
-    rm -f "$TWEAKCC_LIST_OUT"
-    exit 1
-  fi
-fi
 
-# The stage above began by restoring tweakcc's backup over the target. If our
-# marker is in the result, that restore reintroduced a patched image behind 1b's
-# back -- say so here, where the cause is still nameable, instead of letting our
-# patcher fail three steps later with "site not found" for eleven locators and a
-# diagnosis that points nowhere near the reason.
-if [[ $ONLY_OURS -eq 0 ]] && grep -q -a -F "$OUR_MARKER" "$BIN"; then
-  echo "FATAL: after tweakcc's stage the target already carries OUR patches." >&2
-  echo "  Its --apply restores $TWEAKCC_BACKUP over the target first, so that" >&2
-  echo "  backup is patched and step 1b did not catch it." >&2
-  exit 1
-fi
-
-# А теперь встречный вопрос к тому же образу: легли ли на него патчи tweakcc.
-#
-# Гонка check/use по бэкапу.
-#
-# Страж выше проверяет бэкап ДО стадии, а читает его tweakcc ВНУТРИ неё.
-# В это окно внешний писатель -- прямой запуск tweakcc, ручное копирование,
-# синхронизация ~/.tweakcc -- может подменить файл, и сборка пойдёт из
-# байтов, которых никто не видел; воспроизведено. Замок конвейера закрывает
-# только НАШИ прогоны, чужому писателю он не указ.
-#
-# Предотвратить подмену нельзя, но можно не отгрузить её результат. Дайджест
-# снят ровно там, где восстановление применимо (иначе tweakcc сам законно
-# освежает бэкап из цели, и изменение файла ожидаемо), и сверяется здесь --
-# до наших патчей, до подписи, задолго до переключения лаунчера.
-if [[ -n "$TWEAKCC_RESTORE_PINNED" ]]; then
-  NOW_DIGEST="$( { shasum -a 256 "$TWEAKCC_BACKUP" 2>/dev/null || true; } | awk '{print $1}')"
-  if [[ "$NOW_DIGEST" != "$TWEAKCC_RESTORE_PINNED" ]]; then
-    echo "FATAL: tweakcc's backup changed WHILE the tweakcc stage was running." >&2
-    echo "  backup: $TWEAKCC_BACKUP" >&2
-    echo "  checked: $TWEAKCC_RESTORE_PINNED" >&2
-    echo "  now:     ${NOW_DIGEST:-<unreadable>}" >&2
-    echo "  Its config's ccVersion equals the target's version, so this stage had no" >&2
-    echo "  reason to refresh the backup -- somebody else wrote it. The bytes restored" >&2
-    echo "  over the target are therefore NOT the ones checked before the stage." >&2
-    echo "  Nothing has been installed. Re-run when no other tweakcc (or copy) is" >&2
-    echo "  touching ~/.tweakcc." >&2
-    exit 1
-  fi
-fi
-
-# Весь разбор выше читает то, что tweakcc НАПИСАЛ О СЕБЕ: код возврата, строки
-# ✓/✗, фразу "applied with some failures". Это отчёт стороннего инструмента о
-# файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
-# TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
-# ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 114 проверок конвейера ниже этого не заметит: они пинят наш
-# текст, а его пишет наш патчер, работающий по --target.
-#
-# Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
-# Маркер измерен: в пристинном 2.1.247 строки "tweakcc" ноль вхождений, в
-# собранном -- восемь.
-if [[ $ONLY_OURS -eq 0 ]]; then
-  TWEAKCC_LANDED=$(grep -c -a -F 'tweakcc' "$BIN" || true)
-  case "$TWEAKCC_LANDED" in ''|*[!0-9]*) TWEAKCC_LANDED=0 ;; esac
-  if [[ "$TWEAKCC_LANDED" -eq 0 ]]; then
-    if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]]; then
-      echo "NOTE: в цели нет ни одного следа tweakcc; CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1, продолжаю." >&2
-    else
-      echo "FATAL: стадия tweakcc отчиталась успехом, но в цели нет её следов." >&2
-      echo "  Цель: $BIN" >&2
-      echo "  Значит она патчила ДРУГОЙ файл: свой выбор она делает сама," >&2
-      echo "  а мы прибиваем его через TWEAKCC_CC_INSTALLATION_PATH -- проверьте," >&2
-      echo "  что сборка распаковщика эту переменную знает (форк, пин в шапке)." >&2
-      exit 1
-    fi
-  fi
-fi
-
-# --- 3. our patches, ALWAYS after tweakcc -------------------------------------
+# --- гейты, которым образ не нужен, спрашиваются ДО того, как его трогают ----
+# Всё ниже читает КИТ, а не сборку: вклеиваемый код, блок проверок, формы
+# оболочки, инструменты судьи, их раскатку, числа в доках. Блок стоял между
+# стадией tweakcc и нашей, и отказ в нём оставлял цель уже переписанной чужой
+# стадией, пока прогон докладывал «отказано» -- та самая форма, которую 0b
+# убрал с пути по умолчанию (а на --target её не убирал никто). Спрошенный
+# здесь, красный гейт стоит ровно тех секунд, что ушли на вопрос.
 # The injected code is parsed BEFORE the build: the patcher is syntactically
 # intact on its own, while a program glued from hundreds of string pieces may
 # not parse at all. The check must be CALLED: while it was merely shipped in
@@ -1475,6 +1097,29 @@ python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check || {
   esac
 }
 
+# --- раскатка судейских инструментов: исполняются ТЕ ЖЕ байты, что заверены ----
+# Стенд выше сертифицирует КАНОН: tools/judge-tools-bench.py читает judge/*.py
+# ЭТОГО дерева. А launchd гоняет РАСКАТАННУЮ копию из ~/.claude/judge, и ядро
+# читает раскатанные настройки и промты. Пока у сверки не было ни одного
+# автоматического вызывающего (рецепт в хвосте конвейера человек читает раз в
+# жизни), дом отстал от канона на семь волн и продолжал исполняться -- заметил
+# только аудит (круг 20, D-1). Тест-ручки домов снимаются: гейт меряет
+# НАСТОЯЩИЙ дом, а не тот, что назвало окружение оператора.
+echo "==> Раскатка инструментов судьи"
+env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \
+  bash "$(dirname "$0")/scripts/probes-sync.sh" --diff || {
+  __rc=$?
+  case $__rc in
+    5) echo "РАСКАТКИ НЕТ: на этой машине не заведено ни одного файла — пропуск (rc=5)" ;;
+    2) echo "СВЕРКА РАСКАТКИ НЕ ИЗМЕРЯЛА: контракт вызова (rc=2)" >&2
+       exit 2 ;;
+    *) echo "РАСКАТКА РАСХОДИТСЯ С КАНОНОМ (rc=$__rc): launchd и ядро исполняют" >&2
+       echo "  не те байты, что заверил стенд. Починка:" >&2
+       echo "  bash $(dirname "$0")/scripts/probes-sync.sh --to-home" >&2
+       exit 1 ;;
+  esac
+}
+
 # --- 0d. the numbers stated in the docs must be the numbers that are declared --
 # A count written in prose has no reader, so it goes stale by default. This is
 # its reader. Twice already a wave raised EXPECTED_CHECKS and left every
@@ -1517,6 +1162,8 @@ OWNERS = (
      {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
       'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
     ('docnum-bench', ('docnum-bench',), ('tools', 'docnum-bench.py'),
+     {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
+    ('checks-teeth', ('checks-teeth',), ('tools', 'checks-teeth.py'),
      {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
 )
 # Существительное -> величина. Единственного числа нет намеренно: «1 check» как
@@ -1657,7 +1304,7 @@ def prose(path, text):
         #
         # Он вычёркивался целиком, и в нём молча жил целый класс счётов: в этот
         # кит вывод стендов вставляют именно так («probe-bench: ИТОГ
-        # сценариев=56»), и такое утверждение устаревает ровно как любое
+        # сценариев=56» docnum:example), и утверждение устаревает как любое
         # другое. Снимаются только строки-заборы -- вместо них BREAK, чтобы
         # текст до забора не женился с текстом после.
         return blocks(FENCE_LINE.sub(BREAK, text), BLOCK_MD)
@@ -2247,6 +1894,440 @@ python3 "$(dirname "$0")/tools/docnum-bench.py" || {
   esac
 }
 
+# --- which tweakcc unpacks the image -----------------------------------------
+# Claude Code 2.1.242 split the bundle from one 28 MB module into an ESM entry
+# plus ~1400 chunks. Published tweakcc (4.3.3 and every release after it as of
+# this writing) extracts the entry ALONE, so all 25 locators search a 20 KB stub
+# and the whole set fails at once — a failure that reads like 25 broken patches
+# rather than one broken unpacker, which is exactly how it was first misread.
+# Our fork joins the entry with its chunks; on 2.1.241 and earlier its selection
+# is a single module and it behaves identically to the published one.
+#
+# This is the second time the unpacker, not the patches, was the thing that
+# broke: 4.3.2 could not read the container Claude Code ships from 2.1.231 on
+# (bun bumped, the binary grew ~5 MB) and aborted with "Failed to extract
+# JavaScript from native installation" before any patch was evaluated. That one
+# was fixable by raising a version floor; this one was not, which is why there
+# is a fork.
+#
+# The fork is pinned BY COMMIT, never by branch. The unpacker decides what every
+# locator sees, so "whatever main happens to be today" would silently make two
+# runs of this script incomparable. A commit SHA is content-addressed, so the
+# pin is its own integrity check: GitHub cannot serve a different tree under it.
+# Bump it deliberately, the way any dependency is bumped.
+CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0}"
+# Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
+# качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
+# чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
+[[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
+   && "$CATALYST_TWEAKCC_SHA" == "ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0" ]] \
+  || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
+CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
+
+# TWEAKCC_LOCAL is the development escape hatch: point it at a built
+# dist/index.mjs to try an unpacker change before it is pushed and pinned. It is
+# an EXPLICIT opt-in and it announces itself — an implicit "use the sibling
+# checkout if one happens to be there" would make the run depend on the shape of
+# somebody's disk.
+ensure_tweakcc() {
+  if [[ -n "${TWEAKCC_LOCAL:-}" ]]; then
+    [[ -f "$TWEAKCC_LOCAL" ]] || { echo "ERROR: TWEAKCC_LOCAL=$TWEAKCC_LOCAL does not exist"; exit 1; }
+    TWEAKCC=(node "$TWEAKCC_LOCAL")
+    echo "Unpacker: local build via TWEAKCC_LOCAL ($TWEAKCC_LOCAL)"
+    return
+  fi
+
+  local dir="$CATALYST_TWEAKCC_CACHE/$CATALYST_TWEAKCC_SHA"
+  if [[ ! -f "$dir/dist/index.mjs" ]]; then
+    echo "==> Fetching the unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
+    # Built in .tmp and renamed into place only once dist/index.mjs exists, so an
+    # interrupted fetch can never leave a cache entry that looks complete.
+    rm -rf "$dir.tmp"
+    mkdir -p "$dir.tmp"
+    # No `curl | tar`: a pipe reports the LAST stage's exit code, and a failed
+    # download would read as a successful extraction of nothing.
+    curl -fsSL --connect-timeout 20 --max-time 300 -o "$dir.tmp/src.tar.gz" \
+      "https://codeload.github.com/$CATALYST_TWEAKCC_REPO/tar.gz/$CATALYST_TWEAKCC_SHA" \
+      || { echo "ERROR: could not fetch $CATALYST_TWEAKCC_REPO @ $CATALYST_TWEAKCC_SHA"; exit 1; }
+    tar -xzf "$dir.tmp/src.tar.gz" -C "$dir.tmp" --strip-components=1 \
+      || { echo "ERROR: could not unpack the unpacker tarball"; exit 1; }
+    rm -f "$dir.tmp/src.tar.gz"
+    ( cd "$dir.tmp" \
+      && npx -y pnpm@latest install --frozen-lockfile \
+      && npx -y pnpm@latest run build ) \
+      || { echo "ERROR: unpacker build failed in $dir.tmp"; exit 1; }
+    [[ -f "$dir.tmp/dist/index.mjs" ]] \
+      || { echo "ERROR: unpacker build produced no dist/index.mjs"; exit 1; }
+    rm -rf "$dir"
+    mv "$dir.tmp" "$dir"
+    echo "Unpacker cached in $dir"
+  fi
+
+  TWEAKCC=(node "$dir/dist/index.mjs")
+  echo "Unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
+  prune_tweakcc_cache 2
+}
+ensure_tweakcc
+
+# --- 1. let the user pick tweakcc's patches ----------------------------------
+if [[ $CONFIGURE -eq 1 ]]; then
+  echo "==> Opening tweakcc's UI — pick the patches you want, save, and quit."
+  "${TWEAKCC[@]}" || true
+fi
+
+# --- 1b. tweakcc's backup decides what the build starts from -----------------
+# Its `--apply` calls restoreNativeBinaryFromBackup() unconditionally for native
+# installs (patches/index.ts, pinned SHA): it writes the backup's bytes over
+# whatever ccInstallationPath names, and only then patches. Step 0b points that
+# path at OUR staging file, so the pristine copy we just made is overwritten
+# before tweakcc's first patch lands. Staging alone therefore guarantees
+# nothing -- the file the build really starts from is this backup, and it is the
+# one that has to be verified. Hence BEFORE the stage: an earlier version of this
+# check ran after it, and would have repaired the backup for next time while
+# this build had already been made from the poisoned bytes.
+#
+# With no backup yet, tweakcc's startupCheck creates one from
+# ccInstallationPath -- our pristine staging file -- which needs nothing from us.
+TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
+# Запись, по которой tweakcc решает, освежать бэкап или восстанавливать его:
+# страж ниже обязан спрашивать ЕЁ, а не версию файла бэкапа.
+TWEAKCC_CFG="$HOME/.tweakcc/config.json"
+# Дайджест бэкапа, снятый там, где восстановление применимо; пусто -- не
+# применимо. Объявлено здесь: под `set -u` пост-сверка читает его всегда.
+TWEAKCC_RESTORE_PINNED=""
+# Detection is unconditional -- including under `--only-ours`, which does not
+# invoke tweakcc and so cannot cause the poisoning, but whose user is just as
+# entitled to learn that a neighbour already did. Only the REPAIR needs a
+# verified source, and only a real tweakcc run needs to abort.
+if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; then
+  # "Free of OUR marker" is not "pristine". A `.orig` snapshotted from a binary
+  # that had been through tweakcc's stage carries none of our bytes and every
+  # one of theirs -- exactly the case claude_patch.py refuses to CREATE, and
+  # promoting such a file into the backup would restore a patch while reporting
+  # a removal. Nor is a copy of another build a valid restore for this one: ask
+  # both for their version.
+  BACKUP_OK=0
+  if [[ -f "$PRISTINE_SRC" ]] \
+     && ! grep -q -a -F "$OUR_MARKER" "$PRISTINE_SRC" \
+     && ! grep -q -a -F 'tweakcc' "$PRISTINE_SRC"; then
+    SRC_VER="$("$PRISTINE_SRC" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
+    BLD_VER="$("$BIN" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
+    [[ -n "$SRC_VER" && "$SRC_VER" == "$BLD_VER" ]] && BACKUP_OK=1
+  fi
+  if [[ $BACKUP_OK -eq 1 ]]; then
+    # Staged and renamed, not written in place: a `cp` killed halfway leaves a
+    # TRUNCATED backup, and truncated bytes contain no marker either -- so every
+    # later run of this very check would read it as healthy while a restore
+    # wrote a broken binary and reported success.
+    # The message is INSIDE the success branch, and a failed repair is fatal.
+    # `set -e` does not fire when an AND-OR list short-circuits on its first
+    # command -- measured, not assumed: with `set -euo pipefail` and an
+    # unwritable destination, `cp` failed, `mv` was skipped, and the script ran
+    # on to exit 0. So the old shape printed "restored it from ..." over a
+    # backup that still held the patch, and then built from those bytes.
+    if cp -p "$PRISTINE_SRC" "$TWEAKCC_BACKUP.repair" \
+       && mv "$TWEAKCC_BACKUP.repair" "$TWEAKCC_BACKUP"; then
+      echo "NOTE: tweakcc's backup held a PATCHED image; restored it from $PRISTINE_SRC." >&2
+      echo "      This build starts from those bytes, and 'tweakcc --restore' would" >&2
+      echo "      have returned the patch until now." >&2
+    else
+      rm -f "$TWEAKCC_BACKUP.repair"
+      echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image and the" >&2
+      echo "       repair from $PRISTINE_SRC FAILED (no space, no permission?)." >&2
+      echo "       Refusing to build: the build would start from patched bytes, and" >&2
+      echo "       'tweakcc --restore' would keep handing out the patch." >&2
+      exit 1
+    fi
+  else
+    echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image, and no" >&2
+    echo "  verified-pristine copy of THIS build is available to repair it from" >&2
+    echo "  ($PRISTINE_SRC is missing, patched, tweakcc-staged, or another version)." >&2
+    echo "  tweakcc restores that backup over the target before patching, so the" >&2
+    echo "  build would be made FROM our own patched bytes -- and 'tweakcc" >&2
+    echo "  --restore' would hand a human the patch while reporting a removal." >&2
+    echo "  Fetch stock bytes for this version and try again:" >&2
+    echo "    python3 claude_patch.py --download-only <version>" >&2
+    [[ $ONLY_OURS -eq 1 ]] || exit 1
+  fi
+fi
+
+# --- 2. tweakcc's own patches (restores from its backup first!) ---------------
+# tweakcc takes no target argument -- оно само разрешает установку. Порядок
+# приоритетов в его коде (src/installationDetection.ts:550-600 форка):
+#   1. переменная окружения TWEAKCC_CC_INSTALLATION_PATH,
+#   2. ccInstallationPath из конфига,
+#   3. `claude` на PATH,
+#   4. вшитые пути поиска.
+# После --update разрешение по пунктам 3-4 попадает на ПРЕДЫДУЩУЮ версию:
+# лаунчер намеренно ещё не переключён, и tweakcc молча патчит образ, который
+# никто не запускает, пока наш остаётся нетронутым.
+#
+# Раньше цель прибивалась пунктом 2 -- правкой конфига человека. У этого было
+# две беды, и обе исправляет пункт 1.
+#
+#   * Пункт 2 существовал ТОЛЬКО если конфиг уже есть: `if [[ -f "$TWEAKCC_CFG" ]]`.
+#     Отсутствие конфига -- это и есть определение первого запуска, то есть
+#     ровно того случая, ради которого прибивание написано. На чистой машине
+#     прибивания не было, и разрешение уходило в пункты 3-4.
+#   * Прибивание ПЕРЕЖИВАЛО наш прогон. После сборки по --target конфиг
+#     человека оставался указывающим на нашу временную цель (скажем,
+#     /tmp/cc-matrix/bin/242.wave.bin), и следующий его собственный запуск
+#     tweakcc падал с "ccInstallationPath is set to '...' but file does not
+#     exist" -- поломка, которую вносили мы, в файле, который не наш.
+#
+# Переменная окружения не имеет ни одной из этих привязок: она действует на
+# наши вызовы и умирает вместе с процессом, а конфиг человека не трогается
+# вовсе.
+if [[ $ONLY_OURS -eq 0 ]]; then
+  export TWEAKCC_CC_INSTALLATION_PATH="$BIN"
+  echo "Pinned tweakcc to $BIN (TWEAKCC_CC_INSTALLATION_PATH)"
+  # Цель названа оператором -- собрано может быть из ДРУГИХ байтов.
+  #
+  # tweakcc восстанавливает свой бэкап поверх цели до всякого патча (см.
+  # заголовок секции). Ветка выше ловит только случай «в бэкапе НАШИ патчи»;
+  # расхождение двух РАЗНЫХ стоковых образов одной версии она не видит, а
+  # именно оно и наблюдалось: цель с одной изменённой строкой собралась в
+  # образ БЕЗ этого изменения, все проверки зелёные, `Done.` напечатан.
+  # Всё, что человек проверил на своей цели, к отгруженному образу тогда не
+  # относится, и узнать об этом неоткуда.
+  #
+  # ПРЕДИКАТ БЕРЁТСЯ У ТОГО, ЧЬЁ ПОВЕДЕНИЕ ПРЕДСКАЗЫВАЕТСЯ. Первая редакция
+  # спрашивала версию у ФАЙЛА бэкапа, а tweakcc решает по ЗАПИСИ
+  # config.ccVersion (в форке: бэкап освежается из цели, когда
+  # realVersion !== config.ccVersion, и только иначе восстанавливается).
+  # Две модели давали два расхождения, оба воспроизведены: сброшенный
+  # конфиг -- tweakcc пересоздал бы бэкап из цели, подмены нет, а страж
+  # отказывал; запись совпадает, а ФАЙЛ бэкапа несёт другую версию --
+  # подмена есть, а страж молчал.
+  #
+  # Версия ЦЕЛИ снимается так, чтобы падение не убивало прогон: под
+  # `set -euo pipefail` присваивание из конвейера с неисполнимым файлом
+  # завершает скрипт кодом 126 БЕЗ единого слова (замерено). Прежний
+  # комментарий обещал здесь «пустую версию, а дальше страхует дым-гейт» --
+  # не было ни того, ни другого: до проверки пустоты не доходило.
+  #
+  # Невозможность назвать версию цели -- ОТКАЗ, а не пропуск: на ней стоит
+  # весь предикат, а образ уже прошёл image-check.py, то есть это валидный
+  # нативный образ, который обязан отвечать на --version. Молчание здесь
+  # означало бы «не знаю, что будет с байтами» -- ровно та тишина, против
+  # которой страж и написан.
+  #
+  # Отказ, а не автопочинка: два образа одной версии разошлись, и какой из
+  # них истина, знает только человек. Молча взять бэкап -- отгрузить не то,
+  # что проверяли; молча продвинуть цель в бэкап -- подменить человеку точку
+  # восстановления. Обе двери названы в сообщении.
+  #
+  # Цель с НАШИМ маркером сюда не входит: это штатная пересборка живого
+  # образа, где бэкап и есть единственный пристинный источник, а
+  # восстановление стока -- сам смысл стадии.
+  if [[ -f "$TWEAKCC_BACKUP" ]] && ! grep -q -a -F "$OUR_MARKER" "$BIN"; then
+    TGT_VER="$( { "$BIN" --version 2>/dev/null || true; } | awk 'NR==1{print $1; exit}')"
+    if [[ ! "$TGT_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+      echo "FATAL: the target does not name its version, so what tweakcc is about to" >&2
+      echo "  do with it cannot be established." >&2
+      echo "  target: $BIN" >&2
+      echo "  --version gave: '${TGT_VER:-<nothing>}'" >&2
+      echo "  tweakcc restores its backup over the target before patching, and whether" >&2
+      echo "  it does depends on this version. Refusing to build blind: the image that" >&2
+      echo "  would be shipped may not be the one you named." >&2
+      exit 1
+    fi
+    CFG_VER="$(python3 -c 'import json,sys
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8")).get("ccVersion")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
+    if [[ "$CFG_VER" == "$TGT_VER" ]]; then
+      # Восстановление ПРИМЕНИМО: освежать бэкап tweakcc не станет.
+      if ! cmp -s "$BIN" "$TWEAKCC_BACKUP"; then
+        echo "FATAL: the target and tweakcc's backup are DIFFERENT images, and tweakcc" >&2
+        echo "  is about to restore the backup over the target." >&2
+        echo "  target: $BIN (v$TGT_VER)" >&2
+        echo "  backup: $TWEAKCC_BACKUP" >&2
+        echo "  its config records ccVersion=$CFG_VER, which equals the target's version," >&2
+        echo "  so the backup will NOT be refreshed -- the build would be made from the" >&2
+        echo "  BACKUP's bytes, not from the ones you named. Anything you verified on the" >&2
+        echo "  target would not describe the image that gets shipped. Only you know which" >&2
+        echo "  of the two is the truth:" >&2
+        echo "    * the target is:  cp -p '$BIN' '$TWEAKCC_BACKUP'" >&2
+        echo "      (this also changes what 'tweakcc --restore' hands back)" >&2
+        echo "    * the backup is:  cp -p '$TWEAKCC_BACKUP' <a copy> and --target that" >&2
+        exit 1
+      fi
+      TWEAKCC_RESTORE_PINNED="$(shasum -a 256 "$TWEAKCC_BACKUP" | awk '{print $1}')"
+    fi
+  fi
+  # A non-zero --list-patches meant "skip the apply", silently and with every
+  # byte of its output discarded. But that subcommand failing does not imply the
+  # apply would fail: a tweakcc that cannot parse its config, or that dropped
+  # this subcommand, still patches. Skipping the entire third-party stage
+  # without saying why leaves a build carrying none of those patches and a
+  # perfectly clean `Done.` -- the same silence the rest of this block exists to
+  # end, one level up.
+  TWEAKCC_LIST_OUT="$(mktemp)"
+  if "${TWEAKCC[@]}" --list-patches >"$TWEAKCC_LIST_OUT" 2>&1; then
+    rm -f "$TWEAKCC_LIST_OUT"
+    echo "==> Applying tweakcc's configured patches"
+    # A patch of tweakcc's that cannot find its site prints a ✗ row and marks
+    # itself failed -- and then the CLI exits 0 anyway. Nothing downstream looks
+    # at it either: none of our checks below cover tweakcc's own output. So a
+    # patch could stop applying entirely and the build would still be declared
+    # good, with the feature simply gone. That is the same silence the interface
+    # gate exists to end, except the gate only sees a CRASH: a clean skip renders
+    # the stock interface and passes it.
+    #
+    # Every patch in the config is there because it is wanted, so a ✗ is a
+    # failure of the build. The escape hatch is for deliberately running against
+    # a version where something is known not to apply yet.
+    TWEAKCC_OUT="$(mktemp)"
+    set +e
+    "${TWEAKCC[@]}" --apply -y 2>&1 | tee "$TWEAKCC_OUT"
+    TWEAKCC_RC=${PIPESTATUS[0]}
+    set -e
+    if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" && $TWEAKCC_RC -ne 0 ]]; then
+      # A non-zero exit means the whole stage died, so NONE of its patches
+      # applied -- strictly worse than the single ✗ the branches below treat as
+      # fatal, yet this branch used to print a note and let the build continue.
+      # The note guessed "no config yet?", a case the no-result-rows branch below
+      # already reports properly; the guess only served to make a crash look
+      # routine. It hid a real one: handed a shell wrapper instead of an image,
+      # tweakcc threw "No VERSION strings found", this branch waved it through,
+      # and the run went on to fail in our patcher with a message that pointed
+      # nowhere near the actual cause.
+      echo "FATAL: tweakcc --apply exited $TWEAKCC_RC -- not one of its patches applied." >&2
+      tail -n 20 "$TWEAKCC_OUT" | sed 's/^/  /' >&2
+      # On a machine with no ~/.tweakcc yet this is the FIRST thing a human sees,
+      # and the only exit it used to name was the hatch -- which builds without
+      # that whole stage. Name the two real answers first, so the hatch stays
+      # what it is: a deliberate choice, not the obvious way out.
+      echo "  If this is a first run, tweakcc has no saved customizations yet:" >&2
+      echo "    bash claude-patch-all.sh --configure   # pick its patches, save, quit" >&2
+      echo "  To build only OUR patches and skip that stage on purpose:" >&2
+      echo "    bash claude-patch-all.sh --only-ours" >&2
+      echo "  To build anyway, with the stage failing: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1" >&2
+      rm -f "$TWEAKCC_OUT"
+      exit 1
+    elif [[ $TWEAKCC_RC -ne 0 ]]; then
+      echo "NOTE: tweakcc --apply exited $TWEAKCC_RC; CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 is set, continuing with ours only." >&2
+    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
+         && ! grep -qE '^    [✓✗] ' "$TWEAKCC_OUT"; then
+      # The failure detector below is a one-sided text anchor on another
+      # program's human-facing output: a glyph, an indent, an English phrase.
+      # If any of those drift, `grep -q '✗'` finds nothing and the build is
+      # declared good -- the very "clean skip renders the stock interface and
+      # passes" hole the interface gate was added to close, reopened from the
+      # other end. So require the positive counterpart first: if we cannot see a
+      # single row of EITHER kind, we did not read the output at all, and the
+      # absence of a ✗ proves nothing.
+      echo "FATAL: could not read tweakcc's apply output -- no result rows found." >&2
+      echo "  Either no patches are configured, or its output format changed and" >&2
+      echo "  the failure check below is now blind. Inspect: $TWEAKCC_OUT" >&2
+      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
+      exit 1
+    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]] \
+         && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
+      # The hatch is legitimate -- it exists for building against a version where
+      # something is known not to apply yet -- but it must not be invisible. It
+      # only ever announced itself in the non-zero-exit branch, so a build where
+      # tweakcc exited 0 with a ✗ row went out with a patch missing and nothing
+      # in the log to say a gate had been turned off.
+      echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 — these tweakcc patches did NOT apply:" >&2
+      grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
+    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
+         && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
+      echo "FATAL: a configured tweakcc patch did not apply:" >&2
+      grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
+      grep -E '^patch: ' "$TWEAKCC_OUT" | sed 's/^/  /' >&2
+      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
+      rm -f "$TWEAKCC_OUT"
+      exit 1
+    fi
+    rm -f "$TWEAKCC_OUT"
+  else
+    echo "FATAL: tweakcc could not list its patches, so its whole stage would be" >&2
+    echo "       skipped and the build would carry none of them:" >&2
+    tail -n 12 "$TWEAKCC_LIST_OUT" | sed 's/^/  /' >&2
+    rm -f "$TWEAKCC_LIST_OUT"
+    exit 1
+  fi
+fi
+
+# The stage above began by restoring tweakcc's backup over the target. If our
+# marker is in the result, that restore reintroduced a patched image behind 1b's
+# back -- say so here, where the cause is still nameable, instead of letting our
+# patcher fail three steps later with "site not found" for eleven locators and a
+# diagnosis that points nowhere near the reason.
+if [[ $ONLY_OURS -eq 0 ]] && grep -q -a -F "$OUR_MARKER" "$BIN"; then
+  echo "FATAL: after tweakcc's stage the target already carries OUR patches." >&2
+  echo "  Its --apply restores $TWEAKCC_BACKUP over the target first, so that" >&2
+  echo "  backup is patched and step 1b did not catch it." >&2
+  exit 1
+fi
+
+# А теперь встречный вопрос к тому же образу: легли ли на него патчи tweakcc.
+#
+# Гонка check/use по бэкапу.
+#
+# Страж выше проверяет бэкап ДО стадии, а читает его tweakcc ВНУТРИ неё.
+# В это окно внешний писатель -- прямой запуск tweakcc, ручное копирование,
+# синхронизация ~/.tweakcc -- может подменить файл, и сборка пойдёт из
+# байтов, которых никто не видел; воспроизведено. Замок конвейера закрывает
+# только НАШИ прогоны, чужому писателю он не указ.
+#
+# Предотвратить подмену нельзя, но можно не отгрузить её результат. Дайджест
+# снят ровно там, где восстановление применимо (иначе tweakcc сам законно
+# освежает бэкап из цели, и изменение файла ожидаемо), и сверяется здесь --
+# до наших патчей, до подписи, задолго до переключения лаунчера.
+if [[ -n "$TWEAKCC_RESTORE_PINNED" ]]; then
+  NOW_DIGEST="$( { shasum -a 256 "$TWEAKCC_BACKUP" 2>/dev/null || true; } | awk '{print $1}')"
+  if [[ "$NOW_DIGEST" != "$TWEAKCC_RESTORE_PINNED" ]]; then
+    echo "FATAL: tweakcc's backup changed WHILE the tweakcc stage was running." >&2
+    echo "  backup: $TWEAKCC_BACKUP" >&2
+    echo "  checked: $TWEAKCC_RESTORE_PINNED" >&2
+    echo "  now:     ${NOW_DIGEST:-<unreadable>}" >&2
+    echo "  Its config's ccVersion equals the target's version, so this stage had no" >&2
+    echo "  reason to refresh the backup -- somebody else wrote it. The bytes restored" >&2
+    echo "  over the target are therefore NOT the ones checked before the stage." >&2
+    echo "  Nothing has been installed. Re-run when no other tweakcc (or copy) is" >&2
+    echo "  touching ~/.tweakcc." >&2
+    exit 1
+  fi
+fi
+
+# Весь разбор выше читает то, что tweakcc НАПИСАЛ О СЕБЕ: код возврата, строки
+# ✓/✗, фразу "applied with some failures". Это отчёт стороннего инструмента о
+# файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
+# TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
+# ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
+# ни одна из 116 проверок конвейера ниже этого не заметит: они пинят наш
+# текст, а его пишет наш патчер, работающий по --target.
+#
+# Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
+# Маркер измерен: в пристинном 2.1.247 строки "tweakcc" ноль вхождений, в
+# собранном -- восемь.
+if [[ $ONLY_OURS -eq 0 ]]; then
+  TWEAKCC_LANDED=$(grep -c -a -F 'tweakcc' "$BIN" || true)
+  case "$TWEAKCC_LANDED" in ''|*[!0-9]*) TWEAKCC_LANDED=0 ;; esac
+  if [[ "$TWEAKCC_LANDED" -eq 0 ]]; then
+    if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]]; then
+      echo "NOTE: в цели нет ни одного следа tweakcc; CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1, продолжаю." >&2
+    else
+      echo "FATAL: стадия tweakcc отчиталась успехом, но в цели нет её следов." >&2
+      echo "  Цель: $BIN" >&2
+      echo "  Значит она патчила ДРУГОЙ файл: свой выбор она делает сама," >&2
+      echo "  а мы прибиваем его через TWEAKCC_CC_INSTALLATION_PATH -- проверьте," >&2
+      echo "  что сборка распаковщика эту переменную знает (форк, пин в шапке)." >&2
+      exit 1
+    fi
+  fi
+fi
+
+# --- 3. our patches, ALWAYS after tweakcc -------------------------------------
+# Порядку подчинено только ПРИМЕНЕНИЕ; всё, что проверяет сам набор патчей
+# (гейты разбора, формы, стенды, числа), спрошено выше -- до того, как tweakcc
+# переписал хоть один байт.
 echo "==> Applying our multi-provider patches"
 "${TWEAKCC[@]}" adhoc-patch \
   --script "@$OUR_PATCH" \
@@ -3234,10 +3315,20 @@ def _statusline_throttle_raised(d):
                   + rb'\(\)\},(' + ID + rb')\)\}', d)
     if not m:
         return False
-    lo = d.rfind(b'/*__tweakcc_module_boundary_', 0, m.start())
-    hi = d.find(b'/*__tweakcc_module_boundary_', m.start())
-    module = d[lo if lo >= 0 else 0:hi if hi >= 0 else len(d)]
-    return bool(re.search(rb'var ' + re.escape(m.group(1)) + rb'=500\b', module))
+    # Маркеров границ модулей в УПАКОВАННОМ образе нет НИ ОДНОГО: они живут в
+    # распакованных модулях, с которыми работает сам патчер, а проверка читает
+    # `$BIN` (измерено 0 и на собранном 2.1.250, и на четырёх пристинных
+    # корпусных). Прежняя форма молча падала в откат `module = d[0:len(d)]`,
+    # то есть искала по ВСЕМУ образу -- ровно то сужение, ради которого
+    # хелпер и писался, не работало никогда (круг 20, C-10). Окно вокруг
+    # места использования -- то, что в упакованном образе измеримо: на живом
+    # образе объявление лежит в 4.7 КБ до него.
+    lo, hi = max(0, m.start() - 20000), min(len(d), m.start() + 20000)
+    window = d[lo:hi]
+    decls = re.findall(rb'var ' + re.escape(m.group(1)) + rb'=(\d+)', window)
+    # Ровно одно связывание в окне: два -- значит, по имени уже не отличить,
+    # какое из них читает дебаунс, и молчать об этом нельзя.
+    return decls == [b'500']
 
 
 def _dispatch_keeps_its_model(d):
@@ -3319,6 +3410,13 @@ def _every_cut_is_named(d):
 
     found = {}
     for b in blocks:
+        # Опись ходила ТОЛЬКО по `.slice(`. `.substring(0,__n)` режет ровно так
+        # же тихо, в опись не попадал вовсе, и равенство описи от него не
+        # менялось -- новый необъявленный срез проходил зелёным (круг 20, C-6).
+        # В наших блоках их ноль (измерено на собранном 2.1.250); появление
+        # любого краснит перепись, пока его не объявят как остальные.
+        if re.search(rb'\.substring\(|\.substr\(', b):
+            return False
         surs = []
         for m in re.finditer(rb'__sur\(', b):
             e = _closes(b, m.end())
@@ -3359,6 +3457,7 @@ def _every_cut_is_named(d):
         (b'0,__ls.length-__jkeep+1', False): 1,   # prune victims, not text
         (b'1', False): 4,                         # three BOM strips, one low surrogate
         (b'1,-1', False): 1,                      # JSON.stringify quote pair
+        (b'16,-1', False): 1,                     # `[dispatch-class:` and `]` off a matched marker
     }
 
 _probe_full = d
@@ -3664,8 +3763,19 @@ checks = {
     # The cheap count stands BEFORE the model: a busy fleet, an unfilled window
     # and a cooldown cut off the consultation for free. Without it the watcher
     # would become a permanent expense line on every tool call.
+    # Четыре присутствия не задают ПОРЯДКА: перенести блок ворот за разбор
+    # истории -- все строки на месте, а наблюдатель снова платит за консультацию
+    # на каждом вызове инструмента (круг 20, C-7). Порядок пинится склейкой:
+    # блок ворот обязан ПРИМЫКАТЬ к началу сборки транскрипта.
     'watcher spends nothing before the cheap count': bool(re.search(
-                                              rb'if\(__ask&&__o\.gate\)\{let __g=null;', d))
+                                              rb'if\(__ask&&__o\.gate\)\{let __g=null;'
+                                              rb'try\{__g=await __o\.gate\(__cfg,__svc\)\}'
+                                              rb'catch\(__ge\)\{__g="gate-failed:"\+'
+                                              rb'String\(__ge\?\.message\?\?__ge\)\}'
+                                              rb'if\(__g\)\{__ask=!1;await __jlog\(\{'
+                                              rb'outcome:"filtered",by:String\(__g\),cls:null,'
+                                              rb'\.\.\.\(__deg\.length\?\{deg:__dcut\(__deg,5\)\}'
+                                              rb':\{\}\)\}\)\}\}let __uw=\[\];let __arr=\[', d))
                                           # three count refusals; the exact moment of each is
                                           # checked separately below
                                           and bool(re.search(rb'return "fleet-busy:"\+__n\}', d))
@@ -3784,10 +3894,17 @@ checks = {
                                               rb'__max,0\)\):__ctx,'
                                               rb'__num\("rung\.timeout_ms",__e\.timeout_ms,__tmo,1\),'
                                               rb'__e\)', d)),
+    # Ни `for` (это ладдер), ни присваивание счётчика не требуют, чтобы повтор
+    # СОСТОЯЛСЯ: выбросить сам вызов -- и проверка остаётся зелёной, а имя её
+    # идёт в сводку как доказательство повтора (круг 20, C-9).
     'judge retries a failed consultation': bool(re.search(
                                               rb'for\(let __i=0;__i<__mdls\.length;__i\+\+\)\{', d))
                                           and bool(re.search(
-                                              rb'__jtry=__mdls\.length\+1;__jm=__e\.model;', d)),
+                                              rb'__jtry=__mdls\.length\+1;__jm=__e\.model;', d))
+                                          and bool(re.search(
+                                              rb'try\{__raw=await __call\(__cut\(__rcc\),'
+                                              rb'Math\.min\(__rt,Math\.max\(1000,'
+                                              rb'Math\.round\(__rt/2\)\)\),__e\);', d)),
     # a project restates the RULES for itself; the judge still knows nothing
     # about what the project is — the nearest .claude/judge above cwd layers over
     # the global one
@@ -4114,9 +4231,19 @@ checks = {
                                               rb'__ccFleet\.push\(globalThis\.__ccMono\(\)\)', d))
                                           and bool(re.search(
                                               rb'__s&&__s\.nextAt>globalThis\.__ccMono\(\)', d))
+                                          # Часы САМОГО окна наблюдателя: от `__now`
+                                          # считаются окно, порог, остывание, живая работа
+                                          # и оседание. Ни один прежний конъюнкт его не
+                                          # называл, а запрет знал лишь два имени -- перевод
+                                          # инициализатора на стенные часы проходил зелёным
+                                          # (круг 20, C-8).
+                                          and bool(re.search(
+                                              rb'gate:\(__c,__svc\)=>\{let __now='
+                                              rb'globalThis\.__ccMono\(\),', d))
                                           # not one duration left on the wall clock
                                           and len(re.findall(rb'Date\.now\(\)-__t0', d)) == 0
                                           and len(re.findall(rb'Date\.now\(\)-__s0', d)) == 0
+                                          and len(re.findall(rb'__now=Date\.now\(\)', d)) == 0
                                           # and the moment is still named by it
                                           and bool(re.search(
                                               rb'new Date\(\)\.toISOString\(\)', d)),
@@ -4140,16 +4267,45 @@ checks = {
                                               rb'\+__o\.act\+"\):', d))
                                           and bool(re.search(
                                               rb'","mi"\)\.exec\(__v\)', d)),
+    # Имя обещает, что массив частей ЧИТАЕТСЯ как строка, а идентификатор
+    # доказывает лишь, что кто-то спросил про массив. Заменить ветку на
+    # `String(__mm.content)` -- и вердикт снова становится "[object Object]",
+    # ровно тот дефект, ради которого блок написан (круг 20, C-1).
     'a content array reads like a content string': bool(re.search(
-                                              rb'Array\.isArray\(__mm\.content\)', d)),
+                                              rb'Array\.isArray\(__mm\.content\)\?__mm\.content'
+                                              rb'\.filter\(\(__b\)=>__b\?\.type==="text"\|\|'
+                                              rb'typeof __b\?\.text==="string"\)'
+                                              rb'\.map\(\(__b\)=>__b\.text\)\.join\("\\n"\)'
+                                              rb':String\(__mm\.content\?\?""\)', d)),
     'a BOM does not silence the channel': _bom_stripped_in_our_blocks(_probe_full),
+    # `stop_reason==="max_tokens"` -- строка САМОГО апстрима (4-5 вхождений на
+    # каждом пристинном образе корпуса), краснеть она не умеет. И ни один из
+    # двух прежних конъюнктов не касался того, что обещает имя: ПРИЗНАТЬСЯ в
+    # обрыве. Пинится объявление и обе точки, где оно приклеивается к ответу:
+    # без них обрыв снова превращает BLOCK в пустой вердикт (круг 20, C-3).
     'an answer cut at the output cap says so': bool(re.search(
-                                              rb'finish_reason==="length"', d))
+                                              rb'let __cut1=__j\?\.choices\?\.\[0\]\?\.'
+                                              rb'finish_reason==="length"'
+                                              rb'\|\|__j\?\.stop_reason==="max_tokens"'
+                                              # полоса pool несёт stop_reason ВНУТРИ .message --
+                                              # там же, откуда этот разбор берёт содержимое
+                                              rb'\|\|__j\?\.message\?\.stop_reason==="max_tokens"\?" \[', d))
                                           and bool(re.search(
-                                              rb'stop_reason==="max_tokens"', d)),
+                                              rb'if\(__c1\)return __c1\.trim\(\)\+__cut1;', d))
+                                          and bool(re.search(
+                                              rb'return __cv\?__cv\+__cut1:""\}', d)),
     # Recorded, never gated on: the gateway answers with another id by design.
-    'the model that answered is recorded': len(re.findall(
-                                              rb'__a\.served=', d)) >= 2,
+    # Считать присваивания мало: `__a.served=__clip(__e.model,80)` оставляет
+    # счёт прежним и записывает ЗАПРОШЕННЫЙ ид -- шлюз, ответивший другой
+    # моделью, снова неотличим (круг 20, C-4). Пинится значение на обеих ногах.
+    'the model that answered is recorded': bool(re.search(
+                                              rb'if\(__sv&&__sv!==__e\.model\)'
+                                              rb'__a\.served=__clip\(__sv,80\)', d))
+                                          and bool(re.search(
+                                              rb'if\(__sv2&&__sv2!==__e\.model\)'
+                                              rb'__a\.served=__clip\(__sv2,80\)', d))
+                                          and len(re.findall(
+                                              rb'__a\.served=', d)) == 2,
     'the output budget has one default': bool(re.search(
                                               rb'let __mtd=8000', d))
                                           and len(re.findall(
@@ -4253,9 +4409,31 @@ checks = {
     # disabling a probe is a setting; the registry must silence one consumer
     # without touching the others, and the silencing must be VISIBLE in the
     # journal
+    # ...и не печатает эту строку на КАЖДОМ вызове: памятка ядра гасит ПОВТОР
+    # до конца объявленного срока, срок едет в той же строке, а подпись
+    # настроек возвращает строку немедленно, как только настройки правят
+    # (круг 20, D-3; сужено после измерения стендом зондов -- ранний выход ДО
+    # чтения конфига ломал «настройки читаются на каждой консультации»).
     'a disabled probe says so in the journal': bool(re.search(
-                                              rb'if\(__cfg\.enabled===!1\)\{await __jlog\('
-                                              rb'\{outcome:"skip_disabled"\}\);return\}', d)),
+                                              rb'if\(__cfg\.enabled===!1\)\{'
+                                              rb'let __dm=__num\("disabled_memo_ms",'
+                                              rb'__cfg\.disabled_memo_ms,60000,0\),', d))
+                                          and bool(re.search(
+                                              rb'__pv=__offs\[__o\.dirName\];'
+                                              rb'if\(!\(__pv&&__pv\.s===__sg'
+                                              rb'&&__pv\.u>globalThis\.__ccMono\(\)\)\)\{', d))
+                                          and bool(re.search(
+                                              rb'__offs\[__o\.dirName\]='
+                                              rb'\{u:globalThis\.__ccMono\(\)\+__dm,s:__sg\};'
+                                              rb'await __jlog\(\{outcome:"skip_disabled",'
+                                              rb'memo_ms:__dm\}\)\}return\}', d))
+                                          # Ранний выход ДО чтения настроек не
+                                          # должен вернуться: он и был тем, что
+                                          # уводило в тишину всё после первой
+                                          # выключенной пробы в процессе.
+                                          and not re.search(
+                                              rb'if\(__offs\[__o\.dirName\]>'
+                                              rb'globalThis\.__ccMono\(\)\)return;', d),
     # a missing TOML parser is an event, not empty settings: empty ones
     # silently remove enforce, the ladder and the budgets
     'a missing TOML parser is declared, not silently empty': bool(re.search(
@@ -4384,7 +4562,36 @@ checks = {
                                           and bool(re.search(
                                               rb'\?"user-command":', d))
                                           and bool(re.search(
-                                              rb'<command-args>\\s\*\[\^\\s<\]/\.test\(__bt\)\)\?"user"', d)),
+                                              rb'<command-args>\\s\*\[\^\\s<\]/\.test\(__bt\)\)\?"user"', d))
+                                          # МЕТКА самой ветки stdout/stderr. Прежние три конъюнкта
+                                          # брали `?"user-command":` -- метку СОСЕДНЕЙ ветки (слэш-
+                                          # команда без аргументов), и подмена этой на `?"user":`
+                                          # проходила зелёной (круг 20, C-2).
+                                          and bool(re.search(
+                                              rb'\?"tool-output":__M\?\.isCompactSummary\?'
+                                              rb'"compaction-summary":', d)),
+    # Класс диспатча берётся ОДНОЗНАЧНО: цитата чужого маркера в теле брифа
+    # угоняла фильтр первым совпадением, а несколько РАЗНЫХ маркеров теперь не
+    # дают пропустить вызов мимо судьи и объявляются отдельно (круг 20, D-8).
+    'dispatch class is taken unambiguously': bool(re.search(
+                                              rb'__cls=\[\.\.\.new Set\(\(String\(__pm\)\.match\('
+                                              rb'/\\\[dispatch-class:\[\\w-\]\+\\\]/g\)\|\|\[\]\)', d))
+                                          and bool(re.search(
+                                              rb'__amb=__cls\.length>1,__cl=__cls\.length===1\?__cls\[0\]:"",', d))
+                                          and bool(re.search(
+                                              rb'if\(__amb\)__deg\.push\("dispatch-class-ambiguous:"'
+                                              rb'\+__dcut\(__cls,4\)\);'
+                                              rb'if\(!__amb&&__mt\(__f\.classes_skip,__cl\)\)', d)),
+    # Вытеснение из стэша хода -- усечение материала судьи, и оно объявляется:
+    # без метки «хода не было» не отличалось от «ход вытеснен» (круг 20, D-11).
+    'an evicted turn is declared': bool(re.search(
+                                              rb'\(globalThis\.__ccJudgeTurnLost\?\?=new Set\(\)\)'
+                                              rb'\.add\(__k\);', d))
+                                          and bool(re.search(
+                                              rb'turnLost:\(\)=>globalThis\.__ccJudgeTurnLost\?\.has\(', d))
+                                          and bool(re.search(
+                                              rb'if\(!__t\.length&&__o\.turnLost&&__o\.turnLost\(\)\)'
+                                              rb'__deg\.push\("turn-evicted"\);', d)),
     # an unknown wrapper under the user role must be VISIBLE in the journal:
     # three defects in a row were one class, found through an incident
     'judge reports unknown user-role wrappers': bool(re.search(
@@ -4401,8 +4608,13 @@ checks = {
                                               rb'__sb=Math\.floor\(__b\*0\.3\)', d)),
     # a rung failure must carry the reason and its own reply, otherwise there
     # is nothing to analyze
+    # `__a.resp=` -- запись тела на УСПЕШНОЙ ноге, к причине провала она
+    # отношения не имеет, а голый префикс остаётся на месте и когда причину
+    # выбросили: журнал снова висит на "api error from the pool: " без текста
+    # (круг 20, C-5). Пинится сама причина.
     'judge keeps the reason of a failed rung': bool(re.search(
-                                              rb'api error from the pool: ', d))
+                                              rb'throw new Error\("api error from the pool: "'
+                                              rb'\+\(__clip\(__et,300\)\|\|', d))
                                           and len(re.findall(rb'__a\.resp=', d)) == 2,
     # ported from tweakcc, whose own patch set cannot apply on this build
     # a bare 'var X=500' matches six unrelated constants in the PRISTINE binary,
@@ -4432,7 +4644,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 114
+EXPECTED_CHECKS = 116
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -4785,7 +4997,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 56 scenarios through a throwaway probes home —
+# and drives probe-bench's 58 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #

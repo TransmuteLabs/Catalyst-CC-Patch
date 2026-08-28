@@ -1962,7 +1962,16 @@ step('21 current turn reachable at tool dispatch', () => {
   const stash =
     '(process.env.CLAUDE_JUDGE?((globalThis.__ccJudgeTurn??=new Map()),' +
     'globalThis.__ccJudgeTurn.set($5.id,$2.includes($3)?$2.slice():[...$2,$3]),' +
-    'globalThis.__ccJudgeTurn.size>64&&globalThis.__ccJudgeTurn.delete(globalThis.__ccJudgeTurn.keys().next().value),0):0)';
+    'globalThis.__ccJudgeTurn.size>64&&(()=>{' +
+    'let __k=globalThis.__ccJudgeTurn.keys().next().value;' +
+    // Вытеснение -- УСЕЧЕНИЕ материала судьи, и оно обязано быть объявлено, как
+    // всякое другое: без метки `turn()` возвращал пустой список, и «хода не
+    // было» не отличалось от «ход вытеснен» (круг 20, D-11). Список потерянных
+    // сам ограничен и вытесняется по тому же правилу -- он память, а не архив.
+    '(globalThis.__ccJudgeTurnLost??=new Set()).add(__k);' +
+    'globalThis.__ccJudgeTurnLost.size>256&&globalThis.__ccJudgeTurnLost.delete(' +
+      'globalThis.__ccJudgeTurnLost.values().next().value);' +
+    'globalThis.__ccJudgeTurn.delete(__k)})(),0):0)';
   js = js.replace(rx, `if(!$1)$2.push($3);$4.streamingToolExecutor.addTool($5,$3,${stash})`);
   applied.push(`judge: current turn stashed by tool_use id (accumulator '${m[2]}', message '${m[3]}')`);
 });
@@ -2225,6 +2234,25 @@ step('22 judge consulted before a subagent dispatch', () => {
     // not a consultation outcome but its absence. A predicate throw leads to a
     // full pass, not to a skip: a filter failure must not blind the probe.
     'if(__o.pre){let __pr=null;try{__pr=__o.pre()}catch{__pr=null}if(__pr)return}' +
+    // Проба, выключенная настройкой, платила полную цену КАЖДОГО вызова:
+    // обход проектного слоя, два чтения TOML и строка журнала -- при том, что
+    // ответ известен заранее. Дешёвый предфильтр `pre` тут не спасает: он
+    // читает состояние ПОТРЕБИТЕЛЯ, а оно выставляется в его же `gate`, до
+    // которого ветка disabled не доходит никогда (круг 20, D-3). Памятка
+    // принадлежит ЯДРУ и решению ядра (общее ядро не хранит состояние
+    // потребителя) и живёт по идентификатору пробы.
+    //
+    // Памятка гасит ПОВТОРНУЮ СТРОКУ ЖУРНАЛА, а не чтение настроек. Первая
+    // редакция выходила из ядра ДО чтения конфига, и это ломало
+    // ратифицированное свойство «конфиг и промт читаются на КАЖДОЙ
+    // консультации»: включённая обратно проба молчала бы ещё до минуты, а в
+    // одном процессе выключение одной пробы уводило в тишину все последующие
+    // консультации той же пробы (измерено probe-bench: 6 сценариев подряд не
+    // получали НИ одного исхода docnum:subset). Настройки читаются всегда;
+    // памятка знает
+    // подпись тех настроек, по которым принято решение, и любая их правка
+    // возвращает строку журнала немедленно.
+    'let __offs=(globalThis.__ccOff??={});' +
     // Every consultation is journaled, not just the ones run with debug on:
     // a WARN has no channel to the model (the dispatch proceeds, and the
     // tool_result the model later sees comes from the agent itself), and a
@@ -2511,6 +2539,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // and on every watcher window afterwards. Ownership is now structural
       // rather than positional.
       'let __t=__o.turn?__o.turn():[];' +
+      'if(!__t.length&&__o.turnLost&&__o.turnLost())__deg.push("turn-evicted");' +
       // Provenance, not just role. Claude Code files tool results, injected
       // reminders, task notifications and peer messages under the SAME "user"
       // role as something the human typed, so a judge shown bare role labels
@@ -2623,20 +2652,40 @@ step('22 judge consulted before a subagent dispatch', () => {
         'if(__c1===!1)__cfgbad=!0;else if(__c1){__cfgseen=!0;__cfg={...__cfg,...__eff(__c1,__o.dirName)}}}' +
       // Disabling a probe is a setting, not a missing file: the registry must
       // be able to silence one consumer without touching the others.
-      'if(__cfg.enabled===!1){await __jlog({outcome:"skip_disabled"});return}' +
+      'if(__cfg.enabled===!1){' +
+        'let __dm=__num("disabled_memo_ms",__cfg.disabled_memo_ms,60000,0),' +
+          // Подпись -- РОВНО те настройки, по которым принято решение (оба
+          // слоя уже слиты в __cfg) плюс их дома. Строка журнала повторяется
+          // не раньше срока, но ЛЮБАЯ правка настроек печатает её сразу:
+          // читатель журнала видит каждое новое состояние, а не одно на минуту.
+          '__sg=__o.dirName+"|"+__phome+"|"+(__phomeP||"")+"|"+JSON.stringify(__cfg),' +
+          '__pv=__offs[__o.dirName];' +
+        'if(!(__pv&&__pv.s===__sg&&__pv.u>globalThis.__ccMono())){' +
+          '__offs[__o.dirName]={u:globalThis.__ccMono()+__dm,s:__sg};' +
+          'await __jlog({outcome:"skip_disabled",memo_ms:__dm})}' +
+        'return}' +
       'if(__cfg.record===!1)__jrec=!1;' +
       'if(__cfg.record_gzip===!0)__jgz=!0;' +
       '__jkeep=__num("records_keep",__cfg.records_keep,500,1);' +
       'let __ask=!0;' +
       'if(__cfg.filter){let __f=__cfg.filter,__pm=String(__o.input?.prompt??""),' +
-        '__cl=(/\\[dispatch-class:([\\w-]+)\\]/.exec(__pm)||[])[1]||"",' +
+        // Первое совпадение по промпту угоняется цитатой: бриф, пересказывающий
+        // чужой диспатч, несёт чужой маркер РАНЬШЕ собственного (круг 20, D-8).
+        // Собираются ВСЕ маркеры; один класс -- он и есть, несколько РАЗНЫХ --
+        // неоднозначность, и она не даёт пропустить вызов мимо судьи: пропуск по
+        // классу отменяется, консультация идёт, расхождение объявлено.
+        '__cls=[...new Set((String(__pm).match(/\\[dispatch-class:[\\w-]+\\]/g)||[])' +
+          '.map((__s)=>__s.slice(16,-1)))],' +
+        '__amb=__cls.length>1,' +
+        '__cl=__cls.length===1?__cls[0]:"",' +
         '__ag=String(__o.input?.subagent_type??""),' +
         '__mt=(__l,__s)=>Array.isArray(__l)&&__l.length>0&&__l.some((__r)=>{try{return new RegExp(__r).test(__s)}catch{return !1}});' +
         'let __by=null;' +
-        'if(__mt(__f.classes_skip,__cl))__by="classes_skip";' +
+        'if(__amb)__deg.push("dispatch-class-ambiguous:"+__dcut(__cls,4));' +
+        'if(!__amb&&__mt(__f.classes_skip,__cl))__by="classes_skip";' +
         'else if(__mt(__f.agents_skip,__ag))__by="agents_skip";' +
-        'else if((Array.isArray(__f.classes_judge)&&__f.classes_judge.length>0)||' +
-          '(Array.isArray(__f.agents_judge)&&__f.agents_judge.length>0)){' +
+        'else if(!__amb&&((Array.isArray(__f.classes_judge)&&__f.classes_judge.length>0)||' +
+          '(Array.isArray(__f.agents_judge)&&__f.agents_judge.length>0))){' +
           'if(!(__mt(__f.classes_judge,__cl)||__mt(__f.agents_judge,__ag)))' +
             '__by=__cl?"not_in_judge_list":"no_class_marker"}' +
         'if(__by){__ask=!1;await __jlog({outcome:"filtered",by:__by,cls:__cl||null,' +
@@ -3129,8 +3178,14 @@ step('22 judge consulted before a subagent dispatch', () => {
         // mechanism exists to avoid. So the decision stands and the cut is
         // DECLARED, the same way every other truncation in this code is: the
         // notice rides the reason text that reaches the main loop.
+        // Полоса pool отдаёт AssistantMessage: её `stop_reason` лежит ВНУТРИ
+        // `.message` -- ровно там, откуда этот же разбор берёт содержимое
+        // (`__j?.message?.content`). Верхнеуровневая форма для неё не
+        // существует, и обрыв на потолке уходил в вердикт без объявления --
+        // в полосе по умолчанию (круг 20, D-2).
         'let __cut1=__j?.choices?.[0]?.finish_reason==="length"' +
-          '||__j?.stop_reason==="max_tokens"?' +
+          '||__j?.stop_reason==="max_tokens"' +
+          '||__j?.message?.stop_reason==="max_tokens"?' +
           '" [\\u043e\\u0442\\u0432\\u0435\\u0442 \\u043e\\u0431\\u043e\\u0440\\u0432\\u0430\\u043d ' +
           '\\u043d\\u0430 \\u043f\\u043e\\u0442\\u043e\\u043b\\u043a\\u0435 ' +
           '\\u0432\\u044b\\u0432\\u043e\\u0434\\u0430]":"";' +
@@ -3303,6 +3358,7 @@ step('22 judge consulted before a subagent dispatch', () => {
       // does not leave an entry behind forever.
       'turn:()=>{let __x=globalThis.__ccJudgeTurn?.get($5);' +
         'globalThis.__ccJudgeTurn?.delete($5);return __x||[]},' +
+      'turnLost:()=>globalThis.__ccJudgeTurnLost?.has($5)||!1,' +
       // The verdict vocabulary is a parameter, not a property of the core: the
       // watcher has its own.
       'rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",' +
