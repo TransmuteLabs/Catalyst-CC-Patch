@@ -1212,7 +1212,18 @@ MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',
 MARK_RE = re.compile('|'.join(re.escape(m) for m in MARKERS))
 # Журнал кампании записывает прошлые сборки по датам: строка «N checks green»
 # под заголовком «Porting to 2.1.237» верна для ТОЙ сборки и не переписывается.
-JOURNAL = 'judge-patch-spec.md'
+# То же и у дома отчётов аудита: в docs/review/ лежат журнал кампании и отчёты
+# аудиторов по раундам, и каждое число в них принадлежит СВОЕЙ дате -- счёт
+# волны 21 не обязан сходиться со счётом волны 24. Дом объявлен КАТАЛОГОМ, а не
+# перечнем имён: отчётов по раунду бывает несколько, и забытое имя молча
+# вернуло бы лавину чужих чисел в вердикт гейта.
+#
+# Исключение объявляется в потоке (см. ниже) вместе с числом исключённых
+# файлов: дыра, о которой не сказано, растёт молча. И объявленный дом обязан
+# СУЩЕСТВОВАТЬ -- иначе переименование каталога оставило бы исключение,
+# не закрывающее ничего, и это выглядело бы как охват.
+JOURNALS = ('judge-patch-spec.md',)
+JOURNAL_DIRS = (os.path.join('docs', 'review'),)
 
 # Маскируется до разбора: дата иначе предложит своё число, а версия -- своё.
 # Маркер сноски «[^1]» тоже число, и гейт брал ЕГО значением при верном счёте
@@ -1833,13 +1844,21 @@ if not os.path.exists(readme):
 # ЗАКРЫТЫМ списком уже дал дыру: AGENTS.md, judge/*.md, scripts/*.sh и probes/
 # в него не входили, а счёт в них лежал. Теперь берётся всё дерево по
 # расширению, за вычетом .git, распакованных образов и журнала кампании.
+for _home in JOURNAL_DIRS:
+    if not os.path.isdir(os.path.join(here, _home)):
+        print("СВЕРКА ЧИСЕЛ ОТКАЗ: объявленный дом журнала кампании не найден: "
+              + _home)
+        sys.exit(1)
+
 files = []
+skipped = []
 for root, dirs, names in os.walk(here):
     dirs[:] = [d for d in dirs
                if d not in ('.git', 'distros', 'node_modules', '__pycache__')]
+    rel_dir = os.path.relpath(root, here)
+    in_journal_home = any(rel_dir == _h or rel_dir.startswith(_h + os.sep)
+                          for _h in JOURNAL_DIRS)
     for name in sorted(names):
-        if name == JOURNAL:
-            continue
         # Скрытые файлы -- не документация: гейт, вырезанный стендом в
         # `.docnum-gate.py`, попадал под собственный обход и краснел на своих
         # же синтетических случаях.
@@ -1847,8 +1866,16 @@ for root, dirs, names in os.walk(here):
             continue
         # Расширения ТЕ ЖЕ, что понимает prose(): ветка для .txt объявлена там,
         # а обход их не собирал -- недостижимая ветка выглядит как охват.
-        if os.path.splitext(name)[1] in ('.md', '.txt', '.sh', '.py', '.js'):
-            files.append(os.path.join(root, name))
+        if os.path.splitext(name)[1] not in ('.md', '.txt', '.sh', '.py', '.js'):
+            continue
+        if name in JOURNALS or in_journal_home:
+            skipped.append(os.path.relpath(os.path.join(root, name), here))
+            continue
+        files.append(os.path.join(root, name))
+if skipped:
+    print("СВЕРКА ЧИСЕЛ: журналы кампании не сканируются (%s) -- файлов: %s"
+          % ('; '.join(list(JOURNALS) + [_h + os.sep for _h in JOURNAL_DIRS]),
+             len(skipped)))
 files = sorted(set(files + [readme, os.path.abspath(sys.argv[1])]))
 
 bad = []

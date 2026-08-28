@@ -26,7 +26,7 @@ D2	README.md	corpus-tools-bench's 78 recorded mutations	corpus-tools-bench's 79 
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 58;	const EXPECTED_SCENARIOS = 59;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
-D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 37	EXPECTED_MUTATION_COUNT = 37	не объявляет свою величину
+D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 39	EXPECTED_MUTATION_COUNT = 39	не объявляет свою величину
 D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=78	EXPECTED_MUTATION_COUNT=78	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
@@ -63,3 +63,5 @@ D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят',
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
 D36	README.md	probe-bench's 5 recorded mutations	probe-bench's 6 recorded mutations	объявлено «5 mutations» (владелец probe-bench)
 D37	README.md	checks-teeth's 14 recorded mutations	checks-teeth's 15 recorded mutations	объявлено «14 mutations» (владелец checks-teeth)
+D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
+D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден

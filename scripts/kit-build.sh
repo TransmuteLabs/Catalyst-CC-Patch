@@ -70,6 +70,11 @@ cp "$ROOT/AGENTS.md"                        "$STAGE/AGENTS.md"
 # spec did not make it into the kit while the build still succeeded. Task
 # briefs (brief-*) do not go into the kit: they are one-off work orders, not a
 # description of the mechanism.
+#
+# Обход НЕрекурсивен намеренно, и обе стороны -- копия и сверка ниже -- обязаны
+# остаться такими: docs/review/ это журнал кампании (ledger раундов и отчёты
+# аудиторов), а не исходник кита. Он живёт в репозитории ради истории и
+# переживания перезагрузки, но в комплект не едет.
 for f in "$ROOT/docs"/*.md; do
   [ -f "$f" ] || continue
   b="$(basename "$f")"
