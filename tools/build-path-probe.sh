@@ -34,8 +34,8 @@
 # path including a kill.
 #
 # Usage:  bash tools/build-path-probe.sh [--case a|b|c] [--version 2.1.247]
-# Cost:   one full pipeline run per case (tweakcc + our patches + 114 checks +
-#         the interface gate + the bench), so a few minutes each.
+# Cost:   one full run per case (tweakcc + our patches + the pipeline's 114
+#         checks + the interface gate + the bench), so a few minutes each.
 
 set -u
 
@@ -105,7 +105,13 @@ fi
 # его по наследству через CLAUDE_PATCH_LOCK_HELD_BY: взяв замок заново, ребёнок
 # встал бы против собственного родителя. Конвейер эту заявку проверяет, а не
 # принимает на слово (см. его преамбулу).
-LOCK_FILE="${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock"
+# Ручка та же, что у конвейера и свипа. Зонд её НЕ читал и брал боевой файл:
+# прогон, уведённый на отдельный замок, получал зонд, севший на замок соседа --
+# то есть ровно ту встречную блокировку, против которой ручка и заведена.
+# Форма выражения одна во всех четырёх домах и запинена стендом: преамбула
+# конвейера обязана оставаться самодостаточной (lock-probe исполняет её
+# ОТДЕЛЬНО, вырезав из файла), поэтому общий файл сюда не подключить.
+LOCK_FILE="${CLAUDE_PATCH_LOCK:-${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock}"
 exec 9>"$LOCK_FILE"
 if command -v flock >/dev/null 2>&1 && flock -n 9; then
   :

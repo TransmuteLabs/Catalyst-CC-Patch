@@ -28,6 +28,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 KIT=$(cd "$HERE/.." && pwd)
 # Те же ручки, что у свипа, и с той же целью -- стенд (см. комментарий там).
 CORPUS="${CORPUS_DIR:-$HOME/.local/share/claude-patch/corpus}"
+# Имя файла корпуса -- из общего дома (см. комментарий там).
+. "$HERE/corpus-file-name.sh"
 LIST="${CORPUS_LIST:-$HERE/corpus-versions.txt}"
 [[ -f "$LIST" ]] || { echo "ОТКАЗ: нет списка версий $LIST" >&2; exit 1; }
 mkdir -p "$CORPUS"
@@ -43,7 +45,15 @@ if command -v shasum >/dev/null 2>&1; then HASH=(shasum -a 256)
 elif command -v sha256sum >/dev/null 2>&1; then HASH=(sha256sum)
 else echo "ОТКАЗ: нет ни shasum, ни sha256sum -- пин корпуса не проверить" >&2; exit 1
 fi
-sha256_of() { "${HASH[@]}" "$1" | awk '{print $1}'; }
+# Пустой результат хеширования -- НЕ расхождение пина: файл без права чтения
+# давал «файл » и объявлялся подменённым. Свип это различает с волны 18, а
+# наполнитель говорил о подмене там, где нечего читать -- и искать шли не там.
+sha256_of() {
+  local out
+  out=$("${HASH[@]}" "$1" 2>/dev/null | awk '{print $1}')
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
 
 # Пины записываются ПОСЛЕ обхода, одной перезаписью.
 #
@@ -97,11 +107,14 @@ rc=0
 declare -a NEW_PINS=()
 while IFS=$'\t' read -r label version pin; do
   [[ -n "${label:-}" ]] || continue
-  dst="$CORPUS/$version.pristine"
+  dst="$CORPUS/$(corpus_file_name "$version")"
   tmp=$(mktemp "$dst.part.XXXXXX") || { echo "ОТКАЗ: не создать временный файл для $version" >&2; rc=1; continue; }
 
   if [[ -s "$dst" ]]; then
-    got=$(sha256_of "$dst")
+    if ! got=$(sha256_of "$dst"); then
+      rm -f "$tmp"
+      echo "ОТКАЗ: $version лежит, но не прочитать $dst" >&2; rc=1; continue
+    fi
     if [[ "$pin" != "-" ]]; then
       rm -f "$tmp"
       if [[ "$got" == "$pin" ]]; then
@@ -120,7 +133,9 @@ while IFS=$'\t' read -r label version pin; do
     if ! fetch_to "$version" "$tmp"; then
       rm -f "$tmp"; echo "ОТКАЗ: не скачать $version для сверки" >&2; rc=1; continue
     fi
-    fresh=$(sha256_of "$tmp")
+    if ! fresh=$(sha256_of "$tmp"); then
+      rm -f "$tmp"; echo "ОТКАЗ: $version скачан, но не прочитать для сверки" >&2; rc=1; continue
+    fi
     rm -f "$tmp"
     if [[ "$fresh" == "$got" ]]; then
       NEW_PINS+=("$version" "$fresh")
@@ -137,7 +152,9 @@ while IFS=$'\t' read -r label version pin; do
   if ! fetch_to "$version" "$tmp"; then
     rm -f "$tmp"; echo "ОТКАЗ на $version" >&2; rc=1; continue
   fi
-  got=$(sha256_of "$tmp")
+  if ! got=$(sha256_of "$tmp"); then
+    rm -f "$tmp"; echo "ОТКАЗ: $version скачан, но не прочитать $tmp" >&2; rc=1; continue
+  fi
   if [[ "$pin" != "-" && "$got" != "$pin" ]]; then
     # Реестр отдал не то, что записано. Это не повод молча заменить пин: файл
     # выбрасывается, прогон краснеет, разбирается человек.
