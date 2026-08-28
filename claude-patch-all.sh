@@ -11,6 +11,21 @@
 #   bash claude-patch-all.sh --target X --expect-sha <hex>  # ... and prove X is X
 #   CLAUDE_PATCH_SKIP_MODELS=1 bash claude-patch-all.sh # skip the model price/window sync
 #
+# EXIT CODES -- the kit's shared table; every tool declares the subset it can
+# return, and every caller branches on the CLASS, not on "non-zero". One code
+# for two different answers is how a broken machine spent ten minutes looking
+# like a busy lock (round 18, F-2).
+#   0  green
+#   1  a refusal on the merits: a gate failed, an assertion does not hold
+#   2  the call contract is broken (unknown argument/mode, wrong arity), or an
+#      instrument cannot measure at all: its anchor/table is gone
+#   3  the lock is held by another live run -- retry later
+#   4  the bytes are not the ones named by --expect-sha
+#   5  nothing to measure on this machine -- a skip, not a refusal (the
+#      pipeline never returns it; see tools/build-path-probe.sh)
+#   6  the environment or the lock machinery is broken: an inherited ownership
+#      claim that does not hold, perl flock unusable. Retrying will not help.
+#
 # A DEFAULT RUN NEVER TOUCHES THE LIVE FILE UNTIL EVERY GATE HAS PASSED: it
 # builds into `<binary>.staging` and swaps that in with a rename at the end (see
 # 0b). Patching in place rewrites a live executable under the process reading
@@ -89,6 +104,12 @@ set -euo pipefail
 # проверить дверь занятого замка, не занимая боевой файл, иначе законный
 # прогон оператора в это окно получает FATAL от стенда.
 __lock="${CLAUDE_PATCH_LOCK:-${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock}"
+# Замок не на боевом файле -- значит, прогон НЕ выстроен в очередь с настоящими
+# сборками: два таких прогона одновременно правят один образ. Для зондов и
+# стендов это штатно и ради этого ручка и заведена; молчать об этом нельзя --
+# читатель лога иначе не отличит защищённый прогон от незащищённого.
+[[ -z "${CLAUDE_PATCH_LOCK:-}" ]] \
+  || echo "Lock: $__lock (CLAUDE_PATCH_LOCK; NOT the shared one — this run is not queued behind real builds)"
 
 # УНАСЛЕДОВАННЫЙ ЗАМОК. Законный держатель-предок ровно один --
 # tools/build-path-probe.sh: он одалживает ЖИВОЕ состояние ~/.tweakcc
@@ -137,7 +158,11 @@ if [[ -n "${CLAUDE_PATCH_LOCK_HELD_BY:-}" ]]; then
     echo "FATAL: CLAUDE_PATCH_LOCK_HELD_BY=$CLAUDE_PATCH_LOCK_HELD_BY заявляет владение замком," >&2
     echo "       но владение не подтверждается: $__why." >&2
     echo "       Работать без замка нельзя: состояние tweakcc общее." >&2
-    exit 3
+    # Код 6, а НЕ 3: это сломанное окружение, а не занятый замок. Разница не
+    # косметическая -- свип на коде 3 ждёт бюджет замка и записывает «НЕ
+    # ИЗМЕРЕНО(замок)», то есть лживая заявка десять минут выглядела бы чужим
+    # прогоном и уходила в вердикт как «не измерено», а не как «кит сломан».
+    exit 6
   fi
 else
   exec 9>"$__lock"
@@ -279,7 +304,18 @@ __kill_kids() {
     if kill -"$__sig" "$__c" 2>/dev/null; then __kids_hit=$((__kids_hit + 1)); fi
   done
 }
+# Часовой оборванного прогона.
+#
+# bash 3.2 (единственный на этой машине): фатальная ошибка ПОДСТАНОВКИ --
+# unbound variable под `set -u`, `${x:?}`, bad substitution -- в скрипте с
+# EXIT-трапом отдаёт вызывающему код 0. Измерено 2026-08-28 на четырёх формах:
+# без трапа код 1, с трапом 0, и `rc=$?` внутри трапа тоже 0 -- «сохранить и
+# вернуть» не спасает. Провал невидим ровно там, где его никто не ждёт: на
+# ветке отказа, которую зелёный прогон не проходит. Поэтому штатный конец
+# ОБЪЯВЛЯЕТ себя (__DONE=1), а трап без объявления краснит сам.
+__DONE=0
 __release_lock() {
+  __rc=$?
   # Одного TERM мало. Ядерный замок держится, пока жив ХОТЬ ОДИН наследник
   # дескриптора 9, поэтому ребёнок, игнорирующий TERM или застрявший в syscall,
   # держал бы замок и ПОСЛЕ выхода этой оболочки -- а текст отказа советовал бы
@@ -295,7 +331,12 @@ __release_lock() {
   fi
   # Каталог сносит ТОЛЬКО его владелец: см. подтверждение владения выше.
   [[ "${__lockdir_owned:-0}" == 1 ]] && rm -rf "$__lockdir"
-  return 0
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "FATAL: прогон оборвался, не дойдя до конца (ошибка оболочки выше)." >&2
+    echo "  Ничего не установлено; код возврата 1, а не молчаливый ноль." >&2
+    exit 1
+  fi
+  exit "$__rc"
 }
 trap '__release_lock' EXIT
 
@@ -385,7 +426,7 @@ while [[ $# -gt 0 ]]; do
                  EXPECT_SHA="$1"; shift ;;
     --update)    DO_UPDATE=1; shift
                  [[ $# -gt 0 && "$1" != --* ]] && { UPDATE_VER="$1"; shift; } || true ;;
-    -h|--help)   sed -n '2,35p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,/^[^#]/p' "$0" | sed '$d'; __DONE=1; exit 0 ;;
     *)           echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -576,14 +617,15 @@ fi
 #
 # So the question is asked by the program that READS the file, at the moment it
 # reads it, and the answer is printed either way: `--expect-sha` refuses (code
-# 4, its own code -- 3 already means "the lock is busy"), and the announced
+# 4 of the kit's table at the top of this file; a target that cannot be READ at
+# all is not a pin mismatch and exits 1), and the announced
 # digest lets a caller that did not pin anything still bind the run's verdict to
 # the bytes afterwards.
 sha_of() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 HANDED_SHA="$(sha_of "$BIN")"
 if [[ -z "$HANDED_SHA" ]]; then
   echo "ERROR: could not read $BIN to take its digest" >&2
-  exit 4
+  exit 1
 fi
 if [[ -n "$EXPECT_SHA" && "$HANDED_SHA" != "$EXPECT_SHA" ]]; then
   echo "ERROR: the target is not the bytes named by --expect-sha" >&2
@@ -592,7 +634,13 @@ if [[ -n "$EXPECT_SHA" && "$HANDED_SHA" != "$EXPECT_SHA" ]]; then
   exit 4
 fi
 
-python3 "$HERE/tools/image-check.py" "$BIN" || exit 1
+python3 "$HERE/tools/image-check.py" "$BIN" || {
+  __rc=$?
+  # Класс отказа называется по коду: «образ не тот» и «прибор вызван неверно»
+  # -- разные ответы, и общий текст отправлял бы читателя чинить не то.
+  [[ $__rc -eq 2 ]] && echo "FATAL: image-check.py вызван неверно (rc=2) -- это не про образ" >&2
+  exit 1
+}
 
 echo "Target binary: $BIN"
 
@@ -768,6 +816,12 @@ PRISTINE_SRC="${BIN%.staging}.orig"
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
 CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0}"
+# Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
+# качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
+# чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
+[[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
+   && "$CATALYST_TWEAKCC_SHA" == "ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0" ]] \
+  || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
 # TWEAKCC_LOCAL is the development escape hatch: point it at a built
@@ -1175,7 +1229,14 @@ fi
 # not parse at all. The check must be CALLED: while it was merely shipped in
 # the kit, it was broken by two commits and stayed silent.
 echo "==> Разбор вклеиваемого кода"
-node "$(dirname "$0")/tools/emit-check.js"
+node "$(dirname "$0")/tools/emit-check.js" || {
+  __rc=$?
+  if [[ $__rc -eq 2 ]]; then
+    echo "FATAL: разбор НЕ ВЫПОЛНЕН: прибор не может мерить (якорь/строка пропали, rc=2)." >&2
+    echo "  Это не «код не парсится» -- покрытие снято, причина выше." >&2
+  fi
+  exit 1
+}
 
 # The verify block is a python heredoc, and NOTHING was looking inside it:
 # `bash -n` treats a heredoc as data and `node --check` has no opinion about
@@ -1297,6 +1358,34 @@ if NEG.search('if { echo x; } > "$f"; then'):
     print("ГЕЙТ ФОРМ ЛОЖНО СРАБАТЫВАЕТ: форма без отрицания для него тоже находка")
     sys.exit(1)
 
+# Правило 3: EXIT-трап без часового завершения.
+#
+# bash 3.2 (единственный на этой машине) отдаёт код 0, когда скрипт с
+# EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
+# `set -u`, `${x:?}`, bad substitution): трап исполняется, `$?` внутри него --
+# ноль, и вызывающий видит успех вместо оборванного прогона. Измерено
+# 2026-08-28 на зонде, который так «зеленел» посреди таблицы. Лечится только
+# ЧАСОВЫМ: штатный конец объявляет себя (`__DONE=1`), трап без объявления
+# краснит сам. Правило файловое, а не строчное: трап и часовой стоят в разных
+# местах файла.
+TRAP = re.compile(r'^\s*trap\s+[^\n]*\bEXIT\b', re.M)
+
+def sentinel_missing(text):
+    lines = [l for l in text.split('\n') if not l.lstrip().startswith('#')]
+    body = '\n'.join(lines)
+    if not TRAP.search(body):
+        return False
+    return '__DONE=1' not in body or '__DONE=0' not in body
+
+# Контроль СКЛЕИВАЕТСЯ: записанный целиком, он был бы находкой в самом гейте.
+_trap_line = 'trap' + ' cleanup EXIT'
+if not sentinel_missing('set -u\n' + _trap_line + '\nrm -rf x\n'):
+    print("ГЕЙТ ЧАСОВОГО СЛЕП: он не видит трапа без часового")
+    sys.exit(1)
+if sentinel_missing('__DONE=0\n' + _trap_line + '\n__DONE=1\n'):
+    print("ГЕЙТ ЧАСОВОГО ЛОЖНО СРАБАТЫВАЕТ: файл с часовым для него тоже находка")
+    sys.exit(1)
+
 bad = []
 scanned = 0
 for dirpath, dirnames, filenames in os.walk(root):
@@ -1310,6 +1399,9 @@ for dirpath, dirnames, filenames in os.walk(root):
         except (OSError, UnicodeDecodeError):
             continue
         scanned += 1
+        if sentinel_missing(text):
+            bad.append(f"{os.path.relpath(f, root)}: EXIT-трап без часового "
+                       f"завершения -- обрыв на ошибке подстановки вернёт 0")
         for n, line in enumerate(text.split('\n'), 1):
             # Строка-комментарий целиком пропускается: она не исполняется, а
             # объяснить дефект без того, чтобы написать его форму, нельзя --
@@ -1337,13 +1429,26 @@ print(f"ФОРМЫ ОБОЛОЧКИ ЧИСТЫ: разобрано файлов 
 SHVARS
 
 echo "==> Стенд инструментов судьи"
-python3 "$(dirname "$0")/tools/judge-tools-bench.py" || { echo "СТЕНД ИНСТРУМЕНТОВ УПАЛ" >&2; exit 1; }
+python3 "$(dirname "$0")/tools/judge-tools-bench.py" || {
+  __rc=$?
+  [[ $__rc -eq 2 ]] && echo "СТЕНД ИНСТРУМЕНТОВ НЕ ЗАПУСТИЛСЯ: контракт вызова (rc=2)" >&2 \
+                    || echo "СТЕНД ИНСТРУМЕНТОВ УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
+  exit 1
+}
 # Зубы стенда проверяются ТУТ ЖЕ, а не по памяти автора: --self-check применяет
 # к копиям дерева мутации, воспроизводящие починенные дефекты, и требует, чтобы
 # каждая покраснела. Без этого прогона беззубый стенд неотличим от рабочего --
 # ровно тот случай, ради которого стенд и написан (13 с на сборку).
-python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check \
-  || { echo "СТЕНД ИНСТРУМЕНТОВ БЕЗ ЗУБОВ: мутация не покраснела" >&2; exit 1; }
+python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check || {
+  __rc=$?
+  case $__rc in
+    2) echo "СТЕНД ИНСТРУМЕНТОВ: self-check НЕ ЗАПУСТИЛСЯ (контракт вызова, rc=2)" >&2 ;;
+    3) echo "СТЕНД ИНСТРУМЕНТОВ: КОНТРОЛЬ ПРОВАЛЕН -- пристинная копия уже красная" >&2 ;;
+    4) echo "СТЕНД ИНСТРУМЕНТОВ: таблица мутаций не той длины, чем объявлено" >&2 ;;
+    *) echo "СТЕНД ИНСТРУМЕНТОВ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2 ;;
+  esac
+  exit 1
+}
 
 # --- 0d. the numbers stated in the docs must be the numbers that are declared --
 # A count written in prose has no reader, so it goes stale by default. This is
@@ -1378,7 +1483,8 @@ OWNERS = (
                   'конвейером', 'claude-patch-all'), None,
      {'checks': r'^EXPECTED_CHECKS = (\d+)$'}),
     ('probe-bench', ('probe-bench',), ('tools', 'probe-bench.js'),
-     {'scenarios': r'^const EXPECTED_SCENARIOS = (\d+);$'}),
+     {'scenarios': r'^const EXPECTED_SCENARIOS = (\d+);$',
+      'mutations': r'^const EXPECTED_MUTATIONS = (\d+);$'}),
     ('judge-tools-bench', ('judge-tools-bench',), ('tools', 'judge-tools-bench.py'),
      {'scenarios': r'^EXPECTED_SCENARIOS = (\d+)$',
       'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
@@ -2103,8 +2209,16 @@ PYDOCS
 # связку на копии кита: пристинный кит обязан быть зелёным, затем каждая
 # записанная мутация обязана покраснить гейт своей причиной (1 с на сборку).
 echo "==> Зубы гейта чисел"
-python3 "$(dirname "$0")/tools/docnum-bench.py" \
-  || { echo "ГЕЙТ ЧИСЕЛ БЕЗ ЗУБОВ: мутация не покраснела" >&2; exit 1; }
+python3 "$(dirname "$0")/tools/docnum-bench.py" || {
+  __rc=$?
+  case $__rc in
+    2) echo "ГЕЙТ ЧИСЕЛ: СТЕНД НЕ ЗАПУСТИЛСЯ -- прибор не может мерить (нет таблицы/якоря)" >&2 ;;
+    3) echo "ГЕЙТ ЧИСЕЛ: КОНТРОЛЬ ПРОВАЛЕН -- пристинный кит уже красный" >&2 ;;
+    4) echo "ГЕЙТ ЧИСЕЛ: в таблице не столько мутаций, сколько объявлено" >&2 ;;
+    *) echo "ГЕЙТ ЧИСЕЛ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2 ;;
+  esac
+  exit 1
+}
 
 echo "==> Applying our multi-provider patches"
 "${TWEAKCC[@]}" adhoc-patch \
@@ -4316,11 +4430,17 @@ if [[ -f "$PRISTINE_SRC" ]]; then
   FLOOR_IMG="$PRISTINE_SRC"
 elif [[ -n "${CLAUDE_PATCH_FLOOR_IMAGE:-}" && -f "${CLAUDE_PATCH_FLOOR_IMAGE:-}" ]]; then
   FLOOR_IMG="$CLAUDE_PATCH_FLOOR_IMAGE"
+  echo "Пол проверок меряется на образе из CLAUDE_PATCH_FLOOR_IMAGE: $FLOOR_IMG"
 fi
 if [[ -n "$FLOOR_IMG" ]]; then
   echo "==> Пол проверок на пристинном образе"
-  bash "$HERE/tools/checks-on-image.sh" --floor "$FLOOR_IMG" "$OUR_PATCH" \
-    || { echo "FATAL: пол проверок не сошёлся -- см. выше" >&2; exit 1; }
+  bash "$HERE/tools/checks-on-image.sh" --floor "$FLOOR_IMG" "$OUR_PATCH" || {
+    __rc=$?
+    [[ $__rc -eq 2 ]] \
+      && echo "FATAL: пол проверок НЕ ИЗМЕРЕН: прибор вызван неверно или якорь пропал (rc=2)" >&2 \
+      || echo "FATAL: пол проверок не сошёлся -- см. выше" >&2
+    exit 1
+  }
 else
   echo "==> Пол проверок ПРОПУЩЕН: пристинного близнеца нет ($PRISTINE_SRC)"
 fi
@@ -4505,20 +4625,42 @@ GATE_PID=$!
 # affair, and a healthy build that misses the budget is reported as a failure.
 # 40s was a guess that a loaded box can lose; this is generous and adjustable.
 GATE_BUDGET="${CLAUDE_PATCH_GATE_BUDGET:-150}"
+# G-5: поднятый или срезанный бюджет меняет СМЫСЛ вердикта этого гейта
+# (срезанный краснит здоровую сборку, поднятый прячет медленную), поэтому
+# отклонение от умолчания объявляется в потоке, а не остаётся в окружении.
+[[ "$GATE_BUDGET" == "150" ]] \
+  || echo "Interface gate: budget ${GATE_BUDGET}s (CLAUDE_PATCH_GATE_BUDGET, default 150)"
+
+# Ответ помощника читается КАК ОТВЕТ ПРИБОРА. Пустой ответ или ненулевой код --
+# это отказ РАЗБОРА захвата (нет python3, захват не прочитать), а не медленный
+# интерфейс: без этой развилки прогон уходил в ветку таймаута и печатал «гейт
+# не дождался отрисовки за N с» -- то есть поломка прибора объявлялась
+# свойством продукта.
+gate_state_checked() {
+  local out rc=0
+  out="$(gate_state)" || rc=$?
+  if (( rc != 0 )) || [[ -z "$out" ]]; then
+    printf 'TOOLFAIL разбор захвата не ответил (rc=%s, ответ %s символов)\n' \
+      "$rc" "${#out}"
+    return 0
+  fi
+  printf '%s\n' "$out"
+}
+
 GATE_STATE=PENDING
 GATE_EXITED=0
 for _ in $(seq 1 "$GATE_BUDGET"); do
   sleep 1
-  GATE_STATE="$(gate_state)"
+  GATE_STATE="$(gate_state_checked)"
   case "$GATE_STATE" in
-    ERROR*) break ;;
+    ERROR*|TOOLFAIL*) break ;;
   esac
   if ! kill -0 $GATE_PID 2>/dev/null; then
     # It ended on its own. That is not success by itself: read the exit status.
     GATE_EXITED=1
     wait $GATE_PID 2>/dev/null
     GATE_RC=$?
-    GATE_STATE="$(gate_state)"
+    GATE_STATE="$(gate_state_checked)"
     break
   fi
   if [[ "$GATE_STATE" == RENDERED ]]; then
@@ -4526,8 +4668,8 @@ for _ in $(seq 1 "$GATE_BUDGET"); do
     # while instead of declaring victory three seconds in.
     for _ in $(seq 1 8); do
       sleep 1
-      GATE_STATE="$(gate_state)"
-      [[ "$GATE_STATE" == ERROR* ]] && break
+      GATE_STATE="$(gate_state_checked)"
+      [[ "$GATE_STATE" == ERROR* || "$GATE_STATE" == TOOLFAIL* ]] && break
       # The same death the outer loop handles, and it must be handled the same
       # way HERE -- this is the branch the follow-up loop exists for. Breaking
       # without reading the status left GATE_EXITED at 0, and the block below
@@ -4539,7 +4681,7 @@ for _ in $(seq 1 "$GATE_BUDGET"); do
         GATE_EXITED=1
         wait $GATE_PID 2>/dev/null
         GATE_RC=$?
-        GATE_STATE="$(gate_state)"
+        GATE_STATE="$(gate_state_checked)"
         break
       fi
     done
@@ -4574,6 +4716,12 @@ case "$GATE_STATE" in
     fi
     echo "Interface: came up in a throwaway home and drew its message, no name or type errors"
     rm -rf "$GATE_HOME"
+    ;;
+  TOOLFAIL*)
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- сломан разбор захвата, а не продукт" >&2
+    echo "  ${GATE_STATE#TOOLFAIL }" >&2
+    echo "  capture kept at $GATE_LOG" >&2
+    exit 1
     ;;
   ERROR*)
     echo "FATAL: the interface does not come up — leaving the launcher alone" >&2
@@ -4687,6 +4835,21 @@ else
     echo "  Set CLAUDE_PATCH_SKIP_BENCH=1 to build without this gate." >&2
     exit 1
   fi
+
+  # Второй прогон -- зубы самого стенда, как у стенда инструментов судьи.
+  # Сломай сравнивающий, и первый прогон печатает «поведение по спецификации»
+  # для любого образа: гейт, доказывающий поведение, обязан сперва доказать,
+  # что умеет краснеть. Мутации ломают КОПИЮ стенда и обязаны СНЯТЬ красноту,
+  # которую пристинная копия видит на отраве.
+  bun "$BENCH" --self-check --binary "$BIN" || {
+    __rc=$?
+    case $__rc in
+      2) echo "СТЕНД ЗОНДОВ: self-check НЕ ЗАПУСТИЛСЯ -- прибор не может мерить (rc=2)" >&2 ;;
+      4) echo "СТЕНД ЗОНДОВ: таблица мутаций не той длины, чем объявлено" >&2 ;;
+      *) echo "СТЕНД ЗОНДОВ БЕЗ ЗУБОВ: запись таблицы не сняла красноту отравы" >&2 ;;
+    esac
+    exit 1
+  }
 fi
 
 # --- 5b. only now may the launcher point at the new build ----------------------
@@ -4851,3 +5014,5 @@ else
   echo "    ~/.tweakcc/native-binary.backup --version"
   echo "  A complete stock image prints a version; a truncated one does not."
 fi
+
+__DONE=1   # штатный конец: см. «Часовой оборванного прогона» выше

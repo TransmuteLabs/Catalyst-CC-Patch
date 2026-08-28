@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Герметичный стенд для compact.py и прополки временных лаунчеров."""
+"""Герметичный стенд для compact.py и прополки временных лаунчеров.
+
+Коды выхода (подмножество общей таблицы кита -- см. шапку claude-patch-all.sh):
+  0  всё сошлось: каждая дверь на месте, каждая мутация покраснела свою
+  1  дверь не сошлась, либо мутация прошла молча / покрасила чужую
+  2  контракт вызова нарушен (argparse)
+  3  контроль провален: ПРИСТИННАЯ копия дерева уже красная
+  4  длина таблицы не равна объявленной в EXPECTED_MUTATIONS
+"""
 
 from __future__ import annotations
 
@@ -263,6 +271,9 @@ def scenario_9(outputs: list[dict[str, int]]) -> None:
 
 
 def scenario_10(outputs: list[dict[str, int]]) -> None:
+    # Пустой список -- не «ложных исчезновений нет», а «мерить было нечего»:
+    # такой сценарий проходит зелёным, ничего не проверив.
+    require(bool(outputs), "нечего проверять: ни один сценарий не сдал счётчики")
     bad = [counters for counters in outputs if counters["vanished"] != 0]
     require(not bad, f"ложные исчезновения в сценариях compact.py: {bad}")
 
@@ -538,52 +549,112 @@ def mutation_m10(root: Path) -> None:
     )
 
 
+# Каждая мутация обязана покраснить СВОЙ сценарий СВОЕЙ причиной. Голый
+# `rc == 1` этого не доказывает: тот же код даёт необработанное исключение
+# внутри копии стенда и мутация, свалившая ЧУЖУЮ дверь. Сценарий и причина
+# ниже -- измеренные, а не назначенные: прогон каждой из них показывает
+# именно эту строку (раунд 18, E-1).
+MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
+    ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
+    ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
+    ("M3", mutation_m3, 9, "счётчик orphans: ожидалось 0, получено 1"),
+    ("M4", mutation_m4, 9, "OverflowError"),
+    ("M5", mutation_m5, 13, "прополка лаунчера сняла имя вне формы писателя"),
+    ("M6", mutation_m6, 14, "новая ссылка снята после подмены"),
+    ("M7", mutation_m7, 17, "ветка FileNotFoundError больше не ведёт к пересжатию"),
+    ("M8", mutation_m8, 18, "исчезнувший до замера исходник снова не имеет своего счётчика"),
+    ("M9", mutation_m9, 15, "снята запись живого процесса чужого пользователя"),
+    ("M10", mutation_m10, 16, "PermissionError"),
+]
+
+
+def fail_segment(output: str, scenario: int) -> str | None:
+    """Текст провала ИМЕННО этого сценария (сообщение бывает многострочным)."""
+    head = f"judge-tools-bench: СЦЕНАРИЙ {scenario}: FAIL:"
+    start = output.find(head)
+    if start < 0:
+        return None
+    rest = output[start + len(head):]
+    end = rest.find("judge-tools-bench: ")
+    return rest if end < 0 else rest[:end]
+
+
+def copy_tree(root: Path) -> None:
+    (root / "judge").mkdir()
+    (root / "tools").mkdir()
+    shutil.copy2(COMPACT, root / "judge" / "compact.py")
+    shutil.copy2(PATCHER, root / "claude_patch.py")
+    shutil.copy2(BENCH, root / "tools" / "judge-tools-bench.py")
+
+
+def run_copy(root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(root / "tools" / "judge-tools-bench.py")],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+
+
 def run_self_check() -> int:
-    mutations: list[tuple[str, Callable[[Path], None]]] = [
-        ("M1", mutation_m1),
-        ("M2", mutation_m2),
-        ("M3", mutation_m3),
-        ("M4", mutation_m4),
-        ("M5", mutation_m5),
-        ("M6", mutation_m6),
-        ("M7", mutation_m7),
-        ("M8", mutation_m8),
-        ("M9", mutation_m9),
-        ("M10", mutation_m10),
-    ]
+    # Контроль: пристинная копия дерева обязана быть зелёной. Иначе краснеет
+    # что угодно, и каждая мутация «подтвердится» чужим отказом.
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        copy_tree(root)
+        control = run_copy(root)
+        if control.returncode != 0:
+            print(
+                "judge-tools-bench: КОНТРОЛЬ ПРОВАЛЕН -- пристинная копия уже "
+                f"красная (rc={control.returncode}); мутации ничего не докажут\n"
+                f"{control.stdout}{control.stderr}"
+            )
+            return 3
+    print("judge-tools-bench: КОНТРОЛЬ без мутации: ЗЕЛЁНО")
+
+    mutations = MUTATIONS
     reddened = 0
-    for name, mutate in mutations:
+    for name, mutate, scenario, cause in mutations:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            (root / "judge").mkdir()
-            (root / "tools").mkdir()
-            shutil.copy2(COMPACT, root / "judge" / "compact.py")
-            shutil.copy2(PATCHER, root / "claude_patch.py")
-            shutil.copy2(BENCH, root / "tools" / "judge-tools-bench.py")
+            copy_tree(root)
             try:
                 mutate(root)
             except Exception as error:
                 print(f"judge-tools-bench: МУТАЦИЯ {name}: FAIL: {error}")
                 continue
-            result = subprocess.run(
-                [sys.executable, str(root / "tools" / "judge-tools-bench.py")],
-                cwd=root,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 1:
-                reddened += 1
-                print(f"judge-tools-bench: МУТАЦИЯ {name}: RED")
-            else:
+            result = run_copy(root)
+            output = result.stdout + result.stderr
+            segment = fail_segment(output, scenario)
+            if result.returncode != 1:
                 print(
                     f"judge-tools-bench: МУТАЦИЯ {name}: FAIL: ожидался rc=1, "
-                    f"получен rc={result.returncode}\n{result.stdout}{result.stderr}"
+                    f"получен rc={result.returncode}\n{output}"
                 )
+            elif segment is None:
+                print(
+                    f"judge-tools-bench: МУТАЦИЯ {name}: КРАСНАЯ НЕ ТОЙ ДВЕРЬЮ: "
+                    f"сценарий {scenario} не упал\n{output}"
+                )
+            elif cause not in segment:
+                print(
+                    f"judge-tools-bench: МУТАЦИЯ {name}: КРАСНАЯ НЕ ПО ТОЙ ПРИЧИНЕ "
+                    f"(нет «{cause}» в провале сценария {scenario}):\n{segment}"
+                )
+            else:
+                reddened += 1
+                print(f"judge-tools-bench: МУТАЦИЯ {name}: RED (сценарий {scenario})")
     print(
         f"judge-tools-bench: SELF-CHECK мутаций={len(mutations)} "
         f"покраснели={reddened}"
     )
-    return 0 if len(mutations) == EXPECTED_MUTATIONS and reddened == len(mutations) else 1
+    if len(mutations) != EXPECTED_MUTATIONS:
+        print(
+            f"judge-tools-bench: ОТКАЗ -- мутаций {len(mutations)}, "
+            f"объявлено {EXPECTED_MUTATIONS}"
+        )
+        return 4
+    return 0 if reddened == len(mutations) else 1
 
 
 def main() -> int:

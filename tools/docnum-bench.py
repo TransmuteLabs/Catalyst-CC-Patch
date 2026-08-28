@@ -14,6 +14,16 @@
 
 Гейт вырезается из конвейера по якорю. Якорь пропал -- отказ, а не тихий
 пропуск: молча пропущенный стенд это ровно та тишина, ради которой он писан.
+
+Коды выхода (подмножество общей таблицы кита -- см. шапку claude-patch-all.sh):
+  0  каждая записанная мутация покраснела своей причиной
+  1  зубы не держатся: мутация прошла молча или покраснела ЧУЖОЙ причиной
+  2  прибор не может мерить: нет таблицы, строка не о пяти полях, якорь гейта
+     пропал или встречается не один раз
+  3  контроль провален: ПРИСТИННЫЙ кит уже красный, и мутация ничего не докажет
+  4  длина таблицы не равна объявленной в EXPECTED_MUTATIONS
+Один код на два ответа уже стоил кита: вызывающий печатал «мутация не
+покраснела» на КАЖДЫЙ ненулевой, включая пропавший якорь (раунд 18, F-9).
 """
 import io
 import os
@@ -28,7 +38,7 @@ TABLE = os.path.join(HERE, 'docnum-mutations.tsv')
 PIPELINE = 'claude-patch-all.sh'
 ANCHOR = 'python3 - "$0" <<\'PYDOCS\'\n'
 END = '\nPYDOCS\n'
-EXPECTED_MUTATIONS = 35
+EXPECTED_MUTATIONS = 36
 
 
 def read(path):
@@ -95,7 +105,7 @@ def main():
             say('не докажут. Вывод гейта:')
             for line in out.splitlines():
                 print('    ' + line)
-            return 1
+            return 3
         say('КОНТРОЛЬ без мутации: ЗЕЛЁНО')
 
         reddened = 0
@@ -131,7 +141,7 @@ def main():
         if len(rows) != EXPECTED_MUTATIONS:
             say('ОТКАЗ -- в таблице %d строк, объявлено %d'
                 % (len(rows), EXPECTED_MUTATIONS))
-            return 1
+            return 4
         return 0 if reddened == len(rows) else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)

@@ -1,9 +1,20 @@
 #!/usr/bin/env bun
+// КОДЫ ВОЗВРАТА (подмножество общей конвенции кита, README «Exit codes»):
+//   0 -- поведение образа сошлось со спецификацией (в --self-check: каждая
+//        запись таблицы ослепила probe-bench)
+//   1 -- отказ по существу: поведение образа разошлось со спецификацией
+//        (в --self-check: запись не сняла красноту, то есть стенд без зубов)
+//   2 -- прибор не может мерить: контракт вызова нарушен (нет --binary,
+//        неизвестный флаг) или таблица сценариев структурно битая (сценарий
+//        без expected, дубль имени, неизвестный ключ expected)
+//   4 -- объявленное число не сходится с фактическим (EXPECTED_SCENARIOS,
+//        EXPECTED_MUTATIONS): правка таблицы без правки числа
 'use strict';
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const START_MARKER = '/*__ccProbe0*/';
 const END_MARKER = '/*__ccProbe1*/';
@@ -32,10 +43,13 @@ function failSetup(message) {
 function parseArgs(argv) {
   let binary = null;
   let json = null;
+  let selfCheck = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument === '--binary' || argument === '--json') {
+    if (argument === '--self-check') {
+      selfCheck = true;
+    } else if (argument === '--binary' || argument === '--json') {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) {
         throw new Error(`${argument} requires a path`);
@@ -48,8 +62,10 @@ function parseArgs(argv) {
     }
   }
 
-  if (!binary) throw new Error('usage: bun tools/probe-bench.js --binary <path> [--json <file>]');
-  return { binary, json };
+  if (!binary) {
+    throw new Error('usage: bun tools/probe-bench.js [--self-check] --binary <path> [--json <file>]');
+  }
+  return { binary, json, selfCheck };
 }
 
 // The image is a single-file executable bun, and the carved-out block runs on
@@ -445,9 +461,10 @@ const scenarios = [
     expected: { passed: false, outcome: 'block_degraded', poolCalls: 0, nudges: 0,
                 degPrefixes: BROKEN_TOML_DEG_PREFIX },
   },
-  // `expected: null` short-circuits checkMismatch to false, so these two ran and
-  // were counted among the scenarios that "behaved as specified" while having no
-  // specification at all. They are the two that matter most to this bench: both
+  // `expected: null` used to short-circuit the comparator (checkMismatch, since
+  // removed) to false, so these two ran and were counted among the scenarios
+  // that "behaved as specified" while having no specification at all. Today a
+  // missing specification is itself a mismatch -- see mismatchDetails. They are the two that matter most to this bench: both
   // are refusals, and a refusal that silently turns permissive is exactly the
   // failure the judge exists to prevent. Measured on a built image and pinned.
   {
@@ -804,10 +821,14 @@ const EXPECTED_SCENARIOS = 56;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
-  process.exit(2);
+  process.exit(4);
 }
-// A scenario without `expected` used to run and be counted as conforming: see
-// checkMismatch. The count above catches a hole in the ARRAY; this catches a
+// Режим --self-check сверяет длину таблицы мутаций с этим числом на каждом
+// своём запуске: правка таблицы без числа молча урезала бы перечень.
+const EXPECTED_MUTATIONS = 5;
+// A scenario without `expected` used to run and be counted as conforming --
+// the comparator treated a missing specification as agreement (mismatchDetails
+// now returns one). The count above catches a hole in the ARRAY; this catches a
 // hole in a SCENARIO, which the count cannot see -- add one, forget the
 // specification, keep the number right, and the bench reports it as behaving as
 // specified while no specification exists.
@@ -1110,6 +1131,25 @@ const CHECKS = [
   { key: 'systemExcludes', ok: (r, e) => !r.sentSystem.includes(e.systemExcludes), got: (r) => r.sentSystem },
 ];
 
+// Дверь загрузки на опечатку в ключе expected: сравнивающий читает только
+// ключи из CHECKS, и опечатка не ошибка ни для кого — утверждение испаряется
+// молча, без сравнения. Стоит после проверки `unspecified` (не падает на
+// сценарии без expected) и до первого прогона; физически ниже остальных
+// дверей, потому что читает CHECKS, определённый только здесь.
+const unknownExpectedKeys = [];
+const knownExpectedKeys = new Set(CHECKS.map((check) => check.key));
+for (const scenario of scenarios) {
+  for (const key of Object.keys(scenario.expected)) {
+    if (!knownExpectedKeys.has(key)) unknownExpectedKeys.push(`${scenario.name}.${key}`);
+  }
+}
+if (unknownExpectedKeys.length > 0) {
+  console.error('probe-bench: неизвестные ключи expected: '
+    + unknownExpectedKeys.join(', ')
+    + ' — сравнивающий их не читает, утверждение испаряется');
+  process.exit(2);
+}
+
 const clipCell = (text) => {
   const one = String(text ?? '').replace(/\s+/g, ' ');
   return one.length <= 160 ? one : `${one.slice(0, 160)}…`;
@@ -1126,10 +1166,6 @@ function mismatchDetails(result, expected) {
     out.push(`${check.key}: ожидалось ${clipCell(JSON.stringify(expected[check.key]) ?? '')}, факт ${clipCell(check.got(result))}`);
   }
   return out;
-}
-
-function checkMismatch(result, expected) {
-  return mismatchDetails(result, expected).length > 0;
 }
 
 async function runScenario(probe, scenario) {
@@ -1392,11 +1428,172 @@ function printTable(results) {
   }
 }
 
+/* __selfCheckTableBegin__ */
+// Мутации ломают САМ стенд, поэтому покраснение доказывается обратным ходом:
+// мутация обязана СНЯТЬ красноту, которую стенд видит на отраве. Без
+// контрольного прогона отравы это ничего не доказывает: мутация на изначально
+// зелёной копии «ослепляет» пустоту. Каждый образец записи обязан встречаться
+// в копии ровно один раз: два вхождения чинили бы неизвестный второй участок,
+// ноль — сгнивший якорь, и запись проверяла бы пустоту.
+const SELF_CHECK_MUTATIONS = [
+  {
+    name: 'mismatch-comparator',
+    // Сломай сравнивающий — и стенд зелёный навсегда: контроль ловит подмену
+    // значения, мутация обязана её спрятать.
+    poison: { from: 'requestMaxTokens: 8000', to: 'requestMaxTokens: 4242' },
+    controlRc: 1,
+    controlCause: 'requestMaxTokens',
+    mutation: { from: 'if (check.ok(result, expected)) continue;', to: 'continue;' },
+  },
+  {
+    name: 'undefined-key-skip',
+    // Пропуск ключей со значением undefined: контроль ловит подмену значения,
+    // мутация обязана выкинуть проверку целиком.
+    poison: { from: 'requestMaxTokens: 8000', to: 'requestMaxTokens: 4242' },
+    controlRc: 1,
+    controlCause: 'requestMaxTokens',
+    mutation: {
+      from: 'if (!check.always && expected[check.key] === undefined) continue;',
+      to: 'if (!check.always) continue;',
+    },
+  },
+  {
+    name: 'no-spec-is-mismatch',
+    // Отрава обязана убрать спецификацию НА ВХОДЕ сравнивающего: убрать её у
+    // самого сценария нельзя — дверь `unspecified` проверяет то же условие тем
+    // же предикатом и срабатывает на загрузке раньше, так что мутация внутри
+    // сравнивающего её красноту не снимет.
+    poison: { from: 'mismatchDetails(result, scenario.expected)', to: 'mismatchDetails(result, undefined)' },
+    controlRc: 1,
+    controlCause: 'нет спецификации',
+    mutation: {
+      from: "if (!expected || typeof expected !== 'object') return ['нет спецификации'];",
+      to: "if (!expected || typeof expected !== 'object') return [];",
+    },
+  },
+  {
+    name: 'scenario-count-guard',
+    // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
+    // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
+    // никогда не сняла бы его из вывода.
+    poison: { from: 'EXPECTED_SCENARIOS = 56;', to: 'EXPECTED_SCENARIOS = 55;' },
+    controlRc: 4,
+    controlCause: 'добавлены или потеряны',
+    mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },
+  },
+  {
+    name: 'unknown-key-guard',
+    // Дверь «неизвестный ключ expected»: контроль — опечатка в ключе,
+    // мутация обязана выключить саму дверь.
+    poison: { from: 'requestMaxTokens: 8000', to: 'requestMaxTokns: 8000' },
+    controlRc: 2,
+    controlCause: 'неизвестные ключи expected',
+    mutation: { from: 'if (unknownExpectedKeys.length > 0) {', to: 'if (false) {' },
+  },
+];
+/* __selfCheckTableEnd__ */
+
+// Копия под мутацию режется без таблицы выше: каждый образец записи лежит в
+// живом коде один раз, а здесь — второй, и помощник замен правомерно требовал
+// бы отказ вместо правки неизвестного второго участка.
+function benchSourceWithoutMutationTable() {
+  const raw = fs.readFileSync(__filename, 'utf8');
+  const BEGIN = '/* ' + '__selfCheckTableBegin__' + ' */';
+  const END = '/* ' + '__selfCheckTableEnd__' + ' */';
+  const at = raw.indexOf(BEGIN);
+  const until = at < 0 ? -1 : raw.indexOf(END, at + BEGIN.length);
+  if (at < 0 || until < 0) throw new Error('маркер таблицы мутаций не найден');
+  if (raw.indexOf(BEGIN, at + BEGIN.length) >= 0) {
+    throw new Error('маркер таблицы мутаций не уникален');
+  }
+  return raw.slice(0, at) + raw.slice(until + END.length);
+}
+
+function replaceExactlyOnce(text, from, to, label) {
+  const at = text.indexOf(from);
+  if (at < 0) throw new Error(`${label}: образец не найден`);
+  if (text.indexOf(from, at + from.length) >= 0) {
+    throw new Error(`${label}: образец встречается больше одного раза`);
+  }
+  const next = text.slice(0, at) + to + text.slice(at + from.length);
+  if (next === text) throw new Error(`${label}: замена не изменила текст`);
+  return next;
+}
+
+// Вывод копии глотается целиком и наружу не проходит: строки копии (ИТОГ,
+// ВНИМАНИЕ) не должны смешиваться с строками самого self-check.
+function runBenchCopy(scriptPath, binaryPath) {
+  const run = spawnSync('bun', [scriptPath, '--binary', binaryPath], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return {
+    rc: run.status,
+    output: `${run.stdout ?? ''}\n${run.stderr ?? ''}${run.error ? `\n${run.error.message}` : ''}`,
+  };
+}
+
+function runSelfCheck(options) {
+  if (SELF_CHECK_MUTATIONS.length !== EXPECTED_MUTATIONS) {
+    console.error(`probe-bench: записей мутаций ${SELF_CHECK_MUTATIONS.length}, ожидалось `
+      + `${EXPECTED_MUTATIONS} — таблица правлена без обновления числа`);
+    process.exitCode = 4;
+    return;
+  }
+  let blinded = 0;
+  for (const record of SELF_CHECK_MUTATIONS) {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-bench-self.'));
+    let line;
+    try {
+      const scriptPath = path.join(workDir, 'probe-bench.js');
+      let source = replaceExactlyOnce(
+        benchSourceWithoutMutationTable(),
+        record.poison.from,
+        record.poison.to,
+        `${record.name}: отрава`,
+      );
+      fs.writeFileSync(scriptPath, source);
+      const control = runBenchCopy(scriptPath, options.binary);
+      if (control.rc !== record.controlRc || !control.output.includes(record.controlCause)) {
+        line = `probe-bench: МУТАЦИЯ ${record.name}: КОНТРОЛЬ ОТРАВЫ не сработал `
+          + `(код=${control.rc}, нужен ${record.controlRc}, причина «${record.controlCause}» не найдена)`;
+      } else {
+        source = replaceExactlyOnce(
+          source,
+          record.mutation.from,
+          record.mutation.to,
+          `${record.name}: мутация`,
+        );
+        fs.writeFileSync(scriptPath, source);
+        const after = runBenchCopy(scriptPath, options.binary);
+        const firstLine = after.output.split(/\r?\n/).find((l) => l.trim()) ?? '';
+        if (after.rc === 0 && !after.output.includes(record.controlCause)) {
+          blinded += 1;
+          line = `probe-bench: МУТАЦИЯ ${record.name}: RED`;
+        } else {
+          line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ОСЛЕПИЛА код=${after.rc} вывод=${clipCell(firstLine)}`;
+        }
+      }
+    } catch (error) {
+      line = `probe-bench: МУТАЦИЯ ${record.name}: ОТКАЗ — ${error?.message ?? error}`;
+    } finally {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+    console.log(line);
+  }
+  console.log(`probe-bench: SELF-CHECK мутаций=${SELF_CHECK_MUTATIONS.length} ослепили=${blinded}`);
+  if (blinded !== SELF_CHECK_MUTATIONS.length) process.exitCode = 1;
+}
+
 async function main() {
   let options;
   try {
     const benchVersion = assertRuntime();
     options = parseArgs(process.argv.slice(2));
+    if (options.selfCheck) {
+      runSelfCheck(options);
+      return;
+    }
     const realHome = process.env.HOME || os.homedir();
     const homeBefore = homeSnapshot(realHome);
     const source = readImage(options.binary);

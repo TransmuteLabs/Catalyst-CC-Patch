@@ -1,3 +1,9 @@
+// Exit codes -- the kit's shared table (see the top of claude-patch-all.sh):
+//   0  every carved piece parses
+//   1  a piece does not parse: the injection would break the image
+//   2  the instrument cannot measure: an anchor is gone, or a carved piece is
+//      not a string -- there is nothing to parse
+//
 // Parsing the injected code BEFORE the image build. The injection breaks
 // silently: the patcher itself is syntactically intact, while a program glued
 // from hundreds of string pieces may not parse at all — and that is visible

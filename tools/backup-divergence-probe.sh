@@ -25,10 +25,31 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/../claude-patch-all.sh"
-[ -f "$SCRIPT" ] || { echo "нет $SCRIPT" >&2; exit 1; }
+[ -f "$SCRIPT" ] || { echo "нет $SCRIPT" >&2; exit 2; }
 
+# Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
+#   0 -- таблица истинности стража сошлась
+#   1 -- случай разошёлся с ожиданием (страж молчит там, где обязан отказать,
+#        или отказывает чужой причиной), либо прогон оборвался на полпути
+#   2 -- прибор не может мерить: якорь вырезки пропал (страж переписан) или
+#        случай объявлен без причины отказа
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT INT TERM
+# Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
+# EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
+# `set -u`, `${x:?}`, bad substitution) -- провал невидим вызывающему
+# (измерено 2026-08-28). Штатный конец объявляет себя, трап без объявления
+# краснит сам.
+__DONE=0
+__exit_guard() {
+  __rc=$?
+  rm -rf "$WORK"
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "backup-divergence-probe: ОТКАЗ -- прогон оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 1
+  fi
+  exit "$__rc"
+}
+trap __exit_guard EXIT INT TERM
 
 python3 - "$SCRIPT" "$WORK" <<'PY'
 import re, sys
@@ -36,7 +57,8 @@ src, work = sys.argv[1], sys.argv[2]
 lines = open(src, encoding='utf-8').read().split('\n')
 
 def die(msg):
-    sys.exit('ЯКОРЬ ПРОПАЛ: ' + msg)
+    sys.stderr.write('ЯКОРЬ ПРОПАЛ: ' + msg + '\n')
+    sys.exit(2)
 
 # --- значение маркера: первоисточник, не копия ------------------------------
 marker = None
@@ -105,13 +127,25 @@ mkimg() {   # $1 путь, $2 версия ('-' = не называет верс
 mkcfg() { printf '{"ccVersion":"%s"}\n' "$1" > "$2"; }
 
 FAILED=0
-run_case() {  # $1 имя, $2 ожидаемый исход (fired|passed), $3 цель, $4 бэкап, $5 конфиг, $6 хук
-  local name="$1" want="$2" out rc got
+BADCASE=0
+# $7 -- ПРИЧИНА, по которой обязан сработать страж. Без неё случай зачитывался
+# по родовому «FATAL:» (раунд 18, E-4): случай «цель не называет версию» прошёл
+# бы и тогда, когда страж отказал по расхождению с бэкапом, то есть проверял не
+# ту дверь. Для passed-случаев причина не нужна: их след -- GUARD-PASSED.
+run_case() {  # $1 имя, $2 исход (fired|passed), $3 цель, $4 бэкап, $5 конфиг, $6 хук, $7 причина
+  local name="$1" want="$2" cause="${7:-}" out rc got
+  if [[ "$want" == fired && -z "$cause" ]]; then
+    echo "  КРАСНО $name: случай ждёт отказа, но не назвал причину" >&2
+    BADCASE=1
+    return 0
+  fi
   set +e
   out="$(BIN="$3" TWEAKCC_BACKUP="$4" TWEAKCC_CFG="$5" TWEAKCC_RESTORE_PINNED="" \
          STAGE_HOOK="${6:-}" bash "$WORK/guard.sh" 2>&1)"; rc=$?
   set -e
-  if [[ $rc -eq 1 && "$out" == *"FATAL:"* ]]; then got=fired
+  if [[ $rc -eq 1 && "$out" == *"FATAL:"* && -n "$cause" && "$out" != *"$cause"* ]]; then
+    got="fired-ЧУЖОЙ-ПРИЧИНОЙ (нет «${cause}»)"
+  elif [[ $rc -eq 1 && "$out" == *"FATAL:"* ]]; then got=fired
   elif [[ $rc -eq 0 && "$out" == *"GUARD-PASSED"* ]]; then got=passed
   else got="died(rc=$rc)"; fi
   if [[ "$got" == "$want" ]]; then
@@ -145,24 +179,34 @@ run_case "конфиг другой версии -- молчит"              p
 run_case "конфига нет -- молчит"                       passed "$WORK/diverged" "$WORK/backup" "$CFG_NONE"
 
 # (e) единственный случай подмены: запись совпадает, байты разные.
-run_case "запись совпадает, байты разные -- ОТКАЗ"     fired  "$WORK/diverged" "$WORK/backup" "$CFG_MATCH"
+run_case "запись совпадает, байты разные -- ОТКАЗ"     fired  "$WORK/diverged" "$WORK/backup" "$CFG_MATCH" "" \
+         "the target and tweakcc's backup are DIFFERENT images"
 
 # (f) версия цели не устанавливается -- отказ, а не молчание и не смерть.
 mkimg "$WORK/nover" - target-bytes
-run_case "цель не называет версию -- ОТКАЗ"            fired  "$WORK/nover"    "$WORK/backup" "$CFG_MATCH"
+run_case "цель не называет версию -- ОТКАЗ"            fired  "$WORK/nover"    "$WORK/backup" "$CFG_MATCH" "" \
+         "the target does not name its version"
 cp -p "$WORK/diverged" "$WORK/noexec"; chmod -x "$WORK/noexec"
-run_case "цель не исполняется -- ОТКАЗ"                fired  "$WORK/noexec"   "$WORK/backup" "$CFG_MATCH"
+run_case "цель не исполняется -- ОТКАЗ"                fired  "$WORK/noexec"   "$WORK/backup" "$CFG_MATCH" "" \
+         "the target does not name its version"
 mkdir -p "$WORK/dir-target"
-run_case "цель -- каталог -- ОТКАЗ"                    fired  "$WORK/dir-target" "$WORK/backup" "$CFG_MATCH"
+run_case "цель -- каталог -- ОТКАЗ"                    fired  "$WORK/dir-target" "$WORK/backup" "$CFG_MATCH" "" \
+         "the target does not name its version"
 
 # (g) гонка check/use: бэкап подменён ВНУТРИ стадии.
 cp -p "$WORK/backup" "$WORK/same2"
 run_case "бэкап подменён внутри стадии -- ОТКАЗ"       fired  "$WORK/same2"   "$WORK/backup" "$CFG_MATCH" \
-         'mkimg_race() { printf "#!/bin/sh\ncase \"\$1\" in --version) echo \"2.1.247 (Claude Code)\";; esac\n: foreign\n" > "$TWEAKCC_BACKUP"; chmod +x "$TWEAKCC_BACKUP"; }; mkimg_race'
+         'mkimg_race() { printf "#!/bin/sh\ncase \"\$1\" in --version) echo \"2.1.247 (Claude Code)\";; esac\n: foreign\n" > "$TWEAKCC_BACKUP"; chmod +x "$TWEAKCC_BACKUP"; }; mkimg_race' \
+         "tweakcc's backup changed WHILE the tweakcc stage was running"
 # и контроль к ней: без подмены та же дорога молчит
 cp -p "$WORK/backup" "$WORK/backup-intact"; cp -p "$WORK/backup" "$WORK/same3"
 run_case "бэкап не менялся внутри стадии -- молчит"    passed "$WORK/same3"   "$WORK/backup-intact" "$CFG_MATCH"
 
+__DONE=1   # таблица пройдена целиком; дальше только вердикт
+if [[ $BADCASE -ne 0 ]]; then
+  echo "страж «цель против бэкапа»: таблица НЕ ИЗМЕРЕНА -- случай объявлен без причины отказа" >&2
+  exit 2
+fi
 if [[ $FAILED -eq 0 ]]; then
   echo "страж «цель против бэкапа»: таблица из 11 случаев сошлась"
 else

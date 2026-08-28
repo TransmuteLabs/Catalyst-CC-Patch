@@ -21,18 +21,18 @@
 # Каждое правило грамматики имеет здесь СВОЙ вход: украшения разметки (D5),
 # ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
 # явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
-D1	README.md	56 scenarios on a toy corpus	57 scenarios on a toy corpus	объявлено «56 scenarios» (владелец corpus-tools-bench)
-D2	README.md	49 recorded mutations	50 recorded mutations	объявлено «49 mutations» (владелец corpus-tools-bench)
+D1	README.md	66 scenarios on a toy corpus	67 scenarios on a toy corpus	объявлено «66 scenarios» (владелец corpus-tools-bench)
+D2	README.md	corpus-tools-bench's 65 recorded mutations	corpus-tools-bench's 66 recorded mutations	объявлено «65 mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 56;	const EXPECTED_SCENARIOS = 57;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
-D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 35	EXPECTED_MUTATION_COUNT = 35	не объявляет свою величину
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=49	EXPECTED_MUTATION_COUNT=49	не объявляет свою величину
+D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 36	EXPECTED_MUTATION_COUNT = 36	не объявляет свою величину
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=65	EXPECTED_MUTATION_COUNT=65	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение
 D11	claude-patch-all.sh	REACH = 8	REACH = 1	четыре слова между
-D12	scripts/kit-build.sh	 — docnum:historical)	)	kit-build.sh
+D12	scripts/kit-build.sh	 — docnum:historical)	)	объявлено «114 checks» (владелец pipeline)
 D13	claude-patch-all.sh	    if ext in ('.md', '.txt', ''):	    if True:	строковое значение в коде
 D14	claude-patch-all.sh	        lo, hi = sentence_span(at)	        lo, hi = max(0, at - 120), min(len(stream), at + 120)	пометка из соседнего предложения
 D15	claude-patch-all.sh	'стало', 'теперь', 'составляет', 'равно')	'теперь', 'составляет', 'равно')	связка «стало»
@@ -61,3 +61,4 @@ D32	claude-patch-all.sh	        return blocks(FENCE_LINE.sub(BREAK, text), BLOCK
 D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABLE_SEP.match(line):	        if False:	ячейка таблицы ловит расхождение по шапке
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
+D36	README.md	probe-bench's 5 recorded mutations	probe-bench's 6 recorded mutations	объявлено «5 mutations» (владелец probe-bench)

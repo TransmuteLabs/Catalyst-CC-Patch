@@ -28,17 +28,22 @@ VERSION = re.compile(r'^[0-9][0-9.]*$')
 PLATFORM = re.compile(r'^#\s*platform:\s*(\S+)\s*$')
 
 
-def die(message):
+# Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
+#   0 -- список разобран, строки на stdout
+#   1 -- формат нарушен: дубль, лишнее поле, пин не по форме, чужая платформа
+#   2 -- прибор не может мерить: контракт вызова (не один аргумент) или
+#        названного файла нет -- разбирать нечего
+def die(message, code=1):
     sys.stderr.write('СПИСОК КОРПУСА ОТКАЗ: %s\n' % message)
-    raise SystemExit(1)
+    raise SystemExit(code)
 
 
 def main():
     if len(sys.argv) != 2:
-        die('нужен ровно один аргумент -- путь к списку')
+        die('нужен ровно один аргумент -- путь к списку', 2)
     path = sys.argv[1]
     if not os.path.exists(path):
-        die('нет файла %s' % path)
+        die('нет файла %s' % path, 2)
     try:
         import claude_patch
         here_platform = claude_patch.npm_platform_pkg()

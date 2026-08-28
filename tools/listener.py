@@ -1,3 +1,6 @@
+# Подслушивающий стенд для ручных проб: печатает, кто и с какой моделью пришёл.
+# Своей таблицы кодов выхода не имеет -- работает до сигнала и останавливается
+# им; ни один гейт кита его не зовёт.
 import http.server, socketserver, sys, json, threading
 PORT=9317
 LOG=sys.argv[1] if len(sys.argv)>1 else "/tmp/cc_listener.log"

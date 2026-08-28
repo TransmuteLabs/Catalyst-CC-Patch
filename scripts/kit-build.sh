@@ -6,6 +6,9 @@
 # was the archive itself, and both fell behind unnoticed (the README spoke of
 # 25 checks when there were 34 — docnum:historical). Every file now lives on
 # disk, and the archive is a derivative.
+# Exit codes -- the kit's shared table (see the top of claude-patch-all.sh):
+#   0  the kit is assembled
+#   1  assembly refused: a required file is missing or a gate of the build said no
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,7 +30,22 @@ OUT="$ROOT/dist/$NAME-$STAMP.tar.gz"
 # later run removes it (each build rolls its own pid into the name). The trap
 # covers every exit route, including set -e failures and signals; rm -f keeps
 # successful builds (where the tmp was mv'd away) a no-op.
-trap 'rm -f "$OUT.tmp.$$"' EXIT INT TERM
+# Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
+# EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
+# `set -u`, `${x:?}`, bad substitution) -- провал невидим вызывающему
+# (измерено 2026-08-28). Штатный конец объявляет себя, трап без объявления
+# краснит сам.
+__DONE=0
+__exit_guard() {
+  __rc=$?
+  rm -f "$OUT.tmp.$$"
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "kit-build: ОТКАЗ -- прогон оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 1
+  fi
+  exit "$__rc"
+}
+trap __exit_guard EXIT INT TERM
 STAGE="$(mktemp -d)/$NAME"
 # The judge canon lives in the project; ~/.claude/judge is the DEPLOYMENT.
 # The kit is built from the canon: otherwise whatever someone edited on the
@@ -151,4 +169,5 @@ tar czf "$OUT.tmp.$$" -C "$(dirname "$STAGE")" "$NAME"
 mv -f "$OUT.tmp.$$" "$OUT"
 rm -rf "$(dirname "$STAGE")"
 echo "$OUT"
+__DONE=1   # штатный конец
 ls -l "$OUT"

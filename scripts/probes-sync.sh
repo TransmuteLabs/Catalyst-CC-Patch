@@ -7,6 +7,11 @@
 #   --from-home  home  -> canon (pick up an edit made in place)
 #   --diff       show divergences, touching nothing (default)
 #
+# Exit codes: 0 -- in sync (or the copy went through); 1 -- divergences found in
+# --diff, or files were missed in a copy mode; 2 -- unknown mode. The return
+# code is part of the report: --diff used to print "расходится: X" and exit 0,
+# so a gate hung on it stayed green (round 18, F-10).
+#
 # There are TWO homes, and that is not sloppiness but today's install fact:
 #   settings and prompts  -> $CLAUDE_PROBES_DIR (default ~/.claude/probes)
 #   tools (.py)           -> ~/.claude/judge — launchd runs them from there,
@@ -29,7 +34,7 @@ PLIST_NAME=com.transmutelabs.judge-compact.plist
 PLIST_HOME="$HOME/Library/LaunchAgents/$PLIST_NAME"
 
 MODE="${1:---diff}"
-case "$MODE" in --to-home|--from-home|--diff) ;; *) echo "не понял режим: $MODE" >&2; exit 1 ;; esac
+case "$MODE" in --to-home|--from-home|--diff) ;; *) echo "не понял режим: $MODE" >&2; exit 2 ;; esac
 
 # Отсутствие исходной стороны -- НАЗВАННЫЙ отказ, а не тихий пропуск.
 #
@@ -48,7 +53,9 @@ sync_one() {  # $1 canon, $2 home, $3 display name
   case "$MODE" in
     --to-home)   src="$A"; dst="$B" ;;
     --from-home) src="$B"; dst="$A" ;;
-    --diff)      diff -q "$A" "$B" >/dev/null 2>&1 || echo "расходится: $name"; return 0 ;;
+    --diff)      diff -q "$A" "$B" >/dev/null 2>&1 \
+                   || { echo "расходится: $name"; FAILED=$((FAILED+1)); }
+                 return 0 ;;
   esac
   if [[ ! -f "$src" ]]; then
     echo "ОТКАЗ: нет исходника для $name ($src)" >&2
@@ -88,7 +95,11 @@ fi
 # прежде заканчивалась `exit 0`, и вызывающий (в том числе рецепт в хвосте
 # конвейера) не мог отличить её от полной.
 if [[ "$FAILED" -ne 0 ]]; then
-  echo "ИТОГ: не перенесено файлов: $FAILED" >&2
+  if [[ "$MODE" == "--diff" ]]; then
+    echo "ИТОГ: расходится файлов: $FAILED" >&2
+  else
+    echo "ИТОГ: не перенесено файлов: $FAILED" >&2
+  fi
   exit 1
 fi
 exit 0

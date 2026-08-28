@@ -40,9 +40,21 @@
 # demonstrated. The snapshot is restored, and the restore verified, on every exit
 # path including a kill.
 #
-# Exit codes: 0 green; 3 cannot measure (pipeline lock busy, the lock instrument
-# or the backup guard red); 5 nothing to measure ON THIS MACHINE (no patched
-# install with a pristine twin beside it); 1 a case went red.
+# Exit codes -- the kit's shared table (see the top of claude-patch-all.sh):
+#   0  green
+#   1  a case went red, or an instrument of this probe (the lock probe, the
+#      backup guard) says the kit is broken -- retrying will not help
+#   2  the call contract is broken (unknown argument, unknown case letter, an
+#      empty case set), OR an instrument of this probe cannot measure: the
+#      lock preamble moved, the backup guard's carve anchor is gone. Both
+#      say "there is nothing to measure yet", not "the kit is broken" --
+#      different repairs, so they must not share a code
+#   3  the pipeline lock is held by another live run -- retry later
+#   5  nothing to measure ON THIS MACHINE (no patched install with a pristine
+#      twin beside it) -- a skip, not a refusal
+#   6  the lock machinery is broken (perl flock unusable): retrying will not help
+# One code for two answers is what this split undoes: "wait for the lock" and
+# "the kit is broken" used to share 3 (round 18, F-5).
 #
 # Called by tools/sweep.sh as a pre-flight, once per sweep: this branch is
 # invisible to every check in the pipeline, and a tool nobody calls has been
@@ -65,12 +77,20 @@ WANT_VER=
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --case)    CASES="$2"; shift 2 ;;
+    --case)    CASES="${2:-}"; shift 2 ;;
     --version) WANT_VER="$2"; shift 2 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,40p' "$0"; __DONE=1; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# Пустой набор -- контракт вызова, а не зелёный прогон: `--case ''` крутил ноль
+# итераций и печатал «every assertion held» (раунд 18, H-2).
+if [[ -z "$CASES" ]]; then
+  echo "build-path-probe: ОТКАЗ -- пустой набор случаев (--case '')" >&2
+  echo "  Проверять нечего, а зелёная строка означала бы обратное." >&2
+  exit 2
+fi
 
 # Замок берётся ПОСЛЕ разбора аргументов. Раньше он стоял выше, и `--help` во
 # время свипа отвечал «конвейер уже работает» вместо текста использования --
@@ -83,9 +103,18 @@ done
 # TMPDIR, настоящего замка он не касается. Заодно это единственный вызывающий
 # прибора: инструмент, которого никто не зовёт, в этом ките уже трижды
 # оказывался мёртвым, и за его тишиной каждый раз лежал дефект.
-if ! bash "$(dirname "$0")/lock-probe.sh"; then
+# Ответ прибора различается ПО КЛАССУ: «замок сломан» (1) и «мерить нечем --
+# преамбула переехала» (2) чинятся по-разному, а прежде оба выходили кодом 3,
+# который у этого зонда значит «занят замок конвейера, повторите позже»
+# (раунд 18, F-5/F-6).
+bash "$(dirname "$0")/lock-probe.sh"; __lp=$?
+if (( __lp != 0 )); then
+  if (( __lp == 2 )); then
+    echo "ОТКАЗ: прибор замка не может мерить (преамбула переехала или не парсится)." >&2
+    exit 2
+  fi
   echo "ОТКАЗ: прибор замка не сошёлся -- не измеряю путь сборки на сломанном замке." >&2
-  exit 3
+  exit 1
 fi
 
 # По той же причине -- страж «цель против бэкапа tweakcc». Зонд трижды
@@ -93,9 +122,18 @@ fi
 # срабатывания, кейсы зонда упрутся в отказ и он измерит не то, а если в
 # сторону молчания -- обе стороны будут зелены при подменённом входе. Проба
 # ничего не собирает и настоящего бэкапа не касается: секунды.
-if ! bash "$(dirname "$0")/backup-divergence-probe.sh"; then
+# Ответ пробы различается ПО КЛАССУ, как и у прибора замка выше: «страж
+# разошёлся с таблицей» (1) и «мерить нечем -- якорь вырезки пропал или случай
+# объявлен без причины» (2) чинятся по-разному.
+bash "$(dirname "$0")/backup-divergence-probe.sh"; __bd=$?
+if (( __bd != 0 )); then
+  if (( __bd == 2 )); then
+    echo "ОТКАЗ: проба стража не может мерить (якорь вырезки пропал или случай без причины)." >&2
+    exit 2
+  fi
+  # Красный страж -- сломанный кит, а не занятый замок: повтор не поможет.
   echo "ОТКАЗ: страж «цель против бэкапа» не сошёлся -- не измеряю путь сборки." >&2
-  exit 3
+  exit 1
 fi
 
 # ЗАМОК НА ВСЁ ВРЕМЯ ЗОНДА, а не внутри каждого дочернего прогона.
@@ -145,11 +183,13 @@ else
     echo "ОТКАЗ: конвейер уже работает (замок $LOCK_FILE занят)." >&2
     echo "       Зонд одалживает живой ~/.tweakcc и рядом с ним идти не может." >&2
     echo "       Кто держит:  lsof $LOCK_FILE" >&2
-  else
-    echo "ОТКАЗ: не удалось взять замок (perl rc=$__rc)." >&2
-    echo "       Без замка зонд откатит чужую работу на свой снимок -- не иду." >&2
+    exit 3
   fi
-  exit 3
+  # Сломанная машинерия замка -- свой код: повторять бесполезно, и свип не
+  # должен ждать бюджет замка на этом ответе (раунд 18, F-5).
+  echo "ОТКАЗ: не удалось взять замок -- машинерия замка сломана (perl rc=$__rc)." >&2
+  echo "       Без замка зонд откатит чужую работу на свой снимок -- не иду." >&2
+  exit 6
 fi
 export CLAUDE_PATCH_LOCK_HELD_BY=$$
 
@@ -249,7 +289,14 @@ else
   CFG_WAS_ABSENT=1
 fi
 
+# Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
+# EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
+# `set -u`, `${x:?}`, bad substitution) -- провал невидим вызывающему
+# (измерено 2026-08-28). Штатный конец объявляет себя, трап без объявления
+# краснит сам.
+__DONE=0
 cleanup() {
+  __rc=$?
   # Restore the borrowed config first: it carries the seeded version, and leaving
   # a bogus one behind makes the next real tweakcc run refresh its backup from
   # whatever binary happens to be installed -- the exact poisoning this probe is
@@ -281,6 +328,11 @@ cleanup() {
     fi
   fi
   [[ -n "${KEEP_ROOT:-}" ]] || rm -rf "$ROOT"
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "build-path-probe: ОТКАЗ -- прогон оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 1
+  fi
+  exit "$__rc"
 }
 trap cleanup EXIT INT TERM
 
@@ -425,6 +477,9 @@ PY
 run_pipeline() {  # <script> <bindir> <logfile>
   seed_version_mismatch
   ( PATH="$2:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    # Объявленный пропуск: каждая сборка зонда идёт без sync цен, и это
+    # снятое покрытие (раунд 18, G-1). Строка печатается зондом, а не только
+    # прячется в логе случая.
     CLAUDE_PATCH_SKIP_MODELS=1 bash "$1" ) >"$3" 2>&1
 }
 
@@ -679,6 +734,8 @@ MUT
   fi
 }
 
+echo "build-path-probe: во ВСЕХ случаях сборки sync цен пропущен (CLAUDE_PATCH_SKIP_MODELS=1)"
+[[ -n "${KEEP_ROOT:-}" ]] && echo "build-path-probe: KEEP_ROOT=${KEEP_ROOT} -- рабочий корень $ROOT останется на диске"
 for c in $(echo "$CASES" | grep -o .); do
   case "$c" in
     a) case_a ;;
@@ -690,10 +747,19 @@ for c in $(echo "$CASES" | grep -o .); do
   esac
 done
 
+__DONE=1   # все названные случаи исполнены; ниже только вердикт
 if [[ $FAILED -eq 0 ]]; then
-  echo "build path: every assertion held, and the control shows they have teeth"
+  # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d) и (u) --
+  # мутационные контроли, и без них зелёная строка обещала бы доказательство,
+  # которого прогон не получал (раунд 18, H-2).
+  if [[ "$CASES" == *c* || "$CASES" == *d* || "$CASES" == *u* ]]; then
+    echo "build path ($CASES): every assertion held, and the control shows they have teeth"
+  else
+    echo "build path ($CASES): every assertion held; НИ ОДИН контроль (c/d/u) не гонялся -- зубы не доказаны"
+  fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2
   KEEP_ROOT=1
+  echo "build-path-probe: KEEP_ROOT=1 -- корень $ROOT оставлен для разбора" >&2
   exit 1
 fi
