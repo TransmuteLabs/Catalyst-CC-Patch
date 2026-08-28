@@ -49,8 +49,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=78
-EXPECTED_MUTATIONS=78
+EXPECTED_SCENARIOS=86
+EXPECTED_MUTATIONS=87
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -117,19 +117,67 @@ fi
 # здесь уже ловила гейт чисел (`python3 .docnum-gate.py <кит>/claude-patch-all.sh`)
 # и отказывала стенду на чужом аргументе. Копия, а не общий файл: стенд обязан
 # уметь краснеть от расхождения с каноном, а не наследовать его молча.
-__snap=$(ps -eo pid,args)
-__alive=$(printf '%s\n' "$__snap" | awk '
+# Условие СНИМАЕТСЯ ЗАНОВО перед каждым сценарием, а не один раз на старте.
+# Полный прогон идёт минуты, самопроверка -- десятки минут: настоящий прогон,
+# начатый в это окно, ломал сценарии по своей причине, и читатель видел
+# «стенд красный» вместо «мерить сейчас нельзя» (круг 21, F-3).
+real_run_pids() {
+  local __snap __alive __mine __p
+  __snap=$(ps -eo pid,args)
+  __alive=$(printf '%s\n' "$__snap" | awk '
   { for (i = 2; i <= NF && i <= 8; i++) {
       if ($i ~ /\.(py|js|mjs)$/) break
       if ($i ~ /claude-patch-all\.sh$/) { print $1; break } } }
   /catalyst-tweakcc.*index\.mjs.*(--apply|adhoc-patch)/ { print $1 }' || true)
-if [[ -n "$__alive" ]]; then
-  say() { printf '%s\n' "$*"; }
-  say "corpus-tools-bench: ОТКАЗ -- идёт настоящий прогон (pid: $__alive)."
+  # Ниже -- НЕ часть стража, а вычитание СВОИХ: сценарий 45 сам поднимает
+  # поддельный claude-patch-all.sh, чтобы проверить страж свипа, и канонический
+  # страж обязан его увидеть -- а предусловие стенда обязано НЕ увидеть, иначе
+  # стенд отказывает себе на собственной декорации (измерено полным прогоном:
+  # «ПРОВАЛ 45 настоящий прогон конвейера не пойман» -- отказ шёл из
+  # предусловия и подменял собой вывод свипа). Признак своего -- путь под временным
+  # корнем стенда: ни один настоящий прогон оператора там не живёт. Вычитание
+  # стоит ПОСЛЕ блока стража намеренно: сравнение форм (сценарий 57) режет
+  # текст по «| awk '\''» и по «adhoc-patch», и всё, что ниже, в сравнение не
+  # входит -- программа стража остаётся байт в байт канонической.
+  __mine=$(printf '%s\n' "$__snap" | awk -v r="${ROOT:-}" '
+    r != "" && index($0, r) { print $1 }' || true)
+  for __p in $__alive; do
+    printf '%s\n' "$__mine" | grep -qx "$__p" || printf '%s\n' "$__p"
+  done
+}
+
+require_no_real_run() {   # $1 -- что шло дальше (для сообщения)
+  local alive
+  alive=$(real_run_pids)
+  [[ -z "$alive" ]] && return 0
+  # Отметка на диске, а не только `exit 3`.
+  #
+  # Предусловие снимается заново перед каждым игрушечным свипом, а свип всегда
+  # зовут из подстановки команд (`out=$(run_sweep ...)`). `exit` внутри неё
+  # кончает ТОЛЬКО подстановку: сценарий получал текст этого отказа как вывод
+  # свипа и краснел своей формулировкой, а стенд ехал дальше -- ровно то, что
+  # предусловие обязано было предотвратить. Отметка переживает подстановку, и
+  # верхний уровень (ok/bad) прерывает прогон классом 3.
+  [[ -n "${ROOT:-}" ]] && printf '%s\n' "$alive" > "$ROOT/.real-run"
+  say "corpus-tools-bench: ОТКАЗ -- идёт настоящий прогон (pid: $alive)."
   say "  Стенд гоняет те же скрипты, и их же страж общего состояния tweakcc"
   say "  отказал бы каждому сценарию раньше проверяемой двери. Дождитесь конца."
+  [[ -n "${1:-}" ]] && say "  Прервано перед: $1"
   exit 3
-fi
+}
+
+# Верхний уровень читает отметку и прерывает прогон целиком.
+abort_if_real_run() {
+  [[ -n "${ROOT:-}" && -e "${ROOT:-}/.real-run" ]] || return 0
+  say "corpus-tools-bench: ОТКАЗ -- настоящий прогон начался посреди стенда (pid: $(tr '\n' ' ' < "$ROOT/.real-run"))."
+  say "  Сценарии рядом с ним недостоверны: мерить сейчас нельзя, повторить позже."
+  exit 3
+}
+
+# Ранний двойник `say`: настоящее определение ниже, а отказ предусловия
+# случается раньше него.
+say() { printf '%s\n' "$*"; }
+require_no_real_run
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/corpus-bench.XXXXXX")
 # Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
@@ -155,8 +203,10 @@ RUN=0
 LAST_EVID=""
 
 say()  { printf '%s\n' "$*"; }
-ok()   { RUN=$((RUN+1)); say "  ok     $*"; }
-bad()  { RUN=$((RUN+1)); FAILED=$((FAILED+1)); say "  ПРОВАЛ $*"; }
+# Каждый сценарий кончается ok или bad -- это и есть точка, где верхний уровень
+# видит отметку, оставленную предусловием внутри подстановки команд.
+ok()   { abort_if_real_run; RUN=$((RUN+1)); say "  ok     $*"; }
+bad()  { abort_if_real_run; RUN=$((RUN+1)); FAILED=$((FAILED+1)); say "  ПРОВАЛ $*"; }
 
 # --- игрушечный корпус -------------------------------------------------------
 # Версии названы заведомо несуществующими в реестре: если сценарий всё же
@@ -265,6 +315,16 @@ while [[ $# -gt 0 ]]; do
 done
 unless() { [[ "$tweak" == "$1" ]] || printf '%s\n' "$2"; }
 [[ -z "${STUB_TAMPER:-}" ]] || printf 'подменённые байты\n' > "$STUB_TAMPER"
+# STUB_LINGER: оставить за собой ЖИВОЙ процесс, чей путь ведёт в снимок кита.
+# Так проверяется, что свип не сносит снимок из-под ещё исполняющегося
+# конвейера (круг 21, F-9). Путь снимка попадает в аргументы через $0.
+#
+# Две команды через `;`, а не одна: `bash -c 'sleep 25' "$0"` -- ПРОСТАЯ
+# команда, и bash заменяет себя на неё через exec (измерено 2026-08-28). В
+# `ps` остаётся `sleep 25` БЕЗ пути снимка, жильца никто не видит, и сценарий
+# 84 краснел, доказывая не то: не «снимок снесён из-под живого», а «декорация
+# не оставила следа». Точка с запятой отменяет эту оптимизацию.
+[[ -z "${STUB_LINGER:-}" ]] || { bash -c 'sleep 25; true' "$0" >/dev/null 2>&1 & }
 ver=$(awk '{print $2; exit}' "$target" 2>/dev/null)
 [[ "$tweak" != otherver ]] || ver=0.0.999
 sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}')
@@ -359,15 +419,31 @@ SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF -u SWEEP_LAST_N)
 # выключивший предполётный зонд для своего свипа, ронял сценарий 53 внутри
 # стенда -- документированная ручка валила несвязанный гейт, а диагноз указывал
 # на стенд (раунд 19, В-6).
+# Игрушечный дом tweakcc для прогонов стенда.
+#
+# Свип теперь СЕМЕНИТ свой дом из живого, и без этой подмены каждый игрушечный
+# прогон клонировал бы живой дом (у него 116 МБ кэша промтов) -- десятки раз за
+# прогон стенда, и живой дом читался бы там, где стенд не должен его знать
+# вовсе. Пусковой инструмента снимает бухгалтерию вызывающего; здесь он ещё и
+# ПОДСТАВЛЯЕТ свою: крошечный дом с одним файлом настроек.
+TW_FIXTURE="$ROOT/tweakcc-fixture"
+mkdir -p "$TW_FIXTURE"
+printf '{}\n' > "$TW_FIXTURE/config.json"
+
 run_sweep() {   # kit, corpus-dir, list, аргументы...
   local kit=$1 cdir=$2 list=$3; shift 3
+  # Условие пересматривается ПЕРЕД КАЖДЫМ игрушечным свипом: настоящий прогон,
+  # начатый после старта стенда, отказал бы этому свипу своим стражем общего
+  # состояния -- и сценарий покраснел бы по чужой причине (круг 21, F-3).
+  require_no_real_run "игрушечный свип ($*)"
   # Замок конвейера -- СВОЙ: сценарий занятого замка прежде держал боевой файл,
   # и законный прогон оператора в это окно получал FATAL от стенда.
   "${SWEEP_ENV_SCRUB[@]}" \
     CORPUS_DIR="$cdir" CORPUS_LIST="$list" SWEEP_STATE_DIR="$cdir/state" \
     CLAUDE_PATCH_LOCK="$PLOCK" \
     STUB_TWEAK="${STUB_TWEAK:-none}" STUB_RC="${STUB_RC:-0}" \
-    STUB_TAMPER="${STUB_TAMPER:-}" \
+    STUB_TAMPER="${STUB_TAMPER:-}" STUB_LINGER="${STUB_LINGER:-}" \
+    SWEEP_KIT_DRAIN="${BENCH_KIT_DRAIN:-}" \
     STUB_PROBE_RC="${STUB_PROBE_RC:-0}" STUB_PROBE_MARK="${STUB_PROBE_MARK:-}" \
     STUB_BENCH_RC="${STUB_BENCH_RC:-0}" STUB_BENCH_MARK="${STUB_BENCH_MARK:-}" \
     SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" \
@@ -375,6 +451,7 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     SWEEP_LAST_N="${BENCH_LAST_N:-}" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
+    TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
     bash "$kit/tools/sweep.sh" "$@" 2>&1 9>&-
 }
 
@@ -970,7 +1047,10 @@ scenario_45() {   # страж живых прогонов: сам прогон 
   sleep 1
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   kill "$runner" 2>/dev/null; wait "$runner" 2>/dev/null
-  caught=$([[ $rc -ne 0 && "$out" == *"живы процессы предыдущего прогона"* ]] && echo да)
+  # Сверяется КЛАСС кода, а не «не ноль»: пока проверялось «не ноль», отказ
+  # стоял кодом 1 («чинить кит») там, где верен 3 («повторить позже»), и
+  # стенд этого не видел (круг 21, линза F, находка 2).
+  caught=$([[ $rc -eq 3 && "$out" == *"живы процессы чужого прогона конвейера"* ]] && echo да)
 
   # (2) путь конвейера АРГУМЕНТОМ чужой программы -- отказа быть не должно
   python3 "$fake/gate.py" "$fake/claude-patch-all.sh" 9>&- & local reader=$!
@@ -1135,7 +1215,7 @@ CARVE
   if [[ "$out" != *"0.0.999"* ]]; then
     bad "69 пин без строки: версия не названа: $out"; return
   fi
-  if [[ "$(tr '\n' '|' < "$list")" != "$before" || -e "$list.new" ]]; then
+  if [[ "$(tr '\n' '|' < "$list")" != "$before" ]] || ls "$list".new* >/dev/null 2>&1; then
     bad "69 пин без строки: список тронут при отказе"; return
   fi
   ok "69 пин версии, которой нет в списке -- класс «записывать некуда»"
@@ -1317,6 +1397,67 @@ scenario_77() {   # выключатель прибора зубов ОБЪЯВ�
   ok "77 выключатель прибора зубов объявляет пропуск"
 }
 
+scenario_79() {   # свип не трогает ЖИВОЙ дом tweakcc
+  # Круг 21, линза E, находка 1: каждая сборка свипа шла через живой дом
+  # распаковщика и переписывала бэкап живой установки байтами корпусной версии.
+  # Проверяется то, что можно измерить: дом-семя остаётся байт-в-байт, свой дом
+  # создан, и выбор объявлен в потоке и в сводке.
+  local d out rc sum before after
+  d="$C/lastn"; mk_lastn_corpus "$d"
+  before=$(cd "$TW_FIXTURE" && find . -type f -exec shasum {} + | sort)
+  out=$(run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
+  after=$(cd "$TW_FIXTURE" && find . -type f -exec shasum {} + | sort)
+  sum="$d/corpus/state/log/sweep-summary.txt"
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    bad "79 дом tweakcc: прогон отказал ($rc)"; return
+  fi
+  if [[ "$before" != "$after" ]]; then
+    LAST_EVID="ЖИВОЙ_ДОМ_ИЗМЕНЁН :: до=$before :: после=$after"
+    bad "79 дом tweakcc: дом-семя изменился за прогон"; return
+  fi
+  if [[ ! -d "$d/corpus/state/tweakcc-home" ]]; then
+    LAST_EVID="СВОЕГО_ДОМА_НЕТ :: $(ls "$d/corpus/state" 2>&1 | tr '\n' '|')"
+    bad "79 дом tweakcc: свой дом не создан"; return
+  fi
+  if [[ "$out" != *"SWEEP дом tweakcc:"* ]]; then
+    LAST_EVID="ВЫБОР_НЕ_ОБЪЯВЛЕН :: $out"
+    bad "79 дом tweakcc: выбор дома не объявлен в потоке"; return
+  fi
+  if [[ ! -f "$sum" ]] || ! grep -q '^# дом tweakcc: свой' "$sum"; then
+    LAST_EVID="СВОДКА_МОЛЧИТ :: $(cat "$sum" 2>/dev/null | tr '\n' '|')"
+    bad "79 дом tweakcc: сводка не называет дом"; return
+  fi
+  ok "79 свип семенит свой дом tweakcc, живой не трогает, и объявляет это"
+}
+
+scenario_80() {   # ручка «остаться на живом доме» достижима и ОБЪЯВЛЕНА
+  # Ручка нужна для разбора руками, но молчаливый возврат к живому дому -- это
+  # ровно то состояние, против которого механизм заведён. Пропуск объявляется
+  # и в потоке, и в сводке (эталон -- SWEEP_SKIP_BUILD_PROBE).
+  local d out rc sum
+  d="$C/lastn"; mk_lastn_corpus "$d"
+  out=$(SWEEP_KEEP_LIVE_TWEAKCC=1 run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
+  sum="$d/corpus/state/log/sweep-summary.txt"
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    bad "80 ручка дома tweakcc: прогон отказал ($rc)"; return
+  fi
+  if [[ -d "$d/corpus/state/tweakcc-home" ]]; then
+    LAST_EVID="РУЧКА_ПРОИГНОРИРОВАНА :: свой дом всё равно создан :: $out"
+    bad "80 ручка дома tweakcc: свой дом создан вопреки ручке"; return
+  fi
+  if [[ "$out" != *"SWEEP дом tweakcc: ЖИВОЙ по ручке"* ]]; then
+    LAST_EVID="ПРОПУСК_НЕ_ОБЪЯВЛЕН :: $out"
+    bad "80 ручка дома tweakcc: возврат к живому дому не объявлен"; return
+  fi
+  if [[ ! -f "$sum" ]] || ! grep -q '^# дом tweakcc: ЖИВОЙ по ручке' "$sum"; then
+    LAST_EVID="СВОДКА_МОЛЧИТ :: $(cat "$sum" 2>/dev/null | tr '\n' '|')"
+    bad "80 ручка дома tweakcc: сводка молчит о живом доме"; return
+  fi
+  ok "80 ручка возвращает живой дом и объявляет это в потоке и в сводке"
+}
+
 scenario_78() {   # «мерить нечем» у прибора зубов -- свой КЛАСС, а не красный прогон
   # Прибор не может мерить (нет образа, уехал якорь) и красный реестр --
   # разные починки; общий код смешивал бы «почини кит» с «почини машину».
@@ -1350,6 +1491,9 @@ run_all() {
   scenario_67; scenario_68; scenario_69; scenario_70; scenario_71; scenario_72
   scenario_73; scenario_74
   scenario_75; scenario_76; scenario_77; scenario_78
+  scenario_79; scenario_80
+  scenario_81; scenario_82; scenario_83; scenario_84
+  scenario_85; scenario_86
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -1476,12 +1620,15 @@ CARVE
   { echo "# platform: x"; echo "900 0.0.900 -"; echo "901 0.0.901 -"; } > "$list"
   h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}')
   out=$(python3 "$carved" "$list" 0.0.900 "$h900" 2>&1); rc=$?
-  LAST_EVID="rc=$rc :: $out :: временный=$([[ -e "$list.new" ]] && echo ОСТАЛСЯ_ВРЕМЕННЫЙ || echo убран) :: $(tr '\n' '|' < "$list")"
+  # Обломок ищется ГЛОБОМ: имя стадии несёт pid (круг 21, E-5/F-6), и точное
+  # `$list.new` перестало бы находить что-либо -- проверка ушла бы в пустоту.
+  __leftover=$(ls "$list".new* 2>/dev/null | head -1)
+  LAST_EVID="rc=$rc :: $out :: временный=${__leftover:+ОСТАЛСЯ_ВРЕМЕННЫЙ }${__leftover:-убран} :: $(tr '\n' '|' < "$list")"
   if (( rc != 0 )); then
     bad "52 запись списка: блок отказал ($rc): $out"; return
   fi
-  if [[ -e "$list.new" ]]; then
-    bad "52 запись списка: ОСТАЛСЯ_ВРЕМЕННЫЙ $list.new -- запись не переименованием"; return
+  if [[ -n "$__leftover" ]]; then
+    bad "52 запись списка: ОСТАЛСЯ_ВРЕМЕННЫЙ $__leftover -- запись не переименованием"; return
   fi
   if ! grep -q "^900 0.0.900 $h900$" "$list" || ! grep -q '^901 0.0.901 -$' "$list"; then
     bad "52 запись списка: строки не на месте: $(tr '\n' '|' < "$list")"; return
@@ -1569,7 +1716,13 @@ guard_form() {   # файл
   # Конец блока ищется по `adhoc-patch`, а не по `index\.mjs`: в тексте стоит
   # экранированная точка регекспа awk, и образец с обычной точкой её не ловит --
   # диапазон sed уезжал до конца файла, и сравнение шло между хвостами файлов.
-  sed -n '/=\$(ps -eo pid,args)/,/adhoc-patch/p' "$1" \
+  #
+  # Начало ищется по «| awk '» В КОНЦЕ СТРОКИ, а не по `=$(ps -eo pid,args)`:
+  # уборка снимка кита (круг 21, F-9) завела в свипе ВТОРОЙ снимок процессов,
+  # диапазон начинался с него и захватывал полсотни чужих строк -- сравнение
+  # шло между разными блоками. Голова стража с открывающей кавычкой awk
+  # единственна в каждом доме, а у соседей awk зовётся с `-v`.
+  sed -n "/| awk '\$/,/adhoc-patch/p" "$1" \
     | sed 's/__//g' | tr -s ' \t' ' ' | sed 's/^ //; s/ $//'
 }
 
@@ -1660,6 +1813,221 @@ scenario_57() {   # страж живых прогонов -- одна форм�
   ok "57 страж живых прогонов -- одна форма в свипе и в стенде"
 }
 
+scenario_83() {   # занятый замок конвейера -- НЕ ИЗМЕРЕНО, а не красный прогон
+  # Прибор зубов меряет ЖИВОЙ образ и копирует его дюжину раз. Сборка вносит
+  # новый образ переименованием, и копия попадала на файл, который уже не тот:
+  # прибор объявлял КРАСНОЕ там, где дефекта нет. Класс ответа обязан быть
+  # своим -- «повтор поможет», а не «проверка прошла мутацию молча».
+  local out rc
+  out=$(STUB_TEETH_RC=3 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 3 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ rc=$rc :: $out"
+    bad "83 занятый замок при зубах: код возврата $rc, ждали 3"; return
+  fi
+  if [[ "$out" != *"НЕ ИЗМЕРЕНЫ -- замок конвейера держит живая сборка"* ]]; then
+    LAST_EVID="ПРИЧИНА_НЕ_НАЗВАНА :: $out"
+    bad "83 занятый замок при зубах: причина не названа"; return
+  fi
+  ok "83 занятый замок конвейера при зубах -- свой класс, а не красный прогон"
+}
+
+scenario_84() {   # снимок кита не сносится из-под живого конвейера
+  local out rc left users
+  out=$(STUB_LINGER=1 BENCH_KIT_DRAIN=2 \
+        run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  left=$(ls -d "$C/corpus/state"/kit.?????? 2>/dev/null | head -1)
+  users=$(ps -eo pid,args | awk -v h="$C/corpus/state" 'index($0, h) && /sleep 25/ { print $1 }')
+  [[ -n "$users" ]] && kill $users 2>/dev/null
+  LAST_EVID="rc=$rc :: снимок=${left:-СНИМОК_СНЕСЁН} :: $out"
+  if [[ -z "$left" ]]; then
+    bad "84 снимок кита снесён из-под живого процесса, поднятого из него"; return
+  fi
+  if [[ "$out" != *"снимок кита НЕ убран"* ]]; then
+    LAST_EVID="ПРИЧИНА_НЕ_НАЗВАНА :: $out"
+    bad "84 снимок кита: пропуск уборки не объявлен"; return
+  fi
+  rm -rf "$left"
+  ok "84 снимок кита переживает уборку, пока из него исполняются процессы"
+}
+
+scenario_85() {   # предусловие: чужой прогон -- да, своя декорация -- нет
+  # Две половины, и вторая объявлена намеренно.
+  #
+  # ЖИВАЯ половина доказывает поведение прямо здесь: поддельный конвейер ПОД
+  # временным корнем стенда (такой поднимает сценарий 45, чтобы проверить страж
+  # свипа) в ответ попасть не должен, а поддельный ВНЕ корня -- обязан. Мутации
+  # до этой половины не достают: правка ложится в КОПИЮ кита, а предусловие
+  # исполняется из ЖИВОГО файла стенда (тот же класс, что у сценария 66).
+  # Поэтому зуб -- на ФОРМЕ в копии: вычитание своих обязано вычитать по
+  # временному корню. Без этого вычитания стенд отказывал сам себе на
+  # собственной декорации, и сценарий 45 краснел чужой причиной (измерено).
+  local inside outside mine_pid other_pid got form
+  inside="$C/fake85"; mkdir -p "$inside"
+  printf '#!/bin/sh\nsleep 30\n' > "$inside/claude-patch-all.sh"
+  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside85.XXXXXX")
+  printf '#!/bin/sh\nsleep 30\n' > "$outside/claude-patch-all.sh"
+  # `9>&-`: оба живут по 30 секунд и убиваются без ожидания выхода -- с копией
+  # дескриптора они держали бы замок стенда после его выхода.
+  bash "$inside/claude-patch-all.sh" 9>&- & mine_pid=$!
+  bash "$outside/claude-patch-all.sh" 9>&- & other_pid=$!
+  sleep 1
+  got=$(real_run_pids)
+  kill "$mine_pid" "$other_pid" 2>/dev/null
+  wait "$mine_pid" 2>/dev/null; wait "$other_pid" 2>/dev/null
+  rm -rf "$outside"
+  # Считается ТОЛЬКО внутри real_run_pids: строка этого же сценария содержит тот
+  # же литерал (иначе grep считал бы сам себя, и счёт зависел бы от правок
+  # сценария, а не от предмета).
+  form=$(sed -n '/^real_run_pids() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh" \
+         | grep -cF 'index($0, r) { print $1 }')
+  LAST_EVID="ответ=[$(printf '%s' "$got" | tr '\n' ' ')] свой=$mine_pid чужой=$other_pid форма=$form"
+  if printf '%s\n' "$got" | grep -qx "$mine_pid"; then
+    LAST_EVID="СВОЙ_НЕ_ВЫЧТЕН :: $LAST_EVID"
+    bad "85 предусловие: своя декорация засчитана настоящим прогоном"; return
+  fi
+  if ! printf '%s\n' "$got" | grep -qx "$other_pid"; then
+    LAST_EVID="ЧУЖОЙ_ПРОПУЩЕН :: $LAST_EVID"
+    bad "85 предусловие: чужой прогон вне корня стенда не замечен"; return
+  fi
+  if [[ "$form" != "1" ]]; then
+    LAST_EVID="СВОЙ_НЕ_ВЫЧТЕН :: в копии нет вычитания по корню :: $LAST_EVID"
+    bad "85 предусловие: в копии стенда нет вычитания своих по временному корню"; return
+  fi
+  ok "85 предусловие видит чужой прогон и не видит свою декорацию"
+}
+
+scenario_86() {   # отметка настоящего прогона переживает подстановку команд
+  # Свип зовут только из подстановки (`out=$(run_sweep ...)`), а `exit` внутри
+  # неё кончает ТОЛЬКО подстановку: отказ предусловия приезжал сценарию как
+  # вывод свипа, сценарий краснел своей формулировкой, и стенд ехал дальше.
+  # Отметка на диске переживает подстановку, верхний уровень (ok/bad) её
+  # читает и прерывает прогон классом 3. Форма в копии -- зуб к этой половине:
+  # живой abort_if_real_run исполняется из живого файла и мутации недоступен.
+  local outside pid out rc marker sub_rc form
+  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside86.XXXXXX")
+  printf '#!/bin/sh\nsleep 30\n' > "$outside/claude-patch-all.sh"
+  bash "$outside/claude-patch-all.sh" 9>&- & pid=$!
+  sleep 1
+  out=$(require_no_real_run "проба сценария 86"); rc=$?
+  marker=НЕТ
+  [[ -e "$ROOT/.real-run" ]] && marker=$(tr '\n' ' ' < "$ROOT/.real-run")
+  ( abort_if_real_run ) >/dev/null 2>&1; sub_rc=$?
+  # Отметка снимается ДО ok/bad: иначе они прервут прогон на этом сценарии.
+  rm -f "$ROOT/.real-run"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  rm -rf "$outside"
+  # Якорь на начало строки: определения ok/bad стоят с нулевой колонки, а
+  # строка этого сценария -- с отступом, и сама в счёт не попадает.
+  form=$(grep -cE '^(ok|bad)\(\) +\{ abort_if_real_run;' "$K/tools/corpus-tools-bench.real.sh")
+  LAST_EVID="rc=$rc отметка=$marker чтение=$sub_rc форма=$form :: $out"
+  if (( rc != 3 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ :: $LAST_EVID"
+    bad "86 отметка прогона: предусловие вернуло $rc, ждали 3"; return
+  fi
+  if [[ "$marker" == НЕТ || "$marker" != *"$pid"* ]]; then
+    LAST_EVID="ОТМЕТКИ_НЕТ :: $LAST_EVID"
+    bad "86 отметка прогона: подстановка кончилась, следа не осталось"; return
+  fi
+  if (( sub_rc != 3 )); then
+    LAST_EVID="ОТМЕТКА_НЕ_ЧИТАЕТСЯ :: $LAST_EVID"
+    bad "86 отметка прогона: верхний уровень её не читает ($sub_rc)"; return
+  fi
+  if [[ "$form" != "2" ]]; then
+    LAST_EVID="ОТМЕТКА_НЕ_ЧИТАЕТСЯ :: чтений в копии $form, ждали 2 :: $LAST_EVID"
+    bad "86 отметка прогона: в копии стенда её читают не оба исхода сценария"; return
+  fi
+  ok "86 отметка настоящего прогона переживает подстановку и прерывает стенд"
+}
+
+carve_pin_py() {   # $1 -- куда положить блок; возвращает 2, если якорь потерян
+  python3 - "$K/tools/fetch-corpus.sh" "$1" <<'CARVE'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src, encoding='utf-8').read()
+m = re.search(r"<<'PIN_PY'\n(.*?)\nPIN_PY", text, re.S)
+if not m:
+    sys.stderr.write('в наполнителе нет блока PIN_PY -- якорь потерян\n')
+    sys.exit(2)
+open(dst, 'w', encoding='utf-8').write(m.group(1))
+CARVE
+}
+
+scenario_81() {   # стадия чужого прогона не уносится нашей записью
+  # Замок наполнителя стоит на КОРПУСЕ, а список живёт в ките: два прогона с
+  # разными корпусами и одним списком берут каждый свой замок. С фиксированным
+  # `<список>.new` один переименовывал ЧУЖУЮ половину поверх списка.
+  local carved list out rc h900 stray
+  carved="$C/pin-block81.py"
+  if ! carve_pin_py "$carved"; then
+    LAST_EVID="ЯКОРЬ_PIN_PY_ПОТЕРЯН"
+    bad "81 стадия чужого прогона: блок PIN_PY не вырезан -- прибор не мерил"; return
+  fi
+  list="$C/pin81.txt"
+  { echo "# platform: x"; echo "900 0.0.900 -"; } > "$list"
+  stray="$list.new"
+  echo "стадия чужого прогона" > "$stray"
+  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}')
+  out=$(python3 "$carved" "$list" 0.0.900 "$h900" 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out :: чужая стадия=$(cat "$stray" 2>/dev/null || echo СНЕСЕНА)"
+  if (( rc != 0 )); then
+    bad "81 стадия чужого прогона: блок отказал ($rc): $out"; return
+  fi
+  if [[ ! -f "$stray" || "$(cat "$stray")" != "стадия чужого прогона" ]]; then
+    LAST_EVID="ЧУЖАЯ_СТАДИЯ_СНЕСЕНА"
+    bad "81 стадия чужого прогона снесена -- имя стадии не несёт pid"; return
+  fi
+  if ! grep -q "^900 0.0.900 $h900$" "$list"; then
+    bad "81 стадия чужого прогона: пин не записан: $(tr '\n' '|' < "$list")"; return
+  fi
+  rm -f "$stray"
+  ok "81 запись списка не сталкивается со стадией чужого прогона"
+}
+
+scenario_82() {   # сорванное переименование не оставляет обломка стадии
+  local carved list out rc h900 leftover
+  carved="$C/pin-block82.py"
+  if ! carve_pin_py "$carved"; then
+    LAST_EVID="ЯКОРЬ_PIN_PY_ПОТЕРЯН"
+    bad "82 обломок стадии: блок PIN_PY не вырезан -- прибор не мерил"; return
+  fi
+  list="$C/pin82.txt"
+  { echo "# platform: x"; echo "900 0.0.900 -"; } > "$list"
+  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}')
+  # Переименование подменяется падающим: другого способа попасть в окно
+  # «стадия записана, ввод не удался» у стенда нет.
+  out=$(python3 - "$carved" "$list" 0.0.900 "$h900" 2>&1 <<'WRAP'
+import os, sys
+carved = sys.argv[1]
+sys.argv = sys.argv[1:]
+def boom(_a, _b):
+    raise OSError('переименование сорвано (стенд)')
+os.replace = boom
+try:
+    exec(compile(open(carved).read(), carved, 'exec'), {'__name__': '__main__'})
+except OSError as error:
+    sys.stderr.write('ожидаемый сбой: %s\n' % error)
+    sys.exit(7)
+sys.stderr.write('переименование НЕ сорвалось -- прибор не мерил\n')
+sys.exit(2)
+WRAP
+); rc=$?
+  leftover=$(ls "$list".new* 2>/dev/null | head -1)
+  LAST_EVID="rc=$rc :: $out :: обломок=${leftover:-убран}"
+  if (( rc == 2 )); then
+    LAST_EVID="ПОДМЕНА_НЕ_СРАБОТАЛА"
+    bad "82 обломок стадии: переименование не сорвалось -- прибор не мерил"; return
+  fi
+  if (( rc != 7 )); then
+    bad "82 обломок стадии: ждали код 7 от обёртки, получили $rc: $out"; return
+  fi
+  if [[ -n "$leftover" ]]; then
+    LAST_EVID="ОСТАЛСЯ_ОБЛОМОК $leftover"
+    bad "82 обломок стадии: $leftover остался после сорванного переименования"; return
+  fi
+  ok "82 сорванное переименование не оставляет обломка стадии"
+}
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -1700,7 +2068,17 @@ MUT_FILE=(x
   # Волна 23: набор по умолчанию (73), достижимость ручки набора (74) и
   # предполёт прибора зубов реестра (75-78).
   tools/sweep.sh tools/sweep.sh
-  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh)
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  # Волна 24: свой дом tweakcc (79), достижимость ручки возврата (80),
+  # имя стадии списка (81) и уборка обломка стадии (82).
+  tools/sweep.sh tools/sweep.sh
+  # Волна 24: класс ответа прибора зубов на занятом замке (83) и уборка
+  # снимка кита из-под живого процесса (84).
+  tools/fetch-corpus.sh tools/fetch-corpus.sh tools/sweep.sh tools/sweep.sh
+  # Волна 24: доделка F-9 в штатном хвосте (84), вычитание своих в
+  # предусловии (85) и чтение отметки настоящего прогона (86).
+  tools/sweep.sh
+  tools/corpus-tools-bench.real.sh tools/corpus-tools-bench.real.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -1729,12 +2107,15 @@ MUT_PAT=(x
   'if declared != here_platform:'
   '\(\( \$\{#ALL\[\@\]\} \)\) \|\| \{ echo "SWEEP ОТКАЗ: список версий пуст: \$LIST" >&2; exit 1; \}'
   'flock\(\$fh, LOCK_EX\) or exit 2;'
-  '\} > "\$STATE/log/sweep-summary\.txt"'
+  'sum_reset "# ПРОГОН НАЧАТ'
   'uniq -d'
   '\[\[ -n "\$out" \]\] \|\| return 1'
   'dst="\$CORPUS/\$\(corpus_file_name "\$version"\)"'
   'LOCK_FILE="\$\{CLAUDE_PATCH_LOCK:-\$\{TMPDIR:-/tmp\}'
-  'rm -rf "\$\{HERE:-\}"'
+  # Волна 24: снос переехал из трапа в __drop_kit_when_idle; якорь -- сам
+  # снос, а не строка трапа. Взгляд вперёд отделяет его от упоминания в
+  # комментарии выше.
+  'rm -rf "\$HERE"(?=\n    return 0)'
   'if label in labels:'
   "if pin != '-' and not PIN\.match\(pin\):"
   'if not VERSION\.match\(version\):'
@@ -1744,7 +2125,7 @@ MUT_PAT=(x
   '\^Version: \$ver_rx \(Claude Code\)'
   '\[\[ "\$digest" == "1" \]\] \|\| why\+=\("конвейер не объявил запинованные байты"\)'
   'exec 8>"\$STATE/sweep\.lock"'
-  '\} > "\$STATE/log/sweep-summary\.txt"; then'
+  '  return \$rc'
   'rm -rf "\$__stale" && echo "SWEEP убрал обломок'
   'exit\(flock\(\$fh, LOCK_EX\|LOCK_NB\) \? 0 : 1\);'
   'os\.replace\(tmp, path\)'
@@ -1780,7 +2161,21 @@ MUT_PAT=(x
   '    0\) echo "SWEEP зубы реестра проверок: ЗЕЛЁНО \(лог \$TEETH_LOG\)"'
   '    \*\) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
   '  echo "SWEEP зубы реестра проверок ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH=\$\{SWEEP_SKIP_CHECKS_TEETH\}"'
-  '    2\) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ')
+  '    2\) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ'
+  'SWEEP_TW_HOME="\$STATE/tweakcc-home"'
+  'if \[\[ -z "\$\{SWEEP_KEEP_LIVE_TWEAKCC:-\}" \]\]; then'
+  "tmp = path \+ '\.new\.%d' % os\.getpid\(\)"
+  '        os\.unlink\(tmp\)'
+  '    3\) # Не красный прогон, а НЕИЗМЕРЕННЫЙ'
+  'if \[\[ -z "\$__users" \]\]; then'
+  # Волна 24, доделка F-9: снос снимка в ШТАТНОМ хвосте. Первая редакция
+  # ждала жильцов только в трапе, а хвост успешного прогона сносил снимок
+  # безусловно -- гарантия держалась на половине выходов.
+  '__drop_kit_when_idle(?=\n\n# Хвост говорит)'
+  # Волна 24, corpus-tools-bench: вычитание своих в предусловии (номер 85) и
+  # чтение отметки настоящего прогона обоими исходами (номер 86).
+  'r != "" && index\(\$0, r\) \{ print \$1 \}'
+  'ok\(\)   \{ abort_if_real_run; ')
 
 MUT_REP=(x
   'if false; then'
@@ -1802,7 +2197,7 @@ MUT_REP=(x
   'if False:'
   '(( ${#ALL[@]} )) || ALL=("900:0.0.900:-")'
   'exit 0;'
-  '} > /dev/null'
+  ': sum_reset "# ПРОГОН НАЧАТ'
   'uniq -u'
   ':'
   "dst=\"\$CORPUS/\$version.pristine\""
@@ -1817,7 +2212,7 @@ MUT_REP=(x
   '^Version: .* (Claude Code)'
   ':'
   'echo $$ > "$STATE/sweep.pgid"; exec 8>"$STATE/sweep.lock"'
-  '} > "$STATE/log/sweep-summary.txt" || true; then'
+  '  return 0'
   'echo "не убрал обломок'
   'exit(0);'
   "open(path, 'w').write('\\n'.join(lines) + '\\n')"
@@ -1853,7 +2248,16 @@ MUT_REP=(x
   '    0) :'
   '    9) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
   '  :'
-  '    22) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ')
+  '    22) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ'
+  'SWEEP_TW_HOME="$STATE/tweakcc-none"'
+  'if true; then'
+  "tmp = path + '.new'"
+  '        pass'
+  '    33) # снят арм класса 3'
+  'if true; then'
+  'rm -rf "$HERE"'
+  'r != "" && index($0, "не-корень") { print $1 }'
+  'ok()   { ')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -1865,7 +2269,10 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                1 3 5 6 10 12 57 58 59 60 61 62
                63 64 65 66
                9 67 68 69 70 71 72
-               73 74 75 76 77 78)
+               73 74 75 76 77 78
+               79 80
+               81 82 83 84
+               84 85 86)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -1944,7 +2351,16 @@ MUT_CAUSE=(x
   'ВЕРДИКТ_НЕ_ОБЪЯВЛЕН'
   'КРАСНЫЙ_НЕ_ОСТАНОВИЛ'
   'ПРОПУСК_НЕ_ОБЪЯВЛЕН'
-  'КЛАСС_НЕ_ТОТ')
+  'КЛАСС_НЕ_ТОТ'
+  'СВОЕГО_ДОМА_НЕТ'
+  'РУЧКА_ПРОИГНОРИРОВАНА'
+  'ЧУЖАЯ_СТАДИЯ_СНЕСЕНА'
+  'ОСТАЛСЯ_ОБЛОМОК'
+  'КЛАСС_НЕ_ТОТ'
+  'СНИМОК_СНЕСЁН'
+  'СНИМОК_СНЕСЁН'
+  'СВОЙ_НЕ_ВЫЧТЕН'
+  'ОТМЕТКА_НЕ_ЧИТАЕТСЯ')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

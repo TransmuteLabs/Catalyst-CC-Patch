@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Герметичный стенд для compact.py и прополки временных лаунчеров.
+"""Герметичный стенд инструментов кита: compact.py и прополка временных
+лаунчеров, сверка раскатки, загрузка образа, бэкап конфига цен, форма отчёта
+стенда проб.
 
 Коды выхода (подмножество общей таблицы кита -- см. шапку claude-patch-all.sh):
   0  всё сошлось: каждая дверь на месте, каждая мутация покраснела свою
@@ -22,10 +24,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Callable
 
 
@@ -36,14 +39,15 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 27
-EXPECTED_MUTATIONS = 20
+EXPECTED_SCENARIOS = 34
+EXPECTED_MUTATIONS = 30
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
     r"архив исчез после сжатия: (?P<gz_gone>\d+), "
     r"исходник исчез до замера: (?P<src_gone>\d+), "
     r"сирот tmp убрано: (?P<orphans>\d+), "
+    r"tmp при живом pid: (?P<tmp_held>\d+), "
     r"освобождено: [-0-9.]+ МБ"
 )
 
@@ -664,6 +668,307 @@ def scenario_27() -> None:
             "счётчик исчезнувшего до замера исходника пропал")
 
 
+def toy_kit(base: Path) -> Path:
+    """Игрушечная копия кита: раскатку надо ЛОМАТЬ, а живой кит трогать нельзя.
+
+    Копируется ровно то, что читает scripts/probes-sync.sh, и копируется ИЗ
+    ROOT -- то есть из дерева, которое правит мутация. Иначе зуб применился бы
+    к копии, а сценарий мерил бы живой кит (круг 18, §6).
+    """
+    kit = base / "kit"
+    (kit / "scripts").mkdir(parents=True)
+    (kit / "judge").mkdir()
+    shutil.copy2(ROOT / "scripts" / "probes-sync.sh", kit / "scripts" / "probes-sync.sh")
+    for name in ("replay.py", "compact.py", "validate.py", "channel.py",
+                 "adjudicate.py", "README.md", "com.transmutelabs.judge-compact.plist"):
+        shutil.copy2(ROOT / "judge" / name, kit / "judge" / name)
+    for rel in ("probes.toml", "judge/prompt.md", "judge/body.json",
+                "idle-watch/prompt.md"):
+        dst = kit / "probes" / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "probes" / rel, dst)
+    return kit
+
+
+def run_sync(kit: Path, mode: str, home: Path, tools: Path, agents: Path,
+             fake_home: Path | None = None) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env.update(CLAUDE_PROBES_DIR=str(home), CLAUDE_JUDGE_TOOLS_DIR=str(tools),
+               CLAUDE_LAUNCH_AGENTS_DIR=str(agents))
+    if fake_home is not None:
+        env["HOME"] = str(fake_home)
+    return subprocess.run(["bash", str(kit / "scripts" / "probes-sync.sh"), mode],
+                          capture_output=True, text=True, env=env)
+
+
+def home_bytes(home: Path, tools: Path) -> dict[Path, bytes]:
+    out: dict[Path, bytes] = {}
+    for base in (home, tools):
+        for item in sorted(base.rglob("*")):
+            if item.is_file():
+                out[item] = item.read_bytes()
+    return out
+
+
+def scenario_28() -> None:
+    """Раскатка ставится НАБОРОМ и не сталкивается со стадией чужого прогона."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        kit = toy_kit(base)
+        home, tools, agents = base / "p", base / "t", base / "la"
+        agents.mkdir()
+
+        done = run_sync(kit, "--to-home", home, tools, agents)
+        require(done.returncode == 0, f"раскатка в игрушечный дом провалилась: {done.stderr}")
+        before = home_bytes(home, tools)
+        require(len(before) == 10, f"в доме {len(before)} файлов, ожидалось 10")
+
+        # Пропал ОДИН исходник -- дом не трогается ВООБЩЕ. Правка prompt.md
+        # делает «тронут» наблюдаемым: без неё дом совпал бы с собой и на
+        # пофайловой раскатке.
+        (kit / "judge" / "replay.py").unlink()
+        (kit / "probes" / "judge" / "prompt.md").write_text(
+            "раскатка следующей волны\n", encoding="utf-8")
+        done = run_sync(kit, "--to-home", home, tools, agents)
+        out = done.stdout + done.stderr
+        require(done.returncode == 1,
+                f"неполный набор обязан краснить (1), а дал {done.returncode}: {out}")
+        require(home_bytes(home, tools) == before,
+                "дом ТРОНУТ на неполном наборе -- раскатка идёт не всё-или-ничего")
+        require("не перенесено НИЧЕГО" in out, "отказ по неполному набору не назван своим текстом")
+
+        # Стадия чужого прогона под фиксированным именем обязана уцелеть.
+        shutil.copy2(ROOT / "judge" / "replay.py", kit / "judge" / "replay.py")
+        stray = tools / "compact.py.sync-new"
+        stray.write_bytes(b"stage of another run\n")
+        done = run_sync(kit, "--to-home", home, tools, agents)
+        require(done.returncode == 0, f"раскатка провалилась: {done.stderr}")
+        require(stray.is_file() and stray.read_bytes() == b"stage of another run\n",
+                "стадия чужого прогона снесена -- временное имя не несёт pid")
+        require((home / "judge" / "prompt.md").read_text(encoding="utf-8")
+                == "раскатка следующей волны\n", "полный набор так и не доехал до дома")
+
+
+def scenario_29() -> None:
+    """plist едет в ОБЪЯВЛЕННЫЙ каталог агентов, а не в $HOME живой машины."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        kit = toy_kit(base)
+        home, tools, agents = base / "p", base / "t", base / "la"
+        agents.mkdir()
+        fake = base / "fakehome"
+        (fake / "Library" / "LaunchAgents").mkdir(parents=True)
+
+        # В каноне plist -- ОБРАЗЕЦ с плейсхолдерами и не раскатывается вовсе;
+        # ручку видно только на заполненном.
+        pl = kit / "judge" / "com.transmutelabs.judge-compact.plist"
+        pl.write_text(pl.read_text(encoding="utf-8").replace("/Users/YOUR-USER", str(fake)),
+                      encoding="utf-8")
+        done = run_sync(kit, "--to-home", home, tools, agents, fake_home=fake)
+        require(done.returncode == 0, f"раскатка с заполненным plist провалилась: {done.stderr}")
+        require(not (fake / "Library" / "LaunchAgents"
+                     / "com.transmutelabs.judge-compact.plist").exists(),
+                "plist ушёл мимо объявленной ручки -- в $HOME")
+        require((agents / "com.transmutelabs.judge-compact.plist").is_file(),
+                "plist не лёг в объявленный каталог агентов")
+        require("launchctl" in done.stdout,
+                "раскатанный plist не объявил, что нужен bootout+bootstrap")
+
+
+class FakeResponse:
+    """Ответ реестра без сети: стенд герметичен."""
+
+    def __init__(self, blob: bytes) -> None:
+        self.blob = blob
+
+    def read(self) -> bytes:
+        return self.blob
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+
+def fake_tarball(member: str, payload: bytes) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        entry = tarfile.TarInfo(member)
+        entry.size = len(payload)
+        tf.addfile(entry, io.BytesIO(payload))
+    return buf.getvalue()
+
+
+def scenario_30(module: ModuleType) -> None:
+    """Загрузка не идёт через конечное имя и не оставляет обломков."""
+    payload = b"PRISTINE IMAGE" * 64
+    blob = fake_tarball("package/claude", payload)
+    saved = (module.npm_platform_pkg, module.binary_name, module.http_json,
+             module._verify_tarball, module.urllib, module.shutil)
+    try:
+        module.npm_platform_pkg = lambda: "pkg"
+        module.binary_name = lambda: "claude"
+        module.http_json = lambda url: {"dist": {"tarball": "http://example.invalid/t"}}
+        module._verify_tarball = lambda _b, _d, _w: None
+        module.urllib = SimpleNamespace(
+            request=SimpleNamespace(urlopen=lambda *_a, **_k: FakeResponse(blob)))
+
+        with tempfile.TemporaryDirectory() as raw:
+            vdir = Path(raw)
+            dest = vdir / "2.1.250"
+            module.download_binary("2.1.250", dest)
+            require(dest.read_bytes() == payload, "образ лёг не теми байтами")
+            require(not list(vdir.glob("*.download")), "обломок загрузки остался после успеха")
+
+            # Оборванная распаковка: установка не тронута, обломок убран.
+            dest.write_bytes(b"OLD INSTALL")
+
+            def torn(_src: object, _dst: object) -> None:
+                raise RuntimeError("обрыв посреди распаковки")
+
+            module.shutil = SimpleNamespace(copyfileobj=torn)
+            try:
+                module.download_binary("2.1.250", dest)
+            except RuntimeError:
+                pass
+            else:
+                require(False, "оборванная загрузка не подняла ошибку")
+            # Читается защищённо: когда временное имя СОВПАДАЕТ с конечным,
+            # уборка обломка сносит саму установку, и голый read_bytes() упал бы
+            # сырым OSError -- стенд покраснел бы, но НЕ назвал бы свойство.
+            after = dest.read_bytes() if dest.exists() else b"<install deleted>"
+            require(after == b"OLD INSTALL",
+                    "оборванная загрузка перезаписала установку")
+            require(not list(vdir.glob("*.download")),
+                    "обломок оборванной загрузки не убран")
+    finally:
+        (module.npm_platform_pkg, module.binary_name, module.http_json,
+         module._verify_tarball, module.urllib, module.shutil) = saved
+
+
+def import_costs() -> ModuleType:
+    """set-model-costs.py из ТОГО ЖЕ дерева, что меряет стенд."""
+    path = ROOT / "set-model-costs.py"
+    spec = importlib.util.spec_from_file_location("judge_tools_bench_costs", path)
+    require(spec is not None and spec.loader is not None, f"не удалось создать spec для {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def scenario_31() -> None:
+    """Бэкап конфига есть либо целиком, либо никак, и стадия не в семье бэкапов."""
+    module = import_costs()
+    real_shutil = module.shutil
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        cfg = home / "cfg.json"
+        module.write_json_atomically(str(cfg), {"customModelCosts": {"a": 1}}, indent=2)
+        require(json.loads(cfg.read_text(encoding="utf-8"))["customModelCosts"] == {"a": 1},
+                "атомарная запись легла не теми байтами")
+        require([q.name for q in home.iterdir()] == ["cfg.json"],
+                "атомарная запись оставила обломок")
+
+        # Оборванная копия: под именем бэкапа не должно появиться НИЧЕГО.
+        torn_dst = home / "cfg.json.backup.20260829"
+
+        # Замер идёт ВНУТРИ копии: обработчик исключения снимает стадию, и после
+        # возврата состояние «писали прямо в конечное имя» неотличимо от
+        # честного. Видно только в полёте.
+        mid: list[bool] = []
+
+        def torn(_src: object, _dst: object) -> None:
+            mid.append(torn_dst.exists())
+            raise RuntimeError("обрыв посреди копии")
+
+        module.shutil = SimpleNamespace(copyfileobj=torn, copystat=real_shutil.copystat)
+        try:
+            module.copy_atomically(str(cfg), str(torn_dst))
+        except RuntimeError:
+            pass
+        else:
+            require(False, "оборванная копия не подняла ошибку")
+        require(mid == [False] and not torn_dst.exists(),
+                "оборванная копия оставила огрызок бэкапа (имя бэкапа занято уже в полёте)")
+        require(sorted(q.name for q in home.iterdir()) == ["cfg.json"],
+                "оборванная копия оставила обломок стадии")
+
+        # Успешная копия: пока она идёт, глоб прополки бэкапов обязан быть ПУСТ.
+        during: list[list[str]] = []
+
+        def spy(src: object, dst: object) -> None:
+            during.append(sorted(q.name for q in home.glob("cfg.json.backup.*")))
+            real_shutil.copyfileobj(src, dst)
+
+        module.shutil = SimpleNamespace(copyfileobj=spy, copystat=real_shutil.copystat)
+        good = home / "cfg.json.backup.20260828"
+        module.copy_atomically(str(cfg), str(good))
+        require(during == [[]],
+                f"имя стадии попало в семью бэкапов: во время копии глоб дал {during}")
+        require(good.read_bytes() == cfg.read_bytes(), "бэкап лёг не теми байтами")
+    module.shutil = real_shutil
+
+
+def scenario_32() -> None:
+    """Отчёт стенда проб кладётся переименованием.
+
+    Свойство пинится ФОРМОЙ, и это объявлено: исполнить ветку `--json` можно
+    только полным прогоном probe-bench под bun по СОБРАННОМУ образу, которого у
+    этого стенда нет. Тот же приём, что у сценариев 17-18, 20 и 27.
+    """
+    text = (ROOT / "tools" / "probe-bench.js").read_text(encoding="utf-8")
+    require("const jsonTmp = `${options.json}.tmp.${process.pid}`;" in text,
+            "отчёт --json снова пишется через конечное имя")
+    start = text.find("const jsonTmp =")
+    arm = text[start:start + 600]
+    require("fs.fsyncSync(fd);" in arm, "стадия отчёта не доводится до диска")
+    require("fs.renameSync(jsonTmp, options.json);" in arm, "стадия отчёта не вводится переименованием")
+    require("fs.unlinkSync(jsonTmp)" in arm, "обломок стадии отчёта не убирается")
+
+
+def scenario_33() -> None:
+    """Живой pid не даёт сироте вечной неприкосновенности: возраст -- второй признак."""
+    with tempfile.TemporaryDirectory() as raw:
+        records = Path(raw)
+        live = os.getpid()               # заведомо живой номер
+        fresh = records / f"a.json.gz.tmp.{live}"
+        aged = records / f"b.json.gz.tmp.{live}"
+        dead = records / "c.json.gz.tmp.999999"
+        for item in (fresh, aged, dead):
+            item.write_text("x", encoding="utf-8")
+        past = time.time() - 48 * 3600
+        os.utime(aged, (past, past))
+
+        counters, _ = run_compact(records)
+        require(aged.exists() is False,
+                "сирота с ПЕРЕИСПОЛЬЗОВАННЫМ живым pid снова неприкосновенна навсегда")
+        require(dead.exists() is False, "сирота мёртвого pid не снята")
+        require(fresh.is_file(), "снят СВЕЖИЙ tmp живого писателя")
+        require_counters(counters, orphans=2, tmp_held=1)
+
+
+def scenario_34() -> None:
+    """Уничтоженная точка восстановления tweakcc чинится ПОСЛЕ стадии.
+
+    Свойство пинится ФОРМОЙ и это объявлено: чтобы исполнить ветку, нужен
+    настоящий прогон конвейера со стадией распаковщика (минуты, сеть, живой
+    дом). Тот же приём, что у сценария 20.
+    """
+    text = (ROOT / "claude-patch-all.sh").read_text(encoding="utf-8")
+    stage = text.find('TWEAKCC_RC=${PIPESTATUS[0]}')
+    require(stage >= 0, "в конвейере не найден код возврата стадии распаковщика")
+    arm = text[stage:stage + 4000]
+    require('if [[ ! -f "$TWEAKCC_BACKUP" ]]; then' in arm,
+            "после стадии не проверяется, уцелела ли точка восстановления")
+    require('cp -p "$PRISTINE_SRC" "$TWEAKCC_BACKUP.repair"' in arm,
+            "точка восстановления не пересоздаётся из пристинных байтов")
+    require(arm.index('if [[ ! -f "$TWEAKCC_BACKUP" ]]; then') < arm.index("__tw_saved="),
+            "починка стоит ПОСЛЕ сверки дома -- прогон, отказавший на сверке, "
+            "оставит дом без точки восстановления")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -695,6 +1000,13 @@ def run_scenarios() -> int:
         (25, scenario_25),
         (26, scenario_26),
         (27, scenario_27),
+        (28, scenario_28),
+        (29, scenario_29),
+        (30, lambda: scenario_30(module)),
+        (31, scenario_31),
+        (32, scenario_32),
+        (33, scenario_33),
+        (34, scenario_34),
     ]
     mismatches = 0
     for number, case in cases:
@@ -813,8 +1125,8 @@ def mutation_m9(root: Path) -> None:
 def mutation_m10(root: Path) -> None:
     replace_once(
         root / "judge" / "compact.py",
-        "        except (PermissionError, OverflowError, ValueError):\n            continue",
-        "        except (OverflowError, ValueError):\n            continue",
+        "        except (PermissionError, OverflowError, ValueError):\n            tmp_held += 1\n",
+        "        except (OverflowError, ValueError):\n            tmp_held += 1\n",
         "M10",
     )
 
@@ -825,7 +1137,7 @@ def mutation_m10(root: Path) -> None:
 def mutation_m11(root: Path) -> None:
     replace_once(
         root / "scripts" / "probes-sync.sh",
-        'if [[ ! -f "$B" ]]; then\n',
+        'if [[ ! -f "$2" ]]; then\n',
         'if false; then\n',
         "M11",
     )
@@ -916,6 +1228,107 @@ def mutation_m20(root: Path) -> None:
     )
 
 
+# M21-M23 -- зубы волны 24: раскатка набором, имя стадии с pid, каталог агентов
+# из объявленной ручки (круг 21, E-4/F-5/F-4).
+def mutation_m21(root: Path) -> None:
+    replace_once(
+        root / "scripts" / "probes-sync.sh",
+        '  if [[ "$FAILED" -ne 0 ]]; then\n    cleanup_staged\n',
+        '  if false; then\n    cleanup_staged\n',
+        "M21",
+    )
+
+
+def mutation_m22(root: Path) -> None:
+    replace_once(
+        root / "scripts" / "probes-sync.sh",
+        '  tmp="$dst.sync-new.$$"\n',
+        '  tmp="$dst.sync-new"\n',
+        "M22",
+    )
+
+
+def mutation_m23(root: Path) -> None:
+    replace_once(
+        root / "scripts" / "probes-sync.sh",
+        'PLIST_HOME="$LAUNCH_AGENTS_DIR/$PLIST_NAME"\n',
+        'PLIST_HOME="$HOME/Library/LaunchAgents/$PLIST_NAME"\n',
+        "M23",
+    )
+
+
+# M24-M25 -- зубы загрузки образа (круг 21, E-3): распаковка через конечное имя
+# и неубранный обломок.
+def mutation_m24(root: Path) -> None:
+    replace_once(
+        root / "claude_patch.py",
+        '    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.download")\n',
+        '    tmp = dest\n',
+        "M24",
+    )
+
+
+def mutation_m25(root: Path) -> None:
+    replace_once(
+        root / "claude_patch.py",
+        "    except BaseException:\n        try:\n            tmp.unlink()\n",
+        "    except BaseException:\n        try:\n            pass\n",
+        "M25",
+    )
+
+
+# M26-M27 -- зубы бэкапа конфига цен (круг 21, E-6): копия через конечное имя и
+# имя стадии, попадающее в глоб прополки бэкапов.
+def mutation_m26(root: Path) -> None:
+    replace_once(
+        root / "set-model-costs.py",
+        '    part = os.path.join(os.path.dirname(dst) or ".",\n'
+        '                        f".tmp-copy-{os.getpid()}-{os.path.basename(dst)}")\n',
+        '    part = dst\n',
+        "M26",
+    )
+
+
+def mutation_m27(root: Path) -> None:
+    replace_once(
+        root / "set-model-costs.py",
+        '    part = os.path.join(os.path.dirname(dst) or ".",\n'
+        '                        f".tmp-copy-{os.getpid()}-{os.path.basename(dst)}")\n',
+        '    part = f"{dst}.part.{os.getpid()}"\n',
+        "M27",
+    )
+
+
+# M28 -- зуб отчёта стенда проб (круг 21, E-10).
+def mutation_m28(root: Path) -> None:
+    replace_once(
+        root / "tools" / "probe-bench.js",
+        "      const jsonTmp = `${options.json}.tmp.${process.pid}`;\n",
+        "      const jsonTmp = options.json;\n",
+        "M28",
+    )
+
+
+# M29 -- зуб возрастного признака прополки tmp (круг 21, F-10).
+def mutation_m29(root: Path) -> None:
+    replace_once(
+        root / "judge" / "compact.py",
+        "            if age < TMP_HELD_SECONDS:\n",
+        "            if True:\n",
+        "M29",
+    )
+
+
+# M30 -- зуб починки точки восстановления tweakcc (круг 21, E-2).
+def mutation_m30(root: Path) -> None:
+    replace_once(
+        root / "claude-patch-all.sh",
+        '    if [[ ! -f "$TWEAKCC_BACKUP" ]]; then\n',
+        '    if false; then\n',
+        "M30",
+    )
+
+
 # Каждая мутация обязана покраснить СВОЙ сценарий СВОЕЙ причиной. Голый
 # `rc == 1` этого не доказывает: тот же код даёт необработанное исключение
 # внутри копии стенда и мутация, свалившая ЧУЖУЮ дверь. Сценарий и причина
@@ -942,6 +1355,16 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M18", mutation_m18, 25, "метка STOP не засчитана как отмена"),
     ("M19", mutation_m19, 26, "dry-run СНЁС сироту tmp"),
     ("M20", mutation_m20, 27, "сверка подмены сироты между замером и снятием пропала"),
+    ("M21", mutation_m21, 28, "дом ТРОНУТ на неполном наборе"),
+    ("M22", mutation_m22, 28, "стадия чужого прогона снесена"),
+    ("M23", mutation_m23, 29, "plist ушёл мимо объявленной ручки"),
+    ("M24", mutation_m24, 30, "оборванная загрузка перезаписала установку"),
+    ("M25", mutation_m25, 30, "обломок оборванной загрузки не убран"),
+    ("M26", mutation_m26, 31, "оборванная копия оставила огрызок бэкапа"),
+    ("M27", mutation_m27, 31, "имя стадии попало в семью бэкапов"),
+    ("M28", mutation_m28, 32, "отчёт --json снова пишется через конечное имя"),
+    ("M29", mutation_m29, 33, "сирота с ПЕРЕИСПОЛЬЗОВАННЫМ живым pid снова неприкосновенна"),
+    ("M30", mutation_m30, 34, "после стадии не проверяется, уцелела ли точка восстановления"),
 ]
 
 
@@ -965,7 +1388,9 @@ def copy_tree(root: Path) -> None:
     (root / "scripts").mkdir()
     shutil.copy2(COMPACT, root / "judge" / "compact.py")
     shutil.copy2(PATCHER, root / "claude_patch.py")
+    shutil.copy2(ROOT / "set-model-costs.py", root / "set-model-costs.py")
     shutil.copy2(BENCH, root / "tools" / "judge-tools-bench.py")
+    shutil.copy2(ROOT / "tools" / "probe-bench.js", root / "tools" / "probe-bench.js")
     shutil.copy2(ROOT / "claude-patch-all.sh", root / "claude-patch-all.sh")
     shutil.copy2(ROOT / "scripts" / "probes-sync.sh", root / "scripts" / "probes-sync.sh")
     for name in ("replay.py", "validate.py", "channel.py", "adjudicate.py",

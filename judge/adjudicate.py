@@ -17,7 +17,9 @@ import replay
 # beside the tool: `scripts/probes-sync.sh` puts the tools in `~/.claude/judge`
 # and the data under the probes home, so `HERE` was a different directory from
 # the one `validate.py` reads. Derived the same way its reader derives it.
-DEFAULT_HOME = os.environ.get('CLAUDE_PROBES_DIR') or '~/.claude/probes'
+# Лестница дома -- та же, что у ядра (круг 21, F-8).
+DEFAULT_HOME = (os.environ.get('CLAUDE_PROBES_DIR')
+                or os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude', 'probes'))
 DEFAULT_PROBE = os.environ.get('CLAUDE_JUDGE_PROBE') or 'judge'
 LABELS_PATH = None
 
@@ -261,9 +263,25 @@ def main():
     if not args.dry_run:
         out = os.path.expanduser(args.out) if args.out else default_output(args.model)
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-        with open(out, 'w', encoding='utf-8') as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n')
+        # Запись поверх имени стирала прежнюю разметку ПЕРЕД тем, как получить
+        # новую: обрыв здесь оставлял пустой или обрезанный файл, а прежний
+        # уже не существовал (круг 21, линза E, находка 8). Пишется соседний
+        # временный файл и вносится переименованием -- читатель видит либо
+        # старую разметку целиком, либо новую целиком.
+        tmp = out + '.new.%d' % os.getpid()
+        try:
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                for row in rows:
+                    fh.write(json.dumps(row, ensure_ascii=False, separators=(',', ':')) + '\n')
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, out)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         print(f'файл разметки: {out}')
 
     humans = human_records()

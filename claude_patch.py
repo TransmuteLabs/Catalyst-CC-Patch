@@ -202,6 +202,19 @@ def download_binary(version: str, dest: Path) -> None:
         blob = r.read()
     _verify_tarball(blob, meta.get("dist", {}), f"{pkg}@{version}")
     member_name = f"package/{binary_name()}"
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.download")
+    try:
+        _download_into(blob, member_name, pkg, version, tmp, dest)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _download_into(blob: bytes, member_name: str, pkg: str, version: str,
+                   tmp: Path, dest: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
         try:
             src = tf.extractfile(member_name)
@@ -210,9 +223,23 @@ def download_binary(version: str, dest: Path) -> None:
         if src is None:
             die(f"{member_name} not found in {pkg}@{version}")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with open(dest, "wb") as out:
+        # Распаковка НИКОГДА не идёт через конечное имя. Оборванная (kill,
+        # кончилось место, обрыв сети посреди copyfileobj) оставляла усечённый
+        # файл под именем версии, а следующий прогон читает существование как
+        # «уже установлено»: `--update` уходит в ветку target.exists() и строит
+        # рядом, оставляя огрызок на месте установки (круг 21, E-3). Два из трёх
+        # вызывающих уже качали в staging -- дыра была у ПЕРВОЙ установки, где
+        # конечное имя и есть цель. Лечится здесь, а не у вызывающих: свойство
+        # принадлежит загрузке.
+        #
+        # Имя несёт pid: две одновременные загрузки одной версии (свип + ручной
+        # прогон) не должны писать в один временный файл.
+        with open(tmp, "wb") as out:
             shutil.copyfileobj(src, out)
-    os.chmod(dest, 0o755)
+            out.flush()
+            os.fsync(out.fileno())
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, dest)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,7 +264,11 @@ def resolve_active_binary() -> Path:
         # "новейший" выбирало именно его. Эта ветка достижима ровно в
         # первозапускном состоянии (лаунчера ещё нет), то есть там, где
         # ошибиться дороже всего: цель выбирается из обломков прошлого падения.
-        skip = (".orig", ".staging", ".restore", ".repair", ".new", ".tmp", ".bak")
+        # `.download` -- обломок оборванной загрузки (см. download_binary): он
+        # САМЫЙ СВЕЖИЙ по mtime, как и .staging, и по правилу «новейший» был бы
+        # выбран целью.
+        skip = (".orig", ".staging", ".restore", ".repair", ".new", ".tmp", ".bak",
+                ".download")
         cands = [p for p in vdir.iterdir()
                  if p.is_file() and not p.name.endswith(skip)]
         if cands:

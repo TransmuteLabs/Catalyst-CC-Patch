@@ -701,7 +701,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 116 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 117 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -2016,10 +2016,35 @@ fi
 #
 # With no backup yet, tweakcc's startupCheck creates one from
 # ccInstallationPath -- our pristine staging file -- which needs nothing from us.
-TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
+# Дом tweakcc -- ОДНО разрешение на весь кит.
+#
+# Прежде дом был вписан в десяток мест как `$HOME/.tweakcc`, и любой прогон,
+# который не должен был трогать живое состояние -- свип по корпусу, зонд пути
+# сборки, игрушечные прогоны стендов, -- всё равно переписывал живой бэкап и
+# живой ccVersion. Измерено 2026-08-28 посреди свипа: `native-binary.backup`
+# нёс байты КОРПУСНОЙ версии, а `ccInstallationPath` указывал во временный
+# каталог. Это уничтожение точки восстановления живой установки прогоном,
+# который к ней отношения не имеет (круг 21, линза E, находка 1).
+#
+# Лестница -- ТА ЖЕ, что у распаковщика (его `getConfigDir`, src/config.ts
+# запиненного форка): переменная, затем существующий ~/.tweakcc, затем
+# существующий ~/.claude/tweakcc, затем XDG, иначе ~/.tweakcc. Расхождение
+# лестниц ловится ПОСЛЕ стадии: распаковщик печатает, куда он сохранил конфиг,
+# и это обязано лежать внутри дома, который назвали мы.
+TWEAKCC_HOME="${TWEAKCC_CONFIG_DIR:-}"
+if [[ -z "$TWEAKCC_HOME" ]]; then
+  if [[ -d "$HOME/.tweakcc" ]]; then TWEAKCC_HOME="$HOME/.tweakcc"
+  elif [[ -d "$HOME/.claude/tweakcc" ]]; then TWEAKCC_HOME="$HOME/.claude/tweakcc"
+  elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then TWEAKCC_HOME="$XDG_CONFIG_HOME/tweakcc"
+  else TWEAKCC_HOME="$HOME/.tweakcc"
+  fi
+fi
+[[ "$TWEAKCC_HOME" == "$HOME/.tweakcc" ]] \
+  || echo "Дом tweakcc: $TWEAKCC_HOME (не умолчание)"
+TWEAKCC_BACKUP="$TWEAKCC_HOME/native-binary.backup"
 # Запись, по которой tweakcc решает, освежать бэкап или восстанавливать его:
 # страж ниже обязан спрашивать ЕЁ, а не версию файла бэкапа.
-TWEAKCC_CFG="$HOME/.tweakcc/config.json"
+TWEAKCC_CFG="$TWEAKCC_HOME/config.json"
 # Дайджест бэкапа, снятый там, где восстановление применимо; пусто -- не
 # применимо. Объявлено здесь: под `set -u` пост-сверка читает его всегда.
 TWEAKCC_RESTORE_PINNED=""
@@ -2213,6 +2238,47 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
     "${TWEAKCC[@]}" --apply -y 2>&1 | tee "$TWEAKCC_OUT"
     TWEAKCC_RC=${PIPESTATUS[0]}
     set -e
+    # Наша лестница разрешения дома и лестница распаковщика обязаны сойтись.
+    # Он печатает, куда сохранил конфиг; если это не внутри дома, который
+    # назвали мы, значит весь прогон читал и правил ДРУГОЙ дом -- страж бэкапа
+    # сторожил не тот файл, а «изоляция» свипа не изолировала ничего. Дублировать
+    # чужую лестницу без такой сверки -- это охват на словах.
+    # Точка восстановления, УНИЧТОЖЕННАЯ чужим окном, восстанавливается здесь.
+    #
+    # startupCheck распаковщика при смене версии снимает бэкап (`unlink`) и
+    # только потом кладёт новый. Прогон, убитый в этом окне, оставляет дом
+    # ВОВСЕ БЕЗ бэкапа: `tweakcc --restore` человеку отвечать нечем, хотя живая
+    # установка уже пропатчена (круг 21, E-2). Байты для восстановления у нас
+    # есть и они проверены -- это $PRISTINE_SRC, из которого и строится сборка.
+    #
+    # Объявленный предел: если убит будет ЭТОТ прогон (SIGKILL до строки ниже),
+    # дом останется без бэкапа до следующего прогона -- тот пересоздаст его
+    # штатно, из пристинного staging-файла, на который смотрит ccInstallationPath.
+    if [[ ! -f "$TWEAKCC_BACKUP" ]]; then
+      if [[ -f "$PRISTINE_SRC" ]] \
+         && ! grep -q -a -F "$OUR_MARKER" "$PRISTINE_SRC" \
+         && ! grep -q -a -F 'tweakcc' "$PRISTINE_SRC"; then
+        if cp -p "$PRISTINE_SRC" "$TWEAKCC_BACKUP.repair" \
+           && mv "$TWEAKCC_BACKUP.repair" "$TWEAKCC_BACKUP"; then
+          echo "NOTE: точки восстановления tweakcc не было -- восстановлена из $PRISTINE_SRC." >&2
+          echo "      Так выглядит прогон, убитый в окне между снятием и записью бэкапа." >&2
+        else
+          rm -f "$TWEAKCC_BACKUP.repair"
+          echo "ВНИМАНИЕ: точки восстановления tweakcc нет, и восстановить её не удалось" >&2
+          echo "  ($TWEAKCC_BACKUP из $PRISTINE_SRC). 'tweakcc --restore' сейчас без бэкапа." >&2
+        fi
+      else
+        echo "ВНИМАНИЕ: точки восстановления tweakcc нет, а пристинных байтов для неё" >&2
+        echo "  на этой машине не нашлось ($PRISTINE_SRC). 'tweakcc --restore' без бэкапа." >&2
+      fi
+    fi
+    __tw_saved=$(sed -n 's/^Configuration saved at: //p' "$TWEAKCC_OUT" | tail -1)
+    if [[ -n "$__tw_saved" && "$__tw_saved" != "$TWEAKCC_HOME/"* ]]; then
+      echo "ОТКАЗ: распаковщик сохранил конфиг в $__tw_saved, а кит считает домом" >&2
+      echo "  $TWEAKCC_HOME -- лестницы разрешения дома разошлись. Прогон читал и" >&2
+      echo "  правил не тот дом; чинить лестницу, а не повторять прогон." >&2
+      exit 2
+    fi
     if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" && $TWEAKCC_RC -ne 0 ]]; then
       # A non-zero exit means the whole stage died, so NONE of its patches
       # applied -- strictly worse than the single ✗ the branches below treat as
@@ -2318,7 +2384,7 @@ if [[ -n "$TWEAKCC_RESTORE_PINNED" ]]; then
     echo "  reason to refresh the backup -- somebody else wrote it. The bytes restored" >&2
     echo "  over the target are therefore NOT the ones checked before the stage." >&2
     echo "  Nothing has been installed. Re-run when no other tweakcc (or copy) is" >&2
-    echo "  touching ~/.tweakcc." >&2
+    echo "  touching $TWEAKCC_HOME." >&2
     exit 1
   fi
 fi
@@ -2328,7 +2394,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 116 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 117 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -3802,7 +3868,15 @@ checks = {
                                               rb'if\(__g\)\{__ask=!1;await __jlog\(\{'
                                               rb'outcome:"filtered",by:String\(__g\),cls:null,'
                                               rb'\.\.\.\(__deg\.length\?\{deg:__dcut\(__deg,5\)\}'
-                                              rb':\{\}\)\}\)\}\}let __uw=\[\];let __arr=\[', d))
+                                              rb':\{\}\)\}\)\}\}let __uw=\[\];'
+                                              # Перечень между дешёвыми воротами и разбором
+                                              # ОСТАЁТСЯ полным: две подготовительные строки
+                                              # ленты (длина истории и идентификатор предмета)
+                                              # названы поимённо, поэтому любая ТРЕТЬЯ работа,
+                                              # вставленная сюда, по-прежнему краснит проверку.
+                                              rb'let __nh=\(__o\.ctx\.messages\|\|\[\]\)\.length;'
+                                              rb'let __sid=__o\.selfId\?__o\.selfId\(\):null;'
+                                              rb'let __arr=\[', d))
                                           # three count refusals; the exact moment of each is
                                           # checked separately below
                                           and bool(re.search(rb'return "fleet-busy:"\+__n\}', d))
@@ -3942,8 +4016,14 @@ checks = {
                                               rb'if\(__phomeP\)\{let __c1=await __ldt\(__phomeP\+"/probes\.toml"\);'
                                               rb'if\(__c1===!1\)__cfgbad=!0;else if\(__c1\)'
                                               rb'\{__cfgseen=!0;__cfg=\{\.\.\.__cfg,\.\.\.__eff\(__c1,__o\.dirName\)\}\}\}', d)),
+    # Волна 24 добавила в ту же запись две ПОМЕТКИ ленты: `now` (вызов выпущен
+    # ЭТИМ ходом и ещё не исполнен) и `self` (это и есть предмет консультации).
+    # Образец пинится вместе с ними: без пометок судья снова читает свой
+    # собственный вызов как «уже отправленный голос» и отменяет веер.
     'judge context is structured, not prefixed': bool(re.search(
-                                              rb'return\{src:__role,text:__bt\}\}\)\.filter\(Boolean\)', d))
+                                              rb'return\{src:__role,text:__bt,'
+                                              rb'\.\.\.\(__now\?\{now:!0\}:\{\}\),'
+                                              rb'\.\.\.\(__slf\?\{self:!0\}:\{\}\)\}\}\)\.filter\(Boolean\)', d))
                                           and bool(re.search(
                                               rb'let __cut=\(__n\)=>\{let __b=Math\.max\(60,__n\),'
                                               rb'__pb=Math\.floor\(__b\*0\.35\),__sb=Math\.floor\(__b\*0\.3\);', d)),
@@ -4374,7 +4454,7 @@ checks = {
                                               rb'Math\.min\(__rt,Math\.max\(1000,Math\.round\(__rt/2\)\)\)', d)),
     # One expression per core copy, and no second name for the same string.
     'the probes home is computed once': len(re.findall(
-                                              rb'__phome=__o\.dirEnv\|\|\(\(process\.env\.HOME', d)) == 1
+                                              rb'__phome=__o\.dirEnv\|\|\(\(process\.env\.CLAUDE_CONFIG_DIR', d)) == 1
                                           and bool(re.search(
                                               rb'__jdir=__phome\+"/"\+__o\.dirName', d))
                                           and len(re.findall(
@@ -4418,8 +4498,9 @@ checks = {
     # one home for all probes: the id is a subdirectory, not a separate
     # settings root
     'settings live in one probes home': bool(re.search(
-                                              rb'__phome=__o\.dirEnv\|\|\(\(process\.env\.HOME\|\|"\."\)'
-                                              rb'\+"/\.claude/probes"\),__jdir=__phome\+"/"\+__o\.dirName', d))
+                                              rb'__phome=__o\.dirEnv\|\|\(\(process\.env\.CLAUDE_CONFIG_DIR\|\|'
+                                              rb'\(\(process\.env\.HOME\|\|"\."\)\+"/\.claude"\)\)\+"/probes"\),'
+                                              rb'__jdir=__phome\+"/"\+__o\.dirName', d))
                                           # a probe's journal lives in its subdirectory of the same home
                                           and bool(re.search(
                                               rb'__jdir=__phome\+"/"\+__o\.dirName;', d))
@@ -4619,6 +4700,22 @@ checks = {
                                           and bool(re.search(
                                               rb'if\(!__t\.length&&__o\.turnLost&&__o\.turnLost\(\)\)'
                                               rb'__deg\.push\("turn-evicted"\);', d)),
+    # Предмет консультации и соседи ТОГО ЖЕ хода помечены в ленте ПОЛЯМИ:
+    # склеенная лента показывала судье его собственный вызов среди
+    # «уже случившегося», и он отменял его как повтор уже отправленного голоса,
+    # а соседа по сообщению не засчитывал в веер (круг 21, находка контроллера).
+    # Метка -- поле, а не префикс текста: `text` содержимым не доверяют.
+    'the judge sees which calls are its own turn': bool(re.search(
+                                              rb'let __nh=\(__o\.ctx\.messages\|\|\[\]\)\.length;'
+                                              rb'let __sid=__o\.selfId\?__o\.selfId\(\):null;', d))
+                                          and bool(re.search(
+                                              rb'let __slf=!!\(__sid&&__c\.some\(\(__x\)=>'
+                                              rb'__x\?\.type==="tool_use"&&__x\.id===__sid\)\);', d))
+                                          and bool(re.search(
+                                              rb'return\{src:__role,text:__bt,'
+                                              rb'\.\.\.\(__now\?\{now:!0\}:\{\}\),'
+                                              rb'\.\.\.\(__slf\?\{self:!0\}:\{\}\)\}', d))
+                                          and bool(re.search(rb'selfId:\(\)=>', d)),
     # an unknown wrapper under the user role must be VISIBLE in the journal:
     # three defects in a row were one class, found through an incident
     'judge reports unknown user-role wrappers': bool(re.search(
@@ -4671,7 +4768,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 116
+EXPECTED_CHECKS = 117
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -5270,7 +5367,7 @@ echo "  * the proxy gaining a model (or just: bash $(basename "$0") --only-ours)
 # sets the switch before syncing the files meets a stopped fleet and no
 # explanation of why. (`fail_closed` genuinely has no env carrier: a setting with
 # two homes is the defect this kit checks for elsewhere.)
-if [[ ! -f "${CLAUDE_PROBES_DIR:-$HOME/.claude/probes}/probes.toml" ]]; then
+if [[ ! -f "${CLAUDE_PROBES_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/probes}/probes.toml" ]]; then
   echo
   echo "The probes have no settings file yet, and on such a machine the prompt"
   echo "files are missing too -- which is what makes CLAUDE_JUDGE=enforce CANCEL"
@@ -5291,13 +5388,13 @@ if [[ -f "$BIN.orig" ]]; then
   echo "  cp -p \"$BIN.orig\" \"$BIN.restore\" && mv \"$BIN.restore\" \"$BIN\""
   echo "  (running sessions keep the old build until they are restarted)"
 else
-  echo "No pristine copy beside the binary; tweakcc keeps its own backup under ~/.tweakcc."
+  echo "No pristine copy beside the binary; tweakcc keeps its own backup under $TWEAKCC_HOME."
   echo "  Check it before trusting it -- tweakcc restores it blind:"
-  echo "    grep -c -a -F 'baseURL:/^claude/i.test(' ~/.tweakcc/native-binary.backup"
+  echo "    grep -c -a -F 'baseURL:/^claude/i.test(' $TWEAKCC_BACKUP"
   echo "  A non-zero count means the backup itself carries our patches."
   echo "  A zero count alone does NOT mean it is good: a TRUNCATED backup also"
   echo "  answers 0. Ask the second question the build asks -- does it run:"
-  echo "    ~/.tweakcc/native-binary.backup --version"
+  echo "    $TWEAKCC_BACKUP --version"
   echo "  A complete stock image prints a version; a truncated one does not."
 fi
 

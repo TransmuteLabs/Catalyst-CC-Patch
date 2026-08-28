@@ -2356,7 +2356,13 @@ step('22 judge consulted before a subagent dispatch', () => {
     // two identical expressions, and derived two names for one and the same
     // string -- so an edit to either would have sent the journal to a different
     // home than the settings, and nothing would have said so.
-    '__phome=__o.dirEnv||((process.env.HOME||".")+"/.claude/probes"),' +
+    // Лестница дома -- ТА ЖЕ, что у самого продукта: CLAUDE_CONFIG_DIR, иначе
+    // ~/.claude. Прежняя форма выводила дом проб ТОЛЬКО из HOME, и сессия,
+    // запущенная с изолированным CLAUDE_CONFIG_DIR (в том числе гейтом
+    // интерфейса конвейера), писала записи и читала настройки из ЖИВОГО дома
+    // (круг 21, F-8).
+    '__phome=__o.dirEnv||((process.env.CLAUDE_CONFIG_DIR||' +
+      '((process.env.HOME||".")+"/.claude"))+"/probes"),' +
     '__jdir=__phome+"/"+__o.dirName;' +
     // The journal line is an INDEX, not evidence: its verdict is clipped and
     // the material the judge actually saw is nowhere in it, so neither
@@ -2705,7 +2711,20 @@ step('22 judge consulted before a subagent dispatch', () => {
       // otherwise a filtered-out call would leave an entry in the turns table
       // forever.
       'let __uw=[];' +
-      'let __arr=[...(__o.ctx.messages||[]),...__t].map((__M)=>{let __m=__M?.message;if(!__m)return null;' +
+      // Записи ТЕКУЩЕГО хода помечаются, и предмет консультации -- отдельно.
+      // Лента склеивает историю с ходом, и обе половины выглядели одинаково:
+      // судья видел СВОЙ ЖЕ вызов среди «уже случившегося» и отменял его как
+      // повтор уже отправленного голоса. Измерено 2026-08-28 по записи
+      // консультации: оба `[tool Agent]` одного ассистентского сообщения
+      // стояли в ленте, и тот же вызов приходил ниже как предмет. Симптом
+      // двусторонний: соседний вызов того же сообщения не засчитывался в
+      // веер, и первый голос получал замечание «одиночный вызов».
+      // Метка -- ПОЛЕ, а не префикс текста: внутри `text` может лежать что
+      // угодно, включая строку, похожую на метку (то же основание, по
+      // которому лента вообще передаётся массивом, а не строками).
+      'let __nh=(__o.ctx.messages||[]).length;' +
+      'let __sid=__o.selfId?__o.selfId():null;' +
+      'let __arr=[...(__o.ctx.messages||[]),...__t].map((__M,__ix)=>{let __m=__M?.message;if(!__m)return null;' +
         'let __c=Array.isArray(__m.content)?__m.content:[{type:"text",text:String(__m.content??"")}];' +
         'let __bt=__c.map((__b)=>__b?.type==="text"?__b.text:' +
         '__b?.type==="thinking"?"[thinking] "+__b.thinking:' +
@@ -2751,7 +2770,9 @@ step('22 judge consulted before a subagent dispatch', () => {
         'if(__role==="user"){let __wm=/^\\s*<([a-z][a-z0-9-]*)/i.exec(__bt);' +
           'if(__wm&&["command-name","command-message","command-args"].indexOf(__wm[1].toLowerCase())<0' +
             '&&__uw.indexOf(__wm[1])<0)__uw.push(__wm[1])}' +
-        'return{src:__role,text:__bt}}).filter(Boolean);' +
+        'let __now=__ix>=__nh;' +
+        'let __slf=!!(__sid&&__c.some((__x)=>__x?.type==="tool_use"&&__x.id===__sid));' +
+        'return{src:__role,text:__bt,...(__now?{now:!0}:{}),...(__slf?{self:!0}:{})}}).filter(Boolean);' +
       // enforce/fail_closed are computed BEFORE the consultation: the
       // obligation to reach a decision must also be known on the failure path,
       // where neither the verdict nor __cfg can be read anymore.
@@ -3358,6 +3379,9 @@ step('22 judge consulted before a subagent dispatch', () => {
       // does not leave an entry behind forever.
       'turn:()=>{let __x=globalThis.__ccJudgeTurn?.get($5);' +
         'globalThis.__ccJudgeTurn?.delete($5);return __x||[]},' +
+      // Идентификатор ПРЕДМЕТА: тот же ключ, по которому копится ход.
+      // Без него запись собственного вызова в ленте неотличима от чужой.
+      'selfId:()=>$5,' +
       'turnLost:()=>globalThis.__ccJudgeTurnLost?.has($5)||!1,' +
       // The verdict vocabulary is a parameter, not a property of the core: the
       // watcher has its own.

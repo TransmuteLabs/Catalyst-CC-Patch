@@ -13,10 +13,18 @@ after the archive has been written and read back.
 """
 import argparse, glob, gzip, json, os, re, shutil, time
 
+# Возраст, после которого tmp не может принадлежать здоровому писателю: он
+# создаёт временный файл и переименовывает его в те же секунды. Порог служит
+# ВТОРЫМ признаком рядом с проверкой pid -- номера переиспользуются, и одна
+# проверка pid оставляла сироту с чужим живым номером навсегда (круг 21, F-10).
+TMP_HELD_SECONDS = 24 * 3600
+
 
 def main():
     p = argparse.ArgumentParser()
-    home = os.environ.get('CLAUDE_PROBES_DIR') or '~/.claude/probes'
+    # Лестница дома -- та же, что у ядра (круг 21, F-8).
+    home = (os.environ.get('CLAUDE_PROBES_DIR')
+            or os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude', 'probes'))
     p.add_argument('--home', default=home, help='дом проб')
     p.add_argument('--probe', default='judge', help='идентификатор пробы')
     p.add_argument('--dir', default=None,
@@ -29,6 +37,7 @@ def main():
 
     cutoff = time.time() - a.older_than_hours * 3600
     done = saved = skipped = vanished = gz_gone = orphans = src_gone = 0
+    tmp_held = 0
     # Гонка с прополкой ядра (tweakcc-patch.js, records_keep, дефолт 500):
     # ядро удаляет старейшие записи ЭТОГО же каталога в любой момент, и файл,
     # уже попавший в наш глоб, исчезает до getmtime, между getmtime и open,
@@ -77,9 +86,25 @@ def main():
         except ProcessLookupError:
             pass                       # pid мёртв -- файл ничей
         except (PermissionError, OverflowError, ValueError):
+            tmp_held += 1
             continue                   # живой чужой процесс либо неномер pid
         else:
-            continue                   # живой
+            # Живой pid НЕ ДОКАЗЫВАЕТ, что файл чей-то: номера переиспользуются,
+            # и сирота, чей номер достался долгоживущему процессу, не снимался
+            # НИКОГДА -- прополка обходила его каждый проход, вечно (круг 21,
+            # F-10). Возраст файла -- признак, не зависящий от номера: писатель
+            # создаёт tmp и переименовывает его в те же секунды, поэтому tmp
+            # старше суток не принадлежит здоровому писателю ни при каком pid.
+            # Зависший на сутки писатель и так сломан, а его rename после снятия
+            # tmp падает FileNotFoundError -- запись останется несжатой и будет
+            # сжата следующим проходом.
+            try:
+                age = time.time() - os.stat(t).st_mtime
+            except FileNotFoundError:
+                continue
+            if age < TMP_HELD_SECONDS:
+                tmp_held += 1
+                continue               # живой писатель, файл свежий
         if a.dry_run:
             print(f'снёс бы сироту tmp: {os.path.basename(t)}')
         else:
@@ -246,7 +271,7 @@ def main():
 
     print(f'сжато: {done}, пропущено: {skipped}, исчезли под руками: {vanished}, '
           f'архив исчез после сжатия: {gz_gone}, исходник исчез до замера: {src_gone}, '
-          f'сирот tmp убрано: {orphans}, '
+          f'сирот tmp убрано: {orphans}, tmp при живом pid: {tmp_held}, '
           f'освобождено: {saved/1048576:.2f} МБ')
 
 

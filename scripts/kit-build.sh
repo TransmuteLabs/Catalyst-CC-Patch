@@ -174,6 +174,18 @@ done
 # (unpacking, verifying) received a truncated archive. Write under a temp name
 # in the same directory and mv: a rename within one filesystem is atomic, the
 # reader always sees a complete archive — either the old one or the new one.
+# Обломки от УБИТЫХ прогонов: трап их не видит (SIGKILL), а имя несёт чужой
+# pid, и следующая сборка своим `rm -f "$OUT.tmp.$$"` их не трогает -- каждый
+# лежал в dist/ навсегда (круг 21, E-9). Ничьим считается только доказанно
+# ничей: мёртвый номер. Живой -- соседняя сборка, её файл не наш.
+for __stale in "$ROOT"/dist/*.tar.gz.tmp.[0-9]*; do
+  [[ -e "$__stale" ]] || continue
+  __spid="${__stale##*.}"
+  case "$__spid" in ''|*[!0-9]*) continue ;; esac
+  kill -0 "$__spid" 2>/dev/null && continue
+  rm -f "$__stale" && echo "kit-build: убран обломок убитой сборки: $(basename "$__stale")"
+done
+
 tar czf "$OUT.tmp.$$" -C "$(dirname "$STAGE")" "$NAME"
 mv -f "$OUT.tmp.$$" "$OUT"
 rm -rf "$(dirname "$STAGE")"

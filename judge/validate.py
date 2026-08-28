@@ -19,7 +19,9 @@ import replay
 # The probes home is one for all probes; settings come from the shared
 # probes.toml, while the prompt, records and labels come from the probe
 # subdirectory.
-DEFAULT_HOME = os.environ.get('CLAUDE_PROBES_DIR') or '~/.claude/probes'
+# Лестница дома -- та же, что у ядра (круг 21, F-8).
+DEFAULT_HOME = (os.environ.get('CLAUDE_PROBES_DIR')
+                or os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude', 'probes'))
 DEFAULT_PROBE = 'judge'
 DEFAULT_IMAGE = '~/.local/bin/claude'
 
@@ -535,11 +537,24 @@ def command_run(args):
     rows = [result for _, result in sorted(completed)]
     out = os.path.expanduser(args.out) if args.out else default_output_path()
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    with open(out, 'w', encoding='utf-8') as fh:
-        for row in rows:
-            line = json.dumps(row, ensure_ascii=False, separators=(',', ':'))
-            fh.write(line + '\n')
-            print(line)
+    # Тот же приём, что в adjudicate.py: прежний файл прогона не стирается,
+    # пока новый не дописан целиком (круг 21, линза E, находка 8).
+    tmp = out + '.new.%d' % os.getpid()
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            for row in rows:
+                line = json.dumps(row, ensure_ascii=False, separators=(',', ':'))
+                fh.write(line + '\n')
+                print(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     print(f'файл прогона: {out}')
     print_summary(rows, [model for model, _ in models], recorded)
 

@@ -204,6 +204,59 @@ CACHE_PATH = os.path.expanduser("~/.cache/claude-model-costs/models-dev.json")
 SEEN_PATH = os.path.expanduser("~/.cache/claude-model-costs/seen-models.json")
 
 
+def write_json_atomically(path, payload, **dump_kw):
+    """Запись json через временное имя рядом, fsync и переименование.
+
+    Три места писали этот же приём вручную и БЕЗ fsync: переименование
+    гарантирует, что читатель не увидит половину, но не гарантирует, что после
+    внезапной перезагрузки в файле окажутся байты, а не нули. Дом приёма один
+    на всех писателей (круг 21, E-6).
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, **dump_kw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def copy_atomically(src, dst):
+    """Копия, которая либо есть целиком, либо её нет вовсе.
+
+    `shutil.copy2` пишет ПРЯМО в конечное имя: прогон, убитый посреди копии,
+    оставлял огрызок под именем бэкапа. Огрызок бэкапа хуже отсутствия --
+    именно его берут для отката, и он выглядит как полный (круг 21, E-6).
+    """
+    # Имя стадии НАМЕРЕННО не из семьи назначения: конвейер прополаывает бэкапы
+    # глобом `~/.claude.json.backup.*` и оставляет три свежих. Стадия с именем
+    # `<бэкап>.part.<pid>` попала бы в этот глоб -- и обломок убитого прогона
+    # вытеснил бы из тройки НАСТОЯЩИЙ бэкап (claude-patch-all.sh,
+    # prune_config_backups).
+    part = os.path.join(os.path.dirname(dst) or ".",
+                        f".tmp-copy-{os.getpid()}-{os.path.basename(dst)}")
+    try:
+        with open(src, "rb") as rfh, open(part, "wb") as wfh:
+            shutil.copyfileobj(rfh, wfh)
+            wfh.flush()
+            os.fsync(wfh.fileno())
+        shutil.copystat(src, part)
+        os.replace(part, dst)
+    except BaseException:
+        try:
+            os.unlink(part)
+        except OSError:
+            pass
+        raise
+
+
 def load_seen():
     try:
         with open(SEEN_PATH, encoding="utf-8") as fh:
@@ -213,11 +266,7 @@ def load_seen():
 
 
 def save_seen(ids):
-    os.makedirs(os.path.dirname(SEEN_PATH), exist_ok=True)
-    tmp = f"{SEEN_PATH}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(sorted(ids), fh, indent=2)
-    os.replace(tmp, SEEN_PATH)
+    write_json_atomically(SEEN_PATH, sorted(ids), indent=2)
 
 
 def fetch_json(url, timeout=30):
@@ -264,11 +313,7 @@ def fetch_catalogue(persist=True):
     # The cache is written via tmp+os.replace in the same directory (the
     # pattern save_seen() already uses): a concurrent sync or the fallback
     # reader above must never see a half-written catalogue.
-    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-    tmp = f"{CACHE_PATH}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(catalogue, fh)
-    os.replace(tmp, CACHE_PATH)
+    write_json_atomically(CACHE_PATH, catalogue)
     return catalogue
 
 
@@ -570,7 +615,7 @@ def main() -> int:
     # what a rollback would need to restore, not the snapshot from before
     # the network phase.
     backup = f"{path}.backup.{time.strftime('%Y%m%d-%H%M%S')}"
-    shutil.copy2(path, backup)
+    copy_atomically(path, backup)
 
     # Replace wholesale rather than merge: a model that lost its models.dev
     # entry should fall back rather than keep a price nobody can trace.
@@ -581,10 +626,7 @@ def main() -> int:
 
     # Write via a temp file in the same directory so a crash cannot truncate the
     # live config, and rename over it.
-    tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(config, fh, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    write_json_atomically(path, config, indent=2, ensure_ascii=False)
 
     print(f"\nBacked up -> {backup}")
     print(f"Wrote customModelCosts ({len(costs)} models) -> {path}")

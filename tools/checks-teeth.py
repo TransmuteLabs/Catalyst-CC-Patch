@@ -23,6 +23,7 @@ tweakcc восстанавливает свой бэкап поверх назв
   2  прибор не может мерить: якорь пропал/слишком широк, замена длиннее якоря,
      либо КОНТРОЛЬ провален -- названный образ красен ещё до мутаций
   4  длина таблицы разошлась с объявленной (EXPECTED_MUTATIONS)
+  3  замок конвейера держит живая сборка -- НЕ МЕРИЛИ, повтор поможет
   5  мерить нечего: на этой машине нет собранного образа
   6  сломано окружение: нет bash или tools/checks-on-image.sh
 """
@@ -30,8 +31,11 @@ tweakcc восстанавливает свой бэкап поверх назв
 from __future__ import annotations
 
 import argparse
+import fcntl
+import glob
 import io
 import os
+import time
 import re
 import shutil
 import subprocess
@@ -43,7 +47,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 14
+EXPECTED_MUTATIONS = 16
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.
@@ -119,6 +123,83 @@ def edits_c10(base: bytes) -> list[tuple[int, bytes]]:
 DERIVED = {"C10": edits_c10}
 
 
+def pipeline_lock_path() -> str:
+    """Тот же дом замка, что у конвейера (claude-patch-all.sh) и зонда пути."""
+    named = os.environ.get("CLAUDE_PATCH_LOCK")
+    if named:
+        return named
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, "claude-patch-all.%d.lock" % os.getuid())
+
+
+def hold_read_lock() -> "io.BufferedWriter | None":
+    """Разделяемый замок на время замера; None -- замок держит живая сборка.
+
+    Прибор МЕРЯЕТ ЖИВОЙ ОБРАЗ и копирует его четырнадцать раз. Сборка в это
+    время вносит новый образ переименованием: копия попадала на файл, который
+    уже не тот, и прибор объявлял КРАСНОЕ -- дефект, которого нет (круг 21,
+    F-1). Замок разделяемый: два замера друг другу не мешают, а сборка держит
+    исключительный и просто не пускает нас в своё окно.
+    """
+    path = pipeline_lock_path()
+    try:
+        fh = open(path, "a")
+    except OSError:
+        return None                    # машинерия замка недоступна -- решает вызывающий
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
+
+
+WORKER_TMP_HELD_SECONDS = 6 * 3600
+
+
+def weed_worker_leftovers() -> int:
+    """Копии образа, пережившие SIGKILL воркера.
+
+    Каждая -- сотни мегабайт, а имя было СЛУЧАЙНЫМ: опознать ничьё было нечем,
+    и обломки копились без предела (круг 21, E-9). Имя теперь несёт pid, и
+    ничьим считается только доказанно ничей: мёртвый номер либо возраст больше
+    порога (переиспользованный номер -- та же ловушка, что у прополки записей).
+    """
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    removed = 0
+    for path in glob.glob(os.path.join(tmp, "checks-teeth.[0-9]*.*.bin")):
+        suffix = os.path.basename(path).split(".")[1]
+        try:
+            pid = int(suffix)
+        except ValueError:
+            continue
+        try:
+            stat = os.stat(path)
+        except FileNotFoundError:
+            continue
+        alive = True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        except (PermissionError, OverflowError, ValueError):
+            alive = True
+        if alive and (time.time() - stat.st_mtime) < WORKER_TMP_HELD_SECONDS:
+            continue
+        try:
+            after = os.stat(path)
+        except FileNotFoundError:
+            continue
+        if (after.st_ino, after.st_mtime_ns) != (stat.st_ino, stat.st_mtime_ns):
+            continue                   # подменён между замером и снятием -- не наш
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            continue
+        removed += 1
+    return removed
+
+
 def reds(image: Path) -> tuple[list[str], str]:
     done = subprocess.run(["bash", str(RUNNER), str(image)],
                           capture_output=True, text=True)
@@ -132,7 +213,9 @@ def reds(image: Path) -> tuple[list[str], str]:
 
 def run_one(args) -> tuple[str, str, list[str], list[str]]:
     mid, check, image, edits, want = args
-    handle, path = tempfile.mkstemp(prefix="checks-teeth.", suffix=".bin")
+    # pid в имени -- единственный признак, по которому обломок убитого воркера
+    # опознаётся как ничей (см. weed_worker_leftovers).
+    handle, path = tempfile.mkstemp(prefix="checks-teeth.%d." % os.getpid(), suffix=".bin")
     os.close(handle)
     try:
         shutil.copyfile(image, path)
@@ -164,6 +247,17 @@ def main() -> int:
     if image is None or not image.is_file():
         print("checks-teeth: собранного образа на этой машине нет -- пропуск", file=sys.stderr)
         return 5
+
+    # Замок берётся ДО первого чтения образа и держится до конца замера.
+    lock = hold_read_lock()
+    if lock is None:
+        print("checks-teeth: НЕ МЕРИЛИ -- замок конвейера держит живая сборка "
+              f"({pipeline_lock_path()}); образ меняется под руками, повтор поможет",
+              file=sys.stderr)
+        return 3
+    freed = weed_worker_leftovers()
+    if freed:
+        print(f"checks-teeth: убрано копий образа от убитых воркеров: {freed}", flush=True)
 
     try:
         rows = read_table()
@@ -237,6 +331,7 @@ def main() -> int:
             else:
                 print(f"checks-teeth: МУТАЦИЯ {mid}: RED «{'» + «'.join(want)}»", flush=True)
     print(f"checks-teeth: ИТОГ мутаций={len(jobs)} прошло молча/чужой дверью={bad}", flush=True)
+    lock.close()                       # замок снимается ПОСЛЕ последнего замера
     return 0 if bad == 0 else 1
 
 

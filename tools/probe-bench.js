@@ -1673,7 +1673,24 @@ async function main() {
       for (const line of homeDiff.foreign.slice(0, 8)) console.log('  ' + line);
       if (homeDiff.foreign.length > 8) console.log('  … и ещё ' + (homeDiff.foreign.length - 8));
     }
-    if (options.json) fs.writeFileSync(options.json, `${JSON.stringify(results, null, 2)}\n`);
+    // Отчёт кладётся переименованием. Прямая запись в конечное имя оставляла
+    // после убитого прогона ПОЛОВИНУ json под именем готового отчёта: читатель
+    // (человек или разбор) не отличает его от целого, пока не споткнётся на
+    // разборе -- а с усечением ровно по границе элемента и не споткнётся
+    // (круг 21, E-10). Имя стадии несёт pid: два прогона с одним --json не
+    // должны писать в один временный файл.
+    if (options.json) {
+      const jsonTmp = `${options.json}.tmp.${process.pid}`;
+      try {
+        fs.writeFileSync(jsonTmp, `${JSON.stringify(results, null, 2)}\n`);
+        const fd = fs.openSync(jsonTmp, 'r+');
+        try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+        fs.renameSync(jsonTmp, options.json);
+      } catch (error) {
+        try { fs.unlinkSync(jsonTmp); } catch { /* обломка нет -- нечего снимать */ }
+        throw error;
+      }
+    }
     const bad = results.filter((result) => result.mismatch).length;
     // Итог машинным читателем, а не пересчётом строк таблицы.
     //
