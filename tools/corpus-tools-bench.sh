@@ -32,8 +32,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=45
-EXPECTED_MUTATIONS=38
+EXPECTED_SCENARIOS=56
+EXPECTED_MUTATIONS=49
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -111,11 +111,27 @@ bad()  { RUN=$((RUN+1)); FAILED=$((FAILED+1)); say "  ПРОВАЛ $*"; }
 # --- игрушечный корпус -------------------------------------------------------
 # Версии названы заведомо несуществующими в реестре: если сценарий всё же
 # дойдёт до сети, он получит отказ, а не чужой образ.
+# Содержимое игрушечного образа -- ОДИН дом.
+#
+# Оно было записано в пяти местах: в наполнении корпуса и в 4 сценариях
+# docnum:subset,
+# которые портят образ и восстанавливают его литералом. Когда образу добавили
+# номер версии (заглушка обязана отвечать про НЕГО), восстановления вернули
+# старый текст -- пин перестал сходиться, и 22 сценария docnum:historical подряд
+# покраснели по чужой причине. Одна функция: сменить содержимое можно только
+# сразу везде.
+toy_image() {   # путь, версия
+  printf 'образ %s\n' "$2" > "$1"
+}
+
 mk_corpus() {   # каталог-назначение
   local dir=$1
   mkdir -p "$dir/corpus"
-  printf 'образ девятьсот\n'      > "$dir/corpus/0.0.900.pristine"
-  printf 'образ девятьсот один\n' > "$dir/corpus/0.0.901.pristine"
+  # Образ НЕСЁТ свою версию: заглушка конвейера читает её оттуда и печатает
+  # строку дыма про НЕЁ. С константой в заглушке поле вердикта, привязанное к
+  # номеру версии, проверялось бы на выдуманном номере.
+  toy_image "$dir/corpus/0.0.900.pristine" 0.0.900
+  toy_image "$dir/corpus/0.0.901.pristine" 0.0.901
   local h900 h901
   h900=$(shasum -a 256 "$dir/corpus/0.0.900.pristine" | awk '{print $1}')
   h901=$(shasum -a 256 "$dir/corpus/0.0.901.pristine" | awk '{print $1}')
@@ -184,20 +200,54 @@ mk_kit() {   # каталог-назначение
 # названный файл -- так проверяется сверка КОПИИ, сделанной после сверки пинов.
 set -u
 tweak="${STUB_TWEAK:-none}"
+# Цель читается ИЗ АРГУМЕНТОВ: два поля вердикта -- версия и дайджест --
+# привязаны к тому, что конвейеру передали, и заглушка обязана отвечать про
+# ЭТОТ файл, а не про константу. `--expect-sha` она принимает и молчит: свою
+# дверь пина настоящий конвейер закрывает сам (проверено прямым прогоном), а
+# стенд здесь меряет ВЕРДИКТ СВИПА.
+target=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)     target="${2:-}"; shift 2 ;;
+    --expect-sha) shift 2 ;;
+    *)            shift ;;
+  esac
+done
 unless() { [[ "$tweak" == "$1" ]] || printf '%s\n' "$2"; }
 [[ -z "${STUB_TAMPER:-}" ]] || printf 'подменённые байты\n' > "$STUB_TAMPER"
+ver=$(awk '{print $2; exit}' "$target" 2>/dev/null)
+[[ "$tweak" != otherver ]] || ver=0.0.999
+sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}')
 unless notw    'Customizations applied successfully'
 unless notw    '    ✓ site'
 unless noours  'Script patch applied'
 unless nook    '  [OK] stub check'
 [[ "$tweak" != fail ]] || printf '  [FAIL] stub check\n'
-unless nosmoke 'Version: 0.0.0 (Claude Code)'
+unless nodigest "Source digest: $sha  $target"
+unless nosmoke "Version: $ver (Claude Code)"
 unless noiface 'Interface: stub'
 unless nobench 'Probes: 1 scenarios behaved as specified'
 [[ "$tweak" != nul ]] || printf 'второй писатель\000\n'
 exit "${STUB_RC:-0}"
 STUB
   chmod +x "$dir/claude-patch-all.sh"
+  # НАСТОЯЩИЙ зонд остаётся в копии под именем `.real.sh`: сценарий формы имени
+  # замка считает ДОМА этой формы по игрушечному дереву, и заглушка, вставшая
+  # на место файла, унесла бы один дом вместе с его мутацией -- то есть стенд
+  # перестал бы проверять правило, о котором рапортует.
+  mv "$dir/tools/build-path-probe.sh" "$dir/tools/build-path-probe.real.sh"
+  # Зонд пути сборки -- тоже ЗАГЛУШКА. Настоящий гонит полные сборки минутами,
+  # берёт боевой замок и одалживает живой ~/.tweakcc; стенд меряет не его, а
+  # предполётную ДВЕРЬ свипа: позвали ли, как прочли код, объявлен ли пропуск.
+  # Отметка «позвали» кладётся на диск: строку в логе печатает и сам свип.
+  cat > "$dir/tools/build-path-probe.sh" <<'PROBESTUB'
+#!/usr/bin/env bash
+set -u
+[[ -z "${STUB_PROBE_MARK:-}" ]] || printf 'зонд звался\n' > "$STUB_PROBE_MARK"
+echo "stub build-path-probe rc=${STUB_PROBE_RC:-0}"
+exit "${STUB_PROBE_RC:-0}"
+PROBESTUB
+  chmod +x "$dir/tools/build-path-probe.sh"
 }
 
 # --- сценарии ----------------------------------------------------------------
@@ -213,6 +263,8 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     CLAUDE_PATCH_LOCK="$PLOCK" \
     STUB_TWEAK="${STUB_TWEAK:-none}" STUB_RC="${STUB_RC:-0}" \
     STUB_TAMPER="${STUB_TAMPER:-}" \
+    STUB_PROBE_RC="${STUB_PROBE_RC:-0}" STUB_PROBE_MARK="${STUB_PROBE_MARK:-}" \
+    SWEEP_SKIP_BUILD_PROBE="${SWEEP_SKIP_BUILD_PROBE:-}" \
     bash "$kit/tools/sweep.sh" "$@" 2>&1 9>&-
 }
 
@@ -245,7 +297,7 @@ expect_red() {   # имя, режим заглушки, ожидаемая пр�
     bad "$name: код возврата 0 -- вердикт принял такой лог"; return
   fi
   if [[ "$out" != *"КРАСНАЯ: "*"$want"* ]]; then
-    bad "$name: в вердикте нет причины «$want»; было: $(printf '%s' "$out" | grep -a 'SWEEP 900' | head -1)"
+    bad "$name: в вердикте нет причины «${want}»; было: $(printf '%s' "$out" | grep -a 'SWEEP 900' | head -1)"
     return
   fi
   ok "$name"
@@ -261,7 +313,7 @@ scenario_2() {   # образа нет
   rm -f "$C/corpus/0.0.901.pristine"
   local out rc
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 901); rc=$?
-  printf 'образ девятьсот один\n' > "$C/corpus/0.0.901.pristine"
+  toy_image "$C/corpus/0.0.901.pristine" 0.0.901
   expect_refusal "2 образа нет -- отказ до сборки" "нет пристинных образов" "$out" $rc
 }
 
@@ -269,7 +321,7 @@ scenario_3() {   # байты не сходятся с пином
   printf 'подменённые байты\n' > "$C/corpus/0.0.901.pristine"
   local out rc
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 901); rc=$?
-  printf 'образ девятьсот один\n' > "$C/corpus/0.0.901.pristine"
+  toy_image "$C/corpus/0.0.901.pristine" 0.0.901
   expect_refusal "3 подменённый образ -- отказ по пину" "не сходится с пином" "$out" $rc
 }
 
@@ -371,7 +423,7 @@ scenario_10() {   # наполнитель: байты на диске не сх
   printf 'подменённые байты\n' > "$C/corpus/0.0.901.pristine"
   local out rc
   out=$(run_fetch "$K" "$C/corpus" "$C/versions.txt"); rc=$?
-  printf 'образ девятьсот один\n' > "$C/corpus/0.0.901.pristine"
+  toy_image "$C/corpus/0.0.901.pristine" 0.0.901
   expect_refusal "10 наполнитель: диск против пина -- отказ" "на диске не сходится с пином" "$out" $rc
 }
 
@@ -402,8 +454,8 @@ scenario_12() {   # обход списка не обрывается на пе�
     "$C/versions.both.txt"; rm -f "$C/versions.both.txt.bak"
   local out
   out=$(run_fetch "$K" "$C/corpus" "$C/versions.both.txt")
-  printf 'образ девятьсот\n'      > "$C/corpus/0.0.900.pristine"
-  printf 'образ девятьсот один\n' > "$C/corpus/0.0.901.pristine"
+  toy_image "$C/corpus/0.0.900.pristine" 0.0.900
+  toy_image "$C/corpus/0.0.901.pristine" 0.0.901
   LAST_EVID="$out"
   if [[ "$out" == *"0.0.900"* && "$out" == *"0.0.901"* ]]; then
     ok "12 обход списка доходит до последней версии"
@@ -492,8 +544,12 @@ scenario_20() {   # исходник подменён ПОСЛЕ общей св
   local out rc
   out=$(STUB_TAMPER="$C/corpus/0.0.901.pristine" \
         run_sweep "$K" "$C/corpus" "$C/versions.txt" 900 901); rc=$?
-  printf 'образ девятьсот один\n' > "$C/corpus/0.0.901.pristine"
-  LAST_EVID="rc=$rc :: $out"
+  toy_image "$C/corpus/0.0.901.pristine" 0.0.901
+  # Вердикт кладётся В САМ след: причина мутации сверяется по нему, а не по
+  # тексту `bad` -- красным сценарий делает и соседняя дверь (подменённый образ
+  # валит проверку версии в дыме), и без этой пометки её отказ был бы
+  # неотличим от работающей сверки копии.
+  LAST_EVID="rc=$rc :: сверка копии=$([[ "$out" == *"КРАСНАЯ -- копия не сходится с пином"* ]] && echo есть || echo КОПИЯ_НЕ_СВЕРЕНА) :: $out"
   if (( rc == 0 )); then
     bad "20 подмена после сверки: код возврата 0"; return
   fi
@@ -641,7 +697,10 @@ scenario_38() {   # форма имени замка одна во всех до
   # Поэтому форма пинится, и это объявлено -- см. комментарий в build-path-probe.
   local homes n f bad_homes=""
   # Конвейер читается из ЖИВОГО кита: в игрушечной копии на его месте лежит
-  # заглушка, и дом преамбулы там отсутствует по устройству стенда.
+  # заглушка, и дом преамбулы там отсутствует по устройству стенда. Зонд пути
+  # сборки в копии лежит под именем `build-path-probe.real.sh` (на каноническом
+  # имени -- заглушка предполёта), и его дом здесь считается по этой копии:
+  # мутация правит именно её.
   homes=$(grep -rl 'claude-patch-all\.\$(id -u)\.lock' \
             "$KIT/claude-patch-all.sh" "$K/tools" 2>/dev/null | sort)
   n=$(printf '%s\n' "$homes" | grep -c .)
@@ -765,14 +824,20 @@ scenario_45() {   # страж живых прогонов: сам прогон 
   chmod +x "$fake/claude-patch-all.sh"
 
   # (1) настоящий прогон конвейера -- страж ОБЯЗАН отказать
-  bash "$fake/claude-patch-all.sh" & local runner=$!
+  #
+  # `9>&-` у обоих поддельных процессов: стенд держит свой замок на дескрипторе
+  # 9, а эти двое живут по 30 секунд и убиваются `kill` без ожидания выхода. С
+  # копией дескриптора любой из них продолжал бы держать замок стенда после
+  # выхода самого стенда -- та же утечка, что уносила замок конвейера через
+  # гейт интерфейса.
+  bash "$fake/claude-patch-all.sh" 9>&- & local runner=$!
   sleep 1
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   kill "$runner" 2>/dev/null; wait "$runner" 2>/dev/null
   caught=$([[ $rc -ne 0 && "$out" == *"живы процессы предыдущего прогона"* ]] && echo да)
 
   # (2) путь конвейера АРГУМЕНТОМ чужой программы -- отказа быть не должно
-  python3 "$fake/gate.py" "$fake/claude-patch-all.sh" & local reader=$!
+  python3 "$fake/gate.py" "$fake/claude-patch-all.sh" 9>&- & local reader=$!
   sleep 1
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   kill "$reader" 2>/dev/null; wait "$reader" 2>/dev/null
@@ -796,7 +861,212 @@ run_all() {
   scenario_25; scenario_26; scenario_27; scenario_28; scenario_29; scenario_30
   scenario_31; scenario_32; scenario_33; scenario_34; scenario_35; scenario_36
   scenario_37; scenario_38; scenario_39; scenario_40; scenario_41; scenario_42
-  scenario_43; scenario_44; scenario_45
+  scenario_43; scenario_44; scenario_45; scenario_46; scenario_47
+  scenario_48; scenario_49; scenario_50; scenario_51; scenario_52
+  scenario_53; scenario_54; scenario_55; scenario_56
+}
+
+scenario_46() {   # версия сборки не та, что мерили
+  # Поле дыма считало СТРОКИ по шаблону, в котором номера версии не было:
+  # сборка, объявившая любую другую версию, проходила вердикт зелёной под
+  # именем запинованной.
+  expect_red "46 чужая версия в дыме -- КРАСНАЯ" otherver "дым не подтверждён для 0.0.900"
+}
+
+scenario_47() {   # конвейер не объявил байты, из которых собирал
+  expect_red "47 нет дайджеста источника -- КРАСНАЯ" nodigest "не объявил запинованные байты"
+}
+
+scenario_48() {   # номер группы пишется только под замком
+  # `sweep.pgid` существует ради одной операции -- убить группу прогона. Пока
+  # он писался ДО захвата замка, свип-ровесник, которому через секунду откажут,
+  # успевал вписать туда свой номер: остановка целилась в чужую мёртвую группу,
+  # а настоящий прогон продолжался.
+  local S out rc after holder
+  S="$C/corpus/state"; mkdir -p "$S"
+  printf 'ЧУЖОЙ_НОМЕР\n' > "$S/sweep.pgid"
+  perl -e 'use Fcntl ":flock"; open(my $fh, ">>", $ARGV[0]) or die $!;
+           flock($fh, LOCK_EX) or die $!; sleep 20;' "$S/sweep.lock" 9>&- &
+  holder=$!
+  sleep 1
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  after=$(cat "$S/sweep.pgid" 2>/dev/null)
+  LAST_EVID="rc=$rc :: pgid=$([[ "$after" == "ЧУЖОЙ_НОМЕР" ]] && echo не тронут || echo "ПЕРЕПИСАН_БЕЗ_ЗАМКА($after)") :: $out"
+  if (( rc == 0 )); then
+    bad "48 номер группы: свип не отказал на занятом замке -- сценарий не воспроизведён"; return
+  fi
+  if [[ "$after" != "ЧУЖОЙ_НОМЕР" ]]; then
+    bad "48 номер группы: ПЕРЕПИСАН_БЕЗ_ЗАМКА (стало «${after}»)"; return
+  fi
+  ok "48 номер группы пишется только после захвата замка"
+}
+
+scenario_49() {   # сводку не записать -- отказ, а не чужой вердикт
+  # Обесценивание сводки -- гарантия волны 19, и держится она на ОДНОЙ записи.
+  # `set -e` здесь не включён, поэтому молча провалившаяся запись оставляла на
+  # диске зелёный вердикт прошлого прогона.
+  local S out rc kept
+  S="$C/corpus/state"; mkdir -p "$S/log"
+  printf '# ЗЕЛЁНЫЙ_ВЕРДИКТ_ПРОШЛОГО\n' > "$S/log/sweep-summary.txt"
+  chmod 444 "$S/log/sweep-summary.txt"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  kept=$(cat "$S/log/sweep-summary.txt" 2>/dev/null)
+  chmod 644 "$S/log/sweep-summary.txt" 2>/dev/null
+  LAST_EVID="rc=$rc :: сводка=$kept :: $out"
+  if (( rc == 0 )); then
+    bad "49 сводку не записать: прогон не отказал, на диске остался «${kept}»"; return
+  fi
+  if [[ "$out" != *"не обесценить сводку"* ]]; then
+    bad "49 сводку не записать: отказ без своей причины: $(printf '%s' "$out" | head -2 | tr '\n' ' ')"; return
+  fi
+  ok "49 непишущаяся сводка -- отказ со своей причиной"
+}
+
+scenario_50() {   # обломки прошлых прогонов убираются под замком
+  # Трап не исполняется на SIGKILL, и снимки кита по мегабайтам копились в
+  # рабочем каталоге. Прополка идёт под замком (соперника нет) и трогает только
+  # то, что старше суток: свежий снимок принадлежит живому прогону.
+  local S out rc stale fresh
+  S="$C/corpus/state"; mkdir -p "$S"
+  stale=$(mktemp -d "$S/kit.XXXXXX"); fresh=$(mktemp -d "$S/kit.XXXXXX")
+  touch -t 202601010000 "$stale"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: старый=$([[ -e "$stale" ]] && echo ОСТАЛСЯ_ОБЛОМОК || echo убран) :: свежий=$([[ -e "$fresh" ]] && echo цел || echo СНЕСЛИ_ЧУЖОЙ) :: $out"
+  rm -rf "$stale" "$fresh"
+  if (( rc != 0 )); then
+    bad "50 прополка: прогон отказал ($rc) -- прополка не измерена"; return
+  fi
+  if [[ "$LAST_EVID" == *ОСТАЛСЯ_ОБЛОМОК* ]]; then
+    bad "50 прополка: снимок суточной давности остался"; return
+  fi
+  if [[ "$LAST_EVID" == *СНЕСЛИ_ЧУЖОЙ* ]]; then
+    bad "50 прополка: снесён СВЕЖИЙ снимок -- это чужой живой прогон"; return
+  fi
+  ok "50 прополка убирает старые обломки и не трогает свежие"
+}
+
+scenario_51() {   # два наполнителя разом
+  # Список версий каждый наполнитель переписывает ЦЕЛИКОМ из своего снимка:
+  # писавший вторым возвращал файлу свою версию строк, и пины первого исчезали,
+  # притом оба отчитывались успехом.
+  local out rc holder lock
+  lock="$C/corpus/.fetch.lock"
+  perl -e 'use Fcntl ":flock"; open(my $fh, ">>", $ARGV[0]) or die $!;
+           flock($fh, LOCK_EX) or die $!; sleep 20;' "$lock" 6>&- 9>&- &
+  holder=$!
+  sleep 1
+  out=$(run_fetch "$K" "$C/corpus" "$C/versions.txt"); rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  expect_refusal "51 второй наполнитель -- отказ" "другой наполнитель уже идёт" "$out" $rc
+}
+
+scenario_52() {   # список пишется стадией, а не обрезанием
+  # Прямая перезапись обрезает единственный дом версий и пинов: прогон, убитый
+  # в этом окне, оставлял список пустым. Здесь исполняется САМ блок записи,
+  # вырезанный из наполнителя по якорю, -- копия блока рано или поздно разошлась
+  # бы с оригиналом. Пропажа якоря -- отказ, а не тишина.
+  local carved list out rc h900
+  carved="$C/pin-block.py"
+  if ! python3 - "$K/tools/fetch-corpus.sh" "$carved" <<'CARVE'; then
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src, encoding='utf-8').read()
+m = re.search(r"<<'PIN_PY'\n(.*?)\nPIN_PY", text, re.S)
+if not m:
+    sys.exit('в наполнителе нет блока PIN_PY -- якорь потерян')
+open(dst, 'w', encoding='utf-8').write(m.group(1))
+CARVE
+    bad "52 запись списка: блок PIN_PY не вырезан"; return
+  fi
+  list="$C/pinme.txt"
+  { echo "# platform: x"; echo "900 0.0.900 -"; echo "901 0.0.901 -"; } > "$list"
+  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}')
+  out=$(python3 "$carved" "$list" 0.0.900 "$h900" 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out :: временный=$([[ -e "$list.new" ]] && echo ОСТАЛСЯ_ВРЕМЕННЫЙ || echo убран) :: $(tr '\n' '|' < "$list")"
+  if (( rc != 0 )); then
+    bad "52 запись списка: блок отказал ($rc): $out"; return
+  fi
+  if [[ -e "$list.new" ]]; then
+    bad "52 запись списка: ОСТАЛСЯ_ВРЕМЕННЫЙ $list.new -- запись не переименованием"; return
+  fi
+  if ! grep -q "^900 0.0.900 $h900$" "$list" || ! grep -q '^901 0.0.901 -$' "$list"; then
+    bad "52 запись списка: строки не на месте: $(tr '\n' '|' < "$list")"; return
+  fi
+  ok "52 список переписывается стадией и переименованием"
+}
+
+# --- предполёт свипа: зонд пути сборки ----------------------------------------
+# Ветку сборки по умолчанию не видит НИ ОДНА проверка конвейера, а зонд, который
+# её меряет, до волны 20 не звал никто. Свип -- единственный автоматический
+# прогон настоящих сборок, поэтому предполёт живёт в нём; здесь проверяется
+# сама дверь: позвали ли, как прочли код зонда, объявлен ли пропуск.
+
+scenario_53() {   # зонд зовётся по умолчанию, и его вердикт объявлен
+  local out rc mark
+  mark="$C/probe.called"; rm -f "$mark"
+  out=$(STUB_PROBE_MARK="$mark" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: зонд=$([[ -e "$mark" ]] && echo звался || echo НЕ_ЗВАЛСЯ) :: $out"
+  if (( rc != 0 )); then
+    bad "53 предполёт: прогон отказал ($rc) -- дверь не измерена"; return
+  fi
+  if [[ ! -e "$mark" ]]; then
+    bad "53 предполёт: зонд пути сборки не звался"; return
+  fi
+  if [[ "$out" != *"зонд пути сборки: ЗЕЛЁНО"* ]]; then
+    bad "53 предполёт: вердикт зонда не объявлен"; return
+  fi
+  ok "53 предполёт зовёт зонд пути сборки и объявляет его вердикт"
+}
+
+scenario_54() {   # красный зонд останавливает свип ДО первой сборки
+  local out rc
+  out=$(STUB_PROBE_RC=2 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )); then
+    bad "54 красный зонд: код возврата 0, ждали отказ"; return
+  fi
+  if [[ "$out" != *"зонд пути сборки не сошёлся"* ]]; then
+    bad "54 красный зонд: причина не названа: $(printf '%s' "$out" | head -2 | tr '\n' ' ')"; return
+  fi
+  if [[ "$out" == *"SWEEP DONE"* ]]; then
+    bad "54 красный зонд: версии всё равно померены"; return
+  fi
+  ok "54 красный зонд останавливает свип"
+}
+
+scenario_55() {   # выключатель предполёта ОБЪЯВЛЯЕТСЯ, а не молчит
+  local out rc mark
+  mark="$C/probe.called"; rm -f "$mark"
+  out=$(SWEEP_SKIP_BUILD_PROBE=1 STUB_PROBE_MARK="$mark" \
+        run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: объявление=$([[ "$out" == *"ПРОПУЩЕН по ручке"* ]] && echo есть || echo НЕТ_ОБЪЯВЛЕНИЯ) :: зонд=$([[ -e "$mark" ]] && echo ЗВАЛСЯ_ВОПРЕКИ || echo не звался) :: $out"
+  if (( rc != 0 )); then
+    bad "55 выключатель: прогон отказал ($rc)"; return
+  fi
+  if [[ -e "$mark" ]]; then
+    bad "55 выключатель: зонд всё равно звался"; return
+  fi
+  if [[ "$out" != *"ПРОПУЩЕН по ручке"* ]]; then
+    bad "55 выключатель: пропуск не объявлен -- он неотличим от прогона с зондом"; return
+  fi
+  ok "55 выключатель предполёта объявляет пропуск"
+}
+
+scenario_56() {   # «нечего мерить на этой машине» -- не провал ветки
+  local out rc
+  out=$(STUB_PROBE_RC=5 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    bad "56 нет материала: прогон отказал ($rc) -- пропуск прочитан как провал"; return
+  fi
+  if [[ "$out" != *"нечего мерить"* ]]; then
+    bad "56 нет материала: причина пропуска не названа"; return
+  fi
+  if [[ "$out" != *"SWEEP DONE"* ]]; then
+    bad "56 нет материала: версии не померены"; return
+  fi
+  ok "56 нехватка материала пропускает зонд, но не рушит свип"
 }
 
 # --- мутации для --self-check ------------------------------------------------
@@ -817,9 +1087,12 @@ MUT_FILE=(x
   tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
   tools/corpus-list.py tools/sweep.sh tools/corpus-tools-bench.sh
   tools/sweep.sh tools/sweep.sh tools/fetch-corpus.sh tools/fetch-corpus.sh
-  tools/build-path-probe.sh tools/sweep.sh
+  tools/build-path-probe.real.sh tools/sweep.sh
   tools/corpus-list.py tools/corpus-list.py tools/corpus-list.py
-  tools/corpus-tools-bench.sh tools/sweep.sh tools/sweep.sh)
+  tools/corpus-tools-bench.sh tools/sweep.sh tools/sweep.sh
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  tools/sweep.sh tools/fetch-corpus.sh tools/fetch-corpus.sh
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -842,7 +1115,7 @@ MUT_PAT=(x
   '\[\[ "\$ok" != "0" \]\] \|\| why\+=\("ни одной прошедшей проверки"\)'
   '\[\[ "\$ours" == "1" \]\] \|\| why\+=\("наших применений \$ours"\)'
   '\[\[ "\$twruns" == "1" \]\] \|\| why\+=\("прогонов tweakcc \$twruns"\)'
-  '\[\[ "\$smoke" == "1" \]\] \|\| why\+=\("дым не подтверждён"\)'
+  '\[\[ "\$smoke" == "1" \]\] \|\| why\+=\("дым не подтверждён для \$ver"\)'
   '\[\[ "\$iface" == "1" \]\] \|\| why\+=\("интерфейс не подтверждён"\)'
   '\[\[ "\$bench" == "1" \]\] \|\| why\+=\("стенд зондов не подтверждён"\)'
   'if declared != here_platform:'
@@ -859,7 +1132,18 @@ MUT_PAT=(x
   'if not VERSION\.match\(version\):'
   'if \(\( len != EXPECTED_MUTATIONS \+ 1 \)\); then'
   'rm -f "\$STATE\/bin\/\$v\.wave\.bin"'
-  'if \(\$i ~ \/\\\.\(py\|js\|mjs\)\$\/\) break')
+  'if \(\$i ~ \/\\\.\(py\|js\|mjs\)\$\/\) break'
+  '\[\[ "\$smoke" == "1" \]\] \|\| why\+=\("дым не подтверждён для \$ver"\)'
+  '\[\[ "\$digest" == "1" \]\] \|\| why\+=\("конвейер не объявил запинованные байты"\)'
+  'exec 8>"\$STATE/sweep\.lock"'
+  '\} > "\$STATE/log/sweep-summary\.txt"; then'
+  'rm -rf "\$__stale" && echo "SWEEP убрал обломок'
+  'exit\(flock\(\$fh, LOCK_EX\|LOCK_NB\) \? 0 : 1\);'
+  'os\.replace\(tmp, path\)'
+  '  bash "\$PROBE_SH" > "\$PROBE_LOG" 2>&1 8>&-'
+  '  __prc=\$\?'
+  '  echo "SWEEP зонд пути сборки ПРОПУЩЕН по ручке'
+  '    5\) echo "SWEEP зонд пути сборки ПРОПУЩЕН: нечего мерить')
 
 MUT_REP=(x
   'if false; then'
@@ -891,14 +1175,26 @@ MUT_REP=(x
   'if False:'
   'if false; then'
   ':'
-  'if (0) break')
+  'if (0) break'
+  ':'
+  ':'
+  'echo $$ > "$STATE/sweep.pgid"; exec 8>"$STATE/sweep.lock"'
+  '} > "$STATE/log/sweep-summary.txt" || true; then'
+  'echo "не убрал обломок'
+  'exit(0);'
+  "open(path, 'w').write('\\n'.join(lines) + '\\n')"
+  '  : > "$PROBE_LOG"'
+  '  __prc=0'
+  '  : "SWEEP зонд пути сборки ПРОПУЩЕН по ручке'
+  '    99) echo "SWEEP зонд пути сборки ПРОПУЩЕН: нечего мерить')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
 # причине»: отказ соседней двери или упавший инструмент тоже делают сценарий
 # красным, и без названного следа беззубость неотличима от исправности.
 MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 33
-               34 35 36 37 38 39 40 41 42 43 44 45)
+               34 35 36 37 38 39 40 41 42 43 44 45
+               46 47 48 49 50 51 52 53 54 55 56)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -913,9 +1209,16 @@ MUT_CAUSE=(x
   ', на диске )'
   'не прочитать копию'
   'копия не сходится с пином'
+  'КОПИЯ_НЕ_СВЕРЕНА'
   'SWEEP DONE'
-  'SWEEP DONE' 'SWEEP DONE' 'SWEEP DONE' 'SWEEP DONE' 'SWEEP DONE'
-  'SWEEP DONE' 'SWEEP DONE' 'SWEEP DONE' 'SWEEP DONE'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  'SWEEP DONE'
   'SWEEP DONE'
   'unbound variable'
   'замок стенда взят'
@@ -923,14 +1226,25 @@ MUT_CAUSE=(x
   'все 2 версий'
   ', файл )'
   'tools/fetch-corpus.sh'
-  'build-path-probe.sh'
+  'build-path-probe.real.sh'
   'ОСТАЛСЯ_СНИМОК'
   'все 2 версий'
   'не сходится с пином'
   'нет пристинных образов'
   'rc=0 ::'
   'ОСТАЛАСЬ_КОПИЯ_ЗЕЛЁНОЙ'
-  'ОТКАЗ_НА_ЧУЖОМ_АРГУМЕНТЕ')
+  'ОТКАЗ_НА_ЧУЖОМ_АРГУМЕНТЕ'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  'ПЕРЕПИСАН_БЕЗ_ЗАМКА'
+  'SWEEP DONE'
+  'ОСТАЛСЯ_ОБЛОМОК'
+  'rc=0 ::'
+  'ОСТАЛСЯ_ВРЕМЕННЫЙ'
+  'НЕ_ЗВАЛСЯ'
+  'зонд пути сборки: ЗЕЛЁНО'
+  'НЕТ_ОБЪЯВЛЕНИЯ'
+  'не сошёлся (код 5)')
 
 # Длины пяти таблиц сверяются ДО первого прогона: рассинхрон сдвигает описания
 # мутаций молча, и стенд начинает доказывать чужие правила.

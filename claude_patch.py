@@ -428,12 +428,19 @@ def _is_pristine(path: Path) -> bool:
     return not has_marker(path, ROUTING_MARKER) and not has_marker(path, TWEAKCC_MARKER)
 
 
-def patch_binary(target: Path) -> None:
+def patch_binary(target: Path, backup: Path | None = None) -> None:
+    """Patch `target` in place (staged internally), reading stock bytes from `backup`.
+
+    `backup` is named explicitly by callers that build into a staging file: the
+    default `<name>.orig` would then be `<version>.staging.orig`, a second
+    backup under a name nothing else knows -- while the real one, the one the
+    pipeline restores from and step 0b stages from, is `<version>.orig`.
+    """
     if has_marker(target, ROUTING_MARKER):
         info("Already patched — nothing to do.")
         return
 
-    backup = target.with_name(target.name + ".orig")
+    backup = backup or target.with_name(target.name + ".orig")
     if not backup.exists():
         # `.orig` is what a human restores from, so it must not quietly become a
         # snapshot of somebody else's patch. The guard above only knows OUR
@@ -516,7 +523,16 @@ def main(argv: list[str]) -> None:
         die(f"patch_claude_routing.py not found next to this script ({PATCHER})")
 
     target: Path
-    repoint_after_patch = False
+    # Set only on the --update path: the name the staging build is renamed onto,
+    # and the pristine backup that path already wrote (so patch_binary does not
+    # snapshot a second one under the staging name).
+    #
+    # This name is ALSO the condition for the swap-and-repoint tail below. A
+    # separate `repoint_after_patch` flag lived here and had to be kept in step
+    # with it by hand: any future branch setting the flag without the name would
+    # rename onto None. One name, one meaning -- the pair cannot drift apart.
+    update_final: Path | None = None
+    update_backup: Path | None = None
     if argv and argv[0] == "--download-only":
         # Install a PRISTINE build and stop: used by the combined tweakcc
         # pipeline, which applies the patches itself (and would conflict with
@@ -595,11 +611,37 @@ def main(argv: list[str]) -> None:
             info(f"{version} is already installed and patched -> {target}")
             repoint_launcher(target)
             return
-        download_binary(version, target)
-        info(f"Installed pristine {version} -> {target}")
-        # Repointed only after patch_binary() below succeeds — an unpatched
-        # binary on the launcher path sends subscription traffic to the proxy.
-        repoint_after_patch = True
+        # Download BESIDE the target, never into it -- the same rule, and for
+        # the same reason, as --download-only above.
+        #
+        # `download_binary` opens its destination with "wb". When the requested
+        # version is the installed one and it is merely UNPATCHED (a restore, an
+        # interrupted run, a fresh image the pipeline has not been over yet),
+        # the old branch truncated the file the launcher resolves to and refilled
+        # it over the network. Every session started in that window ran an
+        # unpatched image, and a download that failed halfway left the live
+        # installation truncated for good. patch_binary() has staged its own
+        # write since the beginning; the DOWNLOAD was the one step that still
+        # wrote through the live name.
+        #
+        # So: fetch into `<version>.staging`, take the pristine backup from
+        # those bytes (registry bytes, integrity-checked -- a strictly better
+        # source than a snapshot of whatever is on disk), patch the staging file,
+        # and only then rename it over the target. A run that dies anywhere
+        # before that rename leaves the installation exactly as it was.
+        staging = target.with_name(target.name + ".staging")
+        download_binary(version, staging)
+        backup = target.with_name(target.name + ".orig")
+        if not backup.exists() or not _is_pristine(backup):
+            _replace_backup(staging, backup)
+            info(f"Backed up pristine -> {backup}")
+        info(f"Built pristine {version} beside the target -> {staging}")
+        update_final = target
+        update_backup = backup
+        target = staging
+        # Swapped in and repointed only after patch_binary() below succeeds --
+        # an unpatched binary on the launcher path sends subscription traffic to
+        # the proxy.
     elif argv:
         target = Path(argv[0]).expanduser().resolve()
         if not target.is_file():
@@ -608,8 +650,15 @@ def main(argv: list[str]) -> None:
         target = resolve_active_binary()
 
     info(f"Target binary: {target}")
-    patch_binary(target)
-    if repoint_after_patch:
+    patch_binary(target, update_backup)
+    if update_final is not None:
+        # The swap is the last thing that happens: up to here the live file
+        # still holds the previous build, so any failure above -- a locator that
+        # missed, a post-check, a signature -- leaves a working installation
+        # rather than a half-built one.
+        os.replace(target, update_final)
+        info(f"Swapped the patched build over the target: {update_final}")
+        target = update_final
         repoint_launcher(target)
 
 

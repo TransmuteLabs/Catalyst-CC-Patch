@@ -8,17 +8,19 @@
 #   bash claude-patch-all.sh --update 2.1.222
 #   bash claude-patch-all.sh --only-ours     # skip tweakcc's patches, apply only ours
 #   bash claude-patch-all.sh --target /path/to/binary   # build somewhere else
+#   bash claude-patch-all.sh --target X --expect-sha <hex>  # ... and prove X is X
 #   CLAUDE_PATCH_SKIP_MODELS=1 bash claude-patch-all.sh # skip the model price/window sync
 #
-# --target exists for the case where the binary you want to patch is the one
-# currently RUNNING your session, and it guards against two different harms.
-# The first is the obvious one: patching in place rewrites a live executable and
-# can kill the process reading it. The second is quieter and lasts longer --
-# between the tweakcc stage and ours the file on disk is a valid binary with
-# only HALF the patches, so a session started in that window has no
-# multi-provider routing and dies on "unknown provider"; and a run interrupted
-# there leaves the launcher target in that state permanently. Instead, build
-# into a staging file and swap it in with a rename, which the running process (holding the old inode) never notices:
+# A DEFAULT RUN NEVER TOUCHES THE LIVE FILE UNTIL EVERY GATE HAS PASSED: it
+# builds into `<binary>.staging` and swaps that in with a rename at the end (see
+# 0b). Patching in place rewrites a live executable under the process reading
+# it, and -- worse, because it lasts -- between the tweakcc stage and ours the
+# file is a valid binary with only HALF the patches, so a session started in
+# that window has no multi-provider routing and dies on "unknown provider". A
+# run that dies there used to leave the launcher target in that state for good.
+#
+# --target is for building an image that is NOT the live one; it patches the
+# named file in place, so the caller owns the staging discipline:
 #
 #   V=~/.local/share/claude/versions/2.1.222
 #   cp -p "$V.orig" "$V.staging"
@@ -29,8 +31,17 @@
 #   `tweakcc --apply` RESTORES Claude Code from tweakcc's backup before applying
 #   its own patches, which wipes anything else in the binary. So our patches must
 #   always come AFTER it, and re-running tweakcc (its TUI included) always
-#   requires re-running this script to put ours back. This script is safe to
-#   re-run at any time — that is how you recover.
+#   requires re-running this script to put ours back. Re-running is how you
+#   recover, and it is safe in the sense that matters -- it never builds over
+#   the live file (0b) and never installs a build that failed a gate.
+#
+#   It is not, however, always ENOUGH: a default run refuses instead of
+#   rebuilding when the live image already carries our patches and the pristine
+#   copy beside it is missing, is itself patched, or belongs to another build.
+#   Rebuilding from any of those would poison tweakcc's backup or swap a
+#   different version over the live one, so the recovery there is to name the
+#   version you mean: `bash claude-patch-all.sh --update <version>`. The refusal
+#   prints that exact line.
 #
 #   Both tweakcc steps re-sign ad-hoc with an identifier derived from the file
 #   name. On macOS that breaks the login keychain's ACL for the OAuth item
@@ -359,6 +370,7 @@ ONLY_OURS=0
 DO_UPDATE=0
 UPDATE_VER=""
 TARGET=""
+EXPECT_SHA=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -366,9 +378,14 @@ while [[ $# -gt 0 ]]; do
     --only-ours) ONLY_OURS=1; shift ;;
     --target)    shift; [[ $# -gt 0 ]] || { echo "--target needs a path" >&2; exit 1; }
                  TARGET="$1"; shift ;;
+    # The digest the CALLER believes the target holds. Verified here, at read
+    # time, by the program that reads the file -- not by the one that handed it
+    # over minutes earlier. See 0c.
+    --expect-sha) shift; [[ $# -gt 0 ]] || { echo "--expect-sha needs a hex digest" >&2; exit 1; }
+                 EXPECT_SHA="$1"; shift ;;
     --update)    DO_UPDATE=1; shift
                  [[ $# -gt 0 && "$1" != --* ]] && { UPDATE_VER="$1"; shift; } || true ;;
-    -h|--help)   sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,35p' "$0"; exit 0 ;;
     *)           echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -543,6 +560,38 @@ fi
 # Поэтому вопрос задаётся ОДИН и в одном месте -- после того как цель выбрана,
 # каким бы способом она ни выбралась, -- и включает третий: объявляют ли
 # заголовки самого образа больше байт, чем лежит на диске.
+# --- 0a. are these the bytes we were handed? ----------------------------------
+# Asked BEFORE image-check.py below, because "is this the file you meant?" comes
+# before "is this a valid image": a target that is not the named bytes has
+# nothing to say about the run, whatever else it is.
+#
+# image-check.py asks three questions of the target -- magic, product marker,
+# completeness -- and none of them is that one. On the
+# `--target` path nobody asks it at all: the caller (the version sweep, the
+# recipe in this header) pins a digest, copies the file, and hands over a PATH.
+# Minutes pass -- the lock, the unpacker install, tweakcc's stage -- and the
+# pipeline then reads whatever is at that path. A failed copy, a leftover under
+# the same name from an earlier run, or a foreign writer in between, and the
+# build measures other bytes under the pinned version's name, greenly.
+#
+# So the question is asked by the program that READS the file, at the moment it
+# reads it, and the answer is printed either way: `--expect-sha` refuses (code
+# 4, its own code -- 3 already means "the lock is busy"), and the announced
+# digest lets a caller that did not pin anything still bind the run's verdict to
+# the bytes afterwards.
+sha_of() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
+HANDED_SHA="$(sha_of "$BIN")"
+if [[ -z "$HANDED_SHA" ]]; then
+  echo "ERROR: could not read $BIN to take its digest" >&2
+  exit 4
+fi
+if [[ -n "$EXPECT_SHA" && "$HANDED_SHA" != "$EXPECT_SHA" ]]; then
+  echo "ERROR: the target is not the bytes named by --expect-sha" >&2
+  echo "  expected: $EXPECT_SHA" >&2
+  echo "  on disk:  $HANDED_SHA  ($BIN)" >&2
+  exit 4
+fi
+
 python3 "$HERE/tools/image-check.py" "$BIN" || exit 1
 
 echo "Target binary: $BIN"
@@ -561,10 +610,24 @@ echo "Target binary: $BIN"
 # one swept while the live binary is a different, patched one, and the very next
 # default run lands in it.
 #
-# So a default run that finds a patched live binary rebuilds from OUR pristine
-# copy into a staging file and swaps it in with a rename at the end -- which is
-# what the header mandates for a live binary anyway, and which additionally
-# keeps the live file out of the build until every gate has passed.
+# So a default run REBUILDS BESIDE THE LIVE FILE and swaps the result in with a
+# rename at the end -- which is what the header mandates for a live binary
+# anyway, and which additionally keeps the live file out of the build until
+# every gate has passed.
+#
+# The source of that rebuild depends on what the live file is:
+#
+#   * it already carries our patches -> build from OUR pristine copy `.orig`
+#     (patching a patched image is what poisons tweakcc's backup, above);
+#   * it is pristine                 -> build from THE LIVE BYTES THEMSELVES,
+#     after taking a pristine copy of them.
+#
+# The pristine case used to patch in place, and that was a hole of its own: the
+# live installation was the build for the whole run, so a gate that fired late
+# (the interface gate, the probes, any of the pipeline's 114 checks) left the human
+# with an image that had been patched and then declared unfit -- while the run
+# reported a refusal. `set -e` cannot undo bytes. Now every default run has the
+# same shape: nothing touches the live name until every gate has passed.
 #
 # It does NOT by itself make the build independent of tweakcc's backup: that
 # backup is restored over the staging file at the start of tweakcc's stage, so
@@ -574,14 +637,58 @@ echo "Target binary: $BIN"
 # than one image on PATH.
 OUR_MARKER='baseURL:/^claude/i.test('
 STAGED_FROM_LIVE=0
+# First line only: a patched image prints tweakcc's version on a second line,
+# and reading every line made the comparison below fail against any pristine
+# copy -- refusing the default path outright.
+img_ver() { "$1" --version 2>/dev/null | awk 'NR==1{print $1; exit}'; }
 # `--only-ours` is excluded on purpose. The hazard 0b exists for is handing
 # tweakcc a patched image, and `--only-ours` never invokes tweakcc at all (the
 # whole stage is behind ONLY_OURS below). Staging from the pristine copy there
 # would instead REMOVE tweakcc's patches from the build and swap that in -- the
 # opposite kind of loss, committed while preventing nothing. In place is right
 # for that flag: our own patcher refuses loudly if the image already carries us.
-if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]] \
-   && grep -q -a -F "$OUR_MARKER" "$BIN"; then
+if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]]; then
+ if ! grep -q -a -F "$OUR_MARKER" "$BIN"; then
+  # The live image is pristine. Preserve those bytes before building over them:
+  # after the swap they are gone, and `.orig` is what the patched branch above
+  # rebuilds from, what step 1b repairs tweakcc's backup from, and what the
+  # kit's restore recipe hands out. A first run on a clean machine used to leave
+  # none, so the SECOND run refused with "there is no pristine copy beside it".
+  #
+  # Replaced when it is missing, when it is not pristine, or when it is a twin
+  # of a DIFFERENT build -- `.orig` means "the stock bytes of the file next to
+  # it", and a leftover from an earlier version silently breaks both readers.
+  ORIG_STATE=keep
+  if [[ ! -f "$BIN.orig" ]]; then
+    ORIG_STATE="missing"
+  elif grep -q -a -F "$OUR_MARKER" "$BIN.orig" || grep -q -a -F 'tweakcc' "$BIN.orig"; then
+    ORIG_STATE="not pristine"
+  else
+    LIVE_VER="$(img_ver "$BIN")"
+    ORIG_VER="$(img_ver "$BIN.orig")"
+    [[ -n "$LIVE_VER" && "$LIVE_VER" == "$ORIG_VER" ]] || ORIG_STATE="a twin of ${ORIG_VER:-an unreadable build}, not of $LIVE_VER"
+  fi
+  if [[ "$ORIG_STATE" != keep ]]; then
+    # Staged and renamed: a copy killed halfway leaves a TRUNCATED `.orig`, and
+    # truncated bytes carry no marker -- so every later reader calls it pristine
+    # and restores a broken binary while reporting success.
+    if ! { cp -p "$BIN" "$BIN.orig.new" && mv "$BIN.orig.new" "$BIN.orig"; }; then
+      rm -f "$BIN.orig.new"
+      echo "ERROR: could not write the pristine copy $BIN.orig" >&2
+      echo "  Refusing to build over the only stock bytes on this machine." >&2
+      exit 1
+    fi
+    echo "Kept the live pristine bytes as $BIN.orig ($ORIG_STATE)"
+  fi
+  if ! cp -p "$BIN" "$BIN.staging"; then
+    echo "ERROR: could not create $BIN.staging" >&2
+    exit 1
+  fi
+  BIN="$BIN.staging"
+  STAGED_FROM_LIVE=1
+  echo "Live binary is pristine; building beside it into $BIN"
+  echo "and swapping it in at the end."
+ else
   # Same notion of pristine as 1b and claude_patch.py's _is_pristine: neither
   # our bytes nor tweakcc's. A copy carrying only tweakcc's stage passed the
   # our-marker test alone, and on a machine with no backup yet it is exactly
@@ -595,11 +702,8 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]] \
     # the live build: a silent DOWNGRADE presented as a rebuild. Ask both files
     # what they are; `--version` is offline and the pipeline already execs the
     # built image for the smoke check.
-    # First line only: a patched image prints tweakcc's version on a second
-    # line, and reading every line made this comparison fail against any
-    # pristine copy -- refusing the default path outright.
-    LIVE_VER="$("$BIN" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
-    ORIG_VER="$("$BIN.orig" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
+    LIVE_VER="$(img_ver "$BIN")"
+    ORIG_VER="$(img_ver "$BIN.orig")"
     if [[ -z "$LIVE_VER" || -z "$ORIG_VER" || "$LIVE_VER" != "$ORIG_VER" ]]; then
       echo "ERROR: $BIN.orig is not a pristine copy of the live build." >&2
       echo "  live=${LIVE_VER:-unreadable}  pristine copy=${ORIG_VER:-unreadable}" >&2
@@ -621,7 +725,18 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]] \
     echo "    bash claude-patch-all.sh --update" >&2
     exit 1
   fi
+ fi
 fi
+# The digest of what the build actually begins from. On `--target` and on a
+# `--only-ours` run this is the file 0c already hashed; a staging copy is hashed
+# again, because it is a different file and the announcement names a path.
+if [[ $STAGED_FROM_LIVE -eq 1 ]]; then
+  SOURCE_SHA="$(sha_of "$BIN")"
+else
+  SOURCE_SHA="$HANDED_SHA"
+fi
+echo "Source digest: $SOURCE_SHA  $BIN"
+
 # The pristine twin of whatever we are building, for the backup guard below.
 # Computed AFTER any staging swap and with the suffix stripped: on the --update
 # path claude_patch.py leaves <version>.orig beside <version>.staging, never
@@ -1134,6 +1249,93 @@ for f in files:
 print(f"РАЗОБРАНО heredoc'ов {blocks}, файлов .py {len(files)}")
 PYCOMPILE
 
+# Имя переменной, склеенное с многобайтным символом.
+#
+# Bash на этой машине считает байты UTF-8 частью ИДЕНТИФИКАТОРА, поэтому
+# «$want» -- это обращение к переменной `want»`, а не к `want` внутри кавычек.
+# Под `set -u` строка падает с «unbound variable» вместо того, чтобы напечатать
+# сообщение, -- и падает она ровно на ветке отказа, то есть там, где её никто
+# не видит, пока всё зелено. Найдено ровно так: мутация покраснила сценарий не
+# своей причиной, а крахом прибора (2026-08-28, два места в ките).
+#
+# Гейт с ПОЛОЖИТЕЛЬНЫМ контролем: сначала он обязан увидеть синтетический
+# случай, и только потом его молчание на дереве что-то значит.
+echo "==> Формы оболочки"
+python3 - "$(dirname "$0")" <<'SHVARS' || { echo "ГЕЙТ ИМЁН ПЕРЕМЕННЫХ УПАЛ" >&2; exit 1; }
+import io, os, re, sys
+
+root = os.path.abspath(sys.argv[1])
+# Спец-параметры ($1, $?, $@) состоят из одного символа, и разбор имени на них
+# не распространяется -- ищем только именованные переменные.
+PAT = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]')
+
+# Контрольная строка СКЛЕИВАЕТСЯ из двух кусков: гейт обходит и файл, в
+# котором сам лежит, и записанная целиком она была бы его собственной первой
+# находкой -- ровно та самозацепка, на которой уже спотыкался гейт чисел.
+control = 'bad "нет причины «$' + 'want»"'
+if not PAT.search(control):
+    print("ГЕЙТ ИМЁН СЛЕП: он не видит собственного контрольного случая")
+    sys.exit(1)
+if PAT.search('bad "нет причины «${want}»"'):
+    print("ГЕЙТ ИМЁН ЛОЖНО СРАБАТЫВАЕТ: форма ${...} для него тоже находка")
+    sys.exit(1)
+
+# Правило 2: отрицание перед СОСТАВНОЙ командой с перенаправлением.
+#
+# `if ! { ...; } > файл; then` в bash 3.2 не видит провала перенаправления --
+# оболочка печатает «Permission denied», условие оказывается ложным, и прогон
+# едет дальше. Та же группа отдельной командой даёт rc=1, и `if ...; then :;
+# else ...; fi` провал ловит; ломает дело именно `!`. Измерено 2026-08-28 на
+# правке, которая как раз и заводила проверку записи -- то есть форма молча
+# отменяла ровно ту гарантию, ради которой писалась.
+NEG = re.compile(r'^\s*(?:if|while)\s+!\s*[{(]')
+control2 = 'if ! { echo x; } > "$f"; then'
+if not NEG.search(control2):
+    print("ГЕЙТ ФОРМ СЛЕП: он не видит своего контрольного случая")
+    sys.exit(1)
+if NEG.search('if { echo x; } > "$f"; then'):
+    print("ГЕЙТ ФОРМ ЛОЖНО СРАБАТЫВАЕТ: форма без отрицания для него тоже находка")
+    sys.exit(1)
+
+bad = []
+scanned = 0
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in ('.git', 'distros', 'node_modules')]
+    for name in sorted(filenames):
+        if not (name.endswith('.sh') or name == 'claude-patch-all.sh'):
+            continue
+        f = os.path.join(dirpath, name)
+        try:
+            text = io.open(f, encoding='utf-8').read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        scanned += 1
+        for n, line in enumerate(text.split('\n'), 1):
+            # Строка-комментарий целиком пропускается: она не исполняется, а
+            # объяснить дефект без того, чтобы написать его форму, нельзя --
+            # эта самая преамбула им и была. Комментарий В КОНЦЕ строки кода
+            # не спасает: у такой строки есть исполняемая часть, и она
+            # проверяется как обычно.
+            if line.lstrip().startswith('#'):
+                continue
+            for m in PAT.finditer(line):
+                bad.append(f"{os.path.relpath(f, root)}:{n}: имя склеено -- {m.group()}")
+            # Перенаправление ищется в той же строке или в строке, где
+            # составная команда закрывается: `{` и `}` часто на разных строках.
+            if NEG.search(line):
+                tail = '\n'.join(text.split('\n')[n - 1:n + 8])
+                if re.search(r'[});]\s*>[^&]', tail):
+                    bad.append(f"{os.path.relpath(f, root)}:{n}: "
+                               f"отрицание перед составной командой с перенаправлением -- "
+                               f"провал записи не будет замечен")
+if bad:
+    print("ФОРМЫ ОБОЛОЧКИ, КОТОРЫЕ МОЛЧАТ:")
+    for b in bad:
+        print("  " + b)
+    sys.exit(1)
+print(f"ФОРМЫ ОБОЛОЧКИ ЧИСТЫ: разобрано файлов {scanned}")
+SHVARS
+
 echo "==> Стенд инструментов судьи"
 python3 "$(dirname "$0")/tools/judge-tools-bench.py" || { echo "СТЕНД ИНСТРУМЕНТОВ УПАЛ" >&2; exit 1; }
 # Зубы стенда проверяются ТУТ ЖЕ, а не по памяти автора: --self-check применяет
@@ -1169,7 +1371,7 @@ OWNERS = (
     # id, имена в прозе, файл (None = сам конвейер), {величина: регексп объявления}
     # У конвейера имён не было вовсе, а величина 'checks' -- единственного
     # владельца, и владелец возвращался без поиска имени: ЛЮБОЕ «N проверок» в
-    # любом предложении сверялось с числом проверок конвейера («судья делает 2
+    # любом предложении сверялось с константой конвейера («судья делает 2
     # проверки перед вердиктом» -- красное, docnum:example). Имя теперь
     # называется, как у стендов, и правило одно для всех величин.
     ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',
@@ -1206,7 +1408,8 @@ WINDOW = 400
 # scenarios» (docnum:example) и пару, разорванную html-комментарием: живая
 # проза длиннее синтетики, на которой число подбиралось.
 REACH = 8
-# Связки обратной формы (docnum:example): «сценариев — 12», «мутаций всего 9».
+# Связки обратной формы: «сценариев — 12» docnum:example, «мутаций всего 9»
+# docnum:example.
 # Без связки
 # «scenarios of the 3 modes» женило бы существительное на постороннем числе.
 LINKS = ('—', '-', ':', '=', '(', 'total', 'всего', 'итого', 'итог',
@@ -1228,6 +1431,7 @@ BENCH_WORDS = ('bench', 'benches', 'suite', 'suites', 'стенд', 'стенд�
 # docnum:other -- число вообще не про счётчики кита («судья делает 2 проверки»).
 MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',
            'docnum:delta', 'docnum:other')
+MARK_RE = re.compile('|'.join(re.escape(m) for m in MARKERS))
 # Журнал кампании записывает прошлые сборки по датам: строка «N checks green»
 # под заголовком «Porting to 2.1.237» верна для ТОЙ сборки и не переписывается.
 JOURNAL = 'judge-patch-spec.md'
@@ -1238,9 +1442,14 @@ JOURNAL = 'judge-patch-spec.md'
 MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+|\[\^\d+\]'
                   r'|<!--.*?-->', re.S)
 FENCE = re.compile(r'^```.*?^```', re.M | re.S)
+# Строка-забор: сам забор -- не проза, но и склейкой соседей быть не должен.
+FENCE_LINE = re.compile(r'^```.*$', re.M)
+# Строка таблицы и её разделитель («|---|:--:|»).
+TABLE_ROW = re.compile(r'^\s*\|')
+TABLE_SEP = re.compile(r'^\s*\|[\s:|-]+\|?\s*$')
 # Знаки препинания между числом и существительным разбор ПРОПУСКАЕТ, а не
-# вычищает заранее: `| 13 | scenarios |`, `**13**`, `(13)` и `` `scenarios` ``
-# (docnum:example) -- это те же утверждения, и восемь из девяти обычных форм
+# вычищает заранее: `| 13 | scenarios |` docnum:example, а также `**13**`,
+# `(13)` и `` `scenarios` `` docnum:example -- это те же утверждения, и восемь из девяти обычных форм
 # прозы гейт пропускал, пока разбирал поток регекспом. Отдельная чистка
 # разметки тут была и снята: ни один случай самопроверки её снятия не
 # заметил, а механизм, чьё снятие никто не видит, только выглядит рабочим.
@@ -1270,18 +1479,36 @@ ABBR = ('шт', 'т', 'тт', 'др', 'пр', 'см', 'напр', 'рис', 'с�
 # сверять его с константой одного стенда нечестно в обе стороны.
 RANGE = ('от', 'до', 'from', 'to', 'between', 'around', 'about',
          'примерно', 'около', 'свыше', 'более', 'менее')
-# Счёт словом гейт не сверяет и не пропускает: он ТРЕБУЕТ цифру. Список
-# закрытый -- это формы, которыми счёт пишут в прозе.
+# Счёт словом гейт не сверяет и не пропускает: он ТРЕБУЕТ цифру.
+#
+# Список закрытый, и его неполнота была дырой: «ninety»/«девяносто» в нём не
+# значились, поэтому ветка не срабатывала ВООБЩЕ и число не искалось -- счёт,
+# записанный такими словами, проходил молча. Теперь перечислены все единицы,
+# все десятки и «сто/hundred» в обеих речах; составные формы («сто
+# четырнадцать», «one hundred fourteen») ловятся тем же списком, потому что
+# проверяется слово, стоящее ВПЛОТНУЮ к существительному, а последним словом
+# составного числительного всегда бывает единица, десяток или сотня.
+#
+# «один/одна/one» НЕ включены сознательно: это обычные слова прозы («one of the
+# benches», «the one thing»), и их присутствие давало бы отказ сборки на ровном
+# месте. Предел объявлен здесь.
 WORDNUM = ('два', 'две', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь',
            'девять', 'десять', 'одиннадцать', 'двенадцать', 'тринадцать',
            'четырнадцать', 'пятнадцать', 'шестнадцать', 'семнадцать',
            'восемнадцать', 'девятнадцать', 'двадцать', 'тридцать', 'сорок',
-           'пятьдесят', 'сто', 'двух', 'трёх', 'трех', 'четырёх', 'четырех',
+           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',
+           'сто', 'двухсот', 'трёхсот', 'трехсот', 'сотен', 'сотни',
+           'двух', 'трёх', 'трех', 'четырёх', 'четырех',
            'пяти', 'шести', 'семи', 'восьми', 'девяти', 'десяти',
+           'одиннадцати', 'двенадцати', 'тринадцати', 'четырнадцати',
+           'пятнадцати', 'шестнадцати', 'семнадцати', 'восемнадцати',
+           'девятнадцати', 'двадцати', 'тридцати', 'сорока', 'пятидесяти',
+           'шестидесяти', 'семидесяти', 'восьмидесяти', 'девяноста', 'ста',
            'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
            'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen',
            'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty',
-           'thirty', 'forty', 'fifty', 'hundred')
+           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',
+           'hundred')
 
 
 def prose(path, text):
@@ -1295,8 +1522,14 @@ def prose(path, text):
     """
     ext = os.path.splitext(path)[1]
     if ext in ('.md', '.txt', ''):
-        return blocks(FENCE.sub(lambda m: '\n' * m.group(0).count('\n'), text),
-                      BLOCK_MD)
+        # Огороженный блок РАЗБИРАЕТСЯ, а не вычёркивается.
+        #
+        # Он вычёркивался целиком, и в нём молча жил целый класс счётов: в этот
+        # кит вывод стендов вставляют именно так («probe-bench: ИТОГ
+        # сценариев=56»), и такое утверждение устаревает ровно как любое
+        # другое. Снимаются только строки-заборы -- вместо них BREAK, чтобы
+        # текст до забора не женился с текстом после.
+        return blocks(FENCE_LINE.sub(BREAK, text), BLOCK_MD)
     if ext == '.py':
         # Докстринг -- главный носитель прозы в питоне, а гейт читал в .py
         # только строки с '#': счёт, записанный в докстринге, был для него
@@ -1355,11 +1588,40 @@ def prose(path, text):
 
 
 def blocks(text, marker):
-    """Разделитель на границах блоков разметки (см. BREAK)."""
+    """Разделитель на границах блоков разметки (см. BREAK).
+
+    Плюс одно преобразование: ячейка таблицы получает существительное СВОЕЙ
+    КОЛОНКИ. Счёт в таблице записывают шапкой («| стенд | сценариев |») и
+    цифрой в ячейке, а шапку от строки отделяет BREAK -- пара «число +
+    существительное» не возникала вовсе, и такой счёт не проверял никто.
+    Приписка идёт в ту же строку, поэтому имя владельца из соседней ячейки
+    остаётся в том же блоке, а нумерация строк не сдвигается.
+    """
     out = []
-    for line in text.split('\n'):
+    lines = text.split('\n')
+    header = None
+    for i, line in enumerate(lines):
+        if (TABLE_SEP.match(line) and i
+                and TABLE_ROW.match(lines[i - 1]) and not TABLE_SEP.match(lines[i - 1])):
+            header = [c.strip() for c in lines[i - 1].strip().strip('|').split('|')]
         if not line.strip():
+            header = None
             out.append(BREAK)
+            continue
+        if not TABLE_ROW.match(line):
+            header = None
+        if header and TABLE_ROW.match(line) and not TABLE_SEP.match(line):
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            # Существительное шапки приписывается ТОЛЬКО к ячейке с цифрой.
+            # Иначе шапка колонки с именем («| стенд |») ложилась вплотную к
+            # счёту как ОБЩЕЕ СЛОВО и гейт требовал назвать владельца, который
+            # стоит в той же строке.
+            merged = ' '.join(
+                (c + ' ' + header[j])
+                if (j < len(header) and header[j] and any(ch.isdigit() for ch in c))
+                else c
+                for j, c in enumerate(cells))
+            out.append(BREAK + ' ' + merged)
         elif marker.match(line):
             out.append(BREAK + ' ' + line)
         else:
@@ -1431,8 +1693,22 @@ def scan(text, table, aliases, path='<текст>'):
         return lo, hi
 
     def exempt(at):
+        """Пометка освобождает РОВНО ОДИН счёт -- ближайший к ней.
+
+        Прежде она освобождала всё предложение: «the pipeline runs 999 checks
+        and probe-bench 999 scenarios docnum:historical» проходило целиком, хотя
+        помечено было одно утверждение из двух. Пометок в предложении может быть
+        столько же, сколько счётов; каждая берёт себе ближайший.
+        """
         lo, hi = sentence_span(at)
-        return any(marker in low[lo:hi] for marker in MARKERS)
+        here = [a for a in anchors if lo <= a < hi]
+        if not here:
+            return False
+        for m in MARK_RE.finditer(low[lo:hi]):
+            mp = lo + m.start()
+            if min(here, key=lambda a: (abs(a - mp), a)) == at:
+                return True
+        return False
 
     def resolve(lo, hi, by, at, strict):
         """Владелец счёта в куске потока [lo, hi): (id, причина отказа).
@@ -1471,16 +1747,25 @@ def scan(text, table, aliases, path='<текст>'):
             return None, None
         best = min(found, key=lambda oid: (found[oid], oid))
         best_d = found[best]
-        if strict and len(found) > 1:
-            # Предмет речи называет ПРЕДЛОЖЕНИЕ, а не расстояние. Правило
-            # «побеждает ближайшее имя» принимало ложь молча, когда константа
-            # соседа случайно совпадала: «docnum-bench растёт вслед за
+        # Отдельной ветки «равное расстояние до двух имён» здесь больше нет:
+        # два имени отвергаются выше В ОБОИХ кругах, поэтому сюда с двумя
+        # именами не приходят. Ветка, которая не может сработать, выглядит
+        # ровно как работающая -- держать её значит хранить ложное покрытие.
+        if len(found) > 1:
+            # Предмет речи называет ТЕКСТ, а не расстояние. Правило «побеждает
+            # ближайшее имя» принимало ложь молча, когда константа соседа
+            # случайно совпадала: «docnum-bench растёт вслед за
             # corpus-tools-bench: 26 мутаций» (docnum:example) зеленело по
             # чужой константе.
-            return None, ('в предложении названы два стенда — назовите владельца '
-                          'счёта явно (' + ' / '.join(sorted(found)) + ')')
-        if [oid for oid in found if found[oid] == best_d and oid != best]:
-            return None, 'рядом два стенда на равном расстоянии — назовите владельца счёта'
+            #
+            # Второй круг (окно ±WINDOW) раньше эту же ложь принимал: там
+            # strict был выключен, и абзац, ЯВНО объявивший владельца в первой
+            # строке, проигрывал имени соседа, упомянутому мимоходом ближе к
+            # числу. Отказ одинаков в обоих кругах; разное -- только слово о
+            # том, где искать (предложение или соседний текст).
+            where = 'в предложении' if strict else 'рядом'
+            return None, (where + ' названы два стенда — назовите владельца '
+                          'счёта в том же предложении (' + ' / '.join(sorted(found)) + ')')
         if common is not None and common < best_d:
             return None, ('владелец назван общим словом, а не именем стенда — '
                           'припишите имя (' + ' / '.join(sorted(by)) + ')')
@@ -1498,6 +1783,11 @@ def scan(text, table, aliases, path='<текст>'):
             return oid, why
         return None, ('владелец счёта не назван — припишите рядом имя стенда ('
                       + ' / '.join(sorted(by)) + ')')
+
+    # Позиции ВСЕХ сверяемых счётных существительных: по ним пометка выбирает
+    # себе счёт (см. exempt). Считаются один раз на текст.
+    anchors = [at for tok, at in toks
+               if NOUNS.get(tok.casefold()) in table]
 
     bad = []
     for i, (tok, at) in enumerate(toks):
@@ -1583,19 +1873,16 @@ T = {'scenarios': {'probe-bench': '56', 'corpus-tools-bench': '12'},
 A = [('probe-bench', 'probe-bench'), ('judge-tools-bench', 'judge-tools-bench'),
      ('corpus-tools-bench', 'corpus-tools-bench'),
      ('pipeline', 'pipeline'), ('конвейер', 'pipeline')]
-_LEAD, _TRAIL, _MID = 'corpus-tools-bench', 'probe-bench', '12 scenarios'
-# Набивка СЧИТАЕТСЯ от якоря владельца, а он теперь на существительном: оба
-# имени обязаны стоять от него на равном расстоянии, иначе случай молча
-# выродится в «побеждает ближнее» и ветка неоднозначности останется непройденной.
-_NOUN_AT = len(_LEAD) + 1 + _MID.index('scenarios')
-TIE = (_LEAD + ' ' + _MID + ' '
-       + 'x' * (2 * _NOUN_AT - (len(_LEAD) + len(_MID) + 3)) + ' ' + _TRAIL)
-# Та же ничья, но имена ВНЕ предложения со счётом: первый круг их не видит,
-# решает окно. Набивка считается от позиции существительного так же.
-_TIE2_HEAD = _LEAD + '. '
-_TIE2_AT = len(_TIE2_HEAD) + _MID.index('scenarios')
-TIE2 = (_TIE2_HEAD + _MID + '. '
-        + 'x' * (2 * _TIE2_AT - (len(_TIE2_HEAD) + len(_MID) + 3)) + ' ' + _TRAIL)
+# Два имени -- отказ в ОБОИХ кругах, и расстояние до них больше ничего не
+# решает. Набивка, уравнивавшая его, стояла здесь ровно против правила
+# «побеждает ближнее»; правило снято, и её мутация (сдвиг набивки на символ)
+# перестала краснеть -- то есть уравнивание проверять стало нечем. Строки
+# лежат буквально: механизм, чьё снятие никто не замечает, только выглядит
+# рабочим.
+TIE = 'corpus-tools-bench 12 scenarios probe-bench'
+# Та же пара имён, но ВНЕ предложения со счётом: первый круг их не видит,
+# решает окно.
+TIE2 = 'corpus-tools-bench. 12 scenarios. probe-bench'
 CASES = (
     ('corpus-tools-bench runs 12 scenarios.', 0, '', 'простая форма, счёт верный'),
     ('corpus-tools-bench runs 13 scenarios.', 1, 'corpus-tools-bench', 'простая форма, счёт разошёлся'),
@@ -1674,7 +1961,30 @@ CASES = (
     ('the bench drives 56 scenarios', 1, 'общим словом', 'без имени стенда счёт не принимается'),
     ('56 scenarios and nobody named the bench', 1, 'общим словом', 'имени нет вовсе'),
     (TIE, 1, 'названы два стенда', 'два имени в одном предложении — отказ'),
-    (TIE2, 1, 'равном расстоянии', 'равное расстояние до двух имён в окне — отказ'),
+    (TIE2, 1, 'названы два стенда', 'два имени в окне — отказ, а не ближайшее'),
+    # Абзац объявил владельца первой строкой, а ближе к числу мимоходом назван
+    # сосед. Прежде побеждало расстояние, и счёт сверялся с чужой константой.
+    ('probe-bench is what this whole section is about.\n\nfiller line one\n\n'
+     'corpus-tools-bench is mentioned once here, in passing.\n\n'
+     'Its 52 scenarios stayed green.',
+     1, 'названы два стенда', 'объявленный владелец не проигрывает соседу по расстоянию'),
+    # Пометка освобождает РОВНО ОДИН счёт -- ближайший к ней.
+    ('the pipeline runs 999 checks and probe-bench 999 scenarios docnum:historical',
+     1, 'pipeline', 'пометка освобождает один счёт, а не всё предложение'),
+    ('the pipeline runs 999 checks docnum:historical and probe-bench 56 scenarios',
+     0, '', 'помеченный счёт свободен, второй сходится'),
+    # Огороженный блок -- проза: в этот кит так вставляют вывод стендов.
+    ('```\nprobe-bench: ИТОГ сценариев=56\n```', 0, '', 'огороженный блок сходится'),
+    ('```\nprobe-bench: ИТОГ сценариев=99\n```', 1, 'probe-bench',
+     'огороженный блок ловит расхождение'),
+    # Таблица: существительное в шапке, число в ячейке.
+    ('| стенд | сценариев |\n|---|---|\n| probe-bench | 56 |', 0, '',
+     'ячейка таблицы сходится с шапкой'),
+    ('| стенд | сценариев |\n|---|---|\n| probe-bench | 99 |', 1, 'probe-bench',
+     'ячейка таблицы ловит расхождение по шапке'),
+    # Числительные словами вне прежнего закрытого списка.
+    ('probe-bench runs ninety scenarios.', 1, 'словом', 'ninety -- тоже счёт словом'),
+    ('probe-bench гоняет девяносто сценариев.', 1, 'словом', 'девяносто -- тоже счёт словом'),
     ('judge-tools-bench: SELF-CHECK — 10 mutations', 0, '', 'обратная грамматика'),
     ('judge-tools-bench: SELF-CHECK — 11 mutations', 1, 'judge-tools-bench', 'обратная грамматика ловит расхождение'),
     ('the pipeline runs 114 checks', 0, '', 'конвейер назван по имени'),
@@ -1757,7 +2067,9 @@ for root, dirs, names in os.walk(here):
         # же синтетических случаях.
         if name.startswith('.'):
             continue
-        if os.path.splitext(name)[1] in ('.md', '.sh', '.py', '.js'):
+        # Расширения ТЕ ЖЕ, что понимает prose(): ветка для .txt объявлена там,
+        # а обход их не собирал -- недостижимая ветка выглядит как охват.
+        if os.path.splitext(name)[1] in ('.md', '.txt', '.sh', '.py', '.js'):
             files.append(os.path.join(root, name))
 files = sorted(set(files + [readme, os.path.abspath(sys.argv[1])]))
 
@@ -2656,6 +2968,32 @@ def _consumer_uses_no_core_privates(full):
                 return False
     return bool(re.search(rb'catch\(__ne\)\{try\{await __svc\.log\(\{'
                           rb'outcome:"nudge_undelivered",reason:__svc\.clip\(', full))
+
+def _bom_stripped_in_our_blocks(d):
+    """Our four BOM strips, counted INSIDE our blocks -- not in the whole image.
+
+    The old form counted `^\\uFEFF/,""` across the file and asked for `>= 2`.
+    Stock images carry the same idiom on their own: 3 occurrences in 2.1.233 and
+    2.1.240, 4 in every version from 2.1.242 on. The threshold sat BELOW that
+    floor, so the check was green on an image with none of our patches at all,
+    and byte-neutrally replacing all four of ours (measured 2026-08-28) left the
+    whole registry green -- including the check named for exactly that property.
+
+    A count is only ours if it is scoped to our blocks, the way the neighbouring
+    checks do it. Two blocks (judge and observer), two strips each: the judge's
+    verdict text and the observer's, both of which arrive as provider answers
+    that may start with a BOM.
+
+    Reads `_probe_full`, NOT `d`: `d` has every duplicate of the shared core
+    removed, and the strips live in that core -- so on `d` the second block is
+    empty of them by construction and the check would refuse a perfectly good
+    build.
+    """
+    blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', d)
+    if len(blocks) != 2:
+        return False
+    return all(len(re.findall(rb'\^\\uFEFF/,""', b)) == 2 for b in blocks)
+
 
 def _gateway_ids_are_undisguised(d):
     """Every gateway-model filter is followed by a map that RESTORES the id.
@@ -3663,8 +4001,7 @@ checks = {
                                               rb'","mi"\)\.exec\(__v\)', d)),
     'a content array reads like a content string': bool(re.search(
                                               rb'Array\.isArray\(__mm\.content\)', d)),
-    'a BOM does not silence the channel': len(re.findall(
-                                              rb'\^\\uFEFF/,""', d)) >= 2,
+    'a BOM does not silence the channel': _bom_stripped_in_our_blocks(_probe_full),
     'an answer cut at the output cap says so': bool(re.search(
                                               rb'finish_reason==="length"', d))
                                           and bool(re.search(
@@ -3964,6 +4301,30 @@ for name, ok in checks.items():
 sys.exit(0 if all(checks.values()) else 1)
 PY
 
+# --- 5a0. пол проверок: что остаётся зелёным на ПРИСТИННОМ образе -------------
+# Реестр выше говорит, что все 114 сошлись НА СОБРАННОМ образе. Он ничего не
+# говорит о проверке, которая сошлась бы и без наших патчей -- а такая
+# неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
+# такая прожила в реестре неизвестно сколько: порог полосы BOM стоял `>= 2`,
+# при том что стоковые образы несут этот приём 3-4 раза сами.
+#
+# Пристинный близнец есть не всегда: на `--update` это `<версия>.orig`, свип
+# называет свой корпусный образ ручкой. Когда его нет, гейт объявляет пропуск и
+# не делает вид, что измерил.
+FLOOR_IMG=""
+if [[ -f "$PRISTINE_SRC" ]]; then
+  FLOOR_IMG="$PRISTINE_SRC"
+elif [[ -n "${CLAUDE_PATCH_FLOOR_IMAGE:-}" && -f "${CLAUDE_PATCH_FLOOR_IMAGE:-}" ]]; then
+  FLOOR_IMG="$CLAUDE_PATCH_FLOOR_IMAGE"
+fi
+if [[ -n "$FLOOR_IMG" ]]; then
+  echo "==> Пол проверок на пристинном образе"
+  bash "$HERE/tools/checks-on-image.sh" --floor "$FLOOR_IMG" "$OUR_PATCH" \
+    || { echo "FATAL: пол проверок не сошёлся -- см. выше" >&2; exit 1; }
+else
+  echo "==> Пол проверок ПРОПУЩЕН: пристинного близнеца нет ($PRISTINE_SRC)"
+fi
+
 # A pattern check proves the injected BYTES are present; it does not prove the
 # bundle still PARSES. One mis-escaped newline inside an injected string literal
 # left every check green while the image died on "SyntaxError: Unexpected EOF"
@@ -4120,12 +4481,24 @@ PYSTATE
 # and process-group leader. Killing the single pid leaves `script` and the CLI
 # running: during one version sweep that left 23 sessions and 1.4 GB resident.
 # The group kill is what actually ends the run.
+#
+# `9>&-` CLOSES THE PATCH LOCK FOR THIS CHILD, and it is not hygiene -- it is
+# the lock's lifetime. The lock lives in a file DESCRIPTOR, so every process
+# holding a copy of fd 9 holds the lock; bash does not set close-on-exec on a
+# redirection, so the whole tree spawned here inherited it. This gate starts a
+# real CLI session -- which starts MCP servers, hooks and helper processes, in
+# its own session and process group. Anything that escapes the group kill below
+# then keeps the lock ALIVE AFTER THIS RUN EXITS, and the next run reads that as
+# "the pipeline is already running" (code 3). A version sweep that measured one
+# version and then reported the rest as НЕ ИЗМЕРЕНО is exactly this: no pipeline
+# was running, a straggler from the previous version's interface gate was
+# holding the descriptor.
 (
   cd "$GATE_HOME/proj" || exit 1
   exec env CLAUDE_CONFIG_DIR="$GATE_HOME/cfg" CLAUDE_CODE_CHILD_SESSION=1 \
     perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV or die $!' \
     script -q /dev/null "$BIN" --strict-mcp-config "$GATE_PROMPT" >"$GATE_LOG" 2>&1
-) &
+) 9>&- &
 GATE_PID=$!
 
 # A full session start on a machine already running builds is not a two-second

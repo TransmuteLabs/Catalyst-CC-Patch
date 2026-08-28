@@ -28,7 +28,7 @@ TABLE = os.path.join(HERE, 'docnum-mutations.tsv')
 PIPELINE = 'claude-patch-all.sh'
 ANCHOR = 'python3 - "$0" <<\'PYDOCS\'\n'
 END = '\nPYDOCS\n'
-EXPECTED_MUTATIONS = 29
+EXPECTED_MUTATIONS = 35
 
 
 def read(path):

@@ -1,6 +1,13 @@
 # Мутации гейта чисел (0d): id, файл, что заменить, на что, чем гейт обязан
 # ответить. Поля разделены табуляцией.
 #
+# СТРОКИ, НЕСУЩИЕ ЖИВОЙ СЧЁТ (D1, D2, D4, D6, D7), устаревают вместе с ним:
+# мутация обязана создать РАСХОЖДЕНИЕ, а для этого держит в себе одно из двух
+# сверяемых чисел. Устаревают они ГРОМКО -- стенд отвечает «вход не найден
+# дословно» и падает, -- поэтому счёт правится в двух местах: у владельца и
+# здесь. Тихого варианта у этой связки нет: мутация без числа не создаёт
+# расхождения, которое гейт обязан увидеть.
+#
 # Почему таблица лежит ОТДЕЛЬНО от кода стенда: вход каждой мутации -- это
 # нарочно неверное утверждение о счёте, а гейт сканирует прозу в .md и
 # комментарии в .sh, .js, .py. Записанное в коде стенда, оно было бы живым
@@ -14,13 +21,13 @@
 # Каждое правило грамматики имеет здесь СВОЙ вход: украшения разметки (D5),
 # ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
 # явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
-D1	README.md	45 scenarios on a toy corpus	46 scenarios on a toy corpus	объявлено «45 scenarios» (владелец corpus-tools-bench)
-D2	README.md	38 recorded mutations	39 recorded mutations	объявлено «38 mutations» (владелец corpus-tools-bench)
+D1	README.md	56 scenarios on a toy corpus	57 scenarios on a toy corpus	объявлено «56 scenarios» (владелец corpus-tools-bench)
+D2	README.md	49 recorded mutations	50 recorded mutations	объявлено «49 mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 56;	const EXPECTED_SCENARIOS = 57;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
-D6	claude-patch-all.sh	'x' * (2 * _TIE2_AT - (len(_TIE2_HEAD) + len(_MID) + 3))	'x' * (2 * _TIE2_AT - (len(_TIE2_HEAD) + len(_MID) + 2))	равном расстоянии
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=38	EXPECTED_MUTATION_COUNT=38	не объявляет свою величину
+D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 35	EXPECTED_MUTATION_COUNT = 35	не объявляет свою величину
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=49	EXPECTED_MUTATION_COUNT=49	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение
@@ -36,10 +43,21 @@ D19	claude-patch-all.sh	ABBR = ('шт', 'т', 'тт',	ABBR = ('нетакого'
 D20	claude-patch-all.sh	RANGE = ('от', 'до', 'from',	RANGE = ('от', 'from',	диапазон -- не счёт
 D21	claude-patch-all.sh	'ten', 'eleven', 'twelve', 'thirteen',	'ten', 'eleven', 'twelve',	счёт словом требует цифру
 D22	claude-patch-all.sh	MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+|\[\^\d+\]'	MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+'	маркер сноски не значение
-D23	claude-patch-all.sh	        if strict and len(found) > 1:	        if False:	два владельца в предложении -- отказ
+D23	claude-patch-all.sh	        if len(found) > 1:	        if False:	два владельца в предложении -- отказ
 D24	claude-patch-all.sh	    if ext == '.py':	    if ext == '.py-нет':	докстринг питона -- проза
 D25	claude-patch-all.sh	            elif re.match(r'(echo|say|printf)\b', stripped):	            elif False:	печатаемая строка -- проза
 D26	claude-patch-all.sh	    ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',	    ('pipeline', ('нетакогоимени', 'конвейера', 'конвейере',	## What the patches do (114 pipeline checks)
 D27	claude-patch-all.sh	        (('checks', 'проверок', 'проверки', 'проверкам', 'проверками',	        (('checks', 'проверок', 'проверки', 'проверками',	дательный падеж
 D28	claude-patch-all.sh	                if nxt_ch == '-' or prv_ch in ('~', '±'):	                if False:	составное число принадлежит своему слову
 D29	claude-patch-all.sh	            if not prev[:1].isalnum():	            if prev.casefold() not in WORDNUM:	числительное чужого предмета не женится
+# Волна 20. Гарантии грамматики, добавленные разбором раунда 17: пометка
+# освобождает ОДИН счёт (а не предложение), окно отвергает два имени так же
+# строго, как предложение, огороженный блок РАЗБИРАЕТСЯ, ячейка таблицы
+# получает существительное шапки, список числительных словами полон.
+# Каждая из них до этой волны жила без мутации -- то есть на слово.
+D30	claude-patch-all.sh	            if min(here, key=lambda a: (abs(a - mp), a)) == at:	            if True:	пометка освобождает один счёт, а не всё предложение
+D31	claude-patch-all.sh	        if len(found) > 1:	        if len(found) > 1 and strict:	объявленный владелец не проигрывает соседу по расстоянию
+D32	claude-patch-all.sh	        return blocks(FENCE_LINE.sub(BREAK, text), BLOCK_MD)	        return blocks(FENCE.sub(BREAK, text), BLOCK_MD)	огороженный блок ловит расхождение
+D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABLE_SEP.match(line):	        if False:	ячейка таблицы ловит расхождение по шапке
+D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
+D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом

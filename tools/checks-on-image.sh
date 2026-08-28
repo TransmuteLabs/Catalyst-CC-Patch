@@ -19,6 +19,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/../claude-patch-all.sh"
 PATCH_SRC="$HERE/../tweakcc-patch.js"
 
+# Режим пола и подмена кита -- для стенда: чтобы отрицательный контроль мог
+# прогнать МУТИРОВАННУЮ копию конвейера, не трогая дерево.
+FLOOR=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --floor)  FLOOR=1; shift ;;
+    --script) SCRIPT="$2"; shift 2 ;;
+    *)        break ;;
+  esac
+done
+
 IMG="${1:-}"
 if [[ -z "$IMG" ]]; then
   echo "использование: $(basename "$0") <собранный-образ> [исходник-патча]" >&2
@@ -55,4 +66,67 @@ extracted_lines = end - start - 1
 sys.stderr.write(f'блок проверок извлечён, строк: {extracted_lines}\n')
 PY
 
-python3 "$BLOCK" "$IMG" "$PATCH_SRC"
+if [[ $FLOOR -eq 0 ]]; then
+  python3 "$BLOCK" "$IMG" "$PATCH_SRC"
+  exit $?
+fi
+
+# --- режим пола: что остаётся зелёным на ПРИСТИННОМ образе --------------------
+#
+# Проверка, которую нельзя провалить, выглядит ровно как проверка, которая
+# проходит. Одна такая прожила в реестре неизвестно сколько: порог BOM-полосы
+# стоял `>= 2`, а стоковые образы несут этот же приём 3-4 раза сами -- то есть
+# проверка была зелена на образе, где наших патчей нет вообще, и не увидела бы
+# потери всех четырёх наших полос (2026-08-28, находка раунда 17).
+#
+# Здесь закрывается весь класс: на пристинном образе зелёными имеют право
+# остаться РОВНО те проверки, что перечислены в DECLARED ниже, и каждая -- по
+# названной там причине (счёт не повторяется здесь словами: список -- его
+# единственный дом, а повтор устаревал бы молча). Любая незаявленная зелёная
+# означает порог НИЖЕ стокового пола. Пропажа объявленной из списка зелёных --
+# тоже находка: значит устарело объявление, и его надо прочитать заново, а не
+# подогнать.
+python3 - "$BLOCK" "$IMG" "$PATCH_SRC" <<'FLOOR_PY'
+import subprocess, sys
+
+block, img, patch_src = sys.argv[1], sys.argv[2], sys.argv[3]
+# Объявленные исключения. Каждое -- со своей причиной, и причина проверяема.
+DECLARED = {
+    # Читают ИСХОДНИК патча (`src`), а не образ: на любом образе они об одном и
+    # том же файле кита.
+    'patch source escapes every captured name':
+        'читает tweakcc-patch.js, а не образ',
+    'patch source keeps both dispatcher shapes':
+        'читает tweakcc-patch.js, а не образ',
+    # Пинит СТОКОВУЮ форму и краснеет, когда её испортит наш свип классов.
+    'Vertex project resolution intact (fork-sweep tripwire)':
+        'пинит стоковую форму -- зелена на стоке по замыслу',
+}
+
+out = subprocess.run([sys.executable, block, img, patch_src],
+                     capture_output=True, text=True)
+green, red = [], []
+for line in out.stdout.splitlines():
+    line = line.strip()
+    if line.startswith('[OK] '):
+        green.append(line[5:])
+    elif line.startswith('[FAIL] '):
+        red.append(line[7:])
+if not green and not red:
+    sys.exit('ПОЛ НЕ ИЗМЕРЕН: блок проверок не назвал ни одной проверки\n'
+             + (out.stdout or out.stderr)[-2000:])
+
+extra = [n for n in green if n not in DECLARED]
+missing = [n for n in DECLARED if n not in green]
+if extra or missing:
+    print('ПОЛ ПРОВЕРОК НЕ СОШЁЛСЯ (образ: %s)' % img)
+    for n in extra:
+        print('  зелена на стоке, а не объявлена: %s' % n)
+        print('    -- её порог лежит НИЖЕ стокового пола: она не может упасть')
+    for n in missing:
+        print('  объявлена зелёной на стоке, но красна: %s' % n)
+        print('    -- объявление устарело; прочитать причину заново')
+    sys.exit(1)
+print('ПОЛ ПРОВЕРОК СОШЁЛСЯ: на пристинном образе зелёных %d из %d, все объявлены'
+      % (len(green), len(green) + len(red)))
+FLOOR_PY

@@ -48,7 +48,7 @@ Everything below is confirmed by fact, not inferred.
 | the record is addressed by session and its title | in the field: `sid=0ed12ae4`, `title=CC-Pathc-Test2` |
 | the dispatch model is resolved from the agent definition | in the field: `model=glm-5.3`, `msrc=agent` when called without a model |
 | TOML parsing in the image runtime is free | the image is a single-file bun 1.4.0 executable (`bun/1.4.0 npm/…` in the native part, self-update address `bun-v1.4.0`); the bundle contains a `Bun.TOML` call; parsing verified on bun 1.3.14 — comments are stripped, nested tables yield nested objects |
-| the bench can run on the same runtime as the image | `bun tools/probe-bench.js` — 32/32 without touching the scenarios at measurement time (36 scenarios after the move to `probes.toml`) — docnum:historical, обе цифры про прошлые сборки; the runtime gate added 2026-08-24 |
+| the bench can run on the same runtime as the image | `bun tools/probe-bench.js` — 32/32 docnum:historical without touching the scenarios at measurement time (36 scenarios after the move to `probes.toml`) — docnum:historical, обе цифры про прошлые сборки; the runtime gate added 2026-08-24 |
 | the image's TOML version reads nested arrays | on bun **1.4.0** (the image version) `x = [[1]]` parses. On 1.3.14 it fails: the lexer greedily read `[[` as an array-of-tables header. The defect is someone else's and closed before us; it does NOT affect the design |
 
 Still open: the full trace `yB → sdh → adh → … → t4` has not been followed.

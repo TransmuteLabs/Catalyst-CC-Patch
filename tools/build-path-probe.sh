@@ -19,12 +19,19 @@
 #         executing the old one), must leave no staging file, and must not let
 #         tweakcc's backup become a copy of our build.
 #   b  live binary pristine, no `.orig` at all -- a first run on a clean machine
-#      -> must NOT stage (there are no patches to preserve, and staging from a
-#         copy that does not exist cannot be done), must patch in place.
+#      -> must ALSO stage, from the live bytes themselves, and must first keep
+#         those bytes as `.orig`. Patching in place there was a hole of its own:
+#         the live installation was the build for the whole run, so a gate that
+#         fired late left the human with an image that had been patched and then
+#         declared unfit, while the run reported a refusal.
 #   c  the negative control: case (a) again, but against a copy of the pipeline
-#      with 0b's trigger forced to false. At least one of case (a)'s assertions
-#      MUST go red -- otherwise those assertions are decoration and this probe
-#      proves nothing. The probe names which ones reddened.
+#      with 0b disabled entirely. At least one of case (a)'s assertions MUST go
+#      red -- otherwise those assertions are decoration and this probe proves
+#      nothing. The probe names which ones reddened.
+#   d  the same control for case (b): 0b disabled, live binary pristine.
+#   u  the installer's own `--update` path, offline and in seconds: it must
+#      build BESIDE the target and swap by rename, never download over the live
+#      file. Its control is a copy of claude_patch.py with the staging removed.
 #
 # Case (c) runs a mutant copy of the pipeline out of a directory of symlinks to
 # this kit, so nothing is written into the source tree; and it snapshots
@@ -33,7 +40,15 @@
 # demonstrated. The snapshot is restored, and the restore verified, on every exit
 # path including a kill.
 #
-# Usage:  bash tools/build-path-probe.sh [--case a|b|c] [--version 2.1.247]
+# Exit codes: 0 green; 3 cannot measure (pipeline lock busy, the lock instrument
+# or the backup guard red); 5 nothing to measure ON THIS MACHINE (no patched
+# install with a pristine twin beside it); 1 a case went red.
+#
+# Called by tools/sweep.sh as a pre-flight, once per sweep: this branch is
+# invisible to every check in the pipeline, and a tool nobody calls has been
+# dead three times in this kit.
+#
+# Usage:  bash tools/build-path-probe.sh [--case abcdu] [--version 2.1.247]
 # Cost:   one full run per case (tweakcc + our patches + the pipeline's 114
 #         checks + the interface gate + the bench), so a few minutes each.
 
@@ -45,7 +60,7 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abc
+CASES=abcdu
 WANT_VER=
 
 while [[ $# -gt 0 ]]; do
@@ -199,18 +214,23 @@ if [[ -z "$WANT_VER" ]]; then
 fi
 PATCHED="$VERSIONS/$WANT_VER"
 PRISTINE="$VERSIONS/$WANT_VER.orig"
+# «Нет материала» и «не могу мерить» -- РАЗНЫЕ ответы, и второй нельзя читать
+# как первый. Оба уезжали кодом 3, а его же отдаёт занятый замок и красный
+# прибор: вызывающий (предполёт свипа) не мог отличить «на этой машине нечего
+# мерить» от «механизм сломан», и любая политика по коду 3 была бы неверна для
+# одной из сторон. Материал -- 5, отказы остаются на 3.
 if [[ -z "$WANT_VER" || ! -f "$PATCHED" || ! -f "$PRISTINE" ]]; then
   echo "SKIP: need both $PATCHED and $PRISTINE" >&2
   echo "  (install a version with: bash claude-patch-all.sh --update <version>)" >&2
-  exit 3
+  exit 5
 fi
 if [[ "$(marks "$PATCHED")" == 0 ]]; then
   echo "SKIP: $PATCHED does not carry our patches, so case (a) has nothing to preserve" >&2
-  exit 3
+  exit 5
 fi
 if [[ "$(marks "$PRISTINE")" != 0 ]]; then
   echo "SKIP: $PRISTINE is not pristine -- it carries our marker" >&2
-  exit 3
+  exit 5
 fi
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe.XXXXXX")"
@@ -263,6 +283,98 @@ cleanup() {
   [[ -n "${KEEP_ROOT:-}" ]] || rm -rf "$ROOT"
 }
 trap cleanup EXIT INT TERM
+
+# Драйвер случая (u) пишется на диск здесь, а не встраивается в тело функции:
+# его надо запустить ДВАЖДЫ -- по киту дерева и по мутированной копии, -- и обе
+# половины обязаны исполнять ОДИН И ТОТ ЖЕ текст, иначе контроль сравнивает
+# разные приборы.
+cat > "$ROOT/update-probe.py" <<'UPDATE_PROBE'
+"""Куда пишет `claude_patch.py --update`: в живой файл или рядом с ним.
+
+Сеть и настоящий патч заменены заглушками -- измеряется не содержимое сборки, а
+ИМЯ ФАЙЛА, в который пишет каждый шаг. Аргумент -- каталог с claude_patch.py
+(дерево кита или мутированная копия).
+"""
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+kit = sys.argv[1]
+sys.path.insert(0, kit)
+import claude_patch as m
+
+LIVE = b'PRISTINE-STOCK-IMAGE-no-patches'
+FRESH = b'FRESH-STOCK-BYTES-FROM-REGISTRY'
+BUILT = b'PATCHED-BYTES-with-marker-' + m.ROUTING_MARKER
+
+failed = []
+
+
+def probe(patch_works):
+    root = Path(tempfile.mkdtemp(prefix='update-probe.'))
+    try:
+        vdir = root / 'versions'
+        vdir.mkdir()
+        target = vdir / '0.0.900'
+        target.write_bytes(LIVE)
+        repointed = []
+
+        m.versions_dir = lambda: vdir
+        m.download_binary = lambda version, dest: Path(dest).write_bytes(FRESH)
+        m.repoint_launcher = lambda t: repointed.append(Path(t))
+
+        def fake_patch(t, backup=None):
+            if not patch_works:
+                raise RuntimeError('патч упал (так и задумано)')
+            Path(t).write_bytes(BUILT)
+        m.patch_binary = fake_patch
+
+        try:
+            m.main(['--update', '0.0.900'])
+            crashed = None
+        except BaseException as e:          # SystemExit тоже
+            crashed = repr(e)
+
+        now = target.read_bytes()
+        orig = vdir / '0.0.900.orig'
+        staging_orig = vdir / '0.0.900.staging.orig'
+        staging = vdir / '0.0.900.staging'
+        if patch_works:
+            if crashed:
+                failed.append('успешный патч, а прогон упал: %s' % crashed)
+            if now != BUILT:
+                failed.append('цель не получила собранные байты (%r)' % now[:40])
+            if staging.exists():
+                failed.append('стадия осталась на диске: %s' % staging.name)
+            if repointed != [target]:
+                failed.append('лаунчер переведён не на цель: %r' % repointed)
+        else:
+            if not crashed:
+                failed.append('патч упал, а прогон объявил успех')
+            if now != LIVE:
+                failed.append('ЖИВОЙ ФАЙЛ ПЕРЕПИСАН при упавшем патче: %r' % now[:40])
+            if repointed:
+                failed.append('лаунчер переведён при упавшем патче: %r' % repointed)
+        if not orig.exists():
+            failed.append('пристинная копия .orig не создана')
+        elif orig.read_bytes() != FRESH:
+            failed.append('.orig не из байт реестра: %r' % orig.read_bytes()[:40])
+        if staging_orig.exists():
+            failed.append('создана вторая копия под именем стадии: %s' % staging_orig.name)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+probe(patch_works=False)
+probe(patch_works=True)
+if failed:
+    for f in failed:
+        print('ПРОВАЛ ' + f)
+    sys.exit(1)
+print('ok --update строит рядом с целью и подменяет переименованием')
+UPDATE_PROBE
 
 FAILED=0
 note()  { printf '  %-6s %s\n' "$1" "$2"; }
@@ -360,17 +472,38 @@ case_a() {
 
 # --- case b: nothing to preserve ---------------------------------------------
 case_b() {
-  local d log rc
+  local d log rc ino_before ino_after
   d="$(stage_dir b)"; log="$ROOT/b.log"
   cp -p "$PRISTINE" "$d/claude"
+  ino_before="$(inode "$d/claude")"
   echo "case b: live binary pristine, no copy beside it"
   run_pipeline "$PIPELINE" "$d" "$log"; rc=$?
+  ino_after="$(inode "$d/claude")"
 
   [[ $rc -eq 0 ]] && ok "pipeline finished (rc=0)" || bad "pipeline exited rc=$rc (see $log)"
-  grep -q 'rebuilding from the pristine copy' "$log" \
-    && bad 'staged from a copy that does not exist' || ok 'patched in place, as it must'
+  grep -q 'building beside it into' "$log" \
+    && ok 'took the staging branch from the live bytes' \
+    || bad 'patched the live file in place -- a late gate would leave it half-built'
+  if ! is_inode "$ino_before" || ! is_inode "$ino_after"; then
+    bad "инод не измерен (до=$ino_before после=$ino_after): файла нет или stat промолчал"
+  elif [[ "$ino_before" != "$ino_after" ]]; then
+    ok "swapped in by rename (inode $ino_before -> $ino_after)"
+  else
+    bad "same inode $ino_after: patched in place, under any running session"
+  fi
   [[ -e "$d/claude.staging" ]] \
     && bad 'left a staging file behind' || ok 'no staging file left behind'
+  # Пристинные байты не должны исчезнуть вместе с подменой: `.orig` -- это то,
+  # из чего пересобирает следующий прогон по умолчанию и что чинит бэкап
+  # tweakcc. На чистой машине его раньше не появлялось вовсе, и ВТОРОЙ прогон
+  # отказывал с «нет пристинной копии рядом».
+  if [[ ! -f "$d/claude.orig" ]]; then
+    bad 'pristine bytes are gone: no .orig beside the build'
+  elif [[ "$(marks "$d/claude.orig")" != 0 ]]; then
+    bad '.orig carries our patches -- it is not a pristine copy'
+  else
+    ok 'the live pristine bytes were kept as .orig'
+  fi
   [[ "$(marks "$d/claude")" != 0 ]] \
     && ok 'the build carries our patches' || bad 'the build carries NO patches'
 }
@@ -393,12 +526,15 @@ case_c() {
     ln -sfn "$f" "$kit/$(basename "$f")"
   done
   rm -f "$kit/claude-patch-all.sh"
-  # Anchored to 0b's trigger, which is a CONTINUATION line beginning with `&&`.
-  # The unanchored form also rewrote the post-stage assertion, which begins
-  # `if [[ $ONLY_OURS -eq 0 ]] && grep -q ...` -- so the control silently
-  # disabled a second guard and then read the result as evidence about the
-  # first. Faithfulness of a mutation is not a matter of intent: it is counted.
-  sed -E 's/^([[:space:]]*)&& grep -q -a -F "\$OUR_MARKER" "\$BIN"; then$/\1\&\& false; then/' \
+  # Anchored to 0b's OUTER condition -- the line that decides whether a default
+  # run stages at all. Both branches inside it (live patched -> from `.orig`,
+  # live pristine -> from the live bytes) are disabled by this one edit, which
+  # is exactly the state the pipeline was in before this wave.
+  #
+  # The anchor is the whole line, so a rewrite that touches a second guard shows
+  # up as a changed-line count and refuses. Faithfulness of a mutation is not a
+  # matter of intent: it is counted.
+  sed -E 's/^if \[\[ -z "\$TARGET" && \$DO_UPDATE -eq 0 && \$ONLY_OURS -eq 0 \]\]; then$/if false; then/' \
     "$PIPELINE" > "$kit/claude-patch-all.sh"
   local changed
   changed=$(diff "$PIPELINE" "$kit/claude-patch-all.sh" | grep -c '^< ' || true)
@@ -444,11 +580,112 @@ case_c() {
   fi
 }
 
+# --- case d: the negative control for case (b) -------------------------------
+# Case (c) proves case (a)'s assertions have teeth on the PATCHED-live branch.
+# The pristine-live branch is separate code with its own assertions, so it needs
+# its own control -- otherwise "the default run always stages" is proven for one
+# half and asserted for the other.
+case_d() {
+  local d log rc ino_before ino_after kit reddened=0 required=0
+  kit="$ROOT/kit"
+  if [[ ! -f "$kit/claude-patch-all.sh" ]]; then
+    bad 'case (d) needs the mutant kit built by case (c) -- run them together (--case cd)'
+    return
+  fi
+  d="$(stage_dir d)"; log="$ROOT/d.log"
+  cp -p "$PRISTINE" "$d/claude"
+  ino_before="$(inode "$d/claude")"
+  echo "case d (negative control): same as (b), with 0b disabled"
+  run_pipeline "$kit/claude-patch-all.sh" "$d" "$log"; rc=$?
+  ino_after="$(inode "$d/claude")"
+
+  grep -q 'building beside it into' "$log" || { required=1; note 'red' 'staging branch not taken'; }
+  if ! is_inode "$ino_before" || ! is_inode "$ino_after"; then
+    note 'info' "инод не измерен (до=$ino_before после=$ino_after) -- не засчитано"
+  elif [[ "$ino_before" == "$ino_after" ]]; then
+    reddened=$((reddened+1)); note 'red' "patched in place (inode $ino_after)"
+  fi
+  [[ -f "$d/claude.orig" ]] || { reddened=$((reddened+1)); note 'red' 'pristine bytes not kept'; }
+  [[ $rc -ne 0 ]] && note 'info' "pipeline refused (rc=$rc) -- not counted as evidence"
+
+  if [[ $required -eq 1 ]]; then
+    ok "the mutation reddens case (b)'s staging assertion, and $reddened more"
+  else
+    bad 'the mutation changed NOTHING about the pristine-live branch: case (b) is not testing 0b'
+  fi
+}
+
+# --- case u: the installer's own --update path -------------------------------
+# Offline and in seconds: the network fetch and the byte patch are both replaced
+# by stubs, because what is being measured is WHICH FILE each step writes to.
+#
+# The defect this exists for: `--update` downloaded straight into the target. If
+# the requested version was the installed one and merely unpatched (a restore,
+# an interrupted run, a fresh image), the launcher's own file was truncated and
+# refilled over the network -- and a run that died in that window left the
+# installation broken for good. patch_binary has staged its write since the
+# beginning; the download was the one step that still wrote through the live
+# name.
+case_u() {
+  local out rc mut
+  echo "case u: claude_patch.py --update builds beside the target"
+  out="$(python3 "$ROOT/update-probe.py" "$HERE" 2>&1)"; rc=$?
+  printf '%s\n' "$out" | sed 's/^/    /'
+  [[ $rc -eq 0 ]] && ok 'the --update path never writes through the live name' \
+                  || bad "the --update path wrote through the live name (see above)"
+
+  # Отрицательный контроль: копия установщика без стадии. Утверждение обязано
+  # покраснеть -- иначе оно ничего не проверяет.
+  # Кит копии -- ПОЛНЫЙ: `main()` первым делом требует patch_claude_routing.py
+  # рядом с собой, и копия из одного файла краснела с чужой причиной («нет
+  # patch_claude_routing.py»), то есть доказывала сломанный прибор, а не
+  # отсутствие стадии.
+  mut="$ROOT/mutkit"; mkdir -p "$mut"
+  cp "$HERE/claude_patch.py" "$HERE/patch_claude_routing.py" "$mut/"
+  python3 - "$mut/claude_patch.py" <<'MUT'
+import sys
+
+p = sys.argv[1]
+t = open(p, encoding='utf-8').read()
+# Якорь НАЧИНАЕТСЯ С ПЕРЕВОДА СТРОКИ, и это не украшение: тот же оператор есть
+# в ветке --download-only с отступом в 12 пробелов, а поиск по восьми пробелам
+# -- ЕГО ПОДСТРОКА. Первая редакция контроля так и села на чужую ветку: мутация
+# «применилась», прогон вёл себя как исправный, и контроль объявил утверждение
+# беззубым, ничего о нём не измерив.
+NEEDLE = ('\n        staging = target.with_name(target.name + ".staging")\n'
+          '        download_binary(version, staging)\n')
+if t.count(NEEDLE) != 1:
+    sys.exit('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: якорь ветки --update найден %d раз' % t.count(NEEDLE))
+t2 = t.replace(NEEDLE, '\n        staging = target\n        download_binary(version, staging)\n', 1)
+if t2.count('.with_name(target.name + ".staging")') != 1:
+    sys.exit('МУТАЦИЯ ЗАДЕЛА ЧУЖУЮ ВЕТКУ: стадий осталось %d'
+             % t2.count('.with_name(target.name + ".staging")'))
+open(p, 'w', encoding='utf-8').write(t2)
+MUT
+  if [[ $? -ne 0 ]]; then
+    bad 'case (u) control: the mutation did not apply -- it proves nothing'
+    return
+  fi
+  out="$(python3 "$ROOT/update-probe.py" "$mut" 2>&1)"; rc=$?
+  # Требуется НАЗВАННАЯ причина: упавший прибор (нет соседнего файла, опечатка
+  # в мутации) тоже даёт ненулевой код, и без имени причины беззубость
+  # неотличима от исправности.
+  if [[ $rc -ne 0 && "$out" == *"ЖИВОЙ ФАЙЛ ПЕРЕПИСАН"* ]]; then
+    ok "the control reddens it by its own cause: $(printf '%s' "$out" | grep -m1 'ЖИВОЙ ФАЙЛ')"
+  elif [[ $rc -ne 0 ]]; then
+    bad "the control reddened by a FOREIGN cause: $(printf '%s' "$out" | grep -m1 'ПРОВАЛ\|ERROR')"
+  else
+    bad 'the control did NOT redden: case (u) is not testing the staging'
+  fi
+}
+
 for c in $(echo "$CASES" | grep -o .); do
   case "$c" in
     a) case_a ;;
     b) case_b ;;
     c) case_c ;;
+    d) case_d ;;
+    u) case_u ;;
     *) echo "unknown case: $c" >&2; exit 2 ;;
   esac
 done
