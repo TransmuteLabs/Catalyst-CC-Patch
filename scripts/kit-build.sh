@@ -4,8 +4,8 @@
 # This exists because the kit was twice built by unpacking the PREVIOUS
 # archive with edits made in place: the only home of the README and the spec
 # was the archive itself, and both fell behind unnoticed (the README spoke of
-# 25 checks when there were 34). Every file now lives on disk, and the archive
-# is a derivative.
+# 25 checks when there were 34 — docnum:historical). Every file now lives on
+# disk, and the archive is a derivative.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

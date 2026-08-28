@@ -2,21 +2,29 @@
 # ответить. Поля разделены табуляцией.
 #
 # Почему таблица лежит ОТДЕЛЬНО от кода стенда: вход каждой мутации -- это
-# нарочно неверное утверждение о счёте, а гейт сканирует прозу в .md, .sh,
-# .js и .py. Записанное в коде стенда, оно было бы живым утверждением и
-# предъявлялось бы при каждой сборке. Данные (как corpus-versions.txt) гейт
-# не читает -- поэтому мутации живут здесь, читаемыми, а не собранными из
-# кусков ради обхода собственного гейта.
+# нарочно неверное утверждение о счёте, а гейт сканирует прозу в .md и
+# комментарии в .sh, .js, .py. Записанное в коде стенда, оно было бы живым
+# утверждением. Данные (как corpus-versions.txt) гейт не читает.
 #
-# Каждая строка обязана и ПРИМЕНИТЬСЯ (вход найден дословно), и покраснить
-# гейт ИМЕННО своей причиной: красное не по той причине -- это провал стенда,
-# а не подтверждение.
-D1	README.md	12 scenarios on a toy corpus	13 scenarios on a toy corpus	владелец corpus-tools-bench
-D2	README.md	6 recorded mutations	7 recorded mutations	mutations» (владелец corpus-tools-bench)
-D3	README.md	`tools/corpus-tools-bench.sh` | the bench for the two corpus tools	`tools/judge-tools-bench.sh` | the bench for the two corpus tools	владелец judge-tools-bench
+# Каждая строка обязана и ПРИМЕНИТЬСЯ (вход найден дословно и РОВНО ОДИН раз:
+# теневой дубликат в другом месте файла позволял мутации подтвердиться после
+# того, как её настоящая цель исчезла), и покраснить гейт ИМЕННО своей
+# причиной: красное не по той причине -- провал стенда, а не подтверждение.
+#
+# Каждое правило грамматики имеет здесь СВОЙ вход: украшения разметки (D5),
+# ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
+# явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
+D1	README.md	33 scenarios on a toy corpus	34 scenarios on a toy corpus	объявлено «33 scenarios» (владелец corpus-tools-bench)
+D2	README.md	26 recorded mutations	27 recorded mutations	объявлено «26 mutations» (владелец corpus-tools-bench)
+D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 56;	const EXPECTED_SCENARIOS = 57;	владелец probe-bench
-D5	claude-patch-all.sh	ONE = re.compile(r'(?<!\w)(\d+)	ONE = re.compile(r'(\d+)	12 сценариев» (владелец corpus-tools-bench)
-D6	claude-patch-all.sh	'x' * (len(_LEAD) - len(_MID) - 1)	'x' * (len(_LEAD) - len(_MID))	равном расстоянии
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=6	EXPECTED_MUTATION_COUNT=6	не объявляет свою величину
-D8	claude-patch-all.sh	DEFAULTS = {'scenarios': 'probe-bench'}	DEFAULTS = {}	владелец счёта не назван
-D9	claude-patch-all.sh	(?:[\w-]+\s+){0,3}	(?:[^\s.;!?]+\s+){0,3}	6 мутаций» (владелец corpus-tools-bench)
+D5	claude-patch-all.sh	            if prev_at < lo_s or prev in STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
+D6	claude-patch-all.sh	'x' * (2 * _NOUN_AT - (len(_LEAD) + len(_MID) + 3))	'x' * (2 * _NOUN_AT - (len(_LEAD) + len(_MID) + 2))	равном расстоянии
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=26	EXPECTED_MUTATION_COUNT=26	не объявляет свою величину
+D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
+D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
+D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example')	MARKERS = ('subset', 'подмножеств', 'docnum:example')	отрицание не работает как разрешение
+D11	claude-patch-all.sh	REACH = 5	REACH = 1	четыре слова между
+D12	scripts/kit-build.sh	 — docnum:historical)	)	kit-build.sh
+D13	claude-patch-all.sh	    if ext in ('.md', '.txt', ''):	    if True:	The number of checks
+D14	claude-patch-all.sh	        lo, hi = sentence_span(at)	        lo, hi = max(0, at - 120), min(len(stream), at + 120)	пометка из соседнего предложения

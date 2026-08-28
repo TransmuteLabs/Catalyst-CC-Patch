@@ -110,7 +110,7 @@ snap=$(ps -eo pid,args)
 alive=$(printf '%s\n' "$snap" | awk '
   { for (i = 2; i <= NF && i <= 8; i++)
       if ($i ~ /claude-patch-all\.sh$/) { print $1; next } }
-  /catalyst-tweakcc.*index\.mjs.*--apply/ { print $1 }' || true)
+  /catalyst-tweakcc.*index\.mjs.*(--apply|adhoc-patch)/ { print $1 }' || true)
 if [[ -n "$alive" ]]; then
   echo "SWEEP ОТКАЗ: живы процессы предыдущего прогона: $alive" >&2
   exit 1
@@ -136,11 +136,18 @@ CORPUS="${CORPUS_DIR:-$HOME/.local/share/claude-patch/corpus}"
 # Рабочий корень прогона -- $STATE (см. SWEEP_STATE_DIR выше).
 LIST="${CORPUS_LIST:-$SWEEP_KIT/tools/corpus-versions.txt}"
 [[ -f "$LIST" ]] || { echo "SWEEP ОТКАЗ: нет списка версий $LIST" >&2; exit 1; }
+# Формат списка разбирает ОДИН дом на оба инструмента: свой `while read` у
+# каждого читателя разошёлся на строке без пина, на лишнем поле и на дубле
+# версии под двумя метками (последний давал «все N версий измерены» там, где
+# файл на диске один). Отказ разбора -- отказ свипа, до первой сборки.
+PARSED=$(python3 "$SWEEP_KIT/tools/corpus-list.py" "$LIST") || {
+  echo "SWEEP ОТКАЗ: список версий $LIST не проходит разбор (см. причину выше)" >&2
+  exit 1; }
 declare -a ALL=()
-while read -r label version _rest; do
-  [[ -z "${label:-}" || "$label" == \#* ]] && continue
-  ALL+=("$label:$CORPUS/$version.pristine")
-done < "$LIST"
+while IFS=$'\t' read -r label version pin; do
+  [[ -n "${label:-}" ]] || continue
+  ALL+=("$label:$version:$pin")
+done <<< "$PARSED"
 (( ${#ALL[@]} )) || { echo "SWEEP ОТКАЗ: список версий пуст: $LIST" >&2; exit 1; }
 
 # Версии можно назвать аргументами: `sweep.sh 246 247`.
@@ -173,9 +180,15 @@ fi
 # Именно так пропажа корпуса едва не прошла незамеченной. Проверка снята с
 # цикла и вынесена вперёд: неполный корпус не тратит десять минут машины и не
 # оставляет сводки, которую можно прочесть как вердикт.
+# Путь образа выводится из версии одним местом: имя файла корпуса -- часть
+# формата, а не догадка каждого потребителя.
+src_of() { printf '%s/%s.pristine' "$CORPUS" "$1"; }
+ver_of() { local rest="${1#*:}"; printf '%s' "${rest%%:*}"; }
+pin_of() { printf '%s' "${1##*:}"; }
 declare -a MISSING=()
 for entry in "${SRC[@]}"; do
-  [[ -f "${entry#*:}" ]] || MISSING+=("${entry%%:*} (${entry#*:})")
+  [[ -f "$(src_of "$(ver_of "$entry")")" ]] \
+    || MISSING+=("${entry%%:*} ($(src_of "$(ver_of "$entry")"))")
 done
 if (( ${#MISSING[@]} )); then
   echo "SWEEP ОТКАЗ: нет пристинных образов: ${MISSING[*]}" >&2
@@ -197,15 +210,24 @@ if command -v shasum >/dev/null 2>&1; then HASH=(shasum -a 256)
 elif command -v sha256sum >/dev/null 2>&1; then HASH=(sha256sum)
 else echo "SWEEP ОТКАЗ: нет ни shasum, ни sha256sum -- пин корпуса не проверить" >&2; exit 1
 fi
-sha256_of() { "${HASH[@]}" "$1" | awk '{print $1}'; }
+# Пустой результат хеширования -- НЕ расхождение пина: файл без права чтения
+# давал «на диске » и объявлялся подменённым, то есть причина отказа называлась
+# неверно, а искать шли не там.
+sha256_of() {
+  local out
+  out=$("${HASH[@]}" "$1" 2>/dev/null | awk '{print $1}')
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
 declare -a TAINTED=()
 for entry in "${SRC[@]}"; do
-  v="${entry%%:*}"; src="${entry#*:}"
-  want=$(awk -v l="$v" '$1==l {print $3}' "$LIST")
-  if [[ -z "$want" || "$want" == "-" ]]; then
+  v="${entry%%:*}"; src=$(src_of "$(ver_of "$entry")"); want=$(pin_of "$entry")
+  if [[ "$want" == "-" ]]; then
     TAINTED+=("$v (пин не записан)"); continue
   fi
-  got=$(sha256_of "$src")
+  if ! got=$(sha256_of "$src"); then
+    TAINTED+=("$v (не прочитать $src)"); continue
+  fi
   [[ "$got" == "$want" ]] || TAINTED+=("$v (пин $want, на диске $got)")
 done
 if (( ${#TAINTED[@]} )); then
@@ -224,8 +246,21 @@ SRC_KIT="$SWEEP_KIT"
 # once at the start costs a second and decouples the two: the snapshot is what
 # gets verified, the tree stays free to be worked on, and the summary says which
 # commit-state was measured so the two are never confused.
+# Метка снимается ДО копирования и сверяется ПОСЛЕ: снятая только после, она
+# описывала дерево на момент конца копирования, а не то, что попало в снимок.
+# Расхождение не гадаем -- объявляем.
+kit_state() {
+  local st; st=$(cd "$SRC_KIT" && git rev-parse --short HEAD 2>/dev/null || echo "вне-git")
+  [[ -n "$(cd "$SRC_KIT" && git status --porcelain 2>/dev/null)" ]] && st="$st+dirty"
+  printf '%s' "$st"
+}
+STATE_BEFORE=$(kit_state)
 HERE=$(mktemp -d "$STATE/kit.XXXXXX")
-cp -R "$SRC_KIT"/. "$HERE"/
+# Провал копирования -- отказ, а не сборка из половины кита: `cp -R` молча
+# оставлял неполный снимок при нехватке места, и красный прогон приписывался
+# коду, а не снимку.
+cp -R "$SRC_KIT"/. "$HERE"/ || {
+  echo "SWEEP ОТКАЗ: не снять снимок кита в $HERE" >&2; exit 1; }
 # Метка происхождения снимка.
 #
 # `git diff --quiet` сравнивает дерево только с ИНДЕКСОМ, то есть видит лишь
@@ -234,8 +269,8 @@ cp -R "$SRC_KIT"/. "$HERE"/
 # напечатать чистый HEAD над кодом, которого в HEAD нет: сами инструменты свипа
 # в момент их появления были неотслеживаемыми и для прежней формы невидимыми.
 # `status --porcelain` покрывает все три случая.
-SWEPT_STATE=$(cd "$SRC_KIT" && git rev-parse --short HEAD)
-[[ -n "$(cd "$SRC_KIT" && git status --porcelain 2>/dev/null)" ]] && SWEPT_STATE="$SWEPT_STATE+dirty"
+SWEPT_STATE="$STATE_BEFORE"
+[[ "$(kit_state)" == "$STATE_BEFORE" ]] || SWEPT_STATE="$SWEPT_STATE+сдвинулось-при-снимке"
 echo "SWEEP снимок кита: $HERE (дерево $SWEPT_STATE)"
 : > "$STATE/log/sweep-summary.txt"
 echo "# снимок дерева: $SWEPT_STATE" >> "$STATE/log/sweep-summary.txt"
@@ -251,18 +286,44 @@ num() { case "$1" in ''|*[!0-9]*) echo "БИТО";; *) echo "$1";; esac; }
 # файлу замка плюс срез ps), и версия не объявляется измеренной, пока бюджет
 # ожидания не исчерпан. Конвейер отдаёт 3 на обеих дверях замка -- и на
 # flock-ступени, и на каталоге-замке.
-PATCH_LOCK="${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock"
+# Путь замка -- тот же, что у конвейера, и переопределяется той же ручкой:
+# стенд обязан уметь проверить дверь занятого замка, не занимая БОЕВОЙ файл,
+# из-за которого законный прогон оператора получал бы FATAL.
+PATCH_LOCK="${CLAUDE_PATCH_LOCK:-${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock}"
 LOCK_BUDGET=${SWEEP_LOCK_BUDGET:-600}
 LOCK_POLL=15
 
 declare -a UNMEASURED=()
 RED=0
 for entry in "${SRC[@]}"; do
-  v="${entry%%:*}"; src="${entry#*:}"
+  v="${entry%%:*}"; src=$(src_of "$(ver_of "$entry")"); want=$(pin_of "$entry")
   log="$STATE/log/sweep-$v.log"
   locklog="$STATE/log/sweep-$v.lock.log"
   rm -f "$log" "$locklog"
-  cp -p "$src" "$STATE/bin/$v.wave.bin"
+  # Меряется КОПИЯ, а пин доказывал исходник. Между сверкой и этим местом
+  # проходят минуты и целые сборки: упавший `cp` (нет места, нет прав,
+  # обломок прошлого прогона под тем же именем) или подменённый за это время
+  # исходник давали измерение чужих байт под именем запинованной версии, и
+  # прогон объявлял его зелёным. Сверяется то, что пойдёт в конвейер, и в тот
+  # момент, когда оно туда пойдёт.
+  if ! cp -p "$src" "$STATE/bin/$v.wave.bin"; then
+    RED=$(( RED + 1 ))
+    echo "SWEEP $v: КРАСНАЯ -- не скопировать $src в $STATE/bin/$v.wave.bin"
+    echo "$v КРАСНАЯ (копия не сделана)" >> "$STATE/log/sweep-summary.txt"
+    continue
+  fi
+  if ! copy=$(sha256_of "$STATE/bin/$v.wave.bin"); then
+    RED=$(( RED + 1 ))
+    echo "SWEEP $v: КРАСНАЯ -- не прочитать копию $STATE/bin/$v.wave.bin"
+    echo "$v КРАСНАЯ (копия не читается)" >> "$STATE/log/sweep-summary.txt"
+    continue
+  fi
+  if [[ "$copy" != "$want" ]]; then
+    RED=$(( RED + 1 ))
+    echo "SWEEP $v: КРАСНАЯ -- копия не сходится с пином (пин $want, копия $copy)"
+    echo "$v КРАСНАЯ (копия не сходится с пином)" >> "$STATE/log/sweep-summary.txt"
+    continue
+  fi
   waited=0
   while :; do
     CLAUDE_PATCH_SKIP_MODELS=1 bash "$HERE/claude-patch-all.sh" \
@@ -305,12 +366,34 @@ for entry in "${SRC[@]}"; do
     note=" НЕ ИЗМЕРЕНО(замок, ждали ${waited}s; держатели: $locklog)"
     UNMEASURED+=("$v")
   fi
-  [[ "$mixed" != "$size" ]] && note="$note ЛОГ СМЕШАН(NUL)"
-  # Не измеренная из-за замка версия считается ОДИН раз, в своём счётчике:
-  # иначе хвост печатал бы её и как непомеренную, и как красную.
-  (( rc == 0 || rc == 3 )) || RED=$(( RED + 1 ))
-  [[ "$ours" != "1" ]] && note="$note НАШИХ_ПРИМЕНЕНИЙ=$ours"
-  [[ "$twruns" != "1" ]] && note="$note TWEAKCC_ПРОГОНОВ=$twruns"
+  # Вердикт ПОТРЕБЛЯЕТ всё, что измерено.
+  #
+  # Прежде в него входил один код возврата, а счётчики оставались текстовой
+  # припиской: лог, смешанный с чужим потоком (NUL), два применения патчей
+  # вместо одного, ноль прошедших проверок, упавшая проверка, непройденный
+  # дым, интерфейс или стенд зондов -- всё это печаталось и не мешало
+  # последней строке сказать «красных нет» с нулевым кодом. То есть инцидент,
+  # ради которого счётчики и заводились (выживший ребёнок допатчивает образ
+  # ПОСЛЕ проверки), выглядел зелёным прогоном.
+  #
+  # Версия, не измеренная из-за замка, считается ОДИН раз, в своём счётчике:
+  # её лога нет, и поля к ней не применяются.
+  if (( rc != 3 )); then
+    declare -a why=()
+    (( rc == 0 )) || why+=("конвейер вернул $rc")
+    [[ "$mixed" == "$size" ]] || why+=("лог смешан с чужим потоком (NUL)")
+    [[ "$fail" == "0" ]] || why+=("проверок упало $fail")
+    [[ "$ok" != "0" ]] || why+=("ни одной прошедшей проверки")
+    [[ "$ours" == "1" ]] || why+=("наших применений $ours")
+    [[ "$twruns" == "1" ]] || why+=("прогонов tweakcc $twruns")
+    [[ "$smoke" == "1" ]] || why+=("дым не подтверждён")
+    [[ "$iface" == "1" ]] || why+=("интерфейс не подтверждён")
+    [[ "$bench" == "1" ]] || why+=("стенд зондов не подтверждён")
+    if (( ${#why[@]} )); then
+      RED=$(( RED + 1 ))
+      note="$note КРАСНАЯ: $(printf '%s; ' "${why[@]}")"
+    fi
+  fi
   printf '%s exit=%s ok=%s fail=%s tweakcc=%s ours=%s smoke=%s iface=%s bench=%s%s\n' \
     "$v" "$rc" "$ok" "$fail" "$tw" "$ours" "$smoke" "$iface" "$bench" "$note" \
     >> "$STATE/log/sweep-summary.txt"

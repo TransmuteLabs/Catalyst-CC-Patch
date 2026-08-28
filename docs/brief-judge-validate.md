@@ -9,9 +9,9 @@
 
 Goal. There is a corpus of recorded judgements (`~/.claude/judge/records/
 *.json[.gz]`) and a single-record replay tool (`replay.py`). There is no
-separate tool that (1) checks verdicts against a LABELLED truth, (2) runs
+separate tool that (a) checks verdicts against a LABELLED truth, (b) runs
 SEVERAL models over the same corpus and shows which minimal one is good
-enough, (3) accounts for the project settings layers the judging happened
+enough, (c) accounts for the project settings layers the judging happened
 under. We write exactly that tool. The design below is accepted; no decisions
 are yours to make.
 

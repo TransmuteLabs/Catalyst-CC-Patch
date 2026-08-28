@@ -28,7 +28,7 @@ TABLE = os.path.join(HERE, 'docnum-mutations.tsv')
 PIPELINE = 'claude-patch-all.sh'
 ANCHOR = 'python3 - "$0" <<\'PYDOCS\'\n'
 END = '\nPYDOCS\n'
-EXPECTED_MUTATIONS = 9
+EXPECTED_MUTATIONS = 14
 
 
 def read(path):
@@ -60,6 +60,10 @@ def carve(kit):
     source = read(os.path.join(kit, PIPELINE))
     if ANCHOR not in source:
         say('ОТКАЗ -- якорь гейта чисел пропал из %s' % PIPELINE)
+        sys.exit(2)
+    if source.count(ANCHOR) != 1:
+        say('ОТКАЗ -- якорь гейта чисел встречается %d раз в %s: неизвестно, '
+            'какое тело проверяется' % (source.count(ANCHOR), PIPELINE))
         sys.exit(2)
     start = source.index(ANCHOR) + len(ANCHOR)
     if END not in source[start:]:
@@ -101,8 +105,13 @@ def main():
                 say('МУТАЦИЯ %s: FAIL -- нет файла %s' % (name, rel))
                 continue
             pristine = read(target)
-            if old not in pristine:
+            seen = pristine.count(old)
+            if seen == 0:
                 say('МУТАЦИЯ %s: FAIL -- вход не найден дословно в %s' % (name, rel))
+                continue
+            if seen != 1:
+                say('МУТАЦИЯ %s: FAIL -- вход встречается %d раз в %s: мутация '
+                    'подтвердилась бы по теневому совпадению' % (name, seen, rel))
                 continue
             io.open(target, 'w', encoding='utf-8').write(pristine.replace(old, new))
             # Гейт вырезается заново: мутация могла править сам гейт.

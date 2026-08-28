@@ -85,14 +85,18 @@ claude_patch.download_binary(os.environ['VER'], Path(os.environ['DST']))
 FETCH_PY
 }
 
-# Список -- в память целиком, комментарии и пустые строки отсеиваются здесь.
-ENTRIES=$(sed 's/#.*//' "$LIST" | awk 'NF')
+# Формат списка разбирает ОДИН дом на оба инструмента (tools/corpus-list.py).
+# Свой разбор у каждого читателя разошёлся: строку без третьего поля свип
+# отвергал, а наполнитель качал и записывал ей пин; лишнее поле оба глотали;
+# дубль версии под двумя метками оба принимали. Отказ разбора -- отказ здесь,
+# до первой сетевой закачки.
+ENTRIES=$(python3 "$KIT/tools/corpus-list.py" "$LIST") || {
+  echo "ОТКАЗ: список $LIST не проходит разбор (см. причину выше)" >&2; exit 1; }
 
 rc=0
 declare -a NEW_PINS=()
-while read -r label version pin _rest; do
+while IFS=$'\t' read -r label version pin; do
   [[ -n "${label:-}" ]] || continue
-  pin="${pin:--}"
   dst="$CORPUS/$version.pristine"
   tmp=$(mktemp "$dst.part.XXXXXX") || { echo "ОТКАЗ: не создать временный файл для $version" >&2; rc=1; continue; }
 

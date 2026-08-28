@@ -74,7 +74,10 @@ set -euo pipefail
 # ожидаемый». TERM, затем -- если кого-то задели -- KILL: ребёнок, игнорирующий
 # TERM, держал бы ядерный замок и после нашего выхода, а текст отказа советовал
 # бы ждать того, чего уже нет.
-__lock="${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock"
+# Путь замка переопределяем ОДНОЙ ручкой на конвейер и свип: стенду нужно
+# проверить дверь занятого замка, не занимая боевой файл, иначе законный
+# прогон оператора в это окно получает FATAL от стенда.
+__lock="${CLAUDE_PATCH_LOCK:-${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock}"
 
 # УНАСЛЕДОВАННЫЙ ЗАМОК. Законный держатель-предок ровно один --
 # tools/build-path-probe.sh: он одалживает ЖИВОЕ состояние ~/.tweakcc
@@ -1159,10 +1162,9 @@ read = lambda p: io.open(p, encoding='utf-8').read()
 
 # --- кто объявляет число ------------------------------------------------------
 # Число в прозе принадлежит ОДНОМУ объявляющему месту. Пока счётчик сценариев
-# был один, владельца можно было держать неявным. С тремя стендами, у каждого
-# свои константы, неявный владелец заставляет гейт сверять утверждение про один
-# стенд с константой другого -- ровно так честная строка README про
-# corpus-tools-bench была предъявлена как расхождение с числом probe-bench.
+# был один, владельца можно было держать неявным. С несколькими стендами, у
+# каждого свои константы, неявный владелец заставляет гейт сверять утверждение
+# про один стенд с константой другого.
 OWNERS = (
     # id, имена в прозе, файл (None = сам конвейер), {величина: регексп объявления}
     ('pipeline', (), None,
@@ -1178,35 +1180,92 @@ OWNERS = (
     ('docnum-bench', ('docnum-bench',), ('tools', 'docnum-bench.py'),
      {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
 )
-# Существительное -> величина. Единственного числа здесь нет намеренно: «1 check»
-# как утверждение не пишут, а слово в единственном числе стоит в прозе на каждом
-# шагу и тянет за собой ложные совпадения.
-NOUNS = {'checks': 'checks', 'проверок': 'checks', 'проверки': 'checks',
-         'scenarios': 'scenarios', 'сценариев': 'scenarios', 'сценария': 'scenarios',
-         'mutations': 'mutations', 'мутаций': 'mutations', 'мутации': 'mutations'}
-# Насколько далеко от числа ищется имя владельца. Строка таблицы README и абзац
-# комментария укладываются в это окно; дальше имя рядом не стоит.
-WINDOW = 400
-# Только для сценариев: в этом ките «стенд» без уточнения исторически значил
-# probe-bench, и все безымянные счета сценариев -- его. Для мутаций такой
-# истории нет, поэтому неназванный владелец у счёта мутаций -- отказ, а не
-# догадка: гейт, который догадывается, сверяет не с тем числом.
-DEFAULTS = {'scenarios': 'probe-bench'}
+# Существительное -> величина. Единственного числа нет намеренно: «1 check» как
+# утверждение не пишут, а слово в единственном числе стоит в прозе на каждом шагу.
+NOUNS = {}
+for _forms, _q in (
+        (('checks', 'проверок', 'проверки', 'проверками', 'проверках'), 'checks'),
+        (('scenarios', 'сценариев', 'сценария', 'сценарии',
+          'сценариям', 'сценариями'), 'scenarios'),
+        (('mutations', 'мутаций', 'мутации', 'мутациями', 'мутациях'), 'mutations')):
+    for _f in _forms:
+        NOUNS[_f] = _q
 
+# Насколько далеко от числа ищется имя владельца.
+WINDOW = 400
+# Сколько токенов между числом и существительным считается одной связкой.
+REACH = 5
+# Связки обратной формы (docnum:example): «сценариев — 12», «мутаций всего 9».
+# Без связки
+# «scenarios of the 3 modes» женило бы существительное на постороннем числе.
+LINKS = ('—', '-', ':', '=', 'total', 'всего', 'итого', 'итог',
+         'стало', 'теперь', 'составляет', 'равно')
+# Общие слова, которыми называют стенд НЕ по имени. Если такое слово ближе к
+# числу, чем настоящее имя, владелец не назван (docnum:example): «unlike
+# corpus-tools-bench, the probe suite covers 12 scenarios» сверялось бы с чужой
+# константой и зеленело.
+BENCH_WORDS = ('bench', 'benches', 'suite', 'suites', 'стенд', 'стенда',
+               'стенде', 'стенды', 'стендов', 'стендах')
+# Пометок три: историческое число, счёт подмножества и ОБРАЗЕЦ формы -- этот
+# файл сам сканируется, и пара «число + существительное» в комментарии про
+# грамматику остаётся живым утверждением, пока не помечена.
+# Пометка -- ЯВНЫЙ токен, а не слово естественного языка. Слова «subset» и
+# «historical» в соседнем предложении освобождали утверждение, которое к ним
+# отношения не имеет, а фраза «это НЕ подмножество» работала как разрешение.
+MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example')
 # Журнал кампании записывает прошлые сборки по датам: строка «N checks green»
 # под заголовком «Porting to 2.1.237» верна для ТОЙ сборки и не переписывается.
 JOURNAL = 'judge-patch-spec.md'
-# `subset` -- не послабление гейта, а имя случая, который он не может решить:
-# число рядом с существительным может быть вовсе другой величиной, и знает об
-# этом только автор. Записанное и грепаемое лучше слепого пятна.
-MARKERS = ('at measurement time', 'на момент замера', 'historical', 'историческ',
-           'subset', 'подмножеств')
+
+# Маскируется до разбора: дата иначе предложит своё число, а версия -- своё.
+MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+')
+FENCE = re.compile(r'^```.*?^```', re.M | re.S)
+# Знаки препинания между числом и существительным разбор ПРОПУСКАЕТ, а не
+# вычищает заранее: `| 13 | scenarios |`, `**13**`, `(13)` и `` `scenarios` ``
+# (docnum:example) -- это те же утверждения, и восемь из девяти обычных форм
+# прозы гейт пропускал, пока разбирал поток регекспом. Отдельная чистка
+# разметки тут была и снята: ни один случай самопроверки её снятия не
+# заметил, а механизм, чьё снятие никто не видит, только выглядит рабочим.
+TOKEN = re.compile(r"[^\W\d_][\w:-]*|\d+|[^\s\w]")
+STOP = ('.', ';', '!', '?')
+
+
+def prose(path, text):
+    """Проза файла: в коде число -- это значение, а не утверждение о счёте.
+
+    Прежняя версия читала код наравне с прозой и потому боролась с ложными
+    срабатываниями сужением грамматики -- а сужение убивало настоящие формы
+    прозы. Разделение снимает обе беды разом: в .md читается всё (кроме
+    огороженных блоков кода), в коде -- только комментарии. Номера строк
+    сохраняются: непрозаические строки заменяются пустыми, а не выбрасываются.
+    """
+    ext = os.path.splitext(path)[1]
+    if ext in ('.md', '.txt', ''):
+        return FENCE.sub(lambda m: '\n' * m.group(0).count('\n'), text)
+    out, block = [], False
+    for line in text.split('\n'):
+        stripped = line.lstrip()
+        keep = ''
+        if ext == '.js':
+            if block:
+                keep = line
+                if '*/' in line:
+                    block = False
+            elif stripped.startswith('/*'):
+                keep = line
+                block = '*/' not in line
+            elif stripped.startswith('//'):
+                keep = line
+        elif stripped.startswith('#'):
+            keep = line
+        out.append(keep)
+    return '\n'.join(out)
 
 
 def collapse(text):
     """Поток без повторных пробелов плюс номер строки для каждого символа.
 
-    Построчно этот гейт не видел счёт, у которого существительное кончало одну
+    Построчно гейт не видел счёт, у которого существительное кончало одну
     строку, а число открывало следующую. Потоком видит -- но находка без номера
     строки та, по которой никто не пойдёт, поэтому отображение едет рядом.
     """
@@ -1226,75 +1285,55 @@ def collapse(text):
     return ''.join(out), lines
 
 
-def scan(text, table, aliases, defaults):
+def scan(text, table, aliases, path='<текст>'):
     """Все расхождения «число + существительное» в одном тексте.
 
-    Вынесено функцией не ради красоты: у грамматики ниже уже трижды находилась
-    дыра, которую замечали не гейтом, а руками. Функция позволяет прогнать её
-    по синтетическим случаям с известным ответом ДО того, как она пойдёт по
-    настоящим файлам (самопроверка ниже).
+    Разбор идёт ОТ СУЩЕСТВИТЕЛЬНОГО: именно оно называет величину. Число --
+    ближайшее слева в пределах связки, не пересекая границу предложения; этим
+    одним правилом закрываются и дробь «12/12», и честная форма «7 из 12
+    сценариев» (сверяется общее число, а не подсчёт подмножества).
     """
-    nouns = sorted([n for n in NOUNS if NOUNS[n] in table], key=len, reverse=True)
-    WORDS = '|'.join(nouns)
-    # Маскируется до любого сопоставления: дата иначе предложит своё число, а
-    # версия -- своё, каждому существительному по соседству.
-    MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+')
-    # Левая граница у числа обязательна во всех трёх грамматиках: без неё
-    # `scenario_12` отдаёт свои цифры как самостоятельный счёт, и мутации
-    # первым же прогоном женились на хвосте имени функции. Пример здесь
-    # литеральный намеренно -- он попадает и в настоящий проход, поэтому
-    # откат этой границы краснит гейт дважды: самопроверкой и находкой в
-    # собственном исходнике.
-    PAIR = re.compile(r'(?<!\w)(\d+)\s*/\s*(\d+)\s+(' + WORDS + r')')
-    # До трёх слов между числом и существительным: счёт с прилагательным перед
-    # существительным прятался от «только вплотную» ровно столько, сколько та
-    # форма существовала. Пример не выписан намеренно -- этот файл сам входит в
-    # число сканируемых, и литеральная пара в комментарии была бы живым
-    # утверждением; расширенная грамматика первым делом предъявила именно её.
-    #
-    # Промежуточные слова обязаны быть СЛОВАМИ -- буквы, цифры, дефис и
-    # ничего больше. Запрет одного лишь знака конца предложения этого не
-    # давал: сканируется не только проза, и в коде «return 1» через пару
-    # токенов от строки со словом «мутации» читалось как счёт мутаций. Точка
-    # внутри токена теперь тоже его отбрасывает, так что граница предложения
-    # держится тем же правилом, а не отдельным.
-    ONE = re.compile(r'(?<!\w)(\d+)\s+(?:[\w-]+\s+){0,3}(' + WORDS + r')')
-    # Обратная грамматика: существительное, затем тире или двоеточие, затем
-    # число. Так был написан самый долгоживущий протухший счёт в этом ките, и
-    # из-за него гейт перестал читать построчно.
-    #
-    # Точка кончает предложение только когда за ней пробел. Запрет на точку
-    # вообще был первой попыткой, и он позволил точкам внутри имени файла
-    # блокировать совпадение -- грамматика не видела случая, ради которого
-    # писалась, а гейт светил зелёным, потому что протухшее число к тому
-    # времени поправили руками. Зелёный после ручной правки не говорит о
-    # приборе ничего; сказала мутация.
-    REV = re.compile(r'(' + WORDS + r')\b(?:(?!\.\s)[^;!?]){0,64}?(?:—|:|\s-\s)\s*(?<!\w)(\d+)\b')
+    stream, lines = collapse(prose(path, text))
+    stream = MASK.sub(lambda m: 'x' * len(m.group(0)), stream)
+    toks = [(m.group(0), m.start()) for m in TOKEN.finditer(stream)]
+    low = stream.casefold()
 
-    stream, lines = collapse(text)
-    stream = MASK.sub(lambda m: '#' * len(m.group(0)), stream)
+    def sentence_span(at):
+        lo = 0
+        for stop in STOP:
+            found = stream.rfind(stop + ' ', 0, at)
+            lo = max(lo, found + 2 if found >= 0 else 0)
+        hi = len(stream)
+        for stop in STOP:
+            found = stream.find(stop + ' ', at)
+            if found >= 0:
+                hi = min(hi, found)
+        return lo, hi
 
     def exempt(at):
-        # Пометка ищется ВОКРУГ совпадения, а не на его строке: строк здесь уже
-        # нет, а пометка в соседнем придаточном -- то же самое утверждение.
-        lo, hi = max(0, at - 120), min(len(stream), at + 120)
-        return any(marker in stream[lo:hi] for marker in MARKERS)
+        lo, hi = sentence_span(at)
+        return any(marker in low[lo:hi] for marker in MARKERS)
 
     def owner(at, quantity):
         by = table[quantity]
         if len(by) == 1:
             return sorted(by)[0], None
         lo, hi = max(0, at - WINDOW), min(len(stream), at + WINDOW)
+        window = low[lo:hi]
         best, best_d, tie = None, None, False
+        masked = list(window)
         for alias, oid in aliases:
             if oid not in by:
                 continue
-            start = lo
+            start = 0
             while True:
-                i = stream.find(alias, start, hi)
+                i = window.find(alias.casefold(), start)
                 if i < 0:
                     break
-                d = abs(i - at)
+                # Имя стенда само содержит слово «bench» -- заслонить, иначе
+                # каждое имя выглядело бы как «названо общим словом».
+                masked[i:i + len(alias)] = ' ' * len(alias)
+                d = abs(lo + i - at)
                 if best_d is None or d < best_d:
                     best, best_d, tie = oid, d, False
                 elif d == best_d and oid != best:
@@ -1302,97 +1341,127 @@ def scan(text, table, aliases, defaults):
                 start = i + 1
         if tie:
             return None, 'рядом два стенда на равном расстоянии — назовите владельца счёта'
+        common = None
+        for m in TOKEN.finditer(''.join(masked)):
+            if m.group(0) in BENCH_WORDS:
+                d = abs(lo + m.start() - at)
+                if common is None or d < common:
+                    common = d
+        if common is not None and (best_d is None or common < best_d):
+            return None, ('владелец назван общим словом, а не именем стенда — '
+                          'припишите имя (' + ' / '.join(sorted(by)) + ')')
         if best:
             return best, None
-        if quantity in defaults:
-            return defaults[quantity], None
         return None, ('владелец счёта не назван — припишите рядом имя стенда ('
                       + ' / '.join(sorted(by)) + ')')
 
     bad = []
-
-    def check(at, got, nums, noun):
-        oid, why = owner(at, NOUNS[noun])
+    for i, (tok, at) in enumerate(toks):
+        quantity = NOUNS.get(tok.casefold())
+        if quantity is None or quantity not in table:
+            continue
+        lo_s, hi_s = sentence_span(at)
+        value = None
+        for j in range(i - 1, max(-1, i - 1 - REACH), -1):
+            prev, prev_at = toks[j]
+            if prev_at < lo_s or prev in STOP:
+                break
+            if prev.isdigit():
+                value = prev
+                break
+        if value is None:
+            linked = False
+            for j in range(i + 1, min(len(toks), i + 1 + REACH)):
+                nxt, nxt_at = toks[j]
+                if nxt_at > hi_s or nxt in STOP:
+                    break
+                if nxt.isdigit():
+                    if linked:
+                        value = nxt
+                    break
+                if nxt.casefold() in LINKS:
+                    linked = True
+        if value is None or exempt(at):
+            continue
+        oid, why = owner(at, quantity)
+        got = stream[max(lo_s, at - 40):min(hi_s, at + len(tok) + 10)].strip()
         if why:
             bad.append((lines[at], got, why))
-            return
-        want = table[NOUNS[noun]][oid]
-        if any(n != want for n in nums):
+            continue
+        want = table[quantity][oid]
+        if value != want:
             bad.append((lines[at], got,
-                        'объявлено «%s %s» (владелец %s)' % (want, noun, oid)))
-
-    covered = []
-    for m in PAIR.finditer(stream):
-        covered.append((m.start(), m.end()))
-        if not exempt(m.start()):
-            check(m.start(), m.group(0), (m.group(1), m.group(2)), m.group(3))
-    for rx, num, noun in ((ONE, 1, 2), (REV, 2, 1)):
-        for m in rx.finditer(stream):
-            if any(a <= m.start() < b for a, b in covered):
-                continue
-            if exempt(m.start()):
-                continue
-            check(m.start(), m.group(0), (m.group(num),), m.group(noun))
+                        'объявлено «%s %s» (владелец %s)' % (want, tok, oid)))
     return bad
 
 
 # --- самопроверка грамматики --------------------------------------------------
 # Гейт трижды молчал не потому, что чисел не было, а потому, что грамматика их
-# не видела; каждую дыру находили руками. Это её положительный контроль: набор
-# синтетических текстов с известным ответом, прогоняемый ДО настоящих файлов.
+# не видела; каждую дыру находили руками, а восемь форм обычной прозы нашёл
+# аудитор раунда 15. Это её положительный контроль: синтетические тексты с
+# известным ответом, прогоняемые ДО настоящих файлов. Каждая форма из того
+# отчёта записана здесь случаем.
 #
-# Существительные здесь собираются из кусков намеренно: этот файл сам входит в
-# список сканируемых, и литеральная пара «число + существительное» в коде
-# самопроверки была бы живым утверждением, которое гейт предъявит.
-SC = 'scen' + 'arios'
-MU = 'mut' + 'ations'
-SELF_TABLE = {SC: {'probe-bench': '56', 'corpus-tools-bench': '12'},
-              MU: {'judge-tools-bench': '10', 'corpus-tools-bench': '6'}}
-SELF_ALIASES = [('probe-bench', 'probe-bench'),
-                ('judge-tools-bench', 'judge-tools-bench'),
-                ('corpus-tools-bench', 'corpus-tools-bench')]
-SELF_DEFAULTS = {SC: 'probe-bench'}
-# Набивка СЧИТАЕТСЯ, а не подбирается: оба имени обязаны стоять от числа на
-# равном расстоянии, иначе случай молча выродится в «побеждает ближнее» и
-# единственный вход в ветку неоднозначности останется непройденным. Поток к
-# этому моменту уже схлопнут по пробелам, поэтому длины считаются по одному
-# пробелу между словами. Ожидается не просто находка, а её причина.
-_LEAD, _TRAIL, _MID = 'corpus-tools-bench', 'probe-bench', '12 ' + SC
-TIE = (_LEAD + ' ' + _MID + ' ' + 'x' * (len(_LEAD) - len(_MID) - 1)
-       + ' ' + _TRAIL)
-SELF_CASES = (
-    ('`tools/corpus-tools-bench.sh` — 12 ' + SC, 0, '', 'владелец рядом, счёт верный'),
-    ('`tools/corpus-tools-bench.sh` — 13 ' + SC, 1, 'corpus-tools-bench',
-     'владелец рядом, счёт разошёлся'),
-    ('the bench drives 56 ' + SC, 0, '', 'владелец не назван — берётся по умолчанию'),
-    ('the bench drives 12 ' + SC, 1, 'probe-bench',
-     'счёт чужого стенда без имени владельца не проходит'),
-    ('corpus-tools-bench: ' + 'x' * 60 + ' probe-bench 56 ' + SC, 0, '',
-     'из двух имён выигрывает ближнее'),
-    ('probe-bench: ' + 'x' * 60 + ' corpus-tools-bench 56 ' + SC, 1,
-     'corpus-tools-bench', 'ближнее имя выигрывает и когда счёт от него уходит'),
+# Литеральные пары «число + существительное» тут безопасны: это код, а гейт
+# читает в коде только комментарии.
+T = {'scenarios': {'probe-bench': '56', 'corpus-tools-bench': '12'},
+     'mutations': {'judge-tools-bench': '10', 'corpus-tools-bench': '6'},
+     'checks': {'pipeline': '114'}}
+A = [('probe-bench', 'probe-bench'), ('judge-tools-bench', 'judge-tools-bench'),
+     ('corpus-tools-bench', 'corpus-tools-bench')]
+_LEAD, _TRAIL, _MID = 'corpus-tools-bench', 'probe-bench', '12 scenarios'
+# Набивка СЧИТАЕТСЯ от якоря владельца, а он теперь на существительном: оба
+# имени обязаны стоять от него на равном расстоянии, иначе случай молча
+# выродится в «побеждает ближнее» и ветка неоднозначности останется непройденной.
+_NOUN_AT = len(_LEAD) + 1 + _MID.index('scenarios')
+TIE = (_LEAD + ' ' + _MID + ' '
+       + 'x' * (2 * _NOUN_AT - (len(_LEAD) + len(_MID) + 3)) + ' ' + _TRAIL)
+CASES = (
+    ('corpus-tools-bench runs 12 scenarios.', 0, '', 'простая форма, счёт верный'),
+    ('corpus-tools-bench runs 13 scenarios.', 1, 'corpus-tools-bench', 'простая форма, счёт разошёлся'),
+    ('| corpus-tools-bench | 13 | scenarios |', 1, 'corpus-tools-bench', 'ячейки таблицы'),
+    ('corpus-tools-bench runs **13** scenarios.', 1, 'corpus-tools-bench', 'выделение'),
+    ('corpus-tools-bench runs (13) scenarios.', 1, 'corpus-tools-bench', 'скобки'),
+    ('corpus-tools-bench runs 13 `scenarios`.', 1, 'corpus-tools-bench', 'обратные апострофы'),
+    ('corpus-tools-bench runs 13 — scenarios total.', 1, 'corpus-tools-bench', 'тире между'),
+    ('corpus-tools-bench covers 13 deliberately isolated executable regression scenarios.',
+     1, 'corpus-tools-bench', 'четыре слова между'),
+    ('corpus-tools-bench had 13 (2026-08-28) scenarios.', 1, 'corpus-tools-bench', 'дата между'),
+    ('corpus-tools-bench had 13 (v2.1.250) scenarios.', 1, 'corpus-tools-bench', 'версия между'),
+    ('corpus-tools-bench scenarios total 13.', 1, 'corpus-tools-bench', 'обратная форма со связкой'),
+    ('corpus-tools-bench подтверждён 13 проверками.', 1, 'pipeline', 'творительный падеж'),
+    ('Corpus-tools-bench has 12 scenarios.', 0, '', 'имя с заглавной буквы -- то же имя'),
+    ('Corpus-tools-bench has 56 scenarios.', 1, 'corpus-tools-bench', 'заглавная не отдаёт счёт чужому'),
+    ('corpus-tools-bench reports 13\nscenarios.', 1, 'corpus-tools-bench', 'через перевод строки'),
+    ('corpus-tools-bench 12/12 scenarios', 0, '', 'дробная форма'),
+    ('corpus-tools-bench 12/13 scenarios', 1, 'corpus-tools-bench', 'дробная форма ловит расхождение'),
+    ('упало 7 из 12 сценариев corpus-tools-bench', 0, '', 'честная форма «M из N»'),
+    ('упало 7 из 13 сценариев corpus-tools-bench', 1, 'corpus-tools-bench', '«M из N» ловит расхождение'),
+    ('corpus-tools-bench: 9 scenarios docnum:historical', 0, '', 'историческое помечено явно'),
+    ('A subset is documented above. Current corpus-tools-bench has 13 scenarios.',
+     1, 'corpus-tools-bench', 'слово subset в соседнем предложении не освобождает'),
+    ('docnum:subset above. Current corpus-tools-bench has 13 scenarios.',
+     1, 'corpus-tools-bench', 'пометка из соседнего предложения не освобождает'),
+    ('corpus-tools-bench has 13 scenarios, это не подмножество',
+     1, 'corpus-tools-bench', 'отрицание не работает как разрешение'),
+    ('unlike corpus-tools-bench, the probe suite covers 12 scenarios',
+     1, 'общим словом', 'предмет речи назван общим словом'),
+    ('the bench drives 56 scenarios', 1, 'общим словом', 'без имени стенда счёт не принимается'),
+    ('56 scenarios and nobody named the bench', 1, 'общим словом', 'имени нет вовсе'),
     (TIE, 1, 'равном расстоянии', 'равное расстояние до двух имён — отказ'),
-    ('judge-tools-bench: SELF-CHECK — 10 ' + MU, 0, '', 'обратная грамматика'),
-    ('judge-tools-bench: SELF-CHECK — 11 ' + MU, 1, 'judge-tools-bench',
-     'обратная грамматика ловит расхождение'),
-    ('the bench records 6 ' + MU, 1, 'не назван',
-     'счёт мутаций без имени владельца — отказ, а не догадка'),
-    ('corpus-tools-bench 12/12 ' + SC, 0, '', 'дробная форма'),
-    ('corpus-tools-bench 12/13 ' + SC, 1, 'corpus-tools-bench',
-     'дробная форма ловит расхождение'),
-    ('corpus-tools-bench 9 ' + SC + ' at measurement time', 0, '',
-     'историческое число помечено'),
-    ('probe-bench 2.1.247 ' + SC, 0, '', 'версия не число сценариев'),
-    ('corpus-tools-bench has 13 gates. Its ' + SC + ' are green', 0, '',
+    ('judge-tools-bench: SELF-CHECK — 10 mutations', 0, '', 'обратная грамматика'),
+    ('judge-tools-bench: SELF-CHECK — 11 mutations', 1, 'judge-tools-bench', 'обратная грамматика ловит расхождение'),
+    ('the pipeline runs 114 checks', 0, '', 'у величины один владелец — имя не нужно'),
+    ('the pipeline runs 116 checks', 1, 'pipeline', 'единственный владелец тоже сверяется'),
+    ('scenario_18 сценариев corpus-tools-bench', 0, '', 'цифры внутри имени не самостоятельный счёт'),
+    ('corpus-tools-bench has 13 gates. Its scenarios are green', 0, '',
      'через точку число с существительным не женится'),
-    ('corpus-tools-bench: scenario_18 сценариев', 0, '',
-     'цифры внутри имени не самостоятельный счёт'),
-    ('corpus-tools-bench: return 1 say(x) без мутаций', 0, '',
-     'токены кода между числом и существительным не проза'),
+    ('corpus-tools-bench scenarios of the 3 modes', 0, '',
+     'обратная форма без связки не женится'),
 )
 broken = []
-for text, want_n, want_why, name in SELF_CASES:
-    got = scan(text, SELF_TABLE, SELF_ALIASES, SELF_DEFAULTS)
+for text, want_n, want_why, name in CASES:
+    got = scan(text, T, A, 'случай.md')
     if len(got) != want_n or (want_why and want_why not in got[0][2]):
         broken.append((name, want_n, want_why, got))
 if broken:
@@ -1401,7 +1470,7 @@ if broken:
         print("  %s: ожидалось находок %d%s, получено %r"
               % (name, want_n, (' с «%s»' % want_why) if want_why else '', got))
     sys.exit(1)
-print("ГРАММАТИКА ЧИСЕЛ: самопроверка %d/%d" % (len(SELF_CASES), len(SELF_CASES)))
+print("ГРАММАТИКА ЧИСЕЛ: самопроверка %d/%d" % (len(CASES), len(CASES)))
 
 # --- что объявлено ------------------------------------------------------------
 table, aliases = {}, []
@@ -1428,32 +1497,36 @@ if not os.path.exists(readme):
     print("СВЕРКА ЧИСЕЛ ПРОПУЩЕНА — README.md рядом со скриптом не найден")
     sys.exit(0)
 
-# Проза живёт не только в .md. Первая версия гейта читала одни доки и оставила
-# три счёта в настоящем времени стоять в коде -- два из них в шапке того самого
-# инструмента, который существует потому, что проверки не видят путь сборки.
-files = [readme, sys.argv[1]] + sorted(
-    sum((glob.glob(os.path.join(here, *parts))
-         for parts in (('docs', '*.md'), ('tools', '*.sh'), ('tools', '*.js'),
-                       ('tools', '*.py'), ('judge', '*.py'))), [])
-    + [os.path.join(here, name) for name in ('tweakcc-patch.js', 'claude_patch.py')])
+# Проза живёт не только в .md и не только рядом со скриптом. Перечень домов
+# ЗАКРЫТЫМ списком уже дал дыру: AGENTS.md, judge/*.md, scripts/*.sh и probes/
+# в него не входили, а счёт в них лежал. Теперь берётся всё дерево по
+# расширению, за вычетом .git, распакованных образов и журнала кампании.
+files = []
+for root, dirs, names in os.walk(here):
+    dirs[:] = [d for d in dirs
+               if d not in ('.git', 'distros', 'node_modules', '__pycache__')]
+    for name in sorted(names):
+        if name == JOURNAL:
+            continue
+        if os.path.splitext(name)[1] in ('.md', '.sh', '.py', '.js'):
+            files.append(os.path.join(root, name))
+files = sorted(set(files + [readme, os.path.abspath(sys.argv[1])]))
 
 bad = []
 for path in files:
-    if os.path.basename(path) == JOURNAL or not os.path.exists(path):
+    if not os.path.exists(path):
         continue
-    for lineno, got, why in scan(read(path), table, aliases, DEFAULTS):
+    for lineno, got, why in scan(read(path), table, aliases, path):
         bad.append((path, lineno, got, why))
 
 if bad:
     print("ЧИСЛА В ДОКАХ РАЗОШЛИСЬ С ОБЪЯВЛЕННЫМИ:")
     for path, lineno, got, why in bad:
         print("  %s:%d  «%s» — %s" % (os.path.relpath(path, here), lineno, got, why))
-    print("  Если число ИСТОРИЧЕСКОЕ (запись о прошлой сборке), пометьте место")
-    print("  словами «at measurement time» / «на момент замера» / «historical».")
-    print("  Если это ДРУГАЯ величина (подсчёт подмножества, а не общий счёт) —")
-    print("  словом «subset» / «подмножеств». Пометка ищется рядом, не построчно.")
-    print("  Если число про конкретный стенд — имя стенда должно стоять рядом с")
-    print("  числом: владелец выбирается по БЛИЖАЙШЕМУ имени в окне.")
+    print("  Если число ИСТОРИЧЕСКОЕ или это счёт ПОДМНОЖЕСТВА, поставьте в том же")
+    print("  предложении явную пометку «docnum:historical» или «docnum:subset».")
+    print("  Если число про конкретный стенд — рядом должно стоять его ИМЯ, а не")
+    print("  общее слово «стенд»/«bench»: владелец выбирается по ближайшему имени.")
     sys.exit(1)
 print("ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (%s)" % '; '.join(
     '%s: %s' % (quantity, ', '.join('%s=%s' % (oid, val)
@@ -3909,7 +3982,8 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives 56 scenarios through a throwaway probes home — verdicts, degraded
+# and drives probe-bench's 56 scenarios through a throwaway probes home —
+# verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #
 # It existed for weeks and proved nothing, because nothing called it. That is
