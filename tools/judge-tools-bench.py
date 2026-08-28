@@ -39,8 +39,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 34
-EXPECTED_MUTATIONS = 30
+EXPECTED_SCENARIOS = 35
+EXPECTED_MUTATIONS = 32
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -969,6 +969,73 @@ def scenario_34() -> None:
             "оставит дом без точки восстановления")
 
 
+# Форма ЖИВОГО дескриптора пробы в образе: между `dirName:"<проба>"` и её
+# словарём стоят поля arm/turn/selfId/turnLost -- ~236 знаков. Прежний
+# извлекатель стоял на окне {0,160} и молча перестал находить словарь, когда
+# поля добавили; сценариев на извлечение ИЗ ОБРАЗА не было вовсе (все звали
+# seeded_replay, подставляющий словарь в кэш), поэтому отказ вылез только на
+# живой разметке. Фикстура повторяет форму образа, а не её сокращение.
+IMAGE_JUDGE_DESC = (
+    'dirName:"judge",arm:!0,turn:()=>{let __x=globalThis.__ccJudgeTurn?.get(E.toolUseId);'
+    'globalThis.__ccJudgeTurn?.delete(E.toolUseId);return __x||[]},selfId:()=>E.toolUseId,'
+    'turnLost:()=>globalThis.__ccJudgeTurnLost?.has(E.toolUseId)||!1,'
+    'rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",fb:"You judge one dispatch."'
+)
+# Проба БЕЗ своего словаря стоит перед пробой, у которой словарь есть: скан без
+# запрета на пересечение границы `dirName:"` вернёт ей ЧУЖОЙ словарь.
+IMAGE_MUTE_DESC = 'dirName:"mute-probe",arm:!1,label:"MUTE",fb:"no dictionary here"'
+IMAGE_IDLE_DESC = (
+    'dirName:"idle-watch",arm:!1,label:"FLEET",rx:"SILENT|NUDGE",act:"NUDGE",'
+    'fb:"You watch the subagent fleet."'
+)
+
+
+def synthetic_image(path: Path) -> None:
+    """Образ ОДНОЙ строкой -- как настоящий бандл: `[^\n]` в скане не спасёт."""
+    body = ("var A=1;" + IMAGE_JUDGE_DESC + "};var B=2;" + IMAGE_MUTE_DESC
+            + "};var C=3;" + IMAGE_IDLE_DESC + "};")
+    path.write_bytes(body.encode("utf-8"))
+
+
+def scenario_35() -> None:
+    """Словарь вердиктов извлекается из ОБРАЗА живой формы и не крадёт чужой."""
+    module = import_tool("replay")
+    with tempfile.TemporaryDirectory() as tmp:
+        image = Path(tmp) / "claude-image"
+        synthetic_image(image)
+
+        # Положительный контроль фикстуры: если её сократить, сценарий перестанет
+        # воспроизводить дефект и «пройдёт» на любом окне (круг 18, §6).
+        text = image.read_text(encoding="utf-8")
+        gap = text.index('rx:"OK') - (text.index('dirName:"judge"') + len('dirName:"judge"'))
+        require(gap > 160,
+                f"фикстура короче прежнего окна ({gap} знаков) -- дефект не воспроизводится")
+
+        # Отказ извлекателя -- это SystemExit, а он мимо `except Exception`
+        # прогона: несошедшийся сценарий уронил бы стенд целиком вместо своей
+        # строки провала. Ловим здесь и говорим СВОЮ причину.
+        try:
+            rx, act = module.verdict_vocabulary(str(image), "judge")
+        except SystemExit as err:
+            rx, act = None, str(err)
+        require(rx == ["OK", "BLOCK", "STOP", "DENY", "WARN"] and act == ["BLOCK", "STOP", "DENY"],
+                f"словарь пробы живой формы не извлечён из образа: {rx!r}/{act!r}")
+
+        try:
+            stolen = module.verdict_vocabulary(str(image), "mute-probe")
+        except SystemExit:
+            stolen = None
+        require(stolen is None,
+                f"скан пересёк границу чужой пробы и вернул ей ЧУЖОЙ словарь: {stolen!r}")
+
+        try:
+            rx2, act2 = module.verdict_vocabulary(str(image), "idle-watch")
+        except SystemExit as err:
+            rx2, act2 = None, str(err)
+        require(rx2 == ["SILENT", "NUDGE"] and act2 == ["NUDGE"],
+                f"словарь соседней пробы разобран неверно: {rx2!r}/{act2!r}")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -1007,6 +1074,7 @@ def run_scenarios() -> int:
         (32, scenario_32),
         (33, scenario_33),
         (34, scenario_34),
+        (35, scenario_35),
     ]
     mismatches = 0
     for number, case in cases:
@@ -1334,6 +1402,26 @@ def mutation_m30(root: Path) -> None:
 # внутри копии стенда и мутация, свалившая ЧУЖУЮ дверь. Сценарий и причина
 # ниже -- измеренные, а не назначенные: прогон каждой из них показывает
 # именно эту строку (раунд 18, E-1).
+def mutation_m31(root: Path) -> None:
+    # Возврат к прежнему окну: словарь живой формы снова не находится.
+    replace_once(
+        root / "judge" / "replay.py",
+        '(?:(?!dirName:")[^\\n]){0,4000}?',
+        '(?:(?!dirName:")[^\\n]){0,160}?',
+        "M31",
+    )
+
+
+def mutation_m32(root: Path) -> None:
+    # Снятие запрета на пересечение границы: проба без словаря крадёт соседний.
+    replace_once(
+        root / "judge" / "replay.py",
+        '(?:(?!dirName:")[^\\n]){0,4000}?',
+        '[^\\n]{0,4000}?',
+        "M32",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -1365,6 +1453,8 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M28", mutation_m28, 32, "отчёт --json снова пишется через конечное имя"),
     ("M29", mutation_m29, 33, "сирота с ПЕРЕИСПОЛЬЗОВАННЫМ живым pid снова неприкосновенна"),
     ("M30", mutation_m30, 34, "после стадии не проверяется, уцелела ли точка восстановления"),
+    ("M31", mutation_m31, 35, "словарь пробы живой формы не извлечён из образа"),
+    ("M32", mutation_m32, 35, "скан пересёк границу чужой пробы"),
 ]
 
 

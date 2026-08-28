@@ -25,8 +25,14 @@ def verdict_vocabulary(image_path=None, probe='judge'):
             data = fh.read()
     except OSError as err:
         raise SystemExit(f'образ не прочитан: {path} ({err.__class__.__name__})')
+    # От дескриптора пробы до её словаря — сколько угодно полей, но НЕ через
+    # соседнюю пробу: `(?!dirName:")` запрещает пересечь границу, поэтому окно
+    # не приходится подгонять числом. Прежняя форма стояла на `{0,160}` и
+    # молча перестала находить словарь, когда в дескриптор добавили turn/
+    # selfId/turnLost (2026-08-29: расстояние стало ~250 знаков, инструмент
+    # отказал на ЖИВОМ образе — «прибор не может мерить» вместо разметки).
     pattern = (rb'dirName:"' + re.escape(probe.encode()) +
-               rb'"[^\n]{0,160}?rx:"([^"]+)",act:"([^"]+)"')
+               rb'"(?:(?!dirName:")[^\n]){0,4000}?rx:"([^"]+)",act:"([^"]+)"')
     found = re.search(pattern, data)
     if not found:
         raise SystemExit(
