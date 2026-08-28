@@ -227,8 +227,12 @@ def fetch_json(url, timeout=30):
         return json.load(response)
 
 
-def fetch_catalogue():
-    """models.dev, cached on disk so a network hiccup does not block a re-run."""
+def fetch_catalogue(persist=True):
+    """models.dev, cached on disk so a network hiccup does not block a re-run.
+
+    persist=False -- сухой прогон: он объявляет «nothing written» и обязан
+    не писать НИЧЕГО, включая свой кэш (раунд 19, В-14).
+    """
     try:
         catalogue = fetch_json(MODELS_DEV_URL)
     except Exception as error:
@@ -255,6 +259,8 @@ def fetch_catalogue():
                 # the cache's JSONDecodeError instead and misreport the cause.
                 raise error from cache_error
         raise
+    if not persist:
+        return catalogue
     # The cache is written via tmp+os.replace in the same directory (the
     # pattern save_seen() already uses): a concurrent sync or the fallback
     # reader above must never see a half-written catalogue.
@@ -458,10 +464,11 @@ def main() -> int:
         print(f"Proxy catalog <- absent, skipped ({PROXY_CATALOGUE_PATH})")
 
     remembered = load_seen()
-    save_seen(remembered | set(live_ids))
+    if "--dry-run" not in sys.argv:
+        save_seen(remembered | set(live_ids))
 
     print(f"Price catalog <- {MODELS_DEV_URL}")
-    catalogue = fetch_catalogue()
+    catalogue = fetch_catalogue(persist="--dry-run" not in sys.argv)
 
     # Lost update: the config was read IN FULL before the network phase
     # (proxy + models.dev, tens of seconds), while a live Claude Code session

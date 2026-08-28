@@ -4,9 +4,10 @@
 Коды выхода (подмножество общей таблицы кита -- см. шапку claude-patch-all.sh):
   0  всё сошлось: каждая дверь на месте, каждая мутация покраснела свою
   1  дверь не сошлась, либо мутация прошла молча / покрасила чужую
-  2  контракт вызова нарушен (argparse)
-  3  контроль провален: ПРИСТИННАЯ копия дерева уже красная
-  4  длина таблицы не равна объявленной в EXPECTED_MUTATIONS
+  2  прибор не может мерить: контракт вызова (argparse) либо ПРИСТИННАЯ копия
+     дерева уже красная -- контроль провален
+  4  объявленное число не сходится с фактическим (EXPECTED_SCENARIOS,
+     EXPECTED_MUTATIONS)
 """
 
 from __future__ import annotations
@@ -443,7 +444,14 @@ def run_scenarios() -> int:
         else:
             print(f"judge-tools-bench: СЦЕНАРИЙ {number}: OK")
     print(f"judge-tools-bench: ИТОГ сценариев={len(cases)} расхождений={mismatches}")
-    return 0 if len(cases) == EXPECTED_SCENARIOS and mismatches == 0 else 1
+    if len(cases) != EXPECTED_SCENARIOS:
+        # Тот же класс, что и длина таблицы мутаций: объявленное число не
+        # сходится с фактическим. Прежде уезжало кодом 1 -- «сценарий не
+        # сошёлся», хотя ни один сценарий не при чём (раунд 19, A-8).
+        print(f"judge-tools-bench: ОТКАЗ -- сценариев {len(cases)}, объявлено "
+              f"{EXPECTED_SCENARIOS}")
+        return 4
+    return 0 if mismatches == 0 else 1
 
 
 def replace_once(path: Path, old: str, new: str, mutation: str) -> None:
@@ -609,7 +617,9 @@ def run_self_check() -> int:
                 f"красная (rc={control.returncode}); мутации ничего не докажут\n"
                 f"{control.stdout}{control.stderr}"
             )
-            return 3
+            # Класс 2 («ничего не измерено»), а не 3: тройка в таблице кита
+            # значит «занят замок, повторить позже» (раунд 19, A-4).
+            return 2
     print("judge-tools-bench: КОНТРОЛЬ без мутации: ЗЕЛЁНО")
 
     mutations = MUTATIONS

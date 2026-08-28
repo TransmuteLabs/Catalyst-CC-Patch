@@ -64,6 +64,43 @@
 #   bundle id.
 set -euo pipefail
 
+# ARGUMENTS ARE READ BEFORE THE LOCK IS TAKEN, and that order is the contract,
+# not a style choice: a broken call is broken forever, while a held lock is a
+# transient condition, and answering the first with the second sends the caller
+# to wait for a retry that can never help. Measured on this file: with the lock
+# held, `--nonsense` returned 3 ("retry later") instead of 2, and `--help`
+# returned 3 instead of the usage text. tools/build-path-probe.sh moved its own
+# parsing above its lock for exactly this reason in round 18; the pipeline kept
+# the old order until round 19. Nothing here touches shared state, so nothing
+# here needs the lock.
+
+CONFIGURE=0
+ONLY_OURS=0
+DO_UPDATE=0
+UPDATE_VER=""
+TARGET=""
+EXPECT_SHA=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --configure) CONFIGURE=1; shift ;;
+    --only-ours) ONLY_OURS=1; shift ;;
+    --target)    shift; [[ $# -gt 0 ]] || { echo "--target needs a path" >&2; exit 2; }
+                 TARGET="$1"; shift ;;
+    # The digest the CALLER believes the target holds. Verified here, at read
+    # time, by the program that reads the file -- not by the one that handed it
+    # over minutes earlier. See 0c.
+    --expect-sha) shift; [[ $# -gt 0 ]] || { echo "--expect-sha needs a hex digest" >&2; exit 2; }
+                 EXPECT_SHA="$1"; shift ;;
+    --update)    DO_UPDATE=1; shift
+                 [[ $# -gt 0 && "$1" != --* ]] && { UPDATE_VER="$1"; shift; } || true ;;
+    -h|--help)   sed -n '2,/^[^#]/p' "$0" | sed '$d'; __DONE=1; exit 0 ;;
+    *)           echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$TARGET" && $DO_UPDATE -eq 1 ]] && { echo "ERROR: --target and --update are mutually exclusive" >&2; exit 2; }
+
 # ONE RUN AT A TIME. Two instances are not independent: tweakcc keeps its state
 # in a single shared directory, and it stores the system-prompt hashes by
 # reading the whole index, editing it and writing it back. Two runs interleaving
@@ -406,35 +443,10 @@ prune_tweakcc_cache() {
   done
 }
 
-CONFIGURE=0
-ONLY_OURS=0
-DO_UPDATE=0
-UPDATE_VER=""
-TARGET=""
-EXPECT_SHA=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --configure) CONFIGURE=1; shift ;;
-    --only-ours) ONLY_OURS=1; shift ;;
-    --target)    shift; [[ $# -gt 0 ]] || { echo "--target needs a path" >&2; exit 1; }
-                 TARGET="$1"; shift ;;
-    # The digest the CALLER believes the target holds. Verified here, at read
-    # time, by the program that reads the file -- not by the one that handed it
-    # over minutes earlier. See 0c.
-    --expect-sha) shift; [[ $# -gt 0 ]] || { echo "--expect-sha needs a hex digest" >&2; exit 1; }
-                 EXPECT_SHA="$1"; shift ;;
-    --update)    DO_UPDATE=1; shift
-                 [[ $# -gt 0 && "$1" != --* ]] && { UPDATE_VER="$1"; shift; } || true ;;
-    -h|--help)   sed -n '2,/^[^#]/p' "$0" | sed '$d'; __DONE=1; exit 0 ;;
-    *)           echo "unknown option: $1" >&2; exit 1 ;;
-  esac
-done
-
-[[ -n "$TARGET" && $DO_UPDATE -eq 1 ]] && { echo "ERROR: --target and --update are mutually exclusive" >&2; exit 1; }
-
-[[ -f "$OUR_PATCH" ]] || { echo "ERROR: tweakcc-patch.js not found next to this script"; exit 1; }
-command -v node >/dev/null || { echo "ERROR: node is required (tweakcc runs on Node)"; exit 1; }
+# Полнота САМОГО кита -- класс «прибор не может мерить» (2), а не отказ по
+# существу: рядом со скриптом нет его же нагрузки.
+[[ -f "$OUR_PATCH" ]] || { echo "ERROR: tweakcc-patch.js not found next to this script" >&2; exit 2; }
+command -v node >/dev/null || { echo "ERROR: node is required (tweakcc runs on Node)" >&2; exit 6; }
 # Everything below is used by a gate or by the install step, and each one fails
 # in a way that reads like something else when it is absent: a missing `perl`,
 # `script` or `seq` makes the interface gate exit in a second and report "never
@@ -447,7 +459,8 @@ for t in python3 curl tar perl script seq awk sed grep sort cmp shasum codesign;
 done
 if (( ${#MISSING[@]} )); then
   echo "ERROR: these tools are required and were not found on PATH: ${MISSING[*]}" >&2
-  exit 1
+  # Класс 6: сломано ОКРУЖЕНИЕ -- повтор не поможет, чинить машину, а не кит.
+  exit 6
 fi
 
 # --- 0. optionally install a pristine Claude Code -----------------------------
@@ -636,9 +649,13 @@ fi
 
 python3 "$HERE/tools/image-check.py" "$BIN" || {
   __rc=$?
-  # Класс отказа называется по коду: «образ не тот» и «прибор вызван неверно»
-  # -- разные ответы, и общий текст отправлял бы читателя чинить не то.
-  [[ $__rc -eq 2 ]] && echo "FATAL: image-check.py вызван неверно (rc=2) -- это не про образ" >&2
+  # Класс отказа называется по коду И ПЕРЕЖИВАЕТ выход: «образ не тот» (1) и
+  # «прибор не мерил» (2) -- разные починки, и раньше оба уезжали кодом 1,
+  # хотя таблица кита обещает для второго двойку (раунд 19, A-2).
+  if [[ $__rc -eq 2 ]]; then
+    echo "FATAL: image-check.py вызван неверно (rc=2) -- это не про образ" >&2
+    exit 2
+  fi
   exit 1
 }
 
@@ -1234,6 +1251,7 @@ node "$(dirname "$0")/tools/emit-check.js" || {
   if [[ $__rc -eq 2 ]]; then
     echo "FATAL: разбор НЕ ВЫПОЛНЕН: прибор не может мерить (якорь/строка пропали, rc=2)." >&2
     echo "  Это не «код не парсится» -- покрытие снято, причина выше." >&2
+    exit 2
   fi
   exit 1
 }
@@ -1431,9 +1449,14 @@ SHVARS
 echo "==> Стенд инструментов судьи"
 python3 "$(dirname "$0")/tools/judge-tools-bench.py" || {
   __rc=$?
-  [[ $__rc -eq 2 ]] && echo "СТЕНД ИНСТРУМЕНТОВ НЕ ЗАПУСТИЛСЯ: контракт вызова (rc=2)" >&2 \
-                    || echo "СТЕНД ИНСТРУМЕНТОВ УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
-  exit 1
+  case $__rc in
+    2) echo "СТЕНД ИНСТРУМЕНТОВ НЕ ИЗМЕРЯЛ: контракт вызова или контроль провален (rc=2)" >&2
+       exit 2 ;;
+    4) echo "СТЕНД ИНСТРУМЕНТОВ: сценариев не столько, сколько объявлено (rc=4)" >&2
+       exit 1 ;;
+    *) echo "СТЕНД ИНСТРУМЕНТОВ УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
+       exit 1 ;;
+  esac
 }
 # Зубы стенда проверяются ТУТ ЖЕ, а не по памяти автора: --self-check применяет
 # к копиям дерева мутации, воспроизводящие починенные дефекты, и требует, чтобы
@@ -1442,12 +1465,14 @@ python3 "$(dirname "$0")/tools/judge-tools-bench.py" || {
 python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check || {
   __rc=$?
   case $__rc in
-    2) echo "СТЕНД ИНСТРУМЕНТОВ: self-check НЕ ЗАПУСТИЛСЯ (контракт вызова, rc=2)" >&2 ;;
-    3) echo "СТЕНД ИНСТРУМЕНТОВ: КОНТРОЛЬ ПРОВАЛЕН -- пристинная копия уже красная" >&2 ;;
-    4) echo "СТЕНД ИНСТРУМЕНТОВ: таблица мутаций не той длины, чем объявлено" >&2 ;;
-    *) echo "СТЕНД ИНСТРУМЕНТОВ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2 ;;
+    2) echo "СТЕНД ИНСТРУМЕНТОВ: self-check НЕ ИЗМЕРЯЛ -- контракт вызова или" >&2
+       echo "  КОНТРОЛЬ ПРОВАЛЕН: пристинная копия дерева уже красная (rc=2)" >&2
+       exit 2 ;;
+    4) echo "СТЕНД ИНСТРУМЕНТОВ: таблица мутаций не той длины, чем объявлено" >&2
+       exit 1 ;;
+    *) echo "СТЕНД ИНСТРУМЕНТОВ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
+       exit 1 ;;
   esac
-  exit 1
 }
 
 # --- 0d. the numbers stated in the docs must be the numbers that are declared --
@@ -2212,12 +2237,14 @@ echo "==> Зубы гейта чисел"
 python3 "$(dirname "$0")/tools/docnum-bench.py" || {
   __rc=$?
   case $__rc in
-    2) echo "ГЕЙТ ЧИСЕЛ: СТЕНД НЕ ЗАПУСТИЛСЯ -- прибор не может мерить (нет таблицы/якоря)" >&2 ;;
-    3) echo "ГЕЙТ ЧИСЕЛ: КОНТРОЛЬ ПРОВАЛЕН -- пристинный кит уже красный" >&2 ;;
-    4) echo "ГЕЙТ ЧИСЕЛ: в таблице не столько мутаций, сколько объявлено" >&2 ;;
-    *) echo "ГЕЙТ ЧИСЕЛ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2 ;;
+    2) echo "ГЕЙТ ЧИСЕЛ: СТЕНД НЕ ИЗМЕРЯЛ -- нет таблицы/якоря либо КОНТРОЛЬ" >&2
+       echo "  ПРОВАЛЕН: пристинный кит уже красный (rc=2)" >&2
+       exit 2 ;;
+    4) echo "ГЕЙТ ЧИСЕЛ: в таблице не столько мутаций, сколько объявлено" >&2
+       exit 1 ;;
+    *) echo "ГЕЙТ ЧИСЕЛ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
+       exit 1 ;;
   esac
-  exit 1
 }
 
 echo "==> Applying our multi-provider patches"
@@ -4436,10 +4463,15 @@ if [[ -n "$FLOOR_IMG" ]]; then
   echo "==> Пол проверок на пристинном образе"
   bash "$HERE/tools/checks-on-image.sh" --floor "$FLOOR_IMG" "$OUR_PATCH" || {
     __rc=$?
-    [[ $__rc -eq 2 ]] \
-      && echo "FATAL: пол проверок НЕ ИЗМЕРЕН: прибор вызван неверно или якорь пропал (rc=2)" >&2 \
-      || echo "FATAL: пол проверок не сошёлся -- см. выше" >&2
-    exit 1
+    case $__rc in
+      2) echo "FATAL: пол проверок НЕ ИЗМЕРЕН: прибор вызван неверно, якорь пропал" >&2
+         echo "  либо блок проверок оказался пустым -- измерения не было" >&2
+         exit 2 ;;
+      6) echo "FATAL: пол проверок НЕ ИЗМЕРЕН: сломано окружение прибора (rc=6)" >&2
+         exit 6 ;;
+      *) echo "FATAL: пол проверок не сошёлся -- см. выше" >&2
+         exit 1 ;;
+    esac
   }
 else
   echo "==> Пол проверок ПРОПУЩЕН: пристинного близнеца нет ($PRISTINE_SRC)"
@@ -4785,7 +4817,9 @@ else
     exit 1
   fi
   BENCH_LOG="$(mktemp)"
-  if bun "$BENCH" --binary "$BIN" >"$BENCH_LOG" 2>&1; then
+  __benchrc=0
+  bun "$BENCH" --binary "$BIN" >"$BENCH_LOG" 2>&1 || __benchrc=$?
+  if (( __benchrc == 0 )); then
     # -a and a numeric guard: a plain `grep -c` on a log with a NUL byte
     # prints NOTHING and exits 1, and the line would read "Probes:  scenarios
     # behaved as specified" -- which still matches every pattern that looks
@@ -4821,6 +4855,19 @@ else
     # went to the log, and the success branch deleted the log unread.
     grep '^probe-bench: ВНИМАНИЕ' "$BENCH_LOG" >&2 || true
     rm -f "$BENCH_LOG"
+  elif (( __benchrc == 2 || __benchrc == 4 )); then
+    # Класс ответа стенда: код «прибор не мерил» (нет якоря вырезки, нет bun,
+    # таблица сценариев структурно битая) против кода «объявленное число не
+    # сошлось с фактическим». Прежде ветка отказа не смотрела на код вовсе и
+    # печатала «поведение не соответствует спецификации» на оба (раунд 19, A-1).
+    if (( __benchrc == 2 )); then
+      echo "FATAL: СТЕНД ЗОНДОВ НЕ ИЗМЕРЯЛ: прибор не может мерить (rc=2)." >&2
+    else
+      echo "FATAL: СТЕНД ЗОНДОВ: сценариев не столько, сколько объявлено (rc=4)." >&2
+    fi
+    tail -n 15 "$BENCH_LOG" | sed 's/^/  /' >&2
+    echo "  full table kept at $BENCH_LOG" >&2
+    exit "$__benchrc"
   else
     echo "FATAL: the probe bench found behaviour that does not match its specification:" >&2
     # `grep` exits 1 when nothing matches, and under `set -euo pipefail` that

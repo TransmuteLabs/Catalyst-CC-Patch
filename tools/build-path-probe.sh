@@ -37,8 +37,11 @@
 # this kit, so nothing is written into the source tree; and it snapshots
 # ~/.tweakcc/native-binary.backup first, because a mutant whose whole point is to
 # hand tweakcc a patched image may well poison it -- that is the failure being
-# demonstrated. The snapshot is restored, and the restore verified, on every exit
-# path including a kill.
+# demonstrated. The snapshot is restored on every exit path the shell can see --
+# a normal end, a refusal, INT and TERM -- and a restore that FAILS is a refusal
+# of the whole probe (non-zero) that also keeps the snapshots on disk, since they
+# are then the only way back. SIGKILL runs no trap and is not covered: that case
+# leaves the snapshots under the probe root, named in the line above.
 #
 # Exit codes -- the kit's shared table (see the top of claude-patch-all.sh):
 #   0  green
@@ -60,9 +63,10 @@
 # invisible to every check in the pipeline, and a tool nobody calls has been
 # dead three times in this kit.
 #
-# Usage:  bash tools/build-path-probe.sh [--case abcdu] [--version 2.1.247]
-# Cost:   one full run per case (tweakcc + our patches + the pipeline's 114
-#         checks + the interface gate + the bench), so a few minutes each.
+# Usage:  bash tools/build-path-probe.sh [--case abcdurx] [--version 2.1.247]
+# Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 114
+#         checks + the interface gate + the bench), so a few minutes each; case
+#         (r) and (x) build nothing and answer in milliseconds.
 
 set -u
 
@@ -72,7 +76,7 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdu
+CASES=abcdurx
 WANT_VER=
 
 while [[ $# -gt 0 ]]; do
@@ -295,6 +299,28 @@ fi
 # (измерено 2026-08-28). Штатный конец объявляет себя, трап без объявления
 # краснит сам.
 __DONE=0
+__RESTORE_FAILED=0
+
+# Возврат одного заимствованного файла. ОДНА реализация на оба файла и на зуб
+# (случай r): копия кода в контроле рано или поздно разошлась бы с боевой, и
+# зелёный зуб доказывал бы копию.
+#
+# Частичный `.probe-restore` убирается ЗДЕСЬ: `cp -p`, упавший на ENOSPC,
+# оставляет полуфайл рядом с ЖИВЫМ конфигом tweakcc, и следующий читатель
+# каталога видит мусор, которого никто не создавал намеренно (раунд 19, В-12).
+restore_one() {   # <снимок> <живой путь>; 0 -- восстановлено либо не требовалось
+  local snap="$1" live="$2"
+  [[ -f "$snap" ]] || return 0
+  cmp -s "$snap" "$live" 2>/dev/null && return 0
+  if cp -p "$snap" "$live.probe-restore" && mv "$live.probe-restore" "$live"; then
+    echo "restored $live from the probe's snapshot"
+    return 0
+  fi
+  rm -f "$live.probe-restore"
+  echo "WARNING: could not restore $live from $snap" >&2
+  return 1
+}
+
 cleanup() {
   __rc=$?
   # Restore the borrowed config first: it carries the seeded version, and leaving
@@ -308,25 +334,31 @@ cleanup() {
     if [[ -f "$TWEAKCC_CFG" ]]; then
       rm -f "$TWEAKCC_CFG" && echo "removed $TWEAKCC_CFG (the probe created it; there was none before)"
     fi
-  elif [[ -f "$CFG_SNAP" ]]; then
-    if ! cmp -s "$CFG_SNAP" "$TWEAKCC_CFG" 2>/dev/null; then
-      cp -p "$CFG_SNAP" "$TWEAKCC_CFG.probe-restore" \
-        && mv "$TWEAKCC_CFG.probe-restore" "$TWEAKCC_CFG" \
-        && echo "restored $TWEAKCC_CFG from the probe's snapshot" \
-        || echo "WARNING: could not restore $TWEAKCC_CFG from $CFG_SNAP" >&2
-    fi
+  else
+    restore_one "$CFG_SNAP" "$TWEAKCC_CFG" || __RESTORE_FAILED=1
   fi
   # Restore the borrowed backup before anything else, and SAY whether it worked:
   # a silent failure here leaves the human with a poisoned tweakcc restore and no
   # idea this probe was the cause.
-  if [[ -f "$BACKUP_SNAP" ]]; then
-    if ! cmp -s "$BACKUP_SNAP" "$TWEAKCC_BACKUP" 2>/dev/null; then
-      cp -p "$BACKUP_SNAP" "$TWEAKCC_BACKUP.probe-restore" \
-        && mv "$TWEAKCC_BACKUP.probe-restore" "$TWEAKCC_BACKUP" \
-        && echo "restored $TWEAKCC_BACKUP from the probe's snapshot" \
-        || echo "WARNING: could not restore $TWEAKCC_BACKUP from $BACKUP_SNAP" >&2
-    fi
+  restore_one "$BACKUP_SNAP" "$TWEAKCC_BACKUP" || __RESTORE_FAILED=1
+
+  # Невозвращённое ЖИВОЕ состояние -- отказ прогона, а не примечание в логе.
+  #
+  # Прежде обе ветки провала печатали WARNING и не трогали код возврата: зонд,
+  # у которого все случаи сошлись, выходил НУЛЁМ с подменённым бэкапом
+  # ~/.tweakcc, а свип печатал «зонд пути сборки: ЗЕЛЁНО», не читая лога. Следом
+  # тот же cleanup сносил $ROOT -- ЕДИНСТВЕННЫЙ источник ремонта (снимки
+  # конфига и бэкапа). Ровно этим ремонтом чинился инцидент 2026-08-28, и
+  # ровно его прежняя редакция делала невозможным (раунд 19, В-1 и В-2).
+  if (( __RESTORE_FAILED )); then
+    KEEP_ROOT=1
+    echo "build-path-probe: ЖИВОЕ СОСТОЯНИЕ tweakcc НЕ ВОССТАНОВЛЕНО." >&2
+    echo "  Снимки оставлены -- восстановить руками:" >&2
+    [[ -f "$CFG_SNAP" ]]    && echo "    cp -p $CFG_SNAP $TWEAKCC_CFG" >&2
+    [[ -f "$BACKUP_SNAP" ]] && echo "    cp -p $BACKUP_SNAP $TWEAKCC_BACKUP" >&2
+    (( __rc == 0 )) && __rc=1
   fi
+
   [[ -n "${KEEP_ROOT:-}" ]] || rm -rf "$ROOT"
   if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
     echo "build-path-probe: ОТКАЗ -- прогон оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
@@ -476,7 +508,12 @@ PY
 
 run_pipeline() {  # <script> <bindir> <logfile>
   seed_version_mismatch
+  # Люки конвейера снимаются на запуске: зонд обязан мерить КИТ, а не среду
+  # оператора. Тот же список и то же основание, что у свипа (раунд 19, В-5).
   ( PATH="$2:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES= CLAUDE_PATCH_SKIP_BENCH= \
+    CLAUDE_PATCH_GATE_BUDGET= CLAUDE_PATCH_SIGN_ID= TWEAKCC_LOCAL= \
+    CATALYST_TWEAKCC_REPO= CATALYST_TWEAKCC_SHA= \
     # Объявленный пропуск: каждая сборка зонда идёт без sync цен, и это
     # снятое покрытие (раунд 18, G-1). Строка печатается зондом, а не только
     # прячется в логе случая.
@@ -710,14 +747,26 @@ t = open(p, encoding='utf-8').read()
 NEEDLE = ('\n        staging = target.with_name(target.name + ".staging")\n'
           '        download_binary(version, staging)\n')
 if t.count(NEEDLE) != 1:
-    sys.exit('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: якорь ветки --update найден %d раз' % t.count(NEEDLE))
+    # Код 2: якорь уехал -- контроль НЕ ИЗМЕРЯЛ. sys.exit со строкой отдал бы
+    # 1, то есть «случай разошёлся» (раунд 19, A-9).
+    sys.stderr.write('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: якорь ветки --update найден %d раз\n'
+                     % t.count(NEEDLE))
+    sys.exit(2)
 t2 = t.replace(NEEDLE, '\n        staging = target\n        download_binary(version, staging)\n', 1)
 if t2.count('.with_name(target.name + ".staging")') != 1:
-    sys.exit('МУТАЦИЯ ЗАДЕЛА ЧУЖУЮ ВЕТКУ: стадий осталось %d'
-             % t2.count('.with_name(target.name + ".staging")'))
+    sys.stderr.write('МУТАЦИЯ ЗАДЕЛА ЧУЖУЮ ВЕТКУ: стадий осталось %d\n'
+                     % t2.count('.with_name(target.name + ".staging")'))
+    sys.exit(2)
 open(p, 'w', encoding='utf-8').write(t2)
 MUT
-  if [[ $? -ne 0 ]]; then
+  __mrc=$?
+  if [[ $__mrc -ne 0 ]]; then
+    # Класс ответа называется: 2 -- якорь уехал и контроль НЕ ИЗМЕРЯЛ (чинить
+    # прибор), прочее -- контроль не применился по иной причине.
+    if [[ $__mrc -eq 2 ]]; then
+      echo "  ОТКАЗ: контроль случая (u) НЕ ИЗМЕРЯЛ -- якорь мутации уехал" >&2
+      __DONE=1; exit 2
+    fi
     bad 'case (u) control: the mutation did not apply -- it proves nothing'
     return
   fi
@@ -734,6 +783,139 @@ MUT
   fi
 }
 
+case_r() {   # возврат заимствованного файла: обе стороны и уборка полуфайла
+  # Сборок нет: зуб бьёт по ТОЙ ЖЕ функции, которой cleanup возвращает живое
+  # состояние tweakcc. Половина «невозможный возврат» и есть та ветка, которая
+  # до волны 22 печатала WARNING и выходила нулём.
+  local d rc
+  echo "case r: the restore of a borrowed file answers by result and leaves no debris"
+  d="$ROOT/restore"; rm -rf "$d"; mkdir -p "$d/writable" "$d/locked"
+  printf 'snapshot\n' > "$d/snap"
+  printf 'changed\n'  > "$d/writable/live"
+
+  if restore_one "$d/snap" "$d/writable/live" >/dev/null 2>&1 \
+     && cmp -s "$d/snap" "$d/writable/live" \
+     && [[ ! -e "$d/writable/live.probe-restore" ]]; then
+    ok 'a diverged live file is restored from the snapshot, and no partial file is left'
+  else
+    bad "restore_one did not restore the live file: $(ls -1 "$d/writable" | tr '\n' ' ')"
+  fi
+
+  # Каталог только для чтения -- возврат физически невозможен. Под root chmod
+  # не остановил бы запись, и зуб бы молча выродился; такой прогон отвергается.
+  printf 'changed\n' > "$d/locked/live"
+  chmod 500 "$d/locked"
+  restore_one "$d/snap" "$d/locked/live" >/dev/null 2>&1; rc=$?
+  chmod 700 "$d/locked"
+  if [[ "$(id -u)" == "0" ]]; then
+    bad 'case (r) cannot measure as root: a read-only directory does not stop writes'
+  elif (( rc != 0 )) && [[ ! -e "$d/locked/live.probe-restore" ]]; then
+    ok 'an impossible restore answers non-zero and leaves no partial file'
+  else
+    bad "an impossible restore answered rc=$rc, debris: $(ls -1 "$d/locked" | tr '\n' ' ')"
+  fi
+
+  # Сборка ответа в cleanup исполняется только на выходе САМОГО зонда, поэтому
+  # пинится ПО ФОРМЕ -- и это объявляется: зуб проверяет текст исполняющегося
+  # файла, а не поведение.
+  local self miss=()
+  self="$HERE/tools/build-path-probe.sh"
+  grep -qF 'restore_one "$CFG_SNAP" "$TWEAKCC_CFG" || __RESTORE_FAILED=1' "$self"       || miss+=('возврат конфига не учитывается')
+  grep -qF 'restore_one "$BACKUP_SNAP" "$TWEAKCC_BACKUP" || __RESTORE_FAILED=1' "$self" || miss+=('возврат бэкапа не учитывается')
+  grep -qF 'if (( __RESTORE_FAILED )); then' "$self"                                    || miss+=('провал возврата ничего не решает')
+  grep -qF '    KEEP_ROOT=1' "$self"                                                    || miss+=('снимки не сохраняются')
+  grep -qF '    (( __rc == 0 )) && __rc=1' "$self"                                      || miss+=('код возврата не краснеет')
+  if (( ${#miss[@]} == 0 )); then
+    ok 'the FORM of the aggregation holds: a failed restore keeps the snapshots and reddens the run'
+  else
+    bad "the aggregation form drifted: ${miss[*]}"
+  fi
+}
+
+case_x() {   # двери командной строки: КЛАСС ответа и ПОРЯДОК относительно замка
+  # Ни одной сборки: все три двери отвечают на разборе аргументов. Стоит это
+  # миллисекунды, а закрывает то, чего не видит ни одна из проверок по образу --
+  # сам разговор конвейера с вызывающим.
+  local priv holder out rc mut
+  echo "case x: the CLI doors answer by class, and they answer BEFORE the lock"
+  priv="$ROOT/cli.lock"; : > "$priv"
+  # Держатель замка -- perl с flock(2) на СВОЁМ дескрипторе: замок живёт, пока
+  # жив процесс, и снимается его смертью.
+  perl -e 'use Fcntl ":flock";
+           open(my $fh, "<", $ARGV[0]) or exit 3;
+           flock($fh, LOCK_EX) or exit 3;
+           sleep 120;' "$priv" &
+  holder=$!
+  sleep 1
+
+  # `9>&-` и снятие CLAUDE_PATCH_LOCK_HELD_BY: ребёнок обязан идти к замку САМ,
+  # иначе он унаследует замок зонда и занятой двери не увидит.
+  run_cli() {   # <скрипт> <аргумент...>
+    env -u CLAUDE_PATCH_LOCK_HELD_BY CLAUDE_PATCH_LOCK="$priv" bash "$@" 9>&- 2>&1
+  }
+
+  out=$(run_cli "$PIPELINE" --nonsense); rc=$?
+  if [[ $rc -eq 2 && "$out" == *"unknown option"* ]]; then
+    ok 'an unknown option is a broken contract (2) even while the lock is held'
+  else
+    bad "unknown option under a held lock answered rc=$rc: $(printf '%s' "$out" | head -1)"
+  fi
+
+  out=$(run_cli "$PIPELINE" --help); rc=$?
+  if [[ $rc -eq 0 && "$out" == *"One command for the whole stack"* ]]; then
+    ok '--help prints usage while the lock is held'
+  else
+    bad "--help under a held lock answered rc=$rc: $(printf '%s' "$out" | head -1)"
+  fi
+
+  out=$(run_cli "$PIPELINE" --target /nope --update 2.1.250); rc=$?
+  if [[ $rc -eq 2 && "$out" == *"mutually exclusive"* ]]; then
+    ok 'two modes at once is a broken contract (2), not a refusal on the merits'
+  else
+    bad "--target with --update answered rc=$rc: $(printf '%s' "$out" | head -1)"
+  fi
+
+  # Отрицательный контроль: копия конвейера, у которой разбор аргументов
+  # возвращён ПОД замок. Утверждение выше обязано покраснеть на ней -- иначе оно
+  # не о порядке, а о самом наличии двери.
+  mut="$ROOT/cli-mutant.sh"
+  if ! python3 - "$PIPELINE" "$mut" <<'MUTX'; then
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+t = open(src, encoding='utf-8').read()
+m = re.search(r'\nCONFIGURE=0\nONLY_OURS=0\n.*?mutually exclusive[^\n]*\n\n', t, re.S)
+trap = "trap '__release_lock' EXIT\n"
+if not m or t.count(trap) != 1:
+    # Класс 2: мутировать нечего -- контроль НЕ ИЗМЕРЯЛ.
+    sys.stderr.write('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: блок разбора %s, трап %d раз\n'
+                     % ('найден' if m else 'НЕ найден', t.count(trap)))
+    sys.exit(2)
+block = m.group(0)
+t = t.replace(block, '\n', 1).replace(trap, trap + block.lstrip('\n'), 1)
+open(dst, 'w', encoding='utf-8').write(t)
+MUTX
+    __xrc=$?
+    if [[ $__xrc -eq 2 ]]; then
+      echo "  ОТКАЗ: контроль случая (x) НЕ ИЗМЕРЯЛ -- якорь мутации уехал" >&2
+      kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+      __DONE=1; exit 2
+    fi
+    bad 'case (x) control: the mutation did not apply -- it proves nothing'
+    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+    return
+  fi
+  out=$(run_cli "$mut" --nonsense); rc=$?
+  if [[ $rc -eq 2 ]]; then
+    bad 'the control did NOT redden: case (x) is not testing the ORDER'
+  elif [[ $rc -eq 3 ]]; then
+    ok 'the control reddens it by its own cause: parsing under the lock answers 3'
+  else
+    bad "the control reddened by a FOREIGN cause (rc=$rc): $(printf '%s' "$out" | head -1)"
+  fi
+
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+}
+
 echo "build-path-probe: во ВСЕХ случаях сборки sync цен пропущен (CLAUDE_PATCH_SKIP_MODELS=1)"
 [[ -n "${KEEP_ROOT:-}" ]] && echo "build-path-probe: KEEP_ROOT=${KEEP_ROOT} -- рабочий корень $ROOT останется на диске"
 for c in $(echo "$CASES" | grep -o .); do
@@ -743,19 +925,21 @@ for c in $(echo "$CASES" | grep -o .); do
     c) case_c ;;
     d) case_d ;;
     u) case_u ;;
+    r) case_r ;;
+    x) case_x ;;
     *) echo "unknown case: $c" >&2; exit 2 ;;
   esac
 done
 
 __DONE=1   # все названные случаи исполнены; ниже только вердикт
 if [[ $FAILED -eq 0 ]]; then
-  # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d) и (u) --
-  # мутационные контроли, и без них зелёная строка обещала бы доказательство,
-  # которого прогон не получал (раунд 18, H-2).
-  if [[ "$CASES" == *c* || "$CASES" == *d* || "$CASES" == *u* ]]; then
+  # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d), (u) и
+  # (x) -- мутационные контроли, и без них зелёная строка обещала бы
+  # доказательство, которого прогон не получал (раунд 18, H-2).
+  if [[ "$CASES" == *c* || "$CASES" == *d* || "$CASES" == *u* || "$CASES" == *x* || "$CASES" == *r* ]]; then
     echo "build path ($CASES): every assertion held, and the control shows they have teeth"
   else
-    echo "build path ($CASES): every assertion held; НИ ОДИН контроль (c/d/u) не гонялся -- зубы не доказаны"
+    echo "build path ($CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r) не гонялся -- зубы не доказаны"
   fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2

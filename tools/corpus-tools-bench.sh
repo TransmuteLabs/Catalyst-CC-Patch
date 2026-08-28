@@ -23,8 +23,12 @@
 # КОДЫ ВОЗВРАТА (подмножество общей конвенции кита, README «Exit codes»):
 #   0 -- прогон зелёный: расхождений нет, беззубых правок нет
 #   1 -- отказ по существу: сценарий разошёлся, мутация прошла молча,
-#        таблицы мутаций рассинхронизированы, прогон оборвался на полпути
-#   2 -- контракт вызова: неизвестный режим в аргументах
+#        прогон оборвался на полпути
+#   2 -- прибор не может мерить: неизвестный режим в аргументах, пропавший
+#        якорь вырезки
+#   4 -- объявленное число не сходится с фактическим: длины пяти таблиц
+#        мутаций или покрытие сценариев мутациями (тот же класс, что
+#        EXPECTED_MUTATIONS у соседних стендов -- раунд 19, A-8)
 #   3 -- мерить сейчас нельзя: замок стенда держит другой прогон стенда либо
 #        идёт настоящая сборка (повторить позже)
 #   6 -- машинерия замка сломана: не открыть файл замка, не работает perl
@@ -45,8 +49,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=66
-EXPECTED_MUTATIONS=65
+EXPECTED_SCENARIOS=72
+EXPECTED_MUTATIONS=72
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -264,8 +268,8 @@ unless() { [[ "$tweak" == "$1" ]] || printf '%s\n' "$2"; }
 ver=$(awk '{print $2; exit}' "$target" 2>/dev/null)
 [[ "$tweak" != otherver ]] || ver=0.0.999
 sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}')
-unless notw    'Customizations applied successfully'
-unless notw    '    ✓ site'
+unless notw       'Customizations applied successfully'
+unless nopatches  '    ✓ site'
 unless noours  'Script patch applied'
 unless nook    '  [OK] stub check'
 [[ "$tweak" != fail ]] || printf '  [FAIL] stub check\n'
@@ -331,6 +335,11 @@ BENCHSTUB
 # позвали.
 SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF)
 
+# Ручки ПРОПУСКА у сценариев свои (BENCH_SKIP_PROBE/BENCH_SKIP_TOOLS): прежде
+# пусковой пробрасывал операторские SWEEP_SKIP_* «как есть», и человек, честно
+# выключивший предполётный зонд для своего свипа, ронял сценарий 53 внутри
+# стенда -- документированная ручка валила несвязанный гейт, а диагноз указывал
+# на стенд (раунд 19, В-6).
 run_sweep() {   # kit, corpus-dir, list, аргументы...
   local kit=$1 cdir=$2 list=$3; shift 3
   # Замок конвейера -- СВОЙ: сценарий занятого замка прежде держал боевой файл,
@@ -342,8 +351,8 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     STUB_TAMPER="${STUB_TAMPER:-}" \
     STUB_PROBE_RC="${STUB_PROBE_RC:-0}" STUB_PROBE_MARK="${STUB_PROBE_MARK:-}" \
     STUB_BENCH_RC="${STUB_BENCH_RC:-0}" STUB_BENCH_MARK="${STUB_BENCH_MARK:-}" \
-    SWEEP_SKIP_TOOLS_BENCH="${SWEEP_SKIP_TOOLS_BENCH:-}" \
-    SWEEP_SKIP_BUILD_PROBE="${SWEEP_SKIP_BUILD_PROBE:-}" \
+    SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" \
+    SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP_PROBE:-}" \
     bash "$kit/tools/sweep.sh" "$@" 2>&1 9>&-
 }
 
@@ -424,10 +433,16 @@ scenario_5() {   # список пуст
   expect_refusal "5 пустой список -- отказ" "нет ни одной версии" "$out" $rc
 }
 
-scenario_6() {   # списка нет
+scenario_6() {   # списка нет -- разбирать нечего, класс 2
   local out rc
   out=$(run_sweep "$K" "$C/corpus" "$C/нет-такого.txt"); rc=$?
   expect_refusal "6 нет списка версий -- отказ" "нет списка версий" "$out" $rc
+  # Класс ответа: названного списка нет -- прибор НЕ МЕРИЛ, а не «список не
+  # проходит разбор» (раунд 19, A-7).
+  if (( rc != 2 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ rc=$rc :: $out"
+    bad "6 нет списка версий: код возврата $rc, ждали 2"
+  fi
 }
 
 scenario_7() {   # замок свипа занят
@@ -499,7 +514,13 @@ scenario_9() {   # конвейер вернул 3 -- версия НЕ ИЗМЕ
     bad "9 конвейер вернул 3: держатель замка (pid $holder) не записан"
     return
   fi
-  ok "9 конвейер вернул 3 -- НЕ ИЗМЕРЕНО, держатель назван, код ненулевой"
+  # Класс кода: версия не измерена ТОЛЬКО из-за занятого замка и красных нет,
+  # значит «повторить позже» -- 3, а не отказ по существу (раунд 19, A-6).
+  if (( rc != 3 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ rc=$rc :: $out"
+    bad "9 конвейер вернул 3: свип вышел $rc, ждали 3"; return
+  fi
+  ok "9 конвейер вернул 3 -- НЕ ИЗМЕРЕНО, держатель назван, код свипа 3"
 }
 
 scenario_10() {   # наполнитель: байты на диске не сходятся с пином
@@ -665,6 +686,9 @@ scenario_24() { expect_red "24 упавшая проверка -- КРАСНАЯ
 scenario_25() { expect_red "25 ни одной прошедшей проверки -- КРАСНАЯ" nook "ни одной прошедшей проверки"; }
 scenario_26() { expect_red "26 нет нашего применения -- КРАСНАЯ" noours "наших применений 0"; }
 scenario_27() { expect_red "27 нет прогона tweakcc -- КРАСНАЯ" notw "прогонов tweakcc 0"; }
+# Прогон tweakcc был, а патчей применено НОЛЬ -- своя дверь: заглушка снимает
+# ровно маркер применённого патча, оставляя маркер самого прогона.
+scenario_72() { expect_red "72 ноль применённых патчей -- КРАСНАЯ" nopatches "не применил ни одного патча"; }
 scenario_28() { expect_red "28 дым не подтверждён -- КРАСНАЯ" nosmoke "дым не подтверждён"; }
 scenario_29() { expect_red "29 интерфейс не подтверждён -- КРАСНАЯ" noiface "интерфейс не подтверждён"; }
 scenario_30() { expect_red "30 стенд зондов не подтверждён -- КРАСНАЯ" nobench "стенд зондов не подтверждён"; }
@@ -1026,6 +1050,124 @@ scenario_66() {   # стенд, позванный ИЗ свипа, меряет
   ok "66 стенд снимает бухгалтерию внешнего свипа: прогон зелен, форма на месте"
 }
 
+scenario_67() {   # предполётный стенд ЗАНЯТ -- это «повторить», а не красное
+  local out rc
+  out=$(STUB_BENCH_RC=3 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 3 )); then
+    bad "67 занятый стенд: код возврата $rc, ждали 3"; return
+  fi
+  if [[ "$out" != *"стенд корпусных инструментов занят"* ]]; then
+    bad "67 занятый стенд: причина не названа: $(printf '%s' "$out" | head -2 | tr '\n' ' ')"; return
+  fi
+  ok "67 занятый предполётный стенд -- класс «повторить позже»"
+}
+
+scenario_68() {   # конвейер вернул 2 -- вердикт называет КЛАСС, а не «код 2»
+  local out rc
+  out=$(STUB_RC=2 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )); then
+    bad "68 конвейер вернул 2: код возврата свипа 0, ждали отказ"; return
+  fi
+  if [[ "$out" != *"конвейер вернул 2: контракт вызова нарушен или прибор гейта не мерил"* ]]; then
+    LAST_EVID="КЛАСС_НЕ_НАЗВАН :: rc=$rc :: $out"
+    bad "68 конвейер вернул 2: класс не назван в вердикте"; return
+  fi
+  ok "68 конвейер вернул 2 -- вердикт называет класс отказа"
+}
+
+scenario_69() {   # пин некуда записать: список сменился под прогоном
+  # Тот же вырезанный блок записи, что в сценарии 52, но пин пишется версии,
+  # строки которой в списке НЕТ. Это не «корпус красный», а «прибор не может
+  # записать измеренное»: класс 2. Прежде здесь стоял sys.exit со СТРОКОЙ,
+  # то есть код 1, и вызывающий звал чинить корпус.
+  local carved list out rc before
+  carved="$C/pin-block-69.py"
+  if ! python3 - "$K/tools/fetch-corpus.sh" "$carved" <<'CARVE'; then
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src, encoding='utf-8').read()
+m = re.search(r"<<'PIN_PY'\n(.*?)\nPIN_PY", text, re.S)
+if not m:
+    sys.stderr.write('в наполнителе нет блока PIN_PY -- якорь потерян\n')
+    sys.exit(2)
+open(dst, 'w', encoding='utf-8').write(m.group(1))
+CARVE
+    __crc=$?
+    if [[ $__crc -eq 2 ]]; then
+      LAST_EVID="ЯКОРЬ_PIN_PY_ПОТЕРЯН"
+      bad "69 пин без строки: блок PIN_PY не вырезан -- прибор не мерил"; return
+    fi
+    bad "69 пин без строки: блок PIN_PY не вырезан"; return
+  fi
+  list="$C/pin69.txt"
+  { echo "# platform: x"; echo "900 0.0.900 -"; } > "$list"
+  before=$(tr '\n' '|' < "$list")
+  out=$(python3 "$carved" "$list" 0.0.999 deadbeef 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out :: список=$(tr '\n' '|' < "$list")"
+  if (( rc != 2 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ rc=$rc :: $out"
+    bad "69 пин без строки: код возврата $rc, ждали 2"; return
+  fi
+  if [[ "$out" != *"0.0.999"* ]]; then
+    bad "69 пин без строки: версия не названа: $out"; return
+  fi
+  if [[ "$(tr '\n' '|' < "$list")" != "$before" || -e "$list.new" ]]; then
+    bad "69 пин без строки: список тронут при отказе"; return
+  fi
+  ok "69 пин версии, которой нет в списке -- класс «записывать некуда»"
+}
+
+scenario_70() {   # разборщику нечем узнать платформу -- сломан ПРИБОР
+  # Платформу разборщик берёт из claude_patch. Без модуля он не может мерить
+  # НИЧЕГО, и класс отказа обязан звать чинить кит, а не формат списка: код
+  # «формат нарушен» отправлял бы человека править файл, который не читали.
+  local lone out rc
+  lone="$C/lone-kit"; mkdir -p "$lone/tools"
+  cp "$K/tools/corpus-list.py" "$lone/tools/corpus-list.py"
+  { echo "# platform: x"; echo "900 0.0.900 -"; } > "$lone/list.txt"
+  out=$(python3 "$lone/tools/corpus-list.py" "$lone/list.txt" 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 2 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ rc=$rc :: $out"
+    bad "70 нет claude_patch: код возврата $rc, ждали 2"; return
+  fi
+  if [[ "$out" != *"не определить платформу"* ]]; then
+    bad "70 нет claude_patch: причина не названа: $out"; return
+  fi
+  ok "70 разборщик без claude_patch -- «прибор не может мерить»"
+}
+
+scenario_71() {   # операторская ручка пропуска не проникает в сценарии стенда
+  # Две половины, как у сценария 66: поведение на живом файле плюс ФОРМА из
+  # копии кита -- пусковой живёт в исполняющемся файле, и мутировать его зубы
+  # не могут.
+  local out rc mark src amb
+  mark="$C/probe.called.71"; rm -f "$mark"
+  out=$(SWEEP_SKIP_BUILD_PROBE=1 SWEEP_SKIP_TOOLS_BENCH=1 STUB_PROBE_MARK="$mark" \
+        run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: зонд=$([[ -e "$mark" ]] && echo звался || echo НЕ_ЗВАЛСЯ) :: $out"
+  if (( rc != 0 )); then
+    bad "71 амбиентная ручка: прогон отказал ($rc) -- дверь не измерена"; return
+  fi
+  if [[ ! -e "$mark" ]]; then
+    LAST_EVID="АМБИЕНТНАЯ_РУЧКА_ПРОТЕКЛА :: $out"
+    bad "71 амбиентная SWEEP_SKIP_BUILD_PROBE отключила зонд внутри стенда"; return
+  fi
+  src="$K/tools/corpus-tools-bench.real.sh"
+  if [[ ! -f "$src" ]]; then
+    LAST_EVID="НЕТ_КОПИИ_СТЕНДА :: $src"
+    bad "71 форма ручек: в копии кита нет самого стенда"; return
+  fi
+  amb=$(grep -c 'SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP''_PROBE:-}"' "$src")
+  if [[ "$amb" != "1" ]]; then
+    LAST_EVID="ФОРМА_РУЧКИ_РАЗОШЛАСЬ :: своих имён=$amb (ждали 1)"
+    bad "71 форма ручек пропуска разошлась с объявленной"; return
+  fi
+  ok "71 операторская ручка пропуска не проникает в сценарии стенда"
+}
+
 run_all() {
   scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6
   scenario_7; scenario_8; scenario_9; scenario_10; scenario_11; scenario_12
@@ -1039,6 +1181,7 @@ run_all() {
   scenario_53; scenario_54; scenario_55; scenario_56; scenario_57
   scenario_58; scenario_59; scenario_60; scenario_61; scenario_62
   scenario_63; scenario_64; scenario_65; scenario_66
+  scenario_67; scenario_68; scenario_69; scenario_70; scenario_71; scenario_72
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -1149,9 +1292,16 @@ src, dst = sys.argv[1], sys.argv[2]
 text = open(src, encoding='utf-8').read()
 m = re.search(r"<<'PIN_PY'\n(.*?)\nPIN_PY", text, re.S)
 if not m:
-    sys.exit('в наполнителе нет блока PIN_PY -- якорь потерян')
+    # Класс 2: вырезать нечего, сценарий НЕ ИЗМЕРЯЛ дверь (раунд 19, A-9).
+    sys.stderr.write('в наполнителе нет блока PIN_PY -- якорь потерян\n')
+    sys.exit(2)
 open(dst, 'w', encoding='utf-8').write(m.group(1))
 CARVE
+    __crc=$?
+    if [[ $__crc -eq 2 ]]; then
+      LAST_EVID="ЯКОРЬ_PIN_PY_ПОТЕРЯН"
+      bad "52 запись списка: блок PIN_PY не вырезан -- прибор не мерил"; return
+    fi
     bad "52 запись списка: блок PIN_PY не вырезан"; return
   fi
   list="$C/pinme.txt"
@@ -1213,7 +1363,7 @@ scenario_54() {   # красный зонд останавливает свип 
 scenario_55() {   # выключатель предполёта ОБЪЯВЛЯЕТСЯ, а не молчит
   local out rc mark
   mark="$C/probe.called"; rm -f "$mark"
-  out=$(SWEEP_SKIP_BUILD_PROBE=1 STUB_PROBE_MARK="$mark" \
+  out=$(BENCH_SKIP_PROBE=1 STUB_PROBE_MARK="$mark" \
         run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   LAST_EVID="rc=$rc :: объявление=$([[ "$out" == *"ПРОПУЩЕН по ручке"* ]] && echo есть || echo НЕТ_ОБЪЯВЛЕНИЯ) :: зонд=$([[ -e "$mark" ]] && echo ЗВАЛСЯ_ВОПРЕКИ || echo не звался) :: $out"
   if (( rc != 0 )); then
@@ -1297,7 +1447,7 @@ scenario_61() {   # красный стенд останавливает сви�
 scenario_62() {   # выключатель второй половины предполёта ОБЪЯВЛЯЕТСЯ
   local out rc mark
   mark="$C/bench.called"; rm -f "$mark"
-  out=$(SWEEP_SKIP_TOOLS_BENCH=1 STUB_BENCH_MARK="$mark" \
+  out=$(BENCH_SKIP_TOOLS=1 STUB_BENCH_MARK="$mark" \
         run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   LAST_EVID="rc=$rc :: объявление=$([[ "$out" == *"стенд корпусных инструментов ПРОПУЩЕН по ручке"* ]] && echo есть || echo НЕТ_ОБЪЯВЛЕНИЯ) :: стенд=$([[ -e "$mark" ]] && echo ЗВАЛСЯ_ВОПРЕКИ || echo не звался) :: $out"
   if (( rc != 0 )); then
@@ -1374,7 +1524,11 @@ MUT_FILE=(x
   tools/sweep.sh tools/sweep.sh tools/sweep.sh
   # Волна 21: классы ответа предполётных приборов (номера 63, 64, 65) и
   # снятие бухгалтерии внешнего свипа (номер 66).
-  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/corpus-tools-bench.real.sh)
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/corpus-tools-bench.real.sh
+  # Волна 22: класс кода при неполноте от замка (9), занятый предполётный
+  # стенд (67), класс отказа конвейера в вердикте (68).
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/fetch-corpus.sh
+  tools/corpus-list.py tools/corpus-tools-bench.real.sh tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -1429,7 +1583,7 @@ MUT_PAT=(x
   '\[\[ "\$\{entry%%:\*\}" == "\$want" \]\]'
   '\[\[ "\$got" == "\$want" \]\] \|\|'
   "die\('в списке нет ни одной версии'\)"
-  '\[\[ -f "\$LIST" \]\] \|\| \{ echo "SWEEP ОТКАЗ: нет списка версий \$LIST" >&2; exit 1; \}'
+  '\[\[ -f "\$LIST" \]\] \|\| \{ echo "SWEEP ОТКАЗ: нет списка версий \$LIST" >&2; exit 2; \}'
   'if \[\[ "\$got" == "\$pin" \]\]; then'
   '\[\[ -n "\$\{label:-\}" \]\] \|\| continue'
   'if \(\$i ~ \/\\\.\(py\|js\|mjs\)\$\/\) break'
@@ -1441,7 +1595,14 @@ MUT_PAT=(x
   '    2\) echo "SWEEP ОТКАЗ: зонд пути сборки НЕ МЕРИЛ'
   '    2\) echo "SWEEP ОТКАЗ: стенд корпусных инструментов НЕ МЕРИЛ'
   '    6\) echo "SWEEP ОТКАЗ: машинерия замка стенда сломана'
-  'SWEEP_ENV_SCRUB=\(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF\)')
+  'SWEEP_ENV_SCRUB=\(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP_SELF\)'
+  '  if \(\( RED == 0 \)\); then'
+  '    3\) echo "SWEEP ОТКАЗ: стенд корпусных инструментов занят'
+  '        2\) why\+=\("конвейер вернул 2: контракт вызова нарушен или прибор гейта не мерил"\) ;;'
+  '    sys\.exit\(2\)'
+  "        die\('не определить платформу \(%s\)' % exc, 2\)"
+  '    SWEEP_SKIP_BUILD_PROBE="\$\{BENCH_SKIP_PROBE:-\}"'
+  '    \[\[ "\$\{tw:-0\}" != "0" \]\] \|\| why\+=\("tweakcc не применил ни одного патча"\)')
 
 MUT_REP=(x
   'if false; then'
@@ -1501,7 +1662,14 @@ MUT_REP=(x
   '    99) echo "SWEEP ОТКАЗ: зонд пути сборки НЕ МЕРИЛ'
   '    99) echo "SWEEP ОТКАЗ: стенд корпусных инструментов НЕ МЕРИЛ'
   '    99) echo "SWEEP ОТКАЗ: машинерия замка стенда сломана'
-  'SWEEP_ENV_SCRUB=(env)')
+  'SWEEP_ENV_SCRUB=(env)'
+  '  if (( 0 )); then'
+  '    99) echo "SWEEP ОТКАЗ: стенд корпусных инструментов занят'
+  '        2) why+=("конвейер вернул 2") ;;'
+  '    sys.exit(1)'
+  "        die('не определить платформу (%s)' % exc)"
+  '    SWEEP_SKIP_BUILD_PROBE="${SWEEP_SKIP_BUILD_PROBE:-}"'
+  '    :')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -1511,7 +1679,8 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                34 35 36 37 38 39 40 41 42 43 44 45
                46 47 48 49 50 51 52 53 54 55 56
                1 3 5 6 10 12 57 58 59 60 61 62
-               63 64 65 66)
+               63 64 65 66
+               9 67 68 69 70 71 72)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -1565,7 +1734,7 @@ MUT_CAUSE=(x
   'SWEEP DONE'
   'копия не сходится с пином'
   'список версий пуст'
-  'не проходит разбор'
+  'нет файла'
   'пин сходится'
   'ОБХОД_ОБОРВАН'
   'ФОРМА_СТРАЖА_РАЗОШЛАСЬ'
@@ -1577,7 +1746,14 @@ MUT_CAUSE=(x
   'зонд пути сборки не сошёлся (код 2)'
   'стенд корпусных инструментов не сошёлся (код 2)'
   'стенд корпусных инструментов не сошёлся (код 6)'
-  'ФОРМА_СНЯТИЯ_РАЗОШЛАСЬ')
+  'ФОРМА_СНЯТИЯ_РАЗОШЛАСЬ'
+  'КЛАСС_НЕ_ТОТ'
+  'стенд корпусных инструментов не сошёлся (код 3)'
+  'КЛАСС_НЕ_НАЗВАН'
+  'КЛАСС_НЕ_ТОТ'
+  'КЛАСС_НЕ_ТОТ'
+  'ФОРМА_РУЧКИ_РАЗОШЛАСЬ'
+  'SWEEP DONE')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь
@@ -1611,7 +1787,7 @@ check_mut_tables() {
 }
 
 if [[ "${1:-}" == "--table-check" ]]; then
-  check_mut_tables || exit 1
+  check_mut_tables || exit 4
   say "corpus-tools-bench: таблицы мутаций согласованы ($EXPECTED_MUTATIONS)"
   __DONE=1; exit 0
 fi
@@ -1677,12 +1853,12 @@ self_check() {
 }
 
 if [[ "${1:-}" == "--self-check" ]]; then
-  check_mut_tables || exit 1
+  check_mut_tables || exit 4
   self_check || exit 1
   __DONE=1; exit 0
 fi
 
-check_mut_tables || exit 1
+check_mut_tables || exit 4
 K=$(mktemp -d "$ROOT/kit.XXXXXX"); use_corpus "$(mktemp -d "$ROOT/corp.XXXXXX")"
 mk_kit "$K"; mk_corpus "$C"
 # Версия оболочки -- часть условий прогона: текст фатальной ошибки подстановки
