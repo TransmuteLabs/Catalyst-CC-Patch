@@ -2940,6 +2940,56 @@ step('22 judge consulted before a subagent dispatch', () => {
       // surrogate pair -- a replacement character standing where an emoji
       // was, or a parse error, depending on whose JSON reads it next.
       'let __disp=__dtr?__sur(__dsrc.slice(0,__dmax)):__dsrc;' +
+      // Работа, о которой судят, лежит в ФАЙЛЕ, а диспатч несёт указатель на
+      // него. Замер 2026-08-29 (Catalyst-Judge-Eval, 500 записей): 381 диспатч
+      // из 500 называет .md-файл, которого проба не видит, и на лучшем промте
+      // ВСЕ ошибки четырёх моделей, кроме двух, — этот класс: единогласная
+      // отмена соразмерного вызова, потому что факт, делавший его
+      // соразмерным, стоял в брифе.
+      //
+      // Потолок объявляется дважды: сколько файлов взято (attach_files) и
+      // сколько знаков от каждого (attach_chars). Умолчание ядра — НОЛЬ:
+      // ядро общее с наблюдателем флота, у которого в полезной нагрузке путей
+      // нет вовсе, а настройка ядром не переносится — потребитель называется
+      // поимённо в probes.toml.
+      //
+      // Расширение — белым списком (.md/.txt): нагрузка уходит стороннему
+      // провайдеру, и «прочитать любой названный путь» открыло бы дорогу
+      // ключам и конфигам. Список приложенного пишется в запись, чтобы
+      // человек видел, ЧТО ушло.
+      'let __atn=__num("attach_files",__cfg.attach_files,0,0);' +
+      'let __atc=__num("attach_chars",__cfg.attach_chars,40000,0);' +
+      'let __att=[];' +
+      'if(__atn>0&&__atc>0){let __sn={},__mm,' +
+        '__rx=/(~|\\/)[A-Za-z0-9._~\\/-]*\\.(?:md|txt)(?![A-Za-z0-9])/g;' +
+        'while((__mm=__rx.exec(__dsrc))&&__att.length<__atn){' +
+          'let __f=__mm[0];' +
+          'if(__f.charCodeAt(0)===126)__f=(process.env.HOME||"")+__f.slice(1);' +
+          'if(__f.charCodeAt(0)!==47||__sn[__f])continue;__sn[__f]=1;' +
+          // Читаем СВОИМ читателем, не __rdj: тот кладёт EACCES и в __degb, а
+          // это список дефектов САМОГО СУЖДЕНИЯ — недоступное приложение
+          // отменяло бы вызов, хотя судья и без файла выносит вердикт по
+          // диспатчу. Отсутствующий файл (ENOENT) молчит вовсе: путь в тексте
+          // бывает и образцом («<клон>/REPORT.md»), и убранным временным
+          // брифом.
+          'let __bd=null;' +
+          'try{__bd=await __fs.readFile(__f,"utf8")}' +
+            'catch(__ae){if(__pcode(__ae)!==0)' +
+              '__deg.push("attach-unreadable:"+__f+" ("+String(__ae?.code||"ERR")+")");' +
+            'continue}' +
+          'if(!__bd||!__bd.trim())continue;' +
+          'let __bc=__bd.length>__atc;' +
+          '__att.push({f:__f,n:__bd.length,c:__bc,' +
+            't:__bc?__sur(__bd.slice(0,__atc)):__bd})}}' +
+      // Заголовок на КАЖДЫЙ файл, и усечение объявлено в нём же, а не хвостом:
+      // подрезанный нами бриф, кончающийся на середине пункта, читается как
+      // НЕЗАВЕРШЁННЫЙ БРИФ ВЫЗЫВАЮЩЕГО — это подлог происхождения, и он
+      // производит отмену там, где отменять нечего.
+      'for(let __a of __att)__disp+="\\n\\n=== \\u0424\\u0410\\u0419\\u041b "+__a.f+' +
+        '(__a.c?" \\u2014 \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d ' +
+        '\\u043d\\u0430\\u043c\\u0438: \\u043f\\u043e\\u043a\\u0430\\u0437\\u0430\\u043d\\u043e "' +
+        '+__atc+" \\u0438\\u0437 "+__a.n+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432":"")+' +
+        '" ===\\n"+__a.t;' +
       // The declaration sits in the block's HEADER, not its tail: the tail is
       // the caller's text, and a brief ending in such a line would declare
       // itself truncated BY US and beg for leniency the judge is bound by its

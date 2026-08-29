@@ -701,7 +701,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 117 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 118 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -2394,7 +2394,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 117 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 118 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -3474,9 +3474,12 @@ def _every_cut_is_named(d):
     The set below is the whole inventory. Two entries cut TEXT and both append
     a notice as they do it -- `__dcut` (the list) and `__clip` (the string),
     which is also where the dispatch head and the transcript head/tail land.
+    A third, `0,__atc`, cuts an attachment body and declares the cut in that
+    file's own header, so the reader never mistakes our trim for the caller's.
     The rest do not lose meaning: a BOM byte, a lone surrogate half, the JSON
     quote pair, the array copy, the fleet ring, the eight-character key suffix
-    of a record name, and the prune victim list.
+    of a record name, the leading `~` of an attachment path, and the prune
+    victim list.
 
     Re-run by hand after changing the injected code:
       python3 - <<'EOF'  (the same walk, printing Counter(args))
@@ -3543,15 +3546,51 @@ def _every_cut_is_named(d):
         (b'-8', False): 1,                        # key suffix inside the record name
         (b'-__tl', True): 1,                      # declared middle-cut, tail half
         (b'0,-1', False): 1,                      # inside __sur itself
+        (b'0,__atc', True): 1,                    # attachment body, declared in its header
         (b'0,__dmax', True): 1,                   # dispatch head, declared on the label
         (b'0,__h', True): 1,                      # declared middle-cut, head half
         (b'0,__k', True): 1,                      # __clip: characters
         (b'0,__k', False): 1,                     # __dcut: a list, no seam
         (b'0,__ls.length-__jkeep+1', False): 1,   # prune victims, not text
-        (b'1', False): 4,                         # three BOM strips, one low surrogate
+        (b'1', False): 5,                         # three BOM strips, one low surrogate,
+                                                  # one leading `~` of an attachment path
         (b'1,-1', False): 1,                      # JSON.stringify quote pair
         (b'16,-1', False): 1,                     # `[dispatch-class:` and `]` off a matched marker
     }
+
+def _judge_attaches_named_files(d):
+    """The judge reads the brief the dispatch points at, and that read cannot
+    itself cancel the dispatch.
+
+    Most dispatches do not carry the task, they name a file that does. Without
+    this the judge decides the decision boundary from the caller's retelling --
+    exactly the thing the criterion forbids. Five properties, each one a defect
+    if it goes:
+
+      * off unless a probe asks for it -- both knobs default to zero and the
+        whole block sits behind `__atn>0&&__atc>0`, so the watcher (which shares
+        this core) never touches the disk for a file it has no use for;
+      * only `.md`/`.txt`, and the extension must end the token, so a path that
+        merely CONTAINS `.md` earlier does not qualify;
+      * an unreadable file is a note in `__deg`, never in the judgement-defect
+        list -- a stale path in a dispatch must not become a cancellation, and a
+        file simply absent (`__pcode`) is silent;
+      * the trim is declared with BOTH numbers in the file's own header, so the
+        reader can tell our cut from the caller's;
+      * the cut goes through `__sur` -- a body cut in the middle of a surrogate
+        pair would otherwise leave a lone half in the prompt.
+    """
+    return (bool(re.search(rb'__atn=__num\("attach_files",__cfg\.attach_files,0,0\)', d))
+            and bool(re.search(rb'__atc=__num\("attach_chars",__cfg\.attach_chars,\d+,0\)', d))
+            and bool(re.search(rb'if\(__atn>0&&__atc>0\)\{', d))
+            and bool(re.search(rb'\\\.\(\?:md\|txt\)\(\?!\[A-Za-z0-9\]\)', d))
+            and bool(re.search(rb'__att\.length<__atn', d))
+            and bool(re.search(rb'catch\(__ae\)\{if\(__pcode\(__ae\)!==0\)'
+                               rb'__deg\.push\("attach-unreadable:', d))
+            and not re.search(rb'__degb\.push\("attach', d)
+            and bool(re.search(rb't:__bc\?__sur\(__bd\.slice\(0,__atc\)\):__bd', d))
+            and bool(re.search(rb'__a\.c\?"[^"]*"\+__atc\+"[^"]*"\+__a\.n\+"', d)))
+
 
 _probe_full = d
 _probe_dup = re.findall(rb'/\*__ccCore0\*/[\s\S]*?/\*__ccCore1\*/', d)
@@ -3905,6 +3944,7 @@ checks = {
                                               rb'\{__s\.nextAt=__s\.last\+__cd;return "cooldown"\}', d))
                                           and len(re.findall(rb'last:0,start:', d)) == 0,
     'every cut in the probe is named': _every_cut_is_named(d),
+    'judge attaches the brief the dispatch names': _judge_attaches_named_files(d),
     'watcher names the next possible moment': bool(re.search(
                                               rb'pre:\(\)=>\{let __s=globalThis\.__ccWatch;'
                                               rb'return __s&&__s\.nextAt>globalThis\.__ccMono\(\)\?"not-yet":null\}', d))
@@ -4768,7 +4808,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 117
+EXPECTED_CHECKS = 118
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -5121,7 +5161,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 58 scenarios through a throwaway probes home —
+# and drives probe-bench's 63 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #

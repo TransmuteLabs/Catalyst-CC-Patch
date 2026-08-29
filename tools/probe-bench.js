@@ -827,6 +827,54 @@ const scenarios = [
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', requestMaxTokens: 8000,
                 degExact: ['bad-setting:max_tokens=-5 (need >=1), using 8000'] } },
+  // Судья решает, осталось ли внутри задачи решение. Замер 2026-08-29
+  // (Catalyst-Judge-Eval, 500 записей): 381 диспатч называет .md-файл, которого
+  // проба не видела, и на лучшем промте ВСЕ ошибки четырёх моделей, кроме двух,
+  // были этим классом. Файл, названный диспатчем, читается и кладётся следом.
+  { name: 'attach-brief-read', config: { attach_files: 2, attach_chars: 30000 },
+    attachFiles: { 'brief.md': 'ДЕСЯТЬ ПУНКТОВ РАБОТЫ, каждый с file:line.\n' },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] исполни {{DIR}}/brief.md',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchIncludes: 'ДЕСЯТЬ ПУНКТОВ РАБОТЫ, каждый с file:line.' } },
+  // Умолчание ядра — ноль: ядро общее с наблюдателем флота, и настройка
+  // включается ПОИМЁННЫМ потребителем в probes.toml. Без этого сценария
+  // «включено всегда» прошло бы незамеченным.
+  { name: 'attach-off-by-default',
+    attachFiles: { 'brief.md': 'СОДЕРЖИМОЕ КОТОРОГО БЫТЬ НЕ ДОЛЖНО\n' },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] исполни {{DIR}}/brief.md',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchExcludes: 'СОДЕРЖИМОЕ КОТОРОГО БЫТЬ НЕ ДОЛЖНО' } },
+  // Наш обрыв объявляется в ЗАГОЛОВКЕ файла и НАЗЫВАЕТ себя нашим: хвост,
+  // оборванный нами, читается моделью как незаконченный бриф вызывающего —
+  // это подлог происхождения, производящий отмену там, где отменять нечего.
+  { name: 'attach-trimmed-declared', config: { attach_files: 1, attach_chars: 40 },
+    attachFiles: { 'brief.md': 'я'.repeat(300) },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] исполни {{DIR}}/brief.md',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchIncludes: 'подрезан нами: показано 40 из 300 знаков' } },
+  // Белый список расширений: нагрузка уходит стороннему провайдеру, и
+  // «читать любой названный путь» открыло бы дорогу ключам и конфигам.
+  { name: 'attach-extension-whitelist', config: { attach_files: 2, attach_chars: 30000 },
+    attachFiles: { 'secret.key': 'КЛЮЧ КОТОРЫЙ НЕ ДОЛЖЕН УЙТИ\n',
+                   'notes.txt': 'ТЕКСТОВЫЙ ФАЙЛ ЧИТАЕТСЯ\n' },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] ключ {{DIR}}/secret.key, заметки {{DIR}}/notes.txt',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchIncludes: 'ТЕКСТОВЫЙ ФАЙЛ ЧИТАЕТСЯ',
+                dispatchExcludes: 'КЛЮЧ КОТОРЫЙ НЕ ДОЛЖЕН УЙТИ' } },
+  // Путь в тексте бывает и образцом («<клон>/REPORT.md»), и убранным временным
+  // брифом. Отсутствие файла — обычное состояние, а не деградация: запись в
+  // __degb отменяла бы вызов из-за того, что бриф уже убрали.
+  { name: 'attach-missing-is-silent', config: { attach_files: 2, attach_chars: 30000 },
+    attachFiles: { 'brief.md': 'ЭТОТ ЕСТЬ\n' },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] исполни {{DIR}}/brief.md, '
+      + 'отчёт в {{DIR}}/report-которого-нет.md',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchIncludes: 'ЭТОТ ЕСТЬ', degExact: null } },
 ];
 
 // The same invariant the check registry carries, for the same reason it was
@@ -836,7 +884,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 58;
+const EXPECTED_SCENARIOS = 63;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1267,8 +1315,26 @@ async function runScenario(probe, scenario) {
     if (scenario.fleet) globalThis.__ccFleet = scenario.fleet();
     if (scenario.watchState) globalThis.__ccWatch = scenario.watchState();
 
-    const stubPrompt = scenario.dispatchPrompt
+    // Файлы, на которые диспатч только УКАЗЫВАЕТ. Пишутся в свой каталог под
+    // корнем сценария, а путь подставляется в текст диспатча вместо {{DIR}}:
+    // абсолютный путь известен лишь в прогоне, и захардкодить его в таблице
+    // нельзя.
+    let attachDir = null;
+    if (scenario.attachFiles) {
+      attachDir = path.join(tempDir, 'attach-' + scenario.name);
+      fs.mkdirSync(attachDir, { recursive: true });
+      for (const [name, body] of Object.entries(scenario.attachFiles)) {
+        fs.writeFileSync(path.join(attachDir, name), body);
+      }
+    }
+    let stubPrompt = scenario.dispatchPrompt
       ?? ('[' + 'dispatch-class' + ':1e]' + ' сделай X');
+    if (stubPrompt.includes('{{DIR}}')) {
+      // Подстановка обязана состояться: сценарий с {{DIR}} и без attachFiles
+      // отправил бы модели буквальную скобку и «прошёл» бы, ничего не измерив.
+      if (!attachDir) throw new Error(`сценарий ${scenario.name}: {{DIR}} без attachFiles`);
+      stubPrompt = stubPrompt.split('{{DIR}}').join(attachDir);
+    }
     const tool = { name: scenario.toolName || 'Agent' };
     const input = {
       subagent_type: scenario.subagentType ?? 'glm-executor',
@@ -1362,14 +1428,35 @@ async function runScenario(probe, scenario) {
     const entry = journal.entry ? sanitizeValue(journal.entry, tempDir) : null;
     if (!errorText && journal.error) errorText = sanitizeText(journal.error, tempDir);
 
-    const cutAt = sentUser.lastIndexOf('\n\n=== ');
-    const headEnd = cutAt < 0 ? -1 : sentUser.indexOf('\n', cutAt + 2);
     // carveBlock reads the image as latin1, so the carve's own literals that
     // are non-ASCII by letter arrive as raw UTF-8 bytes. The inverse
     // conversion is done HERE, not in the core: in the live image the string
     // lies correctly, and adapting working code to a bench artifact is out of
     // the question.
     const undoLatin1 = (t) => Buffer.from(t, 'latin1').toString('utf8');
+    // Зубы у этого якоря -- сценарий `attach-trimmed-declared`: он ищет НАШ
+    // заголовок обрезки в нагрузке, а тот стоит ВЫШЕ тела файла. Ослепление
+    // строки-фильтра ниже (`if (false) continue;`) красит его -- измерено,
+    // прогон отдал ненулевой код. Поэтому отдельной мутации у якоря нет:
+    // мутация обязана ОСЛЕПИТЬ отравленную копию целиком, а здесь она сама
+    // красит соседний сценарий, и пара «отрава+мутация» зелёной не станет.
+    // Здесь стоял lastIndexOf('\n\n=== '): последним заголовком нагрузки
+    // всегда был заголовок диспатча. С приложенными файлами за ним идут ИХ
+    // заголовки, и lastIndexOf отдавал ТЕЛО ПОСЛЕДНЕГО ФАЙЛА вместо всей
+    // нагрузки. Тихо: dispatchExcludes у белого списка расширений смотрел бы
+    // тогда только в тело файла и прошёл бы зелёным, унеси мы ключ в голову
+    // диспатча. Заголовок диспатча — ПОСЛЕДНИЙ из тех, что не про файл.
+    let cutAt = -1;
+    for (let i = sentUser.indexOf('\n\n=== '); i >= 0;
+         i = sentUser.indexOf('\n\n=== ', i + 1)) {
+      const lineEnd = sentUser.indexOf('\n', i + 2);
+      if (lineEnd < 0) break;
+      // Заголовок файла приходит СВОИМИ знаками: он собран из \uXXXX-экранированных
+      // литералов патча, а не из сырых байт карва, поэтому undoLatin1 его бы испортил.
+      if (sentUser.slice(i + 2, lineEnd).startsWith('=== ФАЙЛ ')) continue;
+      cutAt = i;
+    }
+    const headEnd = cutAt < 0 ? -1 : sentUser.indexOf('\n', cutAt + 2);
     const sentHeader = cutAt < 0 ? '' : undoLatin1(sentUser.slice(cutAt + 2, headEnd));
     const sentDispatch = headEnd < 0 ? '' : sentUser.slice(headEnd + 1);
 
@@ -1517,7 +1604,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 58;', to: 'EXPECTED_SCENARIOS = 57;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 63;', to: 'EXPECTED_SCENARIOS = 62;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },
