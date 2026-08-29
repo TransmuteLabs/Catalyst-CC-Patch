@@ -3474,7 +3474,7 @@ def _every_cut_is_named(d):
     The set below is the whole inventory. Two entries cut TEXT and both append
     a notice as they do it -- `__dcut` (the list) and `__clip` (the string),
     which is also where the dispatch head and the transcript head/tail land.
-    A third, `0,__atc`, cuts an attachment body and declares the cut in that
+    A third, `0,__tk`, cuts an attachment body and declares the cut in that
     file's own header, so the reader never mistakes our trim for the caller's.
     The rest do not lose meaning: a BOM byte, a lone surrogate half, the JSON
     quote pair, the array copy, the fleet ring, the eight-character key suffix
@@ -3546,7 +3546,7 @@ def _every_cut_is_named(d):
         (b'-8', False): 1,                        # key suffix inside the record name
         (b'-__tl', True): 1,                      # declared middle-cut, tail half
         (b'0,-1', False): 1,                      # inside __sur itself
-        (b'0,__atc', True): 1,                    # attachment body, declared in its header
+        (b'0,__tk', True): 1,                     # attachment body, declared in its header
         (b'0,__dmax', True): 1,                   # dispatch head, declared on the label
         (b'0,__h', True): 1,                      # declared middle-cut, head half
         (b'0,__k', True): 1,                      # __clip: characters
@@ -3564,12 +3564,17 @@ def _judge_attaches_named_files(d):
 
     Most dispatches do not carry the task, they name a file that does. Without
     this the judge decides the decision boundary from the caller's retelling --
-    exactly the thing the criterion forbids. Five properties, each one a defect
+    exactly the thing the criterion forbids. Six properties, each one a defect
     if it goes:
 
-      * off unless a probe asks for it -- both knobs default to zero and the
-        whole block sits behind `__atn>0&&__atc>0`, so the watcher (which shares
-        this core) never touches the disk for a file it has no use for;
+      * off unless a probe asks for it -- the file count defaults to zero and
+        the whole block sits behind `__atn>0&&__atc>0&&__atb>0`, so the watcher
+        (which shares this core) never touches the disk for a file it has no
+        use for;
+      * the per-file cap does not bound the payload on its own -- N files times
+        the per-file cap is the real size, so a total budget (`__atb`) is spent
+        down file by file and the last one in is TRIMMED to what is left rather
+        than dropped;
       * only `.md`/`.txt`, and the extension must end the token, so a path that
         merely CONTAINS `.md` earlier does not qualify;
       * an unreadable file is a note in `__deg`, never in the judgement-defect
@@ -3582,14 +3587,18 @@ def _judge_attaches_named_files(d):
     """
     return (bool(re.search(rb'__atn=__num\("attach_files",__cfg\.attach_files,0,0\)', d))
             and bool(re.search(rb'__atc=__num\("attach_chars",__cfg\.attach_chars,\d+,0\)', d))
-            and bool(re.search(rb'if\(__atn>0&&__atc>0\)\{', d))
+            and bool(re.search(rb'__atb=__num\("attach_total",__cfg\.attach_total,\d+,0\)', d))
+            and bool(re.search(rb'if\(__atn>0&&__atc>0&&__atb>0\)\{', d))
+            and bool(re.search(rb'__rm=__atb-__sp;if\(__rm<=0\)break', d))
+            and bool(re.search(rb'__tk=__atc<__rm\?__atc:__rm', d))
+            and bool(re.search(rb'__kn=__bc\?__tk:__bd\.length;__sp\+=__kn', d))
             and bool(re.search(rb'\\\.\(\?:md\|txt\)\(\?!\[A-Za-z0-9\]\)', d))
             and bool(re.search(rb'__att\.length<__atn', d))
             and bool(re.search(rb'catch\(__ae\)\{if\(__pcode\(__ae\)!==0\)'
                                rb'__deg\.push\("attach-unreadable:', d))
             and not re.search(rb'__degb\.push\("attach', d)
-            and bool(re.search(rb't:__bc\?__sur\(__bd\.slice\(0,__atc\)\):__bd', d))
-            and bool(re.search(rb'__a\.c\?"[^"]*"\+__atc\+"[^"]*"\+__a\.n\+"', d)))
+            and bool(re.search(rb't:__bc\?__sur\(__bd\.slice\(0,__tk\)\):__bd', d))
+            and bool(re.search(rb'__a\.c\?"[^"]*"\+__a\.k\+"[^"]*"\+__a\.n\+"', d)))
 
 
 _probe_full = d
@@ -5161,7 +5170,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 63 scenarios through a throwaway probes home —
+# and drives probe-bench's 66 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #

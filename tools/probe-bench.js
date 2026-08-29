@@ -875,6 +875,37 @@ const scenarios = [
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok',
                 dispatchIncludes: 'ЭТОТ ЕСТЬ', degExact: null } },
+  // Потолок на файл не ограничивает нагрузку: N файлов по attach_chars — это
+  // произведение. Суммарный бюджет тратится по файлам, и ПОСЛЕДНИЙ вошедший
+  // подрезается до остатка, а не выбрасывается: половина брифа отвечает на
+  // больше вопросов, чем его отсутствие.
+  { name: 'attach-total-trims-last',
+    config: { attach_files: 3, attach_chars: 100, attach_total: 150 },
+    attachFiles: { 'a.md': 'а'.repeat(100), 'b.md': 'б'.repeat(100) },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] первый {{DIR}}/a.md, второй {{DIR}}/b.md',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchIncludes: 'подрезан нами: показано 50 из 100 знаков' } },
+  // Исчерпанный бюджет ОСТАНАВЛИВАЕТ обход, а не подрезает в ноль: файл,
+  // от которого не осталось ни знака, не должен появляться заголовком с
+  // пустым телом — читатель прочтёт его как пустой бриф.
+  { name: 'attach-total-stops-when-spent',
+    config: { attach_files: 3, attach_chars: 100, attach_total: 100 },
+    attachFiles: { 'a.md': 'а'.repeat(100), 'b.md': 'ВТОРОЙ ФАЙЛ НЕ ВЛЕЗАЕТ\n' },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] первый {{DIR}}/a.md, второй {{DIR}}/b.md',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchExcludes: 'ВТОРОЙ ФАЙЛ НЕ ВЛЕЗАЕТ' } },
+  // Нулевой суммарный бюджет выключает блок целиком — тем же ключом, что и
+  // нулевое число файлов. Без сценария «ноль читается как безлимит» прошло бы
+  // молча, и наблюдатель флота, делящий это ядро, полез бы на диск.
+  { name: 'attach-total-zero-is-off',
+    config: { attach_files: 2, attach_chars: 30000, attach_total: 0 },
+    attachFiles: { 'brief.md': 'ПРИ НУЛЕВОМ БЮДЖЕТЕ ЭТОГО БЫТЬ НЕ ДОЛЖНО\n' },
+    dispatchPrompt: '[' + 'dispatch-class' + ':1e] исполни {{DIR}}/brief.md',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok',
+                dispatchExcludes: 'ПРИ НУЛЕВОМ БЮДЖЕТЕ ЭТОГО БЫТЬ НЕ ДОЛЖНО' } },
 ];
 
 // The same invariant the check registry carries, for the same reason it was
@@ -884,7 +915,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 63;
+const EXPECTED_SCENARIOS = 66;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1604,7 +1635,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 63;', to: 'EXPECTED_SCENARIOS = 62;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 66;', to: 'EXPECTED_SCENARIOS = 65;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },
