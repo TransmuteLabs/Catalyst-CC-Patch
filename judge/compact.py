@@ -102,7 +102,10 @@ def main():
                 age = time.time() - os.stat(t).st_mtime
             except FileNotFoundError:
                 continue
-            if age < TMP_HELD_SECONDS:
+            # Граница: mtime в будущем (дальше +60 c) -- не живой писатель, а
+            # испорченная метка (шаг часов, копия с машины вперёд); такой
+            # обломок протухает наравне со старым. Порог общий с tools/sweep.sh.
+            if age < TMP_HELD_SECONDS and before.st_mtime <= time.time() + 60:
                 tmp_held += 1
                 continue               # живой писатель, файл свежий
         if a.dry_run:

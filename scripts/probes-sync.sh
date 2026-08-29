@@ -9,10 +9,12 @@
 #
 # Exit codes (a subset of the kit-wide table -- see the claude-patch-all.sh
 # header): 0 -- in sync (or the copy went through); 1 -- divergences found in
-# --diff, or files were missed in a copy mode; 2 -- unknown mode; 5 -- nothing
-# to measure: this machine has no deployment at all. The return code is part of
-# the report: --diff used to print "расходится: X" and exit 0, so a gate hung on
-# it stayed green (round 18, F-10).
+# --diff, or files were missed in a copy mode; 2 -- unknown mode; 3 -- another
+# live writer holds the sync lock (flock, lock directory, or it has just won
+# the takeover race), retry later; 5 -- nothing to measure: this machine has no
+# deployment at all; 6 -- the lock machinery is broken: the lock file itself
+# cannot be opened. The return code is part of the report: --diff used to print
+# "расходится: X" and exit 0, so a gate hung on it stayed green (round 18, F-10).
 #
 # «Не раскатан» и «расходится» -- РАЗНЫЕ классы, и смешивать их нельзя. Чистая
 # машина, где дома ещё нет, обязана получить объявленный пропуск (5), иначе
@@ -119,9 +121,14 @@ cleanup_staged() {
 # того, как у него появился трап. Каждый ОБЪЯВЛЕННЫЙ выход ставит __DONE=1;
 # обрыв доезжает сюда с нулём и не объявленным -- и краснит.
 __DONE=0
+__SYNC_LOCKDIR_OWNED=0
 __exit_guard() {
   __rc=$?
   cleanup_staged
+  if [[ "${__SYNC_LOCKDIR_OWNED:-0}" == 1 ]]; then
+    rm -rf "$SYNC_LOCKDIR"
+    __SYNC_LOCKDIR_OWNED=0
+  fi
   if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
     echo "ОТКАЗ: раскатка оборвалась, не дойдя до конца (ошибка оболочки выше)" >&2
     exit 1
@@ -157,6 +164,136 @@ stage_one() {  # $1 canon, $2 home, $3 display name
 
 for f in "${PROBE_FILES[@]}";  do add_pair "$ROOT/probes/$f" "$PROBES_HOME/$f" "probes/$f"; done
 for f in "${TOOL_FILES[@]}";   do add_pair "$ROOT/judge/$f"  "$TOOLS_HOME/$f"  "judge/$f";  done
+
+SYNC_LOCK="${PROBES_SYNC_LOCK:-$CLAUDE_HOME_DIR/probes-sync.lock}"
+SYNC_LOCKDIR="$SYNC_LOCK.d"
+acquire_sync_lock() {
+  local __held=0 __rc=0 __owner __confirm __opid __ostart __stale_dir __cpid
+  mkdir -p "$(dirname "$SYNC_LOCK")"
+  exec 7>"$SYNC_LOCK" || { echo "ОТКАЗ: не открыть замок синхронизации $SYNC_LOCK" >&2; exit 6; }
+  if command -v flock >/dev/null 2>&1; then
+    if flock -n 7; then
+      __held=1
+    else
+      __rc=$?
+      if [[ $__rc -eq 1 ]]; then
+        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCK (держатель: lsof $SYNC_LOCK)" >&2
+        exit 3
+      fi
+      echo "NOTE: flock(1) не сработал (rc=$__rc) -- пробую perl" >&2
+    fi
+  fi
+  if [[ $__held -eq 0 ]]; then
+    if perl -e 'use Fcntl ":flock"; open(my $fh, ">&=7") or exit 2;
+                exit(flock($fh, LOCK_EX|LOCK_NB) ? 0 : 1);'; then
+      __held=1
+    else
+      __rc=$?
+      if [[ $__rc -eq 1 ]]; then
+        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCK (держатель: lsof $SYNC_LOCK)" >&2
+        exit 3
+      fi
+      echo "NOTE: perl flock(2) не сработал (rc=$__rc) -- беру каталог-замок" >&2
+    fi
+  fi
+  if [[ $__held -eq 0 ]]; then
+    if ! mkdir "$SYNC_LOCKDIR" 2>/dev/null; then
+      __owner=''
+      for _ in 1 2 3 4 5; do
+        __owner=$(cat "$SYNC_LOCKDIR/pid" 2>/dev/null || true)
+        [[ -n "$__owner" ]] && break
+        sleep 0.2
+      done
+      # Владелец записывается парой: pid + время старта процесса
+      # (LC_ALL=C ps -o lstart=). Живость по одному kill -0 верит
+      # переиспользованному номеру: держатель мёртв, номер достался чужому
+      # процессу -- и замок стоял бы вечно. pid без метки (файл прежней
+      # редакции) живость не опровергает: тогда решает один kill -0.
+      __opid="${__owner%%$'\t'*}"
+      # Строка БЕЗ таба -- формат прежней редакции: метки нет, и подстановка
+      # вернула бы всю строку; пустая метка возвращает решение kill -0.
+      __ostart="${__owner#*$'\t'}"
+      [[ "$__ostart" == "$__owner" ]] && __ostart=''
+      __stale_dir=1
+      if [[ -n "$__opid" ]] && kill -0 "$__opid" 2>/dev/null; then
+        if [[ -z "$__ostart" ]] \
+           || [[ "$(LC_ALL=C ps -o lstart= -p "$__opid" 2>/dev/null)" == "$__ostart" ]]; then
+          __stale_dir=0
+        fi
+      fi
+      if (( __stale_dir )); then
+        # За номером никого нет -- замок протух, берём его.
+        rm -rf "$SYNC_LOCKDIR"
+        mkdir "$SYNC_LOCKDIR" 2>/dev/null || {
+          echo "ОТКАЗ: гонка за каталог-замок $SYNC_LOCKDIR -- его только что взял другой живой писатель" >&2
+          exit 3; }
+      else
+        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCKDIR (pid $__opid)" >&2
+        exit 3
+      fi
+    fi
+    printf '%s\t%s\n' "$$" "$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null)" > "$SYNC_LOCKDIR/pid"
+    sleep 0.3
+    __confirm=$(cat "$SYNC_LOCKDIR/pid" 2>/dev/null || true)
+    __cpid="${__confirm%%$'\t'*}"
+    if [[ "$__cpid" != "$$" ]]; then
+      echo "ОТКАЗ: каталог-замок синхронизации перехвачен pid ${__cpid:-неизвестен}" >&2
+      exit 3
+    fi
+    __SYNC_LOCKDIR_OWNED=1
+  fi
+}
+
+for_each_sync_stage() {  # $1 -- функция-потребитель пути
+  local __fn="$1" __i __stage
+  # Обходятся ОБЕ стороны независимо от режима текущего прогона:
+  # --from-home кладёт стадии на КАНОННУЮ сторону (dst="$A",
+  # дерево репозитория), и обход одной домашней стороны
+  # оставлял бы обломок в дереве навсегда -- прополка его не видит,
+  # --diff о нём молчит. Обломок остаётся от ПРОШЛОГО прогона,
+  # чей режим сегодняшнему прогону неизвестен.
+  for ((__i=0; __i<${#PAIR_A[@]}; __i++)); do
+    for __stage in "${PAIR_A[$__i]}.sync-new."*; do
+      [[ -e "$__stage" ]] || continue
+      "$__fn" "$__stage"
+    done
+  done
+  for ((__i=0; __i<${#PAIR_B[@]}; __i++)); do
+    for __stage in "${PAIR_B[$__i]}.sync-new."*; do
+      [[ -e "$__stage" ]] || continue
+      "$__fn" "$__stage"
+    done
+  done
+}
+
+prune_one_sync_stage() {
+  local __stage="$1" __pid="${1##*.sync-new.}"
+  case "$__pid" in ''|*[!0-9]*) return 0 ;; esac
+  if ! kill -0 "$__pid" 2>/dev/null; then
+    rm -f "$__stage" && echo "убрана осиротевшая стадия: $__stage"
+  fi
+}
+prune_sync_stages() { for_each_sync_stage prune_one_sync_stage; }
+report_one_sync_stage() {
+  local __pid="${1##*.sync-new.}"
+  # Стадия ЖИВОГО писателя -- не расхождение: параллельный --diff во время
+  # идущей синхронизации красил бы живого писателя и вешал ложный
+  # красный на гейт, стоящий на коде возврата. Проверка живости --
+  # та же, что у прополки.
+  case "$__pid" in ''|*[!0-9]*)
+    echo "расходится: стадия синхронизации осталась: $1"
+    DIFFERS=$((DIFFERS+1))
+    return 0
+    ;;
+  esac
+  if kill -0 "$__pid" 2>/dev/null; then
+    echo "(стадия живого писателя pid $__pid -- идёт, не расхождение)"
+  else
+    echo "расходится: стадия синхронизации осталась: $1"
+    DIFFERS=$((DIFFERS+1))
+  fi
+}
+report_sync_stages() { for_each_sync_stage report_one_sync_stage; }
 # The plist in the canon is a SAMPLE with path placeholders. Rolling it out
 # as-is means registering in launchd an agent pointing at /Users/YOUR-USER:
 # it would silently never run. We copy only one filled in for this machine.
@@ -173,10 +310,13 @@ fi
 
 __pairs=${#PAIR_A[@]}
 if [[ "$MODE" == "--diff" ]]; then
+  report_sync_stages
   for ((__i=0; __i<__pairs; __i++)); do
     diff_one "${PAIR_A[$__i]}" "${PAIR_B[$__i]}" "${PAIR_N[$__i]}"
   done
 else
+  acquire_sync_lock
+  prune_sync_stages
   for ((__i=0; __i<__pairs; __i++)); do
     stage_one "${PAIR_A[$__i]}" "${PAIR_B[$__i]}" "${PAIR_N[$__i]}"
   done

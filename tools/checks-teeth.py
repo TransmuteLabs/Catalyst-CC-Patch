@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -313,23 +314,31 @@ def main() -> int:
     del base
 
     bad = 0
-    with ProcessPoolExecutor(max_workers=max(1, opts.jobs)) as pool:
-        for mid, check, red, want in pool.map(run_one, jobs):
-            if check not in red:
-                bad += 1
-                print(f"checks-teeth: МУТАЦИЯ {mid}: ПРОШЛА МОЛЧА -- «{check}» осталась зелёной",
-                      flush=True)
-                if red:
-                    print("    покраснели вместо неё: " + ", ".join(red), flush=True)
-            elif sorted(red) != want:
-                bad += 1
-                others = [n for n in red if n not in want]
-                missing = [n for n in want if n not in red]
-                print(f"checks-teeth: МУТАЦИЯ {mid}: КРАСНЫЕ НЕ ТЕ, ЧТО ОБЪЯВЛЕНЫ -- "
-                      + ("лишние: " + ", ".join(others) + " " if others else "")
-                      + ("не покраснели: " + ", ".join(missing) if missing else ""), flush=True)
-            else:
-                print(f"checks-teeth: МУТАЦИЯ {mid}: RED «{'» + «'.join(want)}»", flush=True)
+    try:
+        with ProcessPoolExecutor(max_workers=max(1, opts.jobs)) as pool:
+            for mid, check, red, want in pool.map(run_one, jobs):
+                if check not in red:
+                    bad += 1
+                    print(f"checks-teeth: МУТАЦИЯ {mid}: ПРОШЛА МОЛЧА -- «{check}» осталась зелёной",
+                          flush=True)
+                    if red:
+                        print("    покраснели вместо неё: " + ", ".join(red), flush=True)
+                elif sorted(red) != want:
+                    bad += 1
+                    others = [n for n in red if n not in want]
+                    missing = [n for n in want if n not in red]
+                    print(f"checks-teeth: МУТАЦИЯ {mid}: КРАСНЫЕ НЕ ТЕ, ЧТО ОБЪЯВЛЕНЫ -- "
+                          + ("лишние: " + ", ".join(others) + " " if others else "")
+                          + ("не покраснели: " + ", ".join(missing) if missing else ""), flush=True)
+                else:
+                    print(f"checks-teeth: МУТАЦИЯ {mid}: RED «{'» + «'.join(want)}»", flush=True)
+    except BrokenProcessPool:
+        # Воркер умер (SIGKILL/OOM): мутации НЕ ИЗМЕРЕНЫ. Класс 2, а не 1 --
+        # по таблице инструмента 1 значит «мутация прошла молча», и свип
+        # объявлял бы красным китом сломанный прибор.
+        print("checks-teeth: НЕ МЕРИЛ -- воркер умер (SIGKILL/OOM), "
+              "мутации не измерены", file=sys.stderr, flush=True)
+        return 2
     print(f"checks-teeth: ИТОГ мутаций={len(jobs)} прошло молча/чужой дверью={bad}", flush=True)
     lock.close()                       # замок снимается ПОСЛЕ последнего замера
     return 0 if bad == 0 else 1

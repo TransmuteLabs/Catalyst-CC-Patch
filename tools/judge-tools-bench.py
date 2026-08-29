@@ -39,8 +39,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 35
-EXPECTED_MUTATIONS = 32
+EXPECTED_SCENARIOS = 36
+EXPECTED_MUTATIONS = 33
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -1036,6 +1036,30 @@ def scenario_35() -> None:
                 f"словарь соседней пробы разобран неверно: {rx2!r}/{act2!r}")
 
 
+def scenario_36() -> None:
+    """Метка из будущего -- испорченная метка, а не живой писатель.
+
+    tmp с ЖИВЫМ pid и mtime на сутки вперёд обязан сниматься: возраст по
+    времени старта писателя его не покрывает, а «pid жив» не доказывает
+    ничьё -- файл остаётся навсегда. Порог и правило общие с tools/sweep.sh.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        records = Path(raw)
+        live = os.getpid()               # заведомо живой номер
+        future = records / f"a.json.gz.tmp.{live}"
+        fresh = records / f"b.json.gz.tmp.{live}"
+        for item in (future, fresh):
+            item.write_text("x", encoding="utf-8")
+        ahead = time.time() + 24 * 3600
+        os.utime(future, (ahead, ahead))
+
+        counters, _ = run_compact(records)
+        require(future.exists() is False,
+                "сирота с меткой из БУДУЩЕГО снова неприкосновенна навсегда")
+        require(fresh.is_file(), "снят СВЕЖИЙ tmp живого писателя")
+        require_counters(counters, orphans=1, tmp_held=1)
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -1075,6 +1099,7 @@ def run_scenarios() -> int:
         (33, scenario_33),
         (34, scenario_34),
         (35, scenario_35),
+        (36, scenario_36),
     ]
     mismatches = 0
     for number, case in cases:
@@ -1379,10 +1404,12 @@ def mutation_m28(root: Path) -> None:
 
 # M29 -- зуб возрастного признака прополки tmp (круг 21, F-10).
 def mutation_m29(root: Path) -> None:
+    # Якорь -- условие хранения tmp ЖИВОГО pid целиком (с аркой метки из
+    # будущего, волна 25B): мутация снимает только АРМ ВОЗРАСТА.
     replace_once(
         root / "judge" / "compact.py",
-        "            if age < TMP_HELD_SECONDS:\n",
-        "            if True:\n",
+        "            if age < TMP_HELD_SECONDS and before.st_mtime <= time.time() + 60:\n",
+        "            if before.st_mtime <= time.time() + 60:\n",
         "M29",
     )
 
@@ -1409,6 +1436,15 @@ def mutation_m31(root: Path) -> None:
         '(?:(?!dirName:")[^\\n]){0,4000}?',
         '(?:(?!dirName:")[^\\n]){0,160}?',
         "M31",
+    )
+
+
+def mutation_m33(root: Path) -> None:
+    replace_once(
+        root / "judge" / "compact.py",
+        "            if age < TMP_HELD_SECONDS and before.st_mtime <= time.time() + 60:\n",
+        "            if age < TMP_HELD_SECONDS:\n",
+        "M33",
     )
 
 
@@ -1455,6 +1491,7 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M30", mutation_m30, 34, "после стадии не проверяется, уцелела ли точка восстановления"),
     ("M31", mutation_m31, 35, "словарь пробы живой формы не извлечён из образа"),
     ("M32", mutation_m32, 35, "скан пересёк границу чужой пробы"),
+    ("M33", mutation_m33, 36, "из БУДУЩЕГО"),
 ]
 
 

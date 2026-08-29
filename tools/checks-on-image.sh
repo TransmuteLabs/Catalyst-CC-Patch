@@ -72,7 +72,9 @@ __exit_guard() {
   fi
   exit "$__rc"
 }
-trap __exit_guard EXIT INT TERM
+trap __exit_guard EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 python3 - "$SCRIPT" "$BLOCK" <<'PY'
 import sys

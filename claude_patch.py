@@ -124,6 +124,15 @@ def binary_name() -> str:
     return "claude.exe" if is_windows() else "claude"
 
 
+VERSION = re.compile(r"^[0-9][0-9.]*$")
+
+
+def validate_version(version: str) -> str:
+    if not isinstance(version, str) or not VERSION.fullmatch(version):
+        die(f"invalid version {version!r}: expected digits and dots, starting with a digit")
+    return version
+
+
 def versions_dir() -> Path:
     """$XDG_DATA_HOME || ~/.local/share, then /claude/versions (all platforms)."""
     xdg = os.environ.get("XDG_DATA_HOME")
@@ -147,7 +156,10 @@ def http_json(url: str) -> dict:
 
 def latest_version() -> str:
     tags = http_json(f"https://registry.npmjs.org/-/package/{NPM_MAIN}/dist-tags")
-    return tags["latest"]
+    return validate_version(tags["latest"])
+
+
+INTEGRITY_ALGORITHMS = {"sha512", "sha256"}
 
 
 def _verify_tarball(blob: bytes, dist: dict, what: str) -> None:
@@ -167,6 +179,8 @@ def _verify_tarball(blob: bytes, dist: dict, what: str) -> None:
     integrity = dist.get("integrity")
     if integrity:
         alg, _, b64 = integrity.partition("-")
+        if alg not in INTEGRITY_ALGORITHMS:
+            die(f"{what}: dist.integrity algorithm {alg!r} is not allowed")
         if not b64:
             die(f"{what}: unreadable dist.integrity ({integrity!r})")
         try:
@@ -568,7 +582,7 @@ def main(argv: list[str]) -> None:
         # Install a PRISTINE build and stop: used by the combined tweakcc
         # pipeline, which applies the patches itself (and would conflict with
         # the byte-neutral ones this script normally applies).
-        version = argv[1] if len(argv) > 1 else latest_version()
+        version = validate_version(argv[1]) if len(argv) > 1 else latest_version()
         target = versions_dir() / version
         backup = target.with_name(target.name + ".orig")
         # When the requested version is ALREADY installed, `target` is the file
@@ -636,7 +650,7 @@ def main(argv: list[str]) -> None:
         return
 
     if argv and argv[0] == "--update":
-        version = argv[1] if len(argv) > 1 else latest_version()
+        version = validate_version(argv[1]) if len(argv) > 1 else latest_version()
         target = versions_dir() / version
         if target.is_file() and has_marker(target, ROUTING_MARKER):
             info(f"{version} is already installed and patched -> {target}")

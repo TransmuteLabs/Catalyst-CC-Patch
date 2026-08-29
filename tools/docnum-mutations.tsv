@@ -21,13 +21,13 @@
 # Каждое правило грамматики имеет здесь СВОЙ вход: украшения разметки (D5),
 # ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
 # явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
-D1	README.md	86 scenarios on a toy corpus	87 scenarios on a toy corpus	объявлено «86 scenarios» (владелец corpus-tools-bench)
-D2	README.md	corpus-tools-bench's 87 recorded mutations	corpus-tools-bench's 88 recorded mutations	объявлено «87 mutations» (владелец corpus-tools-bench)
+D1	README.md	102 scenarios on a toy corpus	103 scenarios on a toy corpus	объявлено «102 scenarios» (владелец corpus-tools-bench)
+D2	README.md	corpus-tools-bench's 106 recorded mutations	corpus-tools-bench's 107 recorded mutations	объявлено «106 mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 66;	const EXPECTED_SCENARIOS = 67;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
 D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 39	EXPECTED_MUTATION_COUNT = 39	не объявляет свою величину
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=87	EXPECTED_MUTATION_COUNT=87	не объявляет свою величину
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=106	EXPECTED_MUTATION_COUNT=106	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение

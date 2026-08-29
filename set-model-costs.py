@@ -181,6 +181,13 @@ def context_window(model_id, model, catalogued=None):
 
     Source order is narrowest-first: a hand-set input cap, then the window the
     proxy records for THIS route, then models.dev for the model in general.
+
+    Every fallback is cut from above by `routed` when the route is known: the
+    ladder only reaches a fallback when `routed - headroom` is already
+    nonpositive, and an uncapped `limit.input` there declared 116000 to a
+    route that carries 32000 (wave 26). The declared window may not exceed the
+    route's capacity on any fallback branch; the hand-set INPUT_CAP_OVERRIDES
+    return is a deliberate override, not a fallback.
     """
     cap = INPUT_CAP_OVERRIDES.get(model_id)
     if cap:
@@ -188,15 +195,27 @@ def context_window(model_id, model, catalogued=None):
     limit = (model or {}).get("limit") or {}
     routed = (catalogued or {}).get("context") or deployment_tag_window(model_id)
     if routed:
-        return routed - reply_headroom()
+        adjusted = routed - reply_headroom()
+        if adjusted > 0:
+            return adjusted
     explicit_input = limit.get("input")
     if explicit_input:
-        return explicit_input
+        if not routed or explicit_input <= routed:
+            return explicit_input
+        return routed
     total = CONTEXT_OVERRIDES.get(model_id) or limit.get("context")
-    return total - reply_headroom() if total else None
+    if total:
+        adjusted = total - reply_headroom()
+        if adjusted > 0:
+            if not routed or adjusted <= routed:
+                return adjusted
+            return routed
+    return None
 
 
 CACHE_PATH = os.path.expanduser("~/.cache/claude-model-costs/models-dev.json")
+CACHE_FUTURE_TOLERANCE_SECONDS = 60
+CACHE_MAX_AGE_SECONDS = 168 * 3600
 
 # Every model id ever seen on the proxy. The proxy's listing shows only what is
 # switched on at that instant, so this file is what makes the roster survive a
@@ -297,10 +316,18 @@ def fetch_catalogue(persist=True):
         # not fly past it as a raw traceback.
         if os.path.exists(CACHE_PATH):
             try:
-                age_h = (time.time() - os.path.getmtime(CACHE_PATH)) / 3600
-                print(f"  models.dev unreachable ({error}); using cache, {age_h:.0f}h old")
-                with open(CACHE_PATH, encoding="utf-8") as fh:
-                    return json.load(fh)
+                age_seconds = time.time() - os.path.getmtime(CACHE_PATH)
+                age_h = age_seconds / 3600
+                if (age_seconds < -CACHE_FUTURE_TOLERANCE_SECONDS
+                        or age_seconds > CACHE_MAX_AGE_SECONDS):
+                    print(f"  cache is outside its valid age window ({age_h:.0f}h); "
+                          "no fallback")
+                else:
+                    print(f"  models.dev unreachable ({error}); using cache, {age_h:.0f}h old")
+                    with open(CACHE_PATH, encoding="utf-8") as fh:
+                        catalogue = json.load(fh)
+                    fetch_catalogue.last_source = "cache"
+                    return catalogue
             except (OSError, ValueError) as cache_error:
                 print(f"  cache is unreadable too ({cache_error}); no fallback")
                 # Re-raise the ORIGINAL network error, exactly as when no
@@ -308,6 +335,7 @@ def fetch_catalogue(persist=True):
                 # the cache's JSONDecodeError instead and misreport the cause.
                 raise error from cache_error
         raise
+    fetch_catalogue.last_source = "network"
     if not persist:
         return catalogue
     # The cache is written via tmp+os.replace in the same directory (the
@@ -577,7 +605,10 @@ def main() -> int:
         # has to compact at the right point, and that is the defect that breaks
         # a session rather than the bill.
         window = context_window(model_id, found[0][1] if found else None, routed)
-        if window:
+        if window is not None and window <= 0:
+            print(f"  refusing nonpositive context window for {model_id}: "
+                  f"window={window}, reply_headroom={reply_headroom()}")
+        elif window:
             windows[model_id] = int(window)
         if not found:
             unpriced.append(model_id)
@@ -610,6 +641,22 @@ def main() -> int:
     if "--dry-run" in sys.argv:
         print("\n--dry-run: nothing written")
         return 0
+
+    catalogue_source = getattr(fetch_catalogue, "last_source", "unknown")
+
+    def empty_replacement_refused(key, replacement, found_name):
+        previous = config.get(key) or {}
+        if previous and not replacement:
+            print(f"ERROR: refusing empty {key} replacement: roster={len(roster)}, "
+                  f"{found_name}={len(replacement)}, catalogue={catalogue_source}; "
+                  "nothing written and no backup taken", file=sys.stderr)
+            return True
+        return False
+
+    if empty_replacement_refused("customModelCosts", costs, "prices"):
+        return 1
+    if empty_replacement_refused("customModelContextWindows", windows, "windows"):
+        return 1
 
     # The backup is taken from the FRESH state: what is on disk right now is
     # what a rollback would need to restore, not the snapshot from before

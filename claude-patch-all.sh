@@ -303,29 +303,46 @@ else
       # holder caught in that window or one that was killed inside it. Waiting a
       # second tells the two apart; without the wait, a kill in that window would
       # leave a lock nobody can ever break.
+      # Владелец записывается парой: pid + время старта лидера
+      # (LC_ALL=C ps -o lstart=). Живость по одному kill -0 верит
+      # переиспользованному номеру: держатель мёртв, номер достался чужому
+      # процессу -- и замок стоял бы вечно. pid без метки (файл прежней
+      # редакции) живость не опровергает: тогда решает один kill -0.
       __owner=''
       for _ in 1 2 3 4 5; do
         __owner="$(cat "$__lockdir/pid" 2>/dev/null || true)"
         [[ -n "$__owner" ]] && break
         sleep 0.2
       done
-      if [[ -z "$__owner" ]] || ! kill -0 "$__owner" 2>/dev/null; then
+      __opid="${__owner%%$'\t'*}"
+      # Строка БЕЗ таба -- формат прежней редакции: метки нет, и подстановка
+      # вернула бы всю строку; пустая метка возвращает решение kill -0.
+      __ostart="${__owner#*$'\t'}"
+      [[ "$__ostart" == "$__owner" ]] && __ostart=''
+      __stale_dir=1
+      if [[ -n "$__opid" ]] && kill -0 "$__opid" 2>/dev/null; then
+        if [[ -z "$__ostart" ]] \
+           || [[ "$(LC_ALL=C ps -o lstart= -p "$__opid" 2>/dev/null)" == "$__ostart" ]]; then
+          __stale_dir=0
+        fi
+      fi
+      if (( __stale_dir )); then
         # Nobody is behind it -- the lock is stale, take it over.
         rm -rf "$__lockdir"
         mkdir "$__lockdir" 2>/dev/null || { echo "FATAL: cannot take the patch lock ($__lockdir)." >&2; exit 3; }
       else
-        echo "FATAL: another claude-patch-all.sh is running (pid $__owner, lock: $__lockdir)." >&2
+        echo "FATAL: another claude-patch-all.sh is running (pid $__opid, lock: $__lockdir)." >&2
         echo "       tweakcc's state is shared; wait for it to finish rather than racing it." >&2
         exit 3
       fi
     fi
-    echo $$ > "$__lockdir/pid"
+    printf '%s\t%s\n' "$$" "$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null)" > "$__lockdir/pid"
     # Подтверждение владения: `rm -rf` плюс `mkdir` -- не взаимно исключающая
     # пара, и два претендента, пришедшие одновременно, оба сносят свежий каталог
     # соперника. Владелец -- тот, чей pid записан последним; остальные отступают.
     sleep 0.3
     __confirm="$(cat "$__lockdir/pid" 2>/dev/null || true)"
-    if [[ "$__confirm" != "$$" ]]; then
+    if [[ "${__confirm%%$'\t'*}" != "$$" ]]; then
       # Уходим, НЕ ТРОГАЯ каталог: он уже принадлежит победителю. Флаг владения
       # так и остался нулём, поэтому EXIT-трап тоже его не снесёт. Без этого
       # разделения проигравший гонки перехвата становился дворником чужого
@@ -405,14 +422,35 @@ prune_config_backups() {
   # install of a build that is in fact installed and live. Count with a glob the
   # shell expands itself; a non-matching glob leaves the literal behind, which
   # the -e test rejects.
-  local count=0 f
+  local f base delete_count
+  local -a backups=()
   for f in "$HOME"/.claude.json.backup.*; do
-    [[ -e "$f" ]] && count=$((count + 1))
+    [[ -e "$f" ]] || continue
+    base="$(basename "$f")"
+    [[ "$base" =~ ^\.claude\.json\.backup\.[0-9]{8}-[0-9]{6}$ ]] || continue
+    backups[${#backups[@]}]="$f"
   done
-  if [[ $count -gt 3 ]]; then
-    echo "==> Cleaning old config backups (keeping 3 most recent)"
-    ls -t ~/.claude.json.backup.* | tail -n +4 | while read -r f; do rm -v "$f"; done
+  if [[ ${#backups[@]} -gt 3 ]]; then
+    echo "==> Cleaning old config backups (keeping 3 most recent by name)"
+    delete_count=$((${#backups[@]} - 3))
+    printf '%s\n' "${backups[@]}" | LC_ALL=C sort | while IFS= read -r f; do
+      (( delete_count > 0 )) || break
+      rm -v "$f"
+      delete_count=$((delete_count - 1))
+    done
   fi
+}
+
+versions_in_use() {
+  local pids p names pgrep_rc=0
+  pids="$(pgrep -x claude 2>/dev/null)" || pgrep_rc=$?
+  (( pgrep_rc <= 1 )) || return 2
+  [[ -z "$pids" ]] && return 0
+  for p in $pids; do
+    names="$(lsof -a -p "$p" -d txt -Fn 2>/dev/null | sed -n 's/^n//p')" || return 2
+    [[ -n "$names" ]] || return 2
+    printf '%s\n' "$names"
+  done
 }
 
 # One cache entry per pinned SHA, ~490 MB each, and nothing ever removed them:
@@ -1026,6 +1064,31 @@ if sentinel_missing('__DONE=0\n' + _trap_line + '\n__DONE=1\n'):
     print("ГЕЙТ ЧАСОВОГО ЛОЖНО СРАБАТЫВАЕТ: файл с часовым для него тоже находка")
     sys.exit(1)
 
+# Правило 4 (волна 26): слитый сигнальный трап.
+#
+# `trap guard EXIT INT TERM` на TERM отдаёт КОД 0, а не 143: сигнал входит в
+# общий гвард, `$?` в нём уже ноль, и убитый прогон зеленеет (измерено
+# контроллером волны 26; парные мутации -- в corpus-tools-bench). Сигнальные
+# трапы переводят сигнал в КОД и стоят ОТДЕЛЬНЫМИ строками -- образец
+# tools/fetch-corpus.sh. Строки-ДАННЫХ таблиц мутаций (начинаются не с `trap`)
+# правилом не задеваются.
+def merged_trap(line):
+    if not re.match(r'\s*trap\s', line):
+        return False
+    return re.search(r'\bEXIT\b', line) is not None \
+        and re.search(r'\b(?:INT|TERM|HUP)\b', line) is not None
+
+_merged = 'trap' + ' __exit_guard EXIT INT TERM'
+if not merged_trap(_merged):
+    print("ГЕЙТ ТРАПОВ СЛЕП: он не видит слитого трапа")
+    sys.exit(1)
+if merged_trap("trap '__exit_guard' EXIT"):
+    print("ГЕЙТ ТРАПОВ ЛОЖНО СРАБАТЫВАЕТ: раздельный EXIT-трап для него тоже находка")
+    sys.exit(1)
+if merged_trap("trap 'exit 143' TERM"):
+    print("ГЕЙТ ТРАПОВ ЛОЖНО СРАБАТЫВАЕТ: раздельный сигнальный трап для него тоже находка")
+    sys.exit(1)
+
 bad = []
 scanned = 0
 for dirpath, dirnames, filenames in os.walk(root):
@@ -1060,6 +1123,9 @@ for dirpath, dirnames, filenames in os.walk(root):
                     bad.append(f"{os.path.relpath(f, root)}:{n}: "
                                f"отрицание перед составной командой с перенаправлением -- "
                                f"провал записи не будет замечен")
+            if merged_trap(line):
+                bad.append(f"{os.path.relpath(f, root)}:{n}: слитый сигнальный трап "
+                           f"(EXIT вместе с INT/TERM) -- TERM отдаёт 0, а не 143")
 if bad:
     print("ФОРМЫ ОБОЛОЧКИ, КОТОРЫЕ МОЛЧАТ:")
     for b in bad:
@@ -1097,6 +1163,62 @@ python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check || {
   esac
 }
 
+# --- волна 26: два стенда, не имевшие вызывающего --------------------------------
+# tools/costs-bench.py (модели/цены/окна и две функции конвейера) и
+# tools/probes-sync-bench.sh (замок писателей синхронизации проб) жили без
+# единого вызова: их зелёный прогон никто не читал. Оба чисто питон/баш, без
+# сборок и tweakcc, поэтому идут в конвейер, а не в свип (причина невключения
+# corpus-tools-bench -- глобальный страж tweakcc-состояния -- к ним не
+# относится). Образец -- стенд инструментов судьи выше: прогон и --self-check,
+# «мутация не покраснела» = провал сборки; классы кода -- из общей таблицы
+# кита, отказ называет стенд и класс.
+echo "==> Стенд моделей и цен"
+python3 "$(dirname "$0")/tools/costs-bench.py" || {
+  __rc=$?
+  case $__rc in
+    2) echo "СТЕНД ЦЕН НЕ ИЗМЕРЯЛ: контракт вызова или контроль провален (rc=2)" >&2
+       exit 2 ;;
+    4) echo "СТЕНД ЦЕН: объявленные числа таблиц не сходятся (rc=4)" >&2
+       exit 1 ;;
+    *) echo "СТЕНД ЦЕН УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
+       exit 1 ;;
+  esac
+}
+python3 "$(dirname "$0")/tools/costs-bench.py" --self-check || {
+  __rc=$?
+  case $__rc in
+    2) echo "СТЕНД ЦЕН: self-check НЕ ИЗМЕРЯЛ -- пристинная копия уже красная (rc=2)" >&2
+       exit 2 ;;
+    4) echo "СТЕНД ЦЕН: таблица мутаций не той длины, чем объявлено" >&2
+       exit 1 ;;
+    *) echo "СТЕНД ЦЕН БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
+       exit 1 ;;
+  esac
+}
+echo "==> Стенд синхронизации проб"
+bash "$(dirname "$0")/tools/probes-sync-bench.sh" || {
+  __rc=$?
+  case $__rc in
+    2) echo "СТЕНД ПРОБ НЕ ИЗМЕРЯЛ: контракт вызова или условие ожидания (rc=2)" >&2
+       exit 2 ;;
+    4) echo "СТЕНД ПРОБ: объявленные числа таблиц не сходятся (rc=4)" >&2
+       exit 1 ;;
+    *) echo "СТЕНД ПРОБ УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
+       exit 1 ;;
+  esac
+}
+bash "$(dirname "$0")/tools/probes-sync-bench.sh" --self-check || {
+  __rc=$?
+  case $__rc in
+    2) echo "СТЕНД ПРОБ: self-check НЕ ИЗМЕРЯЛ -- якорь или условие ожидания (rc=2)" >&2
+       exit 2 ;;
+    4) echo "СТЕНД ПРОБ: таблица мутаций не той длины, чем объявлено" >&2
+       exit 1 ;;
+    *) echo "СТЕНД ПРОБ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
+       exit 1 ;;
+  esac
+}
+
 # --- раскатка судейских инструментов: исполняются ТЕ ЖЕ байты, что заверены ----
 # Стенд выше сертифицирует КАНОН: tools/judge-tools-bench.py читает judge/*.py
 # ЭТОГО дерева. А launchd гоняет РАСКАТАННУЮ копию из ~/.claude/judge, и ядро
@@ -1126,10 +1248,10 @@ env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \
 # sentence about it behind; the second time the correction itself went stale
 # within one wave.
 #
-# A count also has an OWNER. Three benches now declare counts of their own, so
-# a number is compared with the constant of the bench named NEAREST to it, and
-# the grammar that finds those numbers is itself run against synthetic cases
-# with known answers before it is let near a real file.
+# A count also has an OWNER. Several benches now declare counts of their own,
+# so a number is compared with the constant of the bench named NEAREST to it,
+# and the grammar that finds those numbers is itself run against synthetic
+# cases with known answers before it is let near a real file.
 echo "==> Сверка чисел в доках"
 python3 - "$0" <<'PYDOCS'
 import ast, io, os, re, sys, glob
@@ -1161,6 +1283,12 @@ OWNERS = (
     ('corpus-tools-bench', ('corpus-tools-bench',), ('tools', 'corpus-tools-bench.sh'),
      {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
       'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
+    ('probes-sync-bench', ('probes-sync-bench',), ('tools', 'probes-sync-bench.sh'),
+     {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
+      'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
+    ('costs-bench', ('costs-bench',), ('tools', 'costs-bench.py'),
+     {'scenarios': r'^EXPECTED_SCENARIOS = (\d+)$',
+      'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
     ('docnum-bench', ('docnum-bench',), ('tools', 'docnum-bench.py'),
      {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
     ('checks-teeth', ('checks-teeth',), ('tools', 'checks-teeth.py'),
@@ -4908,6 +5036,48 @@ fi
 #                            non-claude id actually reaches the dead port
 #   * CHILD_SESSION marker-> transcript saving off
 #   * --strict-mcp-config -> no servers even if one were configured
+# A full session start on a machine already running builds is not a two-second
+# affair, and a healthy build that misses the budget is reported as a failure.
+# 40s was a guess that a loaded box can lose; this is generous and adjustable.
+validated_nonnegative_integer() {
+  local name="$1" value="$2" digits
+  case "$value" in
+    ''|*[!0-9]*)
+      echo "FATAL: $name must be a nonnegative integer, got '$value'." >&2
+      return 2
+      ;;
+  esac
+  # Величина сверяется по ЗНАЧЕНИЮ, а не по длине строки: «000005» -- это 5, и
+  # отказ по длине отвергал бы законную настройку (волна 26). Ведущие нули
+  # снимаются до сравнения; всё длиннее 19 цифр -- заведомо больше границы (это
+  # утверждение о значении, а не о длине записи), а равная длина сравнивается
+  # поразрядно. Граница -- потолок bash-арифметики: $((10#...)) выше неё
+  # ЗАВОРАЧИВАЕТСЯ (измерено на этой машине), и число, которое арифметика не
+  # может удержать, не может быть значением ручки.
+  digits="$value"
+  while [[ "$digits" == 0* && "$digits" != "0" ]]; do digits="${digits#0}"; done
+  if (( ${#digits} > 19 )) \
+     || { [[ "${#digits}" == 19 ]] && [[ "$digits" > "9223372036854775807" ]]; }; then
+    echo "FATAL: $name must be a nonnegative integer up to 9223372036854775807, got '$value'." >&2
+    return 2
+  fi
+  printf '%d\n' "$((10#$digits))"
+}
+GATE_BUDGET="$(validated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET "${CLAUDE_PATCH_GATE_BUDGET:-150}")"
+# G-5: поднятый или срезанный бюджет меняет СМЫСЛ вердикта этого гейта
+# (срезанный краснит здоровую сборку, поднятый прячет медленную), поэтому
+# отклонение от умолчания объявляется в потоке, а не остаётся в окружении.
+[[ "$GATE_BUDGET" == "150" ]] \
+  || echo "Interface gate: budget ${GATE_BUDGET}s (CLAUDE_PATCH_GATE_BUDGET, default 150)"
+
+# Н-3 (круг 24): величина бюджета проверяется ДО первого следа на диске и до
+# запуска ребёнка. Под `set -euo pipefail` отказ валидатора обрывает прогон
+# немедленно, а стоял он ниже -- после mktemp -d и после спавна сессии; кривая
+# ручка оставляла ЖИВОГО сироту в своей группе процессов и каталог, который
+# уже некому убрать: уборка -- не трап, а строка `rm -rf "$GATE_HOME"` в КОНЦЕ
+# секции, до неё обрыв не доходит. Порядок здесь -- инвариант: между
+# этой проверкой и созданием $GATE_HOME не должно появляться ничего, что
+# создаёт файлы или процессы.
 GATE_HOME="$(mktemp -d)"
 mkdir -p "$GATE_HOME/cfg" "$GATE_HOME/proj"
 GATE_PROMPT="tweakcc interface gate"
@@ -5038,16 +5208,6 @@ PYSTATE
 ) 9>&- &
 GATE_PID=$!
 
-# A full session start on a machine already running builds is not a two-second
-# affair, and a healthy build that misses the budget is reported as a failure.
-# 40s was a guess that a loaded box can lose; this is generous and adjustable.
-GATE_BUDGET="${CLAUDE_PATCH_GATE_BUDGET:-150}"
-# G-5: поднятый или срезанный бюджет меняет СМЫСЛ вердикта этого гейта
-# (срезанный краснит здоровую сборку, поднятый прячет медленную), поэтому
-# отклонение от умолчания объявляется в потоке, а не остаётся в окружении.
-[[ "$GATE_BUDGET" == "150" ]] \
-  || echo "Interface gate: budget ${GATE_BUDGET}s (CLAUDE_PATCH_GATE_BUDGET, default 150)"
-
 # Ответ помощника читается КАК ОТВЕТ ПРИБОРА. Пустой ответ или ненулевой код --
 # это отказ РАЗБОРА захвата (нет python3, захват не прочитать), а не медленный
 # интерфейс: без этой развилки прогон уходил в ветку таймаута и печатал «гейт
@@ -5066,7 +5226,9 @@ gate_state_checked() {
 
 GATE_STATE=PENDING
 GATE_EXITED=0
-for _ in $(seq 1 "$GATE_BUDGET"); do
+i=0
+while (( i < GATE_BUDGET )); do
+  i=$((i + 1))
   sleep 1
   GATE_STATE="$(gate_state_checked)"
   case "$GATE_STATE" in
@@ -5343,26 +5505,30 @@ if [[ $DO_UPDATE -eq 1 ]]; then
     echo "  skipped: without pgrep and lsof, 'is a live session executing it?'" >&2
     echo "  cannot be answered — refusing to delete old versions on a guess." >&2
   else
-    IN_USE="$(for p in $(pgrep -x claude 2>/dev/null); do
-        lsof -p "$p" 2>/dev/null | awk '$4=="txt"{print $NF}'
-      done | sort -u)"
-    for old in "$VERSIONS_DIR"/2.1.*; do
-      base="$(basename "$old")"
-      [[ "$base" == "$CURRENT_VER" || "$base" == "$CURRENT_VER.orig" ]] && continue
-      if grep -qxF "$old" <<<"$IN_USE"; then
-        echo "  kept (a running session is executing it): $base"
-        continue
-      fi
-      # A kept binary without its pristine twin cannot be returned to stock, and
-      # that twin is exactly what the in-use test never matches: sessions execute
-      # `2.1.239`, never `2.1.239.orig`, so the backup of the one version we
-      # deliberately preserved was the first thing deleted. Keep the pair.
-      if [[ "$base" == *.orig ]] && grep -qxF "${old%.orig}" <<<"$IN_USE"; then
-        echo "  kept (pristine copy of a binary a running session is executing): $base"
-        continue
-      fi
-      rm -v "$old"
-    done
+    IN_USE_RC=0
+    IN_USE="$(versions_in_use)" || IN_USE_RC=$?
+    if (( IN_USE_RC != 0 )); then
+      echo "  skipped: pgrep/lsof could not answer for every live claude pid (rc=$IN_USE_RC)." >&2
+      echo "  cannot be answered — refusing to delete old versions on a guess." >&2
+    else
+      for old in "$VERSIONS_DIR"/2.1.*; do
+        base="$(basename "$old")"
+        [[ "$base" == "$CURRENT_VER" || "$base" == "$CURRENT_VER.orig" ]] && continue
+        if grep -qxF "$old" <<<"$IN_USE"; then
+          echo "  kept (a running session is executing it): $base"
+          continue
+        fi
+        # A kept binary without its pristine twin cannot be returned to stock, and
+        # that twin is exactly what the in-use test never matches: sessions execute
+        # `2.1.239`, never `2.1.239.orig`, so the backup of the one version we
+        # deliberately preserved was the first thing deleted. Keep the pair.
+        if [[ "$base" == *.orig ]] && grep -qxF "${old%.orig}" <<<"$IN_USE"; then
+          echo "  kept (pristine copy of a binary a running session is executing): $base"
+          continue
+        fi
+        rm -v "$old"
+      done
+    fi
   fi
   prune_config_backups
 fi

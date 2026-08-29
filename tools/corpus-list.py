@@ -24,6 +24,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 PIN = re.compile(r'^[0-9a-fA-F]{64}$')
+# This standalone tool cannot import the installer; keep this rule aligned with
+# claude_patch.VERSION, the canonical guard before installer path construction.
 VERSION = re.compile(r'^[0-9][0-9.]*$')
 PLATFORM = re.compile(r'^#\s*platform:\s*(\S+)\s*$')
 
@@ -72,6 +74,9 @@ def main():
             die('строка %d: полей %d, а формат -- ровно три (метка, версия, пин; '
                 'пин «-», если ещё не записан)' % (number, len(parts)))
         label, version, pin = parts
+        if ':' in label:
+            die('строка %d: метка «%s» содержит «:», которое не переживает '
+                'круг через sweep.sh' % (number, label))
         if not VERSION.match(version):
             die('строка %d: «%s» не похоже на номер версии' % (number, version))
         if pin != '-' and not PIN.match(pin):

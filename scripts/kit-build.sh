@@ -49,7 +49,9 @@ __exit_guard() {
   fi
   exit "$__rc"
 }
-trap __exit_guard EXIT INT TERM
+trap __exit_guard EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 STAGE="$(mktemp -d)/$NAME"
 # The judge canon lives in the project; ~/.claude/judge is the DEPLOYMENT.
 # The kit is built from the canon: otherwise whatever someone edited on the

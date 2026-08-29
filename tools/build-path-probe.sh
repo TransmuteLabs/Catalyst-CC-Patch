@@ -71,7 +71,7 @@
 # invisible to every check in the pipeline, and a tool nobody calls has been
 # dead three times in this kit.
 #
-# Usage:  bash tools/build-path-probe.sh [--case abcdurxp] [--version 2.1.247]
+# Usage:  bash tools/build-path-probe.sh [--case abcdurxpl] [--version 2.1.247]
 # Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 118
 #         checks + the interface gate + the bench), so a few minutes each; case
 #         (r) and (x) build nothing and answer in milliseconds.
@@ -84,7 +84,7 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdurxp
+CASES=abcdurxpl
 WANT_VER=
 
 while [[ $# -gt 0 ]]; do
@@ -102,6 +102,118 @@ if [[ -z "$CASES" ]]; then
   echo "build-path-probe: ОТКАЗ -- пустой набор случаев (--case '')" >&2
   echo "  Проверять нечего, а зелёная строка означала бы обратное." >&2
   exit 2
+fi
+
+
+ALL_CASES="$CASES"
+case_l() {
+  python3 - "$PIPELINE" <<'PY_LSOF'
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"(?ms)^versions_in_use\(\) \{\n.*?^\}\n", source)
+if not match:
+    print("  FAIL   L: versions_in_use() not found")
+    raise SystemExit(1)
+function = match.group(0)
+
+
+def run(body, pgrep_body, lsof_body):
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        bindir = root / "bin"
+        bindir.mkdir()
+        for name, text in (("pgrep", pgrep_body), ("lsof", lsof_body)):
+            path = bindir / name
+            path.write_text("#!/usr/bin/env bash\n" + text, encoding="utf-8")
+            path.chmod(0o755)
+        script = "set -uo pipefail\n" + body + "\nversions_in_use\n"
+        return subprocess.run(["bash"], input=script,
+                              env={**os.environ, "PATH": str(bindir) + ":/usr/bin:/bin"},
+                              capture_output=True, text=True)
+
+space_path = "/Users/John Doe/.local/share/claude/versions/2.1.226"
+foreign = "/foreign/process/2.1.999"
+pgrep_one = "printf '123\\n'\n"
+lsof_space = "printf 'p123\\nftxt\\nn%s\\n'\n" % space_path
+lsof_empty = ":\n"
+lsof_args = (
+    "seen_a=0\n"
+    "for arg in \"$@\"; do [[ \"$arg\" == -a ]] && seen_a=1; done\n"
+    "if [[ $seen_a -eq 0 ]]; then\n"
+    "  printf 'p616\\nftxt\\nn%s\\n'\n"
+    "else\n"
+    "  printf 'p123\\nftxt\\nn%s\\n'\n"
+    "fi\n"
+) % (foreign, space_path)
+checks = [
+    ("L1", run(function, pgrep_one, lsof_space),
+     lambda r: r.returncode == 0 and r.stdout.splitlines() == [space_path]),
+    ("L2", run(function, pgrep_one, lsof_empty),
+     lambda r: r.returncode == 2 and not r.stdout),
+    ("L3", run(function, ":\n", lsof_space),
+     lambda r: r.returncode == 0 and not r.stdout),
+    ("L4", run(function, pgrep_one, lsof_args),
+     lambda r: r.returncode == 0 and foreign not in r.stdout and space_path in r.stdout),
+]
+failed = 0
+for name, result, predicate in checks:
+    if predicate(result):
+        print("  ok     %s" % name)
+    else:
+        failed += 1
+        print("  FAIL   %s rc=%s stdout=%r stderr=%r" %
+              (name, result.returncode, result.stdout, result.stderr))
+
+mutations = [
+    ("L1-last-field", "sed -n 's/^n//p'", "awk '{print $NF}'", "L1"),
+    ("L2-empty-is-safe", '[[ -n "$names" ]] || return 2',
+     '[[ -n "$names" ]] || continue', "L2"),
+    ("L3-empty-pgrep-refused", '[[ -z "$pids" ]] && return 0',
+     '[[ -z "$pids" ]] && return 2', "L3"),
+    ("L4-no-and-selector", "lsof -a -p", "lsof -p", "L4"),
+]
+for mutation, old, new, owner in mutations:
+    if function.count(old) != 1:
+        failed += 1
+        print("  FAIL   mutation %s anchor count=%s" % (mutation, function.count(old)))
+        continue
+    mutated = function.replace(old, new, 1)
+    if owner == "L1":
+        result = run(mutated, pgrep_one, lsof_space)
+        red = not (result.returncode == 0 and result.stdout.splitlines() == [space_path])
+    elif owner == "L2":
+        result = run(mutated, pgrep_one, lsof_empty)
+        red = not (result.returncode == 2 and not result.stdout)
+    elif owner == "L3":
+        result = run(mutated, ":\n", lsof_space)
+        red = not (result.returncode == 0 and not result.stdout)
+    else:
+        result = run(mutated, pgrep_one, lsof_args)
+        red = not (result.returncode == 0 and foreign not in result.stdout and space_path in result.stdout)
+    if red:
+        print("  RED    mutation %s (%s)" % (mutation, owner))
+    else:
+        failed += 1
+        print("  FAIL   mutation %s did not redden %s" % (mutation, owner))
+
+print("build-path-probe L: сценариев=4 мутаций=4 расхождений=%d" % failed)
+raise SystemExit(1 if failed else 0)
+PY_LSOF
+}
+
+if [[ "$CASES" == *l* ]]; then
+  case_l || exit $?
+  CASES="${CASES//l/}"
+  if [[ -z "$CASES" ]]; then
+    echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
+    exit 0
+  fi
 fi
 
 # Замок берётся ПОСЛЕ разбора аргументов. Раньше он стоял выше, и `--help` во
@@ -367,6 +479,14 @@ cleanup() {
     (( __rc == 0 )) && __rc=1
   fi
 
+  # Держатель случая (x): переживает зонд на ~119 c и держит то, что
+  # унаследовал или занял сам. Штатные ветки case_x снимают его не на всех
+  # выходах -- сигнал посреди случая оставлял сироту с замком в руках.
+  if [[ -n "${__CLI_HOLDER:-}" ]] && kill -0 "$__CLI_HOLDER" 2>/dev/null; then
+    kill "$__CLI_HOLDER" 2>/dev/null
+    wait "$__CLI_HOLDER" 2>/dev/null
+  fi
+
   [[ -n "${KEEP_ROOT:-}" ]] || rm -rf "$ROOT"
   if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
     echo "build-path-probe: ОТКАЗ -- прогон оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
@@ -374,7 +494,9 @@ cleanup() {
   fi
   exit "$__rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Драйвер случая (u) пишется на диск здесь, а не встраивается в тело функции:
 # его надо запустить ДВАЖДЫ -- по киту дерева и по мутированной копии, -- и обе
@@ -849,11 +971,17 @@ case_x() {   # двери командной строки: КЛАСС ответ
   priv="$ROOT/cli.lock"; : > "$priv"
   # Держатель замка -- perl с flock(2) на СВОЁМ дескрипторе: замок живёт, пока
   # жив процесс, и снимается его смертью.
+  # `9>&-`: держатель переживает зонд на ~119 c, а с унаследованным
+  # дескриптором он всё это время держал бы БОЕВОЙ замок конвейера -- тот же
+  # отставший держатель, которого не допустит run_cli ниже.
   perl -e 'use Fcntl ":flock";
            open(my $fh, "<", $ARGV[0]) or exit 3;
            flock($fh, LOCK_EX) or exit 3;
-           sleep 120;' "$priv" &
+           sleep 120;' "$priv" 9>&- &
   holder=$!
+  # Глобально: cleanup обязан снять держателя на НЕштатных выходах -- штатные
+  # ветки ниже снимают его сами, но только свои.
+  __CLI_HOLDER=$holder
   sleep 1
 
   # `9>&-` и снятие CLAUDE_PATCH_LOCK_HELD_BY: ребёнок обязан идти к замку САМ,
@@ -922,6 +1050,7 @@ MUTX
   fi
 
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  __CLI_HOLDER=''
 }
 
 case_p() {   # --target на НЕ пристинных байтах: отказ ДО того, как их трогают
@@ -1026,9 +1155,9 @@ if [[ $FAILED -eq 0 ]]; then
   # (x) -- мутационные контроли, и без них зелёная строка обещала бы
   # доказательство, которого прогон не получал (раунд 18, H-2).
   if [[ "$CASES" == *c* || "$CASES" == *d* || "$CASES" == *u* || "$CASES" == *x* || "$CASES" == *r* || "$CASES" == *p* ]]; then
-    echo "build path ($CASES): every assertion held, and the control shows they have teeth"
+    echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
   else
-    echo "build path ($CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p) не гонялся -- зубы не доказаны"
+    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p/l) не гонялся -- зубы не доказаны"
   fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2
