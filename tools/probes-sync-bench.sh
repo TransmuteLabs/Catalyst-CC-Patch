@@ -5,14 +5,26 @@
 #   0 -- каждый сценарий сошёлся, каждая мутация покраснила свой сценарий
 #   1 -- сценарий разошёлся либо мутация прошла молча
 #   2 -- прибор не может мерить: якорь правки-зуба или условие ожидания
-#        не достигнуто
-#   4 -- probes-sync-bench: объявленные числа таблиц не сходятся
+#        не достигнуто, либо замена СЛОМАЛА РАЗБОР жертвы (круг 25, E-3) --
+#        покраснение разбором ничего не доказывает, прогон останавливается
+#        до счёта покраснений
+#   4 -- probes-sync-bench: объявленные числа таблиц не сходятся, либо
+#        сверка покрытия нашла дверь без своего зуба (круг 25, E-4:
+#        непокрытая дверь не доказывает ничего)
 set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
 EXPECTED_SCENARIOS=5
 EXPECTED_MUTATIONS=5
+# Круг 25, E-4: номер сценария, который красит каждая мутация. Таблица
+# отдельная от самих мутаций, и сверка ниже требует, чтобы КАЖДЫЙ сценарий
+# был чьим-то зубом -- как check_mut_tables у corpus-tools-bench. До этой
+# волны сверялись только длины, и дыра жила латентно, пока покрытие было
+# случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
+# причиной; сегодня их нет.
+MUT_SCENARIO=(x 1 2 3 4 5)
+UNMUTATED_OK=''
 FAILED=0
 RUN=0
 LAST_EVID=''
@@ -20,6 +32,23 @@ LAST_EVID=''
 say() { printf '%s\n' "$*"; }
 ok() { RUN=$((RUN + 1)); say "  ok     $*"; }
 bad() { RUN=$((RUN + 1)); FAILED=$((FAILED + 1)); say "  ПРОВАЛ $*"; }
+
+check_mut_tables() {
+  local n missing=""
+  if (( ${#MUT_SCENARIO[@]} != EXPECTED_MUTATIONS + 1 )); then
+    say "probes-sync-bench: ОТКАЗ -- в MUT_SCENARIO записей $(( ${#MUT_SCENARIO[@]} - 1 )), а мутаций $EXPECTED_MUTATIONS"
+    return 1
+  fi
+  for n in $(seq 1 $EXPECTED_SCENARIOS); do
+    printf '%s\n' "${MUT_SCENARIO[@]}" | grep -qx "$n" || missing="$missing $n"
+  done
+  if [[ -n "${missing:-}" ]]; then
+    say "probes-sync-bench: ОТКАЗ -- без своей мутации сценарии:${missing}"
+    say "  исключений нет; всякое будущее -- поимённо в UNMUTATED_OK с причиной"
+    return 1
+  fi
+  return 0
+}
 
 dead_pid() {
   sh -c 'exit 0' &
@@ -264,8 +293,66 @@ run_scenario() {
   case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; *) return 2 ;; esac
 }
 
+# Круг 25, E-3: тела heredoc'ов .sh-жертвы, поданные питону, по правилу гейта
+# PYCOMPILE конвейера: строка до первого '#' содержит python3 границей слова,
+# между python3 и открытием нет '|' ';' '&', строка КОНЧАЕТСЯ открытием
+# <<'ТЕГ'; тело -- до строки, равной ТЕГУ дословно. Сегодня у жертвы
+# probes-sync.sh таких тел нет, но страж пишется по ПРАВИЛУ, а не по факту
+# сегодняшнего файла: первая же мутация в питонье тело потребует этой
+# проверки, а не случайности (решение контроллера, волна 25).
+python_heredoc_bodies() {   # файл-жертва, каталог для тел; печатает число тел
+  local f="$1" out="$2" line pre rest mid tag n=0
+  local OPEN_RE="<<'([A-Za-z_][A-Za-z0-9_]*)'[[:space:]]*\$"
+  tag=''
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -n "$tag" ]]; then
+      if [[ "$line" == "$tag" ]]; then tag=''; continue; fi
+      printf '%s\n' "$line" >> "$out/body.$n.py"
+      continue
+    fi
+    pre=${line%%#*}
+    [[ "$pre" == *python3* ]] || continue
+    [[ "$pre" =~ (^|[^A-Za-z0-9_])python3([^A-Za-z0-9_]|$) ]] || continue
+    rest=${pre#*python3}
+    mid=${rest%<<*}
+    [[ "$mid" == *[\|\;\&]* ]] && continue
+    [[ "$pre" =~ $OPEN_RE ]] || continue
+    tag=${BASH_REMATCH[1]}
+    n=$((n+1)); : > "$out/body.$n.py"
+  done < "$f"
+  printf '%s\n' "$n"
+}
+
+# Страж разбираемости жертвы: bash -n плюс py_compile каждого питоньего тела.
+# Провал -- ненулевой возврат; вызывающий переводит его в код «прибор не может
+# мерить». Та же пара, что у corpus-tools-bench (круг 24 + 25, E-1).
+sh_victim_parses() {   # файл-жертва
+  local f="$1" dir n i
+  bash -n "$f" 2>/dev/null || return 2
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/heredoc.XXXXXX") || return 2
+  n=$(python_heredoc_bodies "$f" "$dir")
+  # BSD seq при пустом диапазоне (seq 1 0) печатает «1 0» ВНИЗ, а не пустоту:
+  # без этой проверки страж гонял бы py_compile по несуществующим файлам
+  # и краснел на жертвах без питоньих тел (замерено на этой машине).
+  if (( n > 0 )); then
+    for i in $(seq 1 "$n"); do
+      python3 -m py_compile "$dir/body.$i.py" 2>/dev/null || { rm -rf "$dir"; return 2; }
+    done
+  fi
+  rm -rf "$dir"
+  return 0
+}
+
 mutate() {
-  local root="$1" n="$2" file="$root/kit/scripts/probes-sync.sh"
+  # Круг 28, F-15: объявление и присваивание РАЗДЕЛЕНЫ. В форме
+  # `local root="$1" n="$2" file="$root/…"` все слова раскрываются ДО
+  # исполнения local, и `$root` в третьем слове брал значение ЛОКАЛИ
+  # ВЫЗЫВАЮЩЕГО (динамическая область видимости bash): пока mutate звали из
+  # self_check, где `root` есть, строка работала случайно; вызов с верхнего
+  # уровня под `set -u` ронял скрипт «root: unbound variable».
+  local root n file
+  root="$1"; n="$2"
+  file="$root/kit/scripts/probes-sync.sh"
   python3 - "$file" "$n" <<'PY'
 import sys
 path, number = sys.argv[1], int(sys.argv[2])
@@ -297,6 +384,16 @@ if count != 1:
     raise SystemExit(2)
 open(path, 'w', encoding='utf-8').write(text.replace(old, new, 1))
 PY
+  # Круг 25, E-3: замена сломала разбор -- прибор не может мерить. До стража
+  # текст влетал в жертву свободно, и сломанный разбор держался только на
+  # случайности (следи этой таблицы привязаны к коду возврата). Отдельный
+  # класс от «якорь не найден» и с доминированием над счётом покраснений:
+  # self_check ниже останавливается целиком.
+  if ! sh_victim_parses "$file"; then
+    say "  мутация $n сломала РАЗБОР жертвы -- замена невалидна, прибор чинится до следующего вердикта"
+    return 2
+  fi
+  return 0
 }
 
 self_check() {
@@ -330,12 +427,14 @@ self_check() {
 
 case "${1:-}" in
   '')
+    check_mut_tables || exit 4
     scenario_1; scenario_2; scenario_3; scenario_4; scenario_5
     say "probes-sync-bench: ИТОГ сценариев=$RUN расхождений=$FAILED"
     [[ $RUN -eq $EXPECTED_SCENARIOS ]] || exit 4
     [[ $FAILED -eq 0 ]] || exit 1
     ;;
   --self-check)
+    check_mut_tables || exit 4
     self_check || exit $?
     ;;
   *) say "probes-sync-bench: ОТКАЗ -- неизвестный режим $1" >&2; exit 2 ;;

@@ -20,11 +20,30 @@
 #   2  the call contract is broken (unknown argument/mode, wrong arity), or an
 #      instrument cannot measure at all: its anchor/table is gone
 #   3  the lock is held by another live run -- retry later
-#   4  the bytes are not the ones named by --expect-sha
+#   4  a declared quantity does not match the actual one: the target's
+#      bytes against --expect-sha, or a bench's mutation table against the
+#      length/coverage it declares. Both are the same failure -- what the
+#      caller was told does not hold -- and a caller that folds either into
+#      1 loses the distinction between "a gate failed" and "the gate was
+#      measuring something other than what it claims"
 #   5  nothing to measure on this machine -- a skip, not a refusal (the
 #      pipeline never returns it; see tools/build-path-probe.sh)
 #   6  the environment or the lock machinery is broken: an inherited ownership
 #      claim that does not hold, perl flock unusable. Retrying will not help.
+#
+# Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
+# traps) and is NOT a kit verdict: POSIX reports the signal, the table above
+# reports the kit's answers. Declared here because the two-sided rule demands
+# it -- a reachable code must be declared, and wave 26 made 130/143 reachable.
+#
+# The reachability of 130 is spelled out because it is not verified the way
+# one first tries to verify it (measured, round 25, request F-6). 130 arrives
+# when INT is delivered to the process GROUP -- what a terminal does on
+# Ctrl-C. `kill -INT <script pid>` while a foreground child is alive is
+# dropped by bash: the child runs to completion, the INT trap does NOT fire,
+# and the run finishes with its ordinary code. Nothing is truncated -- the
+# whole run executed -- so that code is honest; but a reader who probes 130
+# with a single-pid kill will conclude the trap is broken, and be wrong.
 #
 # A DEFAULT RUN NEVER TOUCHES THE LIVE FILE UNTIL EVERY GATE HAS PASSED: it
 # builds into `<binary>.staging` and swaps that in with a rename at the end (see
@@ -405,6 +424,16 @@ __release_lock() {
   exit "$__rc"
 }
 trap '__release_lock' EXIT
+# Волна 26 расщепила трапы у свипа, наполнителя, кит-сборки, раскатки проб,
+# зонда пути, пола проверок, пробы стража и прибора замка -- а главный,
+# 35-минутный скрипт остался на слитой форме (круг 28, F-2). Измерено на этой
+# машине: при одиночном `trap ... EXIT` TERM приходит в часового как __rc=0,
+# часовой НАЗЫВАЕТ остановку «ошибкой оболочки» и выходит 1 -- ложный диагноз
+# на stderr ровно там, где человек читает, чем кончился его прогон. Явный
+# `exit 143` по TERM превращает смерть в честный код сигнала; EXIT-трап при
+# этом всё равно исполняется (замок снимается, потомство добивается).
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUR_PATCH="$HERE/tweakcc-patch.js"
@@ -949,34 +978,83 @@ def check(src, name):
 # Гейт покрывал ОДИН heredoc из восьми: остальные семь (и все отдельные
 # .py кита) могли уехать в сборку с любой синтаксической поломкой, а
 # упасть уже в бою -- в том числе ПОСЛЕ подмены образа. Поэтому здесь
-# перечисляются ВСЕ питоновские heredoc'и скрипта и все его .py-файлы.
+# перечисляются ВСЕ питоновские heredoc'и всех .sh кита и все его .py-файлы.
+# (Круг 28, F-13: прежде перечислялись heredoc'и ТОЛЬКО самого конвейера,
+# а питоньи тела остальных .sh -- зонда пути, стенда корпусных инструментов --
+# гейт не видел никогда, при целом объявлении «ВСЕ heredoc'и».)
 # Якорь начала: строка НАЧИНАЕТСЯ с вызова python3 -- упоминание тех же
 # слов внутри кода (как в этой строке) под якорь не подходит.
 # Строка обязана КОНЧАТЬСЯ открытием heredoc: так под якорь попадает и форма
 # внутри подстановки (BIN="$(python3 - <<'PY'), и не попадают упоминания тех
-# же слов в коде и комментариях -- как эта строка.
-opener = re.compile(r"^[^#]*\bpython3\b[^|;&]*<<'([A-Za-z_][A-Za-z0-9_]*)'\s*$")
-blocks, i, verify_seen = 0, 0, False
-while i < len(lines):
-    m = opener.match(lines[i])
-    if not m:
-        i += 1
-        continue
-    tag = m.group(1)
-    end = next((j for j in range(i + 1, len(lines)) if lines[j] == tag), -1)
-    if end < 0:
-        print(f"HEREDOC НЕ ЗАКРЫТ: {tag} со строки {i + 1}")
-        sys.exit(1)
-    if lines[i].startswith('python3 - "$BIN" "$OUR_PATCH" <<'):
-        verify_seen = True
-        print(f"БЛОК ПРОВЕРОК РАЗБИРАЕТСЯ ({end - i - 1} строк)")
-    check('\n'.join(lines[i + 1:end]), f'{tag}@{i + 1}')
-    blocks += 1
-    i = end + 1
+# же слов в коде и комментариях -- как эта строка. Круг 28, F-13 добавил
+# ЕДИНСТВЕННОЕ послабление -- закрытый список управляющих продолжений
+# (`; then`, `; do`, `; fi`, `; else`, `; done`, `; esac`): живая форма
+# `if ! python3 - "$X" <<'MUTX'; then` под старый якорь не подходила ВООБЩЕ,
+# и её питоновское тело не проверял никто. ЗАЩИТА КОНЦА СТРОКИ ЭТИМ НЕ
+# СНИМАЕТСЯ: произвольный текст после тега (строки-примеры в комментариях
+# и коде) отсекается, как и прежде.
+opener = re.compile(r"^[^#]*\bpython3\b[^|;&]*<<'([A-Za-z_][A-Za-z0-9_]*)'"
+                    r"(?:\s*;\s*(?:then|do|fi|else|done|esac))?\s*$")
 
+# ЗУБЫ НА ЯКОРЬ (круг 28, F-13). Сужение якоря -- например, возврат к «кончается
+# открытием без хвостов» -- снова оставило бы форму `; then` невидимой, и
+# никакой прогон этого не заметил бы: гейт, не видящий тела, выглядит ровно
+# как гейт, который его проверил. Синтетика с известным ответом краснит
+# такое сужение сама, ДО всякого обращения к дереву.
+for _line, _want in (
+    ('if ! python3 - "$PIPELINE" "$mut" <<\'MUTX\'; then', True),
+    ('  python3 - "$X" <<\'PY\'', True),
+    ('BIN="$(python3 - <<\'PY\'', True),
+    ('# пример: python3 - <<\'PY\' и текст', False),
+    ('echo "python3 - <<\'PY\'"', False),
+    ('python3 - <<\'X\'; echo done', False),
+):
+    if bool(opener.match(_line)) is not _want:
+        print("ЯКОРЬ HEREDOC ПОТЕРЯЛ ФОРМУ: ожидалось "
+              + ("принять" if _want else "отвергнуть") + f": {_line!r}")
+        sys.exit(1)
+
+
+def scan_heredocs(lines, where):
+    """Все питоновские heredoc'и одного файла; (число, виден ли блок проверок)."""
+    count, saw, i = 0, False, 0
+    while i < len(lines):
+        m = opener.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        tag = m.group(1)
+        end = next((j for j in range(i + 1, len(lines)) if lines[j] == tag), -1)
+        if end < 0:
+            print(f"HEREDOC НЕ ЗАКРЫТ: {tag} со строки {i + 1} ({where})")
+            sys.exit(1)
+        if lines[i].startswith('python3 - "$BIN" "$OUR_PATCH" <<'):
+            saw = True
+            print(f"БЛОК ПРОВЕРОК РАЗБИРАЕТСЯ ({end - i - 1} строк)")
+        check('\n'.join(lines[i + 1:end]), f'{tag}@{i + 1} ({where})')
+        count += 1
+        i = end + 1
+    return count, saw
+
+
+blocks, verify_seen = scan_heredocs(lines, os.path.basename(path))
 if not verify_seen:
     print("БЛОК ПРОВЕРОК НЕ НАЙДЕН -- предполётная проверка потеряла свой якорь")
     sys.exit(1)
+
+# Остальные .sh кита: их питоньи тела раньше не проверял никто (F-13). Список
+# строится теми же фильтрами, что и .py ниже; сам конвейер исключён -- он уже
+# разобран выше, вместе со своим блоком проверок.
+sh_files = sorted(
+    f for f in glob.glob(os.path.join(here, '**', '*.sh'), recursive=True)
+    if '/.git/' not in f and '/distros/' not in f
+    and os.path.abspath(f) != os.path.abspath(path)
+)
+sh_blocks = 0
+for f in sh_files:
+    sh_blocks += scan_heredocs(
+        io.open(f, encoding='utf-8').read().split('\n'),
+        os.path.relpath(f, here))[0]
 
 files = sorted(
     f for f in glob.glob(os.path.join(here, '**', '*.py'), recursive=True)
@@ -985,7 +1063,8 @@ files = sorted(
 for f in files:
     check(io.open(f, encoding='utf-8').read(), os.path.relpath(f, here))
 
-print(f"РАЗОБРАНО heredoc'ов {blocks}, файлов .py {len(files)}")
+print(f"РАЗОБРАНО heredoc'ов конвейера {blocks}; .sh-файлов {len(sh_files)} "
+      f"с heredoc'ами {sh_blocks}; файлов .py {len(files)}")
 PYCOMPILE
 
 # Имя переменной, склеенное с многобайтным символом.
@@ -1140,8 +1219,13 @@ python3 "$(dirname "$0")/tools/judge-tools-bench.py" || {
   case $__rc in
     2) echo "СТЕНД ИНСТРУМЕНТОВ НЕ ИЗМЕРЯЛ: контракт вызова или контроль провален (rc=2)" >&2
        exit 2 ;;
+    3) echo "СТЕНД ИНСТРУМЕНТОВ НЕ ИЗМЕРЯЛ: замок дома держит другой живой" >&2
+       echo "  прогон (rc=3) -- это не вердикт о продукте, повторить позже" >&2
+       exit 3 ;;
     4) echo "СТЕНД ИНСТРУМЕНТОВ: сценариев не столько, сколько объявлено (rc=4)" >&2
-       exit 1 ;;
+       # Круг 28, F-6(б): класс 4 («объявленное число не сошлось») не роняется
+       # в единицу -- вызывающий ветвится по КЛАССУ, а не по «ноль/не ноль».
+       exit 4 ;;
     *) echo "СТЕНД ИНСТРУМЕНТОВ УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
        exit 1 ;;
   esac
@@ -1157,7 +1241,7 @@ python3 "$(dirname "$0")/tools/judge-tools-bench.py" --self-check || {
        echo "  КОНТРОЛЬ ПРОВАЛЕН: пристинная копия дерева уже красная (rc=2)" >&2
        exit 2 ;;
     4) echo "СТЕНД ИНСТРУМЕНТОВ: таблица мутаций не той длины, чем объявлено" >&2
-       exit 1 ;;
+       exit 4 ;;
     *) echo "СТЕНД ИНСТРУМЕНТОВ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
        exit 1 ;;
   esac
@@ -1179,7 +1263,8 @@ python3 "$(dirname "$0")/tools/costs-bench.py" || {
     2) echo "СТЕНД ЦЕН НЕ ИЗМЕРЯЛ: контракт вызова или контроль провален (rc=2)" >&2
        exit 2 ;;
     4) echo "СТЕНД ЦЕН: объявленные числа таблиц не сходятся (rc=4)" >&2
-       exit 1 ;;
+       # Круг 28, F-6(б): класс 4 сохраняется, текст не меняется.
+       exit 4 ;;
     *) echo "СТЕНД ЦЕН УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
        exit 1 ;;
   esac
@@ -1190,7 +1275,7 @@ python3 "$(dirname "$0")/tools/costs-bench.py" --self-check || {
     2) echo "СТЕНД ЦЕН: self-check НЕ ИЗМЕРЯЛ -- пристинная копия уже красная (rc=2)" >&2
        exit 2 ;;
     4) echo "СТЕНД ЦЕН: таблица мутаций не той длины, чем объявлено" >&2
-       exit 1 ;;
+       exit 4 ;;
     *) echo "СТЕНД ЦЕН БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
        exit 1 ;;
   esac
@@ -1202,7 +1287,8 @@ bash "$(dirname "$0")/tools/probes-sync-bench.sh" || {
     2) echo "СТЕНД ПРОБ НЕ ИЗМЕРЯЛ: контракт вызова или условие ожидания (rc=2)" >&2
        exit 2 ;;
     4) echo "СТЕНД ПРОБ: объявленные числа таблиц не сходятся (rc=4)" >&2
-       exit 1 ;;
+       # Круг 28, F-6(б): класс 4 сохраняется, текст не меняется.
+       exit 4 ;;
     *) echo "СТЕНД ПРОБ УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
        exit 1 ;;
   esac
@@ -1213,7 +1299,7 @@ bash "$(dirname "$0")/tools/probes-sync-bench.sh" --self-check || {
     2) echo "СТЕНД ПРОБ: self-check НЕ ИЗМЕРЯЛ -- якорь или условие ожидания (rc=2)" >&2
        exit 2 ;;
     4) echo "СТЕНД ПРОБ: таблица мутаций не той длины, чем объявлено" >&2
-       exit 1 ;;
+       exit 4 ;;
     *) echo "СТЕНД ПРОБ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
        exit 1 ;;
   esac
@@ -1306,6 +1392,17 @@ for _forms, _q in (
           'мутациях'), 'mutations')):
     for _f in _forms:
         NOUNS[_f] = _q
+
+# Форма «все N» с опущенным существительным (круг 28, F-12). Живой случай
+# (docnum:example): «Реестр выше говорит, что все 114 сошлись» при
+# EXPECTED_CHECKS = 118 в девяти строках выше -- счёт назван числом,
+# существительное элидировано,
+# и пара «число + существительное» не возникала вовсе: гейт был слеп к
+# протухшему числу ПО УСТРОЙСТВУ. Такая форма -- тоже счёт: она обязана
+# нести владельца (имя, как обычная форма) или явную пометку docnum:*, а
+# число -- сходиться хотя бы с ОДНОЙ из объявленных владельцем величин
+# (какая именно величина -- элидировано, и требовать её нельзя).
+ELIDE_ALL = ('все', 'всех')
 
 # Насколько далеко от числа ищется имя владельца.
 WINDOW = 400
@@ -1702,9 +1799,12 @@ def scan(text, table, aliases, path='<текст>'):
                       + ' / '.join(sorted(by)) + ')')
 
     # Позиции ВСЕХ сверяемых счётных существительных: по ним пометка выбирает
-    # себе счёт (см. exempt). Считаются один раз на текст.
+    # себе счёт (см. exempt). Считаются один раз на текст. Сюда же -- числа
+    # элидированной формы «все N»: пометка обязана освобождать и их.
     anchors = [at for tok, at in toks
                if NOUNS.get(tok.casefold()) in table]
+    anchors += [toks[i + 1][1] for i, (tok, _at) in enumerate(toks[:-1])
+                if tok.casefold() in ELIDE_ALL and toks[i + 1][0].isdigit()]
 
     bad = []
     for i, (tok, at) in enumerate(toks):
@@ -1772,6 +1872,46 @@ def scan(text, table, aliases, path='<текст>'):
         if value != want:
             bad.append((lines[at], got,
                         'объявлено «%s %s» (владелец %s)' % (want, tok, oid)))
+
+    # Элидированная форма «все N» (круг 28, F-12): существительное опущено,
+    # разбор от существительного её не видит. Владелец ищется среди ВСЕХ
+    # объявителей (величина не названа -- фильтровать не по чему), правилами
+    # того же resolve: общее слово и два имени отказывают, как и обычной
+    # форме; число обязано сойтись хотя бы с одной величиной владельца.
+    by_all = dict.fromkeys((oid for by in table.values() for oid in by), True)
+    for i, (tok, at) in enumerate(toks):
+        if tok.casefold() not in ELIDE_ALL:
+            continue
+        if i + 1 >= len(toks) or not toks[i + 1][0].isdigit():
+            continue
+        num_tok, num_at = toks[i + 1]
+        # «все 118 проверок ...» (docnum:example) -- счётное существительное
+        # стоит при числе,
+        # счёт уже разобран обычным путём выше; повторный отчёт не нужен.
+        after = toks[i + 2][0] if i + 2 < len(toks) else ''
+        if NOUNS.get(after.casefold()) in table:
+            continue
+        if exempt(num_at):
+            continue
+        lo_s, hi_s = sentence_span(num_at)
+        oid, why = resolve(lo_s, hi_s, by_all, num_at, True)
+        if not oid and not why:
+            lo, hi = max(0, num_at - WINDOW), min(len(stream), num_at + WINDOW)
+            oid, why = resolve(lo, hi, by_all, num_at, False)
+        got = stream[max(lo_s, num_at - 30):min(hi_s, num_at + len(num_tok) + 15)].strip()
+        if why:
+            bad.append((lines[num_at], got, why))
+            continue
+        if oid is None:
+            bad.append((lines[num_at], got,
+                        'счёт с опущенным существительным (все N) -- владелец '
+                        'не назван (' + ' / '.join(sorted(by_all)) + ')'))
+            continue
+        declared = sorted({table[q][oid] for q in table if oid in table[q]})
+        if num_tok not in declared:
+            bad.append((lines[num_at], got,
+                        '«все %s» не сходится ни с одной величиной владельца %s '
+                        '(объявлено: %s)' % (num_tok, oid, ', '.join(declared))))
     return bad
 
 
@@ -1911,6 +2051,18 @@ CASES = (
      'через точку число с существительным не женится'),
     ('corpus-tools-bench scenarios of the 3 modes', 0, '',
      'обратная форма без связки не женится'),
+    # Круг 28, F-12: элидированная форма «все N» -- счёт без существительного.
+    ('конвейер закрыл все 114 проверок.', 0, '',
+     'существительное при числе -- обычный путь, «все» не мешает'),
+    ('реестр конвейера сошёлся: все 114 сошлись.', 0, '',
+     'элидированная форма с владельцем и сходящимся числом'),
+    ('реестр конвейера сошёлся: все 113 сошлись.', 1,
+     'не сходится ни с одной',
+     'элидированное число сверяется с объявленными величинами'),
+    ('все 113 сошлись.', 1, 'опущенным существительным',
+     'элидированная форма требует владельца, как обычная'),
+    ('все 113 сошлись docnum:other.', 0, '',
+     'помеченная элидированная форма свободна'),
 )
 # Проза живёт и в коде, но читается там по своим правилам: докстринг питона и
 # печатаемая шеллом строка -- проза, остальное -- значения.
@@ -2043,7 +2195,8 @@ python3 "$(dirname "$0")/tools/docnum-bench.py" || {
        echo "  ПРОВАЛЕН: пристинный кит уже красный (rc=2)" >&2
        exit 2 ;;
     4) echo "ГЕЙТ ЧИСЕЛ: в таблице не столько мутаций, сколько объявлено" >&2
-       exit 1 ;;
+       # Круг 28, F-6(б): класс 4 сохраняется, текст не меняется.
+       exit 4 ;;
     *) echo "ГЕЙТ ЧИСЕЛ БЕЗ ЗУБОВ: мутация не покраснела своей причиной" >&2
        exit 1 ;;
   esac
@@ -4956,7 +5109,13 @@ sys.exit(0 if all(checks.values()) else 1)
 PY
 
 # --- 5a0. пол проверок: что остаётся зелёным на ПРИСТИННОМ образе -------------
-# Реестр выше говорит, что все 114 сошлись НА СОБРАННОМ образе. Он ничего не
+# Круг 28, F-12: фраза стояла «все 114 сошлись» (docnum:historical) при
+# EXPECTED_CHECKS = 118 в девяти строках выше -- существительное было
+# элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
+# существительное» не из чего было строить). Число починено, существительное
+# и владелец названы явно.
+# Реестр выше говорит, что все 118 проверок конвейера сошлись НА СОБРАННОМ
+# образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
 # такая прожила в реестре неизвестно сколько: порог полосы BOM стоял `>= 2`,
@@ -5442,6 +5601,14 @@ else
       4) echo "СТЕНД ЗОНДОВ: таблица мутаций не той длины, чем объявлено" >&2 ;;
       *) echo "СТЕНД ЗОНДОВ БЕЗ ЗУБОВ: запись таблицы не сняла красноту отравы" >&2 ;;
     esac
+    # Класс ответа ребёнка СОХРАНЯЕТСЯ и здесь (круг 28, F-4): первый прогон
+    # того же стенда выходит `exit "$__benchrc"`, и соседи (judge-tools,
+    # costs, probes-sync-bench, гейт чисел) -- тоже. Прежняя форма роняла 2 и
+    # 4 в единицу: вызывающий, ветвящийся по КЛАССУ, читал «отказ по существу»
+    # там, где стенд не мерил или таблица разошлась с объявленным числом.
+    if (( __rc == 2 || __rc == 4 )); then
+      exit "$__rc"
+    fi
     exit 1
   }
 fi

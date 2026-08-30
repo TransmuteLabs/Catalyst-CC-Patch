@@ -64,6 +64,16 @@
 #   5  nothing to measure ON THIS MACHINE (no patched install with a pristine
 #      twin beside it) -- a skip, not a refusal
 #   6  the lock machinery is broken (perl flock unusable): retrying will not help
+#
+# Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
+# traps) and is NOT a kit verdict -- POSIX reports the signal, this table
+# reports the probe's answers. Declared for the two-sided rule (round 28, F-8).
+# 130 arrives when INT is delivered to the process GROUP (what a terminal does
+# on Ctrl-C); `kill -INT <script pid>` while a foreground child is alive is
+# dropped by bash -- the child runs to completion, the trap does NOT fire, and
+# the run finishes with its ordinary code. Nothing is truncated, so that code
+# is honest; but probing 130 with a single-pid kill yields the false
+# conclusion "the trap is broken" (measured, round 25, F-6).
 # One code for two answers is what this split undoes: "wait for the lock" and
 # "the kit is broken" used to share 3 (round 18, F-5).
 #
@@ -254,6 +264,14 @@ if (( __bd != 0 )); then
   if (( __bd == 2 )); then
     echo "ОТКАЗ: проба стража не может мерить (якорь вырезки пропал или случай без причины)." >&2
     exit 2
+  fi
+  # Круг 28, F-7: проба объявляет 6 (нет python3 -- вырезать стража нечем), а
+  # вызывающий отделял только 2, и 6 читался как 1 «таблица стража не
+  # сошлась» -- чужой класс и чужой текст. Рука -- по образцу соседней ветки
+  # прибора замка выше: класс называется, повтор «не поможет».
+  if (( __bd == 6 )); then
+    echo "ОТКАЗ: машинерия пробы стража сломана (нет python3) -- не измеряю путь сборки." >&2
+    exit 6
   fi
   # Красный страж -- сломанный кит, а не занятый замок: повтор не поможет.
   echo "ОТКАЗ: страж «цель против бэкапа» не сошёлся -- не измеряю путь сборки." >&2
@@ -848,6 +866,65 @@ case_d() {
 # installation broken for good. patch_binary has staged its write since the
 # beginning; the download was the one step that still wrote through the live
 # name.
+# --- страж разбираемости жертвы (круг 28, F-14) --------------------------------
+# Зонд правит жертвы текстовой подменой, и замена могла сломать РАЗБОР жертвы:
+# контроль красился бы синтаксической ошибкой, доказывая не отсутствие
+# проверяемого механизма, а испорченный прибор (та же дыра, что полоса E
+# закрыла у пяти стендов). Форма стража переиспользована из
+# tools/corpus-tools-bench.sh (python_heredoc_bodies + sh_victim_parses),
+# второй экземпляр правила не изобретался. Правило открытия -- то же, что у
+# гейта PYCOMPILE конвейера: часть строки до первого '#' содержит python3
+# границей слова, между python3 и открытием нет '|' ';' '&', строка КОНЧАЕТСЯ
+# открытием <<'ТЕГ'; тело -- до строки, равной ТЕГУ дословно. Хвост после
+# тега отсекает упоминания в комментариях и примерах -- иначе строка-пример
+# проглотила бы хвост файла как «тело». Провал любого звена -- ненулевой
+# возврат; вызывающий переводит его в код 2 «прибор не может мерить».
+python_heredoc_bodies() {   # файл-жертва, каталог для тел; печатает число тел
+  local f="$1" out="$2" line pre rest mid tag n=0
+  local OPEN_RE="<<'([A-Za-z_][A-Za-z0-9_]*)'[[:space:]]*\$"
+  tag=''
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -n "$tag" ]]; then
+      if [[ "$line" == "$tag" ]]; then tag=''; continue; fi
+      printf '%s\n' "$line" >> "$out/body.$n.py"
+      continue
+    fi
+    pre=${line%%#*}
+    [[ "$pre" == *python3* ]] || continue
+    [[ "$pre" =~ (^|[^A-Za-z0-9_])python3([^A-Za-z0-9_]|$) ]] || continue
+    rest=${pre#*python3}
+    mid=${rest%<<*}
+    [[ "$mid" == *[\|\;\&]* ]] && continue
+    [[ "$pre" =~ $OPEN_RE ]] || continue
+    tag=${BASH_REMATCH[1]}
+    n=$((n+1)); : > "$out/body.$n.py"
+  done < "$f"
+  printf '%s\n' "$n"
+}
+
+victim_parses() {   # файл-жертва: .py -- py_compile; .sh -- bash -n и тела heredoc
+  local f="$1" dir n i
+  case "$f" in
+    *.py)
+      python3 -c 'import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True)' \
+        "$f" >/dev/null 2>&1 || return 2
+      return 0 ;;
+  esac
+  bash -n "$f" 2>/dev/null || return 2
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/heredoc.XXXXXX") || return 2
+  n=$(python_heredoc_bodies "$f" "$dir")
+  # BSD seq при пустом диапазоне (seq 1 0) печатает «1 0» ВНИЗ, а не пустоту:
+  # без этой проверки страж гонял бы py_compile по несуществующим файлам и
+  # краснел на жертвах без питоньих тел (замерено на этой машине).
+  if (( n > 0 )); then
+    for i in $(seq 1 "$n"); do
+      python3 -m py_compile "$dir/body.$i.py" 2>/dev/null || { rm -rf "$dir"; return 2; }
+    done
+  fi
+  rm -rf "$dir"
+  return 0
+}
+
 case_u() {
   local out rc mut
   echo "case u: claude_patch.py --update builds beside the target"
@@ -900,6 +977,13 @@ MUT
     bad 'case (u) control: the mutation did not apply -- it proves nothing'
     return
   fi
+  # Круг 28, F-14: жертва обязана РАЗБИРАТЬСЯ после подмены. .py-жертва
+  # проверяется py_compile; провал -- код 2, а не «контроль не покраснел»:
+  # покраснение разбором ничего не доказывает.
+  victim_parses "$mut/claude_patch.py" || {
+    echo "  ОТКАЗ: контроль случая (u) НЕ ИЗМЕРЯЛ -- замена сломала разбор жертвы ($mut/claude_patch.py)" >&2
+    __DONE=1; exit 2
+  }
   out="$(python3 "$ROOT/update-probe.py" "$mut" 2>&1)"; rc=$?
   # Требуется НАЗВАННАЯ причина: упавший прибор (нет соседнего файла, опечатка
   # в мутации) тоже даёт ненулевой код, и без имени причины беззубость
@@ -1040,6 +1124,14 @@ MUTX
     kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
     return
   fi
+  # Круг 28, F-14: та же проверка разбора, что у случая (u), но жертва --
+  # .sh-копия конвейера: bash -n плюс разбор питоньих heredoc-тел (bash -n
+  # считает heredoc данными). Держатель снимается и на этой двери отказа.
+  victim_parses "$mut" || {
+    echo "  ОТКАЗ: контроль случая (x) НЕ ИЗМЕРЯЛ -- замена сломала разбор жертвы ($mut)" >&2
+    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+    __DONE=1; exit 2
+  }
   out=$(run_cli "$mut" --nonsense); rc=$?
   if [[ $rc -eq 2 ]]; then
     bad 'the control did NOT redden: case (x) is not testing the ORDER'

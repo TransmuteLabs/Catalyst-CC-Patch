@@ -15,6 +15,14 @@
 # deployment at all; 6 -- the lock machinery is broken: the lock file itself
 # cannot be opened. The return code is part of the report: --diff used to print
 # "расходится: X" and exit 0, so a gate hung on it stayed green (round 18, F-10).
+# Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
+# traps) and is NOT a kit verdict (round 28, F-8).
+# 130 arrives when INT is delivered to the process GROUP (what a terminal does
+# on Ctrl-C); `kill -INT <script pid>` while a foreground child is alive is
+# dropped by bash -- the child runs to completion, the trap does NOT fire, and
+# the run finishes with its ordinary code. Nothing is truncated, so that code
+# is honest; but probing 130 with a single-pid kill yields the false
+# conclusion "the trap is broken" (measured, round 25, F-6).
 #
 # «Не раскатан» и «расходится» -- РАЗНЫЕ классы, и смешивать их нельзя. Чистая
 # машина, где дома ещё нет, обязана получить объявленный пропуск (5), иначе
@@ -165,7 +173,24 @@ stage_one() {  # $1 canon, $2 home, $3 display name
 for f in "${PROBE_FILES[@]}";  do add_pair "$ROOT/probes/$f" "$PROBES_HOME/$f" "probes/$f"; done
 for f in "${TOOL_FILES[@]}";   do add_pair "$ROOT/judge/$f"  "$TOOLS_HOME/$f"  "judge/$f";  done
 
-SYNC_LOCK="${PROBES_SYNC_LOCK:-$CLAUDE_HOME_DIR/probes-sync.lock}"
+# Замок лежит при том доме, который инструмент РЕАЛЬНО пишет, а не при доме,
+# вычисленном из CLAUDE_CONFIG_DIR (круг 25, замер контроллера). Стенд
+# подменяет все три каталога записи (CLAUDE_PROBES_DIR, CLAUDE_JUDGE_TOOLS_DIR,
+# CLAUDE_LAUNCH_AGENTS_DIR) и раскатывает в игрушечный дом -- а замок брался от
+# CLAUDE_HOME_DIR, то есть БОЕВОЙ. Отсюда обе беды: игрушечный прогон стенда
+# отказывал настоящей раскатке («держит другой писатель»), а настоящая
+# раскатка роняла сценарий стенда. Ключ замка обязан совпадать с объектом,
+# который он защищает.
+#
+# dirname от PROBES_HOME, а не сам PROBES_HOME: каталог дома может ещё не
+# существовать, а замок открывается ДО раскатки. При умолчаниях путь тот же,
+# что и был (dirname ~/.claude/probes = ~/.claude), поэтому боевой замок
+# остаётся на своём месте и старые держатели видны новым.
+#
+# Ключ ведётся по дому ПРОБ: остальные два каталога в любом реальном вызове
+# переезжают вместе с ним (это одна раскатка), а раздельный перенос только
+# одного из них -- случай стенда, где дома всё равно игрушечные.
+SYNC_LOCK="${PROBES_SYNC_LOCK:-$(dirname "$PROBES_HOME")/probes-sync.lock}"
 SYNC_LOCKDIR="$SYNC_LOCK.d"
 acquire_sync_lock() {
   local __held=0 __rc=0 __owner __confirm __opid __ostart __stale_dir __cpid
@@ -177,7 +202,7 @@ acquire_sync_lock() {
     else
       __rc=$?
       if [[ $__rc -eq 1 ]]; then
-        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCK (держатель: lsof $SYNC_LOCK)" >&2
+        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCK (узнать держателя: lsof $SYNC_LOCK)" >&2
         exit 3
       fi
       echo "NOTE: flock(1) не сработал (rc=$__rc) -- пробую perl" >&2
@@ -190,7 +215,7 @@ acquire_sync_lock() {
     else
       __rc=$?
       if [[ $__rc -eq 1 ]]; then
-        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCK (держатель: lsof $SYNC_LOCK)" >&2
+        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCK (узнать держателя: lsof $SYNC_LOCK)" >&2
         exit 3
       fi
       echo "NOTE: perl flock(2) не сработал (rc=$__rc) -- беру каталог-замок" >&2

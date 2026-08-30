@@ -6,7 +6,11 @@
 //        (в --self-check: запись не сняла красноту, то есть стенд без зубов)
 //   2 -- прибор не может мерить: контракт вызова нарушен (нет --binary,
 //        неизвестный флаг) или таблица сценариев структурно битая (сценарий
-//        без expected, дубль имени, неизвестный ключ expected)
+//        без expected, дубль имени, неизвестный ключ expected); в --self-check
+//        сюда же входит СОРВАВШЕЕСЯ ПРИМЕНЕНИЕ записи таблицы (якорь
+//        отравы/мутации уехал, образец не уникален) -- измерение НЕ
+//        СОСТОЯЛОСЬ, и счёт ослеплений этому прогону веры не даёт (круг 28,
+//        F-9: прежде такой отказ ронялся в единицу «не ослепила»)
 //   4 -- объявленное число не сходится с фактическим (EXPECTED_SCENARIOS,
 //        EXPECTED_MUTATIONS): правка таблицы без правки числа
 'use strict';
@@ -1700,6 +1704,7 @@ function runSelfCheck(options) {
     return;
   }
   let blinded = 0;
+  let broken = 0;
   for (const record of SELF_CHECK_MUTATIONS) {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-bench-self.'));
     let line;
@@ -1734,6 +1739,12 @@ function runSelfCheck(options) {
         }
       }
     } catch (error) {
+      // Круг 28, F-9: сорвавшееся применение -- измерение НЕ СОСТОЯЛОСЬ.
+      // Прежде отказ печатался строкой, цикл ехал дальше, и хвост говорил
+      // «ослепили не все» единицей -- как будто каждая запись была измерена и
+      // не ослепила. Класс 2 доминирует над счётом: пока прибор чинят,
+      // остальным числам этого прогона веры нет.
+      broken += 1;
       line = `probe-bench: МУТАЦИЯ ${record.name}: ОТКАЗ — ${error?.message ?? error}`;
     } finally {
       fs.rmSync(workDir, { recursive: true, force: true });
@@ -1741,6 +1752,12 @@ function runSelfCheck(options) {
     console.log(line);
   }
   console.log(`probe-bench: SELF-CHECK мутаций=${SELF_CHECK_MUTATIONS.length} ослепили=${blinded}`);
+  if (broken > 0) {
+    console.error(`probe-bench: НЕ МЕРИЛ -- ${broken} мутаций не применились `
+      + '(якорь уехал); счёт ослеплений не приговор');
+    process.exitCode = 2;
+    return;
+  }
   if (blinded !== SELF_CHECK_MUTATIONS.length) process.exitCode = 1;
 }
 

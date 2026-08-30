@@ -10,6 +10,12 @@ by a separate pass, by age.
 
 Idempotent: already-compacted ones are skipped, the source is deleted only
 after the archive has been written and read back.
+
+Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
+  0  проход завершён (что считать «записью» и что «мусором», решают правила
+     ниже; пропуск пустого каталога -- тоже 0: нечего уплотнять -- не отказ)
+  2  контракт вызова нарушен: argparse отверг аргументы (питон отдаёт 2 сам)
+Круг 28, F-10: шапка заведена, чтобы объявленный код был виден вызывающему.
 """
 import argparse, glob, gzip, json, os, re, shutil, time
 

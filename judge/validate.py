@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""Прогон и валидация судейских сценариев по записям проб.
+
+Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
+  0  прогоны исполнены и записаны
+  2  контракт вызова нарушен: --prompt при --project-layer off, --truth вне
+     словаря, --repeat/--jobs меньше 1 (круг 28, F-10: прежде отдавалось
+     кодом 1 через SystemExit-строку)
+  5  нечего мерить: записей для прогона не найдено -- пропуск, а не отказ
+     (решение контроллера, круг 28, F-10)
+"""
 import argparse
 import concurrent.futures
 import copy
@@ -9,6 +19,7 @@ import math
 import os
 import re
 import statistics
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +45,18 @@ def configure_paths(home, probe):
     DEFAULT_RECORDS = os.path.join(base, 'records')
     PROMPT_PATH = os.path.join(base, 'prompt.md')
     LABELS_PATH = os.path.join(base, 'labels.jsonl')
+    # Дом РАЗМЕЧЕННЫХ записей. Каталог records -- скользящее окно ядра
+    # (tweakcc-patch.js, records_keep, дефолт 500): старые записи ядро
+    # удаляет само, а метки живут дольше. Замерено 2026-08-30: из 45
+    # размеченных записей на диске оставалась 21, остальные 24 ядро
+    # унесло вместе с окном -- доказательная база таяла молча, и каждый
+    # следующий замер шёл по НЕЗАМЕТНО другому набору. Разметка теперь
+    # уносит запись сюда, за пределы окна; тот же приём и по той же
+    # причине, что и перенос корпуса образов из каталога установок.
+    global LABELLED_HOME
+    LABELLED_HOME = os.path.expanduser(
+        os.environ.get('CLAUDE_JUDGE_LABELLED_DIR')
+        or os.path.join('~/.local/share/claude-patch', 'judge-corpus'))
     SETTINGS_PATH = os.path.join(PROBES_HOME, 'probes.toml')
 
 
@@ -491,7 +514,30 @@ def resolve_record_name(value):
     matches = [name for name in names if name.removesuffix('.gz').removesuffix('.json') == value]
     if len(matches) == 1:
         return matches[0]
-    raise FileNotFoundError(f'запись не найдена: {value}')
+    # Класс 2 общей таблицы кита, а не голая трассировка: имя записи --
+    # часть КОНТРАКТА ВЫЗОВА, и повтор с тем же именем не поможет
+    # (круг 25, замер контроллера; та же линия, что F-10).
+    print(f'запись не найдена: {value}', file=sys.stderr)
+    raise SystemExit(2)
+
+
+def keep_labelled(name):
+    """Копия размеченной записи в дом доказательной базы; путь или None.
+
+    Копия, а не перенос: ядро и прополка продолжают работать со своим окном, а
+    у замера появляется набор, который никто не удаляет. Идемпотентно --
+    повторная разметка той же записи ничего не переписывает.
+    """
+    os.makedirs(LABELLED_HOME, exist_ok=True)
+    for candidate in (os.path.join(DEFAULT_RECORDS, name),
+                      os.path.join(DEFAULT_RECORDS, name + '.gz')):
+        if not os.path.isfile(candidate):
+            continue
+        target = os.path.join(LABELLED_HOME, os.path.basename(candidate))
+        if not os.path.exists(target):
+            shutil.copy2(candidate, target)
+        return target
+    return None
 
 
 def command_label(args):
@@ -502,16 +548,31 @@ def command_label(args):
         'note': args.note or '',
         't': datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
     }
+    # Копия ДО записи метки: метка без записи -- это указатель в пустоту,
+    # а запись без метки безвредна. Порядок выбран так, чтобы обрыв
+    # посередине не рождал первого.
+    kept = keep_labelled(name)
     with open(LABELS_PATH, 'a', encoding='utf-8') as fh:
         fh.write(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n')
     print(json.dumps(item, ensure_ascii=False))
+    if kept:
+        print(f'запись унесена в дом доказательной базы: {kept}')
+    else:
+        # Достижимо, когда запись подали ПУТЁМ вне каталога окна: имя
+        # разрешилось, а копировать в доказательную базу нечего --
+        # метка будет указывать на файл, которого набор не содержит.
+        print(f'ВНИМАНИЕ: {name} нет в каталоге записей ({DEFAULT_RECORDS}) --\n'
+              f'  метка поставлена, но в дом доказательной базы копировать нечего',
+              file=sys.stderr)
 
 
 def command_run(args):
     config = probe_settings()
     models = models_from_args(args.models, config)
     if args.project_layer == 'off' and not args.prompt:
-        raise SystemExit('--prompt обязателен при --project-layer off')
+        # Код 2 «контракт вызова» (круг 28, F-10).
+        print('--prompt обязателен при --project-layer off', file=sys.stderr)
+        raise SystemExit(2)
     paths = record_files(args.records, args.limit)
     labels = labels_by_record()
     tasks = []
@@ -531,7 +592,9 @@ def command_run(args):
                 tasks.append((index, path, record, model, effort, rep, args, config, truths))
                 index += 1
     if not tasks:
-        raise SystemExit('записи для прогона не найдены')
+        # Код 5 «нечего мерить» -- пропуск, не отказ (круг 28, F-10).
+        print('записи для прогона не найдены', file=sys.stderr)
+        raise SystemExit(5)
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
         completed = [future.result() for future in [executor.submit(run_one, task) for task in tasks]]
     rows = [result for _, result in sorted(completed)]
@@ -636,11 +699,18 @@ def main():
         getattr(args, 'image', None) or DEFAULT_IMAGE, PROBE_ID)
     truth = getattr(args, 'truth', None)
     if truth is not None and truth not in RX_VALUES:
-        raise SystemExit('--truth: допустимы ' + ', '.join(RX_VALUES) + '; получено ' + truth)
+        # Код 2 «контракт вызова» (круг 28, F-10).
+        print('--truth: допустимы ' + ', '.join(RX_VALUES) + '; получено ' + truth,
+              file=sys.stderr)
+        raise SystemExit(2)
     if getattr(args, 'repeat', 1) < 1:
-        raise SystemExit('--repeat должен быть не меньше 1')
+        # Код 2 «контракт вызова» (круг 28, F-10).
+        print('--repeat должен быть не меньше 1', file=sys.stderr)
+        raise SystemExit(2)
     if getattr(args, 'jobs', 1) < 1:
-        raise SystemExit('--jobs должен быть не меньше 1')
+        # Код 2 «контракт вызова» (круг 28, F-10).
+        print('--jobs должен быть не меньше 1', file=sys.stderr)
+        raise SystemExit(2)
     args.func(args)
 
 

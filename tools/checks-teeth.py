@@ -25,7 +25,9 @@ tweakcc восстанавливает свой бэкап поверх назв
   4  длина таблицы разошлась с объявленной (EXPECTED_MUTATIONS)
   3  замок конвейера держит живая сборка -- НЕ МЕРИЛИ, повтор поможет
   5  мерить нечего: на этой машине нет собранного образа
-  6  сломано окружение: нет bash или tools/checks-on-image.sh
+  6  сломано окружение либо машинерия замка: нет bash, нет
+     tools/checks-on-image.sh, замок не открыть или flock не работает --
+     повтор НЕ поможет
 """
 
 from __future__ import annotations
@@ -57,6 +59,18 @@ DECOY_BACK = 2_000_000
 
 class Refusal(Exception):
     """Прибор не может мерить (класс 2)."""
+
+
+class LockMachineryBroken(Exception):
+    """Замок не открыть или flock не работает -- класс 6 (круг 28, F-1).
+
+    Один код на два ответа стоил киту десяти минут в круге 18, F-2: сломанная
+    машинерия выглядела занятым замком. Здесь тот же класс дефекта: OSError
+    на open() замка (нет каталога, нет права) возвращал None -- то же значение,
+    что и «flock занят живой сборкой», -- и вызывающий объявлял код 3 «повтор
+    поможет» там, где держателя нет вовсе. Свип на 3 уходит ждать
+    несуществующего держателя. Занятость и поломка теперь РАЗНЫЕ ответы.
+    """
 
 
 def default_image() -> Path | None:
@@ -134,7 +148,12 @@ def pipeline_lock_path() -> str:
 
 
 def hold_read_lock() -> "io.BufferedWriter | None":
-    """Разделяемый замок на время замера; None -- замок держит живая сборка.
+    """Разделяемый замок на время замера.
+
+    None -- замок занят: его держит живая сборка (код 3, повтор поможет).
+    LockMachineryBroken -- замок НЕ открыть либо flock не работает (код 6,
+    повтор НЕ поможет): см. класс -- там история, почему различие обязано
+    быть явным.
 
     Прибор МЕРЯЕТ ЖИВОЙ ОБРАЗ и копирует его четырнадцать раз. Сборка в это
     время вносит новый образ переименованием: копия попадала на файл, который
@@ -145,13 +164,20 @@ def hold_read_lock() -> "io.BufferedWriter | None":
     path = pipeline_lock_path()
     try:
         fh = open(path, "a")
-    except OSError:
-        return None                    # машинерия замка недоступна -- решает вызывающий
+    except OSError as exc:
+        raise LockMachineryBroken(
+            f"файл замка не открывается: {path}: {exc}") from exc
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
-    except OSError:
+    except BlockingIOError:
+        # Единственная ошибка flock, означающая ЗАНЯТОСТЬ (EWOULDBLOCK/EAGAIN):
+        # держатель есть, и это ответ класса 3.
         fh.close()
         return None
+    except OSError as exc:
+        fh.close()
+        raise LockMachineryBroken(
+            f"flock не работает на {path}: {exc}") from exc
     return fh
 
 
@@ -250,7 +276,14 @@ def main() -> int:
         return 5
 
     # Замок берётся ДО первого чтения образа и держится до конца замера.
-    lock = hold_read_lock()
+    # Круг 28, F-1: занятость (3) и поломку машинерии (6) нельзя отвечать
+    # одним кодом -- свип на 3 ждёт держателя, которого при поломке нет.
+    try:
+        lock = hold_read_lock()
+    except LockMachineryBroken as exc:
+        print("checks-teeth: НЕ МЕРИЛИ -- машинерия замка сломана, повтор НЕ поможет "
+              f"({exc})", file=sys.stderr)
+        return 6
     if lock is None:
         print("checks-teeth: НЕ МЕРИЛИ -- замок конвейера держит живая сборка "
               f"({pipeline_lock_path()}); образ меняется под руками, повтор поможет",

@@ -34,6 +34,17 @@ Platform notes:
     Windows still runs the binary; under WDAC/AppLocker enforcement you must
     re-sign yourself (set CLAUDE_PATCH_SIGNTOOL_SHA1, optionally
     CLAUDE_PATCH_SIGNTOOL, to have this script call signtool for you).
+
+Exit codes (a subset of the kit-wide table, see the claude-patch-all.sh header;
+круг 28, F-11):
+  0  installed/verified
+  1  a refusal on the merits: unsupported platform or architecture, integrity
+     mismatch, the target is in use, a post-check failed
+  2  the call contract is broken, or the instrument itself is incomplete:
+     no Claude Code binary found where the invocation promises one (pass its
+     path explicitly or run --update), a malformed --update version, or the
+     kit's own patch_claude_routing.py missing next to this script.
+     Retrying as-is cannot help -- fix the call or the deployment.
 """
 from __future__ import annotations
 
@@ -67,9 +78,14 @@ HERE = Path(__file__).resolve().parent
 PATCHER = HERE / "patch_claude_routing.py"
 
 
-def die(msg: str) -> "NoReturn":  # type: ignore[name-defined]
+def die(msg: str, code: int = 1) -> "NoReturn":  # type: ignore[name-defined]
+    # Круг 28, F-11: код стал параметром с умолчанием 1. Прежде die() всегда
+    # отдавал единицу -- в том числе на нарушении контракта вызова (нет файла),
+    # где класс по общей таблице кита -- 2 «прибор не может мерить»: чинить
+    # надо ВЫЗОВ, а не продукт. Прочие отказа (архитектура, платформа,
+    # целостность) остаются классом 1.
     print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(code)
 
 
 def info(msg: str) -> None:
@@ -129,7 +145,8 @@ VERSION = re.compile(r"^[0-9][0-9.]*$")
 
 def validate_version(version: str) -> str:
     if not isinstance(version, str) or not VERSION.fullmatch(version):
-        die(f"invalid version {version!r}: expected digits and dots, starting with a digit")
+        die(f"invalid version {version!r}: expected digits and dots, starting with a digit",
+            code=2)
     return version
 
 
@@ -289,7 +306,7 @@ def resolve_active_binary() -> Path:
             # newest by mtime — matches what the launcher points at after an update
             return max(cands, key=lambda p: p.stat().st_mtime)
     die("could not locate a Claude Code binary; pass its path explicitly "
-        "or run with --update")
+        "or run with --update", code=2)
 
 
 def _sweep_stale_launcher_tmps(link: Path) -> None:
@@ -565,7 +582,14 @@ def patch_binary(target: Path, backup: Path | None = None) -> None:
 
 def main(argv: list[str]) -> None:
     if not PATCHER.is_file():
-        die(f"patch_claude_routing.py not found next to this script ({PATCHER})")
+        # Класс 2, а не 1 (адъюдикация круга 25, запрос F-4): пропал
+        # компонент САМОГО кита, а не что-то в цели. Код 1 отправляет
+        # читателя разбираться с образом ("не сошёлся гейт"), тогда как
+        # чинить надо неполную раскатку кита -- ровно то различие,
+        # ради которого класс 2 и заведён. Не 6: 6 -- про окружение и
+        # машинерию замка, а здесь недостаёт нашего же файла.
+        die(f"patch_claude_routing.py not found next to this script ({PATCHER})",
+            code=2)
 
     target: Path
     # Set only on the --update path: the name the staging build is renamed onto,

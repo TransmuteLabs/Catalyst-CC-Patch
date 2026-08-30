@@ -26,7 +26,7 @@ D2	README.md	corpus-tools-bench's 106 recorded mutations	corpus-tools-bench's 10
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 66;	const EXPECTED_SCENARIOS = 67;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
-D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 39	EXPECTED_MUTATION_COUNT = 39	не объявляет свою величину
+D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 40	EXPECTED_MUTATION_COUNT = 40	не объявляет свою величину
 D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=106	EXPECTED_MUTATION_COUNT=106	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
@@ -65,3 +65,4 @@ D36	README.md	probe-bench's 5 recorded mutations	probe-bench's 6 recorded mutati
 D37	README.md	checks-teeth's 16 recorded mutations	checks-teeth's 17 recorded mutations	объявлено «16 mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
+D40	claude-patch-all.sh	все 118 проверок конвейера сошлись	все 118 сошлись	опущенным существительным

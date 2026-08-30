@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""Адъюдикация записей проб: разметка моделью и подсчёт полос по записям.
+
+Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
+  0  прогоны разобраны и напечатаны
+  2  контракт вызова нарушен (круг 28, F-10: --jobs меньше 1 прежде отдавался
+     кодом 1 через SystemExit-строку)
+  5  нечего мерить: записей нет (пропуск, а не отказ --
+     решение контроллера, круг 28, F-10)
+"""
 import argparse
 import concurrent.futures
 import datetime
@@ -240,11 +249,17 @@ def main():
     configure_paths(args.home, args.probe)
     load_vocabulary(args.image, args.probe)
     if args.jobs < 1:
-        raise SystemExit('--jobs должен быть не меньше 1')
+        # Код 2 «контракт вызова», не 1 (строка в SystemExit даёт 1) --
+        # круг 28, F-10.
+        print('--jobs должен быть не меньше 1', file=sys.stderr)
+        raise SystemExit(2)
 
     paths = files_for(args.target, args.limit)
     if not paths:
-        raise SystemExit('записи для проверки не найдены')
+        # Код 5 «нечего мерить»: записей нет -- это пропуск, а не отказ по
+        # существу (решение контроллера, круг 28, F-10).
+        print('записи для проверки не найдены', file=sys.stderr)
+        raise SystemExit(5)
     tasks = [(index, path, args) for index, path in enumerate(paths)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
         completed = [future.result() for future in [executor.submit(run_one, task) for task in tasks]]

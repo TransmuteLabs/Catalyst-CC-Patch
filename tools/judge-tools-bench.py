@@ -6,20 +6,27 @@
 Коды выхода (подмножество общей таблицы кита -- см. шапку claude-patch-all.sh):
   0  всё сошлось: каждая дверь на месте, каждая мутация покраснела свою
   1  дверь не сошлась, либо мутация прошла молча / покрасила чужую
-  2  прибор не может мерить: контракт вызова (argparse) либо ПРИСТИННАЯ копия
-     дерева уже красная -- контроль провален
+  2  прибор не может мерить: контракт вызова (argparse), ПРИСТИННАЯ копия
+     дерева уже красная (контроль провален), либо замена СЛОМАЛА РАЗБОР
+     жертвы (круг 25, E-3) -- покраснение разбором ничего не доказывает,
+     и такой прогон останавливается ДО счёта покраснений
+  3  замок объекта держит другой живой прогон -- повторить позже; счёт
+     расхождений при этом НЕ ведётся, «занято» вердиктом не является
   4  объявленное число не сходится с фактическим (EXPECTED_SCENARIOS,
-     EXPECTED_MUTATIONS)
+     EXPECTED_MUTATIONS), либо сверка покрытия нашла дверь без своего зуба
+     (круг 25, E-4: непокрытая дверь не доказывает ничего)
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import gzip
 import io
 import importlib.util
 import json
 import os
+import py_compile
 import re
 import shutil
 import subprocess
@@ -39,8 +46,11 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 36
-EXPECTED_MUTATIONS = 33
+EXPECTED_SCENARIOS = 37
+# Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
+# сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
+# отказывает на любом новом пробеле, а не молчит.
+EXPECTED_MUTATIONS = 44
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -54,6 +64,29 @@ SUMMARY_RE = re.compile(
 
 class BenchFailure(AssertionError):
     pass
+
+
+class CannotMeasureNow(Exception):
+    """Сценарий не смог мерить: замок объекта держит другой живой прогон.
+
+    Круг 25, замер контроллера. Сценарий 28 раскатывает в игрушечный дом; пока
+    замок синхронизации брался от БОЕВОГО дома, чужая раскатка отказывала ему
+    кодом 3, а стенд печатал FAIL и считал расхождение -- то есть «свойство не
+    держится» вместо «померить сейчас нельзя». Ключ замка починен в
+    scripts/probes-sync.sh, но различать классы обязан и стенд: два его
+    собственных прогона рядом всё ещё законно встречаются на одном доме.
+    """
+
+
+class UnparsableVictim(Exception):
+    """Замена сломала РАЗБОР жертвы -- прибор не может мерить (код выхода 2).
+
+    Круг 25, E-3: покраснение СЦЕНАРИЯ синтаксической ошибкой ничего не
+    доказывает -- тот же код возврата даёт и отключённый механизм. Страж
+    разбираемости ловит такую замену ДО прогона сценариев, и класс возврата
+    здесь свой, отдельный от «мутация не применилась» (анкер не найден) и от
+    «мутация прошла молча»: причины разные и чинятся по-разному.
+    """
 
 
 def require(condition: bool, message: str) -> None:
@@ -691,10 +724,17 @@ def toy_kit(base: Path) -> Path:
 
 
 def run_sync(kit: Path, mode: str, home: Path, tools: Path, agents: Path,
-             fake_home: Path | None = None) -> subprocess.CompletedProcess[str]:
+             fake_home: Path | None = None,
+             lock_path: Path | None = None) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env.update(CLAUDE_PROBES_DIR=str(home), CLAUDE_JUDGE_TOOLS_DIR=str(tools),
                CLAUDE_LAUNCH_AGENTS_DIR=str(agents))
+    # Замок называется явно только там, где сценарию нужно СДЕЛАТЬ его
+    # занятым: держать боевой замок стенд не вправе.
+    if lock_path is not None:
+        env["PROBES_SYNC_LOCK"] = str(lock_path)
+    else:
+        env.pop("PROBES_SYNC_LOCK", None)
     if fake_home is not None:
         env["HOME"] = str(fake_home)
     return subprocess.run(["bash", str(kit / "scripts" / "probes-sync.sh"), mode],
@@ -719,6 +759,9 @@ def scenario_28() -> None:
         agents.mkdir()
 
         done = run_sync(kit, "--to-home", home, tools, agents)
+        if done.returncode == 3:
+            raise CannotMeasureNow(
+                f"замок дома держит другой писатель: {done.stderr.strip()}")
         require(done.returncode == 0, f"раскатка в игрушечный дом провалилась: {done.stderr}")
         before = home_bytes(home, tools)
         require(len(before) == 10, f"в доме {len(before)} файлов, ожидалось 10")
@@ -1060,6 +1103,36 @@ def scenario_36() -> None:
         require_counters(counters, orphans=1, tmp_held=1)
 
 
+def scenario_37() -> None:
+    """Занятый замок дома -- «повторить позже» (3), а не отказ по существу.
+
+    Круг 25, замер контроллера: инструмент брал замок от CLAUDE_HOME_DIR, а
+    писал в дом из CLAUDE_PROBES_DIR -- игрушечная раскатка стенда и настоящая
+    раскатка отказывали друг другу, и стенд читал это как непрошедшее
+    свойство. Ключ замка привязан к дому проб (scripts/probes-sync.sh); здесь
+    пинится ВТОРАЯ половина: когда замок занят по-настоящему, инструмент
+    обязан ответить классом 3 и НАЗВАТЬ держателя, а не свалиться в 1.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        kit = toy_kit(base)
+        home, tools, agents = base / "p", base / "t", base / "la"
+        agents.mkdir()
+        lock = base / "held.lock"
+        with open(lock, "w", encoding="utf-8") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            done = run_sync(kit, "--to-home", home, tools, agents,
+                            lock_path=lock)
+            require(done.returncode == 3,
+                    f"занятый замок дал {done.returncode}, ожидался класс 3: "
+                    f"{done.stderr.strip()}")
+            out = done.stdout + done.stderr
+            require("держит" in out,
+                    f"отказ по занятому замку не назвал держателя: {out.strip()}")
+            require(not home.exists() and not tools.exists(),
+                    "дом ТРОНУТ, хотя замок держал другой писатель")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -1100,11 +1173,18 @@ def run_scenarios() -> int:
         (34, scenario_34),
         (35, scenario_35),
         (36, scenario_36),
+        (37, scenario_37),
     ]
     mismatches = 0
     for number, case in cases:
         try:
             case()
+        except CannotMeasureNow as error:
+            # Класс 3 общей таблицы кита: не вердикт о продукте, а «сейчас
+            # нельзя». Счёт расхождений НЕ трогается -- иначе занятый замок
+            # читался бы как непрошедшее свойство.
+            print(f"judge-tools-bench: СЦЕНАРИЙ {number}: НЕ МЕРИЛ -- {error}")
+            return 3
         except Exception as error:
             mismatches += 1
             print(f"judge-tools-bench: СЦЕНАРИЙ {number}: FAIL: {error}")
@@ -1121,11 +1201,79 @@ def run_scenarios() -> int:
     return 0 if mismatches == 0 else 1
 
 
+def shell_python_heredocs(text: str) -> list[str]:
+    """Тела heredoc'ов .sh-жертвы, поданные питону.
+
+    Правило -- то же, что у гейта PYCOMPILE конвейера (claude-patch-all.sh):
+    строка до первого '#' содержит python3 границей слова, между python3 и
+    открытием нет '|' ';' '&', и строка КОНЧАЕТСЯ открытием <<'ТЕГ'; тело --
+    до строки, равной ТЕГУ дословно. Хвост после тега отсекает упоминания в
+    комментариях и примерах -- иначе строка-пример проглотила бы хвост файла
+    как «тело», и страж краснел бы на здоровой жертве.
+    """
+    bodies: list[str] = []
+    opener = re.compile(r"^[^#]*\bpython3\b[^|;&]*<<'([A-Za-z_][A-Za-z0-9_]*)'\s*$")
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = opener.match(lines[i])
+        if match is None:
+            i += 1
+            continue
+        tag = match.group(1)
+        end = next((j for j in range(i + 1, len(lines)) if lines[j] == tag), -1)
+        if end < 0:
+            raise UnparsableVictim(f"heredoc {tag} не закрыт в {lines[i]!r}")
+        bodies.append("\n".join(lines[i + 1:end]))
+        i = end + 1
+    return bodies
+
+
+def victim_parses(path: Path) -> None:
+    """Разбор жертвы её СОБСТВЕННЫМ разборщиком; иначе -- UnparsableVictim.
+
+    Круг 25, E-3: до этого стража замена влетала в жертву свободным текстом,
+    и сломанный разбор эксплуатировался только СЛУЧАЙНО -- следи мутации за
+    маркером состояния, а не за кодом возврата, и любая синтаксическая
+    поломка на строке со своим следом читалась бы как зуб. У .py-жертв
+    вложенных тел под другим интерпретатором нет (внешние вызовы идут
+    файлами-скриптами), у .sh-жертв питоньи heredoc-тела разбираются тем же
+    правилом, что и в corpus-tools-bench (круг 25, E-1). Для .js отдельного
+    разборщика у кита нет (bun/node не обязаны стоять на машине стенда) --
+    жертва tools/probe-bench.js остаётся без этого стража, и это объявлено:
+    первая же мутация со следом-маркером состояния по .js-жертве обязана
+    завести его, а не полагаться на случайность.
+    """
+    if path.suffix == ".py":
+        try:
+            py_compile.compile(str(path), doraise=True)
+        except py_compile.PyCompileError as error:
+            raise UnparsableVictim(f"py_compile {path}: {error}") from error
+    elif path.suffix == ".sh":
+        done = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        if done.returncode != 0:
+            raise UnparsableVictim(f"bash -n {path}: {(done.stderr or '').strip()}")
+        for body in shell_python_heredocs(path.read_text(encoding="utf-8")):
+            try:
+                compile(body, f"heredoc@{path}", "exec")
+            except SyntaxError as error:
+                raise UnparsableVictim(
+                    f"heredoc-тело в {path}: строка {error.lineno}: {error.msg}") from error
+
+
+BUSY_LOCK_ARM = (
+    '        echo "ОТКАЗ: другой писатель синхронизации держит $SYNC_LOCK '
+    '(узнать держателя: lsof $SYNC_LOCK)" >&2\n'
+    "        exit 3\n      fi\n"
+)
+
+
 def replace_once(path: Path, old: str, new: str, mutation: str) -> None:
     text = path.read_text(encoding="utf-8")
     count = text.count(old)
     require(count == 1, f"{mutation}: якорь встретился {count} раз в {path}")
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    victim_parses(path)
 
 
 def mutation_m1(root: Path) -> None:
@@ -1458,6 +1606,162 @@ def mutation_m32(root: Path) -> None:
     )
 
 
+# M34-M43 -- зубы круга 25, E-4: часть дверей стенда жила без своей мутации,
+# и сверка покрытия (введена той же волной) отказывала бы на них. Каждая
+# мутация ниже ломает МЕХАНИЗМ, который утверждает её сценарий, а не синтаксис
+# -- страж разбираемости (E-3) любую синтаксическую поломку остановил бы
+# кодом «прибор не может мерить». Двери, разделяющие один механизм (снятие
+# сироты, удержание живого писателя, исходник-после-сжатия), краснеют от
+# мутации вместе со своей -- сверка проверяет названную дверь и её причину.
+def mutation_m34(root: Path) -> None:
+    # Возрастная калитка снята: свежая запись уходит в сжатие вместо пропуска.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if mtime > cutoff:",
+        "        if False:",
+        "M34",
+    )
+
+
+def mutation_m35(root: Path) -> None:
+    # Исходник не снимается после успешного сжатия: рядом с архивом остаётся
+    # дубль. Дверь оборванного сжатия разделяет этот механизм и краснеет
+    # вместе со своей -- у неё есть собственный зуб M36 на решение о пересжатии.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        try:\n            os.unlink(f)\n        except FileNotFoundError:\n            pass",
+        "        try:\n            pass  # M35: источник не снимается после сжатия\n"
+        "        except FileNotFoundError:\n            pass",
+        "M35",
+    )
+
+
+def mutation_m36(root: Path) -> None:
+    # Нечитаемый сосед-архив объявляется целым: пересжатие не запускается,
+    # битый архив остаётся лежать рядом с неснятым исходником.
+    replace_once(
+        root / "judge" / "compact.py",
+        "                try:\n                    os.unlink(gz)\n"
+        "                except FileNotFoundError:\n"
+        "                    pass          # архив уже убран — пересжимаем всё равно\n"
+        "                print(f'ОБОРВАННОЕ СЖАТИЕ, архив не читается -- пересжимаю: {os.path.basename(f)}: {e}')\n"
+        "                recompress = True",
+        "                done += 1\n                continue",
+        "M36",
+    )
+
+
+def mutation_m37(root: Path) -> None:
+    # Обратное чтение архива вырвано: битый json сжимается и снимается,
+    # сжатие превращается в потерю материала -- ровно то, что запрещает
+    # комментарий у этой ветки в compact.py.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        try:\n            with gzip.open(tmp, 'rt', encoding='utf-8') as fh:\n"
+        "                json.load(fh)\n        except Exception as e:",
+        "        try:\n            with gzip.open(tmp, 'rt', encoding='utf-8') as fh:\n"
+        "                pass  # M37: обратное чтение вырвано\n        except Exception as e:",
+        "M37",
+    )
+
+
+def mutation_m38(root: Path) -> None:
+    # Мёртвый pid считается живым: осиротевший tmp не снимается никогда.
+    # Двери dry-run-сироты и переиспользованного номера разделяют механизм
+    # снятия и краснеют вместе со своей.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        except ProcessLookupError:\n            pass                       # pid мёртв -- файл ничей",
+        "        except ProcessLookupError:\n            continue                  # M38: мёртвый pid держится как живой",
+        "M38",
+    )
+
+
+def mutation_m39(root: Path) -> None:
+    # Удержание свежего tmp живого писателя вырвано: файл падает сквозь
+    # проверку в снятие. Двери возрастного порога и метки из будущего имеют
+    # собственные зубы M29/M33 на свои армы условия.
+    replace_once(
+        root / "judge" / "compact.py",
+        "                tmp_held += 1\n                continue               # живой писатель, файл свежий",
+        "                pass                   # M39: свежий tmp живого писателя проваливается в снятие",
+        "M39",
+    )
+
+
+def mutation_m40(root: Path) -> None:
+    # Пропуск свежей записи заодно считается «исчезновением под руками»:
+    # ложные исчезновения появляются в нормальном прогоне, и надсценарная
+    # дверь, собирающая счётчики всех прогонов, обязана это назвать.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if mtime > cutoff:\n            skipped += 1\n            continue",
+        "        if mtime > cutoff:\n            skipped += 1\n            vanished += 1\n            continue",
+        "M40",
+    )
+
+
+def mutation_m41(root: Path) -> None:
+    # Мёртвый pid лаунчера считается живым: осиротевшая ссылка не снимается.
+    # Дверь подмены после проверки разделяет механизм снятия и краснеет
+    # вместе со своей (у неё собственный зуб M6 на сверку inode).
+    replace_once(
+        root / "claude_patch.py",
+        "        except ProcessLookupError:\n            pass                       # pid мёртв — свап уже не случится",
+        "        except ProcessLookupError:\n            continue                  # M41: мёртвый pid держится как живой",
+        "M41",
+    )
+
+
+def mutation_m42(root: Path) -> None:
+    # Удержание живого pid вырвано: чужая рабочая ссылка снимается, и её
+    # собственный os.replace падает после подмены образа -- ровно то, чему
+    # посвящён абзац сдержанности в docstring прополки.
+    replace_once(
+        root / "claude_patch.py",
+        "        else:\n            continue                   # жив",
+        "        else:\n            pass                       # M42: живой pid проваливается в снятие",
+        "M42",
+    )
+
+
+def mutation_m43(root: Path) -> None:
+    # Импорт снова требует НАЛИЧИЯ образа: одна проверка файла на импорте --
+    # и adjudicate не импортируется на машине без образа, дефект, который
+    # закрывала ленивость чтения. Проверяется именно существование, а не
+    # чтение словаря: соседняя дверь сеет словарь ПУСТЫМ файлом-образом
+    # (кэшем, не байтами), и чтение роняло её вместо своей.
+    replace_once(
+        root / "judge" / "adjudicate.py",
+        "if __name__ == '__main__':\n    main()",
+        "if os.environ.get('CLAUDE_JUDGE_IMAGE'):\n"
+        "    os.stat(os.environ['CLAUDE_JUDGE_IMAGE'])\n"
+        "\n"
+        "\n"
+        "if __name__ == '__main__':\n    main()",
+        "M43",
+    )
+
+
+def mutation_m44(root: Path) -> None:
+    """Занятый замок отвечает классом 1 вместо 3.
+
+    Зуб сценария 37. Ронять «занято» в отказ по существу -- ровно тот дефект,
+    что круг 25 и вскрыл: вызывающий перестаёт отличать «повторить позже» от
+    «свойство не держится». Обе ступени лестницы замка правятся: какая из них
+    сработает, зависит от машины (flock(1) есть не везде), и мутация, задевшая
+    только одну, молча прошла бы там, где живёт другая.
+    """
+    for tail in ("      echo \"NOTE: flock(1) не сработал",
+                 "      echo \"NOTE: perl flock(2) не сработал"):
+        replace_once(
+            root / "scripts" / "probes-sync.sh",
+            BUSY_LOCK_ARM + tail,
+            BUSY_LOCK_ARM.replace("exit 3", "exit 1                    # M44") + tail,
+            "M44",
+        )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -1492,7 +1796,38 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M31", mutation_m31, 35, "словарь пробы живой формы не извлечён из образа"),
     ("M32", mutation_m32, 35, "скан пересёк границу чужой пробы"),
     ("M33", mutation_m33, 36, "из БУДУЩЕГО"),
+    ("M34", mutation_m34, 1, "счётчик skipped: ожидалось 1"),
+    ("M35", mutation_m35, 2, "после сжатия остался неверный состав"),
+    ("M36", mutation_m36, 4, "пересжатие оставило лишние файлы"),
+    ("M37", mutation_m37, 6, "счётчик skipped: ожидалось 1"),
+    ("M38", mutation_m38, 7, "счётчик orphans: ожидалось 1"),
+    ("M39", mutation_m39, 8, "счётчик orphans: ожидалось 0"),
+    ("M40", mutation_m40, 10, "ложные исчезновения в сценариях compact.py"),
+    ("M41", mutation_m41, 11, "лаунчер tmp мёртвого pid не снят"),
+    ("M42", mutation_m42, 12, "лаунчер tmp живого процесса снят"),
+    ("M43", mutation_m43, 23, "импорт adjudicate требует образа"),
+    ("M44", mutation_m44, 37, "ожидался класс 3"),
 ]
+
+# Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно
+# сломать, и стенд останется зелёным. corpus-tools-bench исполняет это правило
+# сверкой таблиц; здесь и у соседних стендов её не было вовсе, проверки были
+# только про длину. Сверка идёт по третьему полю таблицы ДО любого прогона и в
+# ОБЕИХ режимах. Исключения -- только поимённо, с написанной причиной (как
+# UNMUTATED_OK у corpus-tools-bench: позитивный контроль вердикта, краснеющий
+# от любой всегда-красной мутации). На сегодня исключений нет: покрытие полное.
+UNMUTATED_OK: tuple[int, ...] = ()
+
+
+def check_tables() -> int:
+    covered = {scenario for _, _, scenario, _ in MUTATIONS}
+    missing = [n for n in range(1, EXPECTED_SCENARIOS + 1)
+               if n not in covered and n not in UNMUTATED_OK]
+    if missing or len(MUTATIONS) != EXPECTED_MUTATIONS:
+        print(f"judge-tools-bench: ОТКАЗ -- мутаций {len(MUTATIONS)}/{EXPECTED_MUTATIONS},"
+              f" без своей мутации сценарии: {missing or 'нет'}")
+        return 4
+    return 0
 
 
 def fail_segment(output: str, scenario: int) -> str | None:
@@ -1565,6 +1900,13 @@ def run_self_check() -> int:
             copy_tree(root)
             try:
                 mutate(root)
+            except UnparsableVictim as error:
+                # Круг 25, E-3: замена, сломавшая разбор жертвы, -- поломка
+                # САМОГО ПРИБОРА, а не вердикт о продукте. Прогон
+                # останавливается ДО счёта покраснений: пока прибор чинят,
+                # остальным числам этого прогона веры нет.
+                print(f"judge-tools-bench: МУТАЦИЯ {name}: СЛОМАЛА РАЗБОР ЖЕРТВЫ -- {error}")
+                return 2
             except Exception as error:
                 print(f"judge-tools-bench: МУТАЦИЯ {name}: FAIL: {error}")
                 continue
@@ -1606,6 +1948,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
+    # Сверка таблиц -- ДО любого прогона и в обеих режимах (как check_mut_tables
+    # у corpus-tools-bench): рассинхрон таблиц сдвигает причины мутаций молча,
+    # а непокрытый сценарий стенд доказывать не может в принципе.
+    if check_tables():
+        return 4
     return run_self_check() if args.self_check else run_scenarios()
 
 

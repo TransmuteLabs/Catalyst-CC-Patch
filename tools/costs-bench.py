@@ -4,8 +4,13 @@
 Exit codes (subset of the kit-wide table in claude-patch-all.sh):
   0  every scenario passed; in --self-check every mutation reddened its owner
   1  a scenario failed, or a mutation did not redden its owning scenario
-  2  the bench cannot measure: invocation is invalid or the pristine copy is red
-  4  the declared scenario or mutation count differs from the tables below
+  2  the bench cannot measure: invocation is invalid, the pristine copy is red,
+     or a replacement BROKE THE VICTIM'S PARSE (circle 25, E-3) -- a scenario
+     reddened by a parse error proves nothing, and the run stops BEFORE the
+     reddening count
+  4  the declared scenario or mutation count differs from the tables below,
+     or some scenario has NO mutation of its own (circle 25, E-4: an uncovered
+     scenario is a door without teeth)
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import importlib.util
 import io
 import json
 import os
+import py_compile
 import re
 import shutil
 import subprocess
@@ -42,6 +48,17 @@ EXPECTED_MUTATIONS = 16
 
 class BenchFailure(AssertionError):
     pass
+
+
+class UnparsableVictim(Exception):
+    """The replacement broke the victim's PARSE -- the bench cannot measure.
+
+    Circle 25, E-3: a scenario reddened by a syntax error looks exactly like
+    one reddened by a disabled mechanism, and only parse-ability separates
+    the two on state-marker traces. Caught BEFORE any scenario runs; the
+    class is separate from "anchor not found" and from "passed silently"
+    because the causes and the fixes differ.
+    """
 
 
 def require(condition: bool, message: str) -> None:
@@ -244,7 +261,10 @@ def scenario_c8() -> None:
         try:
             module.main(argv)
         except SystemExit as error:
-            require(error.code == 1, f"invalid version {bad!r} returned {error.code}")
+            # Круг 28, F-11: неверная версия -- нарушение КОНТРАКТА вызова
+            # (класс 2), а не отказ по существу; полоса E пинила единицу,
+            # потому что тогда die() не умел ничего другого.
+            require(error.code == 2, f"invalid version {bad!r} returned {error.code}")
         except BenchFailure:
             raise
         else:
@@ -383,11 +403,70 @@ def run_scenarios() -> int:
     return 0 if mismatches == 0 else 1
 
 
+def shell_python_heredocs(text: str) -> list[str]:
+    """Bodies of .sh-victim heredocs fed to python.
+
+    Same rule as the pipeline's PYCOMPILE gate (claude-patch-all.sh): the part
+    of the line before the first '#' contains python3 on a word boundary, no
+    '|' ';' '&' between python3 and the opening, and the line ENDS with the
+    <<'TAG' opening; the body runs to the line equal to TAG verbatim. The
+    end-of-line requirement keeps comment mentions out -- otherwise an example
+    line would swallow the rest of the file as a "body" and the guard would
+    redden a healthy victim.
+    """
+    bodies: list[str] = []
+    opener = re.compile(r"^[^#]*\bpython3\b[^|;&]*<<'([A-Za-z_][A-Za-z0-9_]*)'\s*$")
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = opener.match(lines[i])
+        if match is None:
+            i += 1
+            continue
+        tag = match.group(1)
+        end = next((j for j in range(i + 1, len(lines)) if lines[j] == tag), -1)
+        if end < 0:
+            raise UnparsableVictim(f"heredoc {tag} is not closed at {lines[i]!r}")
+        bodies.append("\n".join(lines[i + 1:end]))
+        i = end + 1
+    return bodies
+
+
+def victim_parses(path: Path) -> None:
+    """Parse the victim with its OWN parser; otherwise raise UnparsableVictim.
+
+    Circle 25, E-3: until this guard a replacement flew into the victim as
+    free text, and a broken parse was exploited only BY CHANCE -- traces tied
+    to a return code hid it today, and the first state-marker trace would
+    have opened the same hole the corpus bench closed in circle 24. The kit's
+    rule is the CHECK, not the absence of an exploit. For .py victims there
+    are no embedded foreign-interpreter bodies (external calls go through
+    script files, not inline text); .sh victims get their python heredoc
+    bodies parsed by the same rule as corpus-tools-bench (circle 25, E-1).
+    """
+    if path.suffix == ".py":
+        try:
+            py_compile.compile(str(path), doraise=True)
+        except py_compile.PyCompileError as error:
+            raise UnparsableVictim(f"py_compile {path}: {error}") from error
+    elif path.suffix == ".sh":
+        done = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        if done.returncode != 0:
+            raise UnparsableVictim(f"bash -n {path}: {(done.stderr or '').strip()}")
+        for body in shell_python_heredocs(path.read_text(encoding="utf-8")):
+            try:
+                compile(body, f"heredoc@{path}", "exec")
+            except SyntaxError as error:
+                raise UnparsableVictim(
+                    f"heredoc body in {path}: line {error.lineno}: {error.msg}") from error
+
+
 def replace_once(path: Path, old: str, new: str, name: str) -> None:
     text = path.read_text(encoding="utf-8")
     count = text.count(old)
     require(count == 1, f"{name}: anchor occurs {count} times in {path}")
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    victim_parses(path)
 
 
 def m1(root: Path) -> None:
@@ -501,6 +580,28 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M15", m15, "C11", "budget '99999999999999999999': rc=0"),
 ]
 
+# Circle 25, E-4: a scenario with no mutation of its own proves nothing --
+# break it, and the bench stays green. corpus-tools-bench enforces this rule
+# by a table check; here and in the neighbouring benches the check did not
+# exist at all -- only lengths were compared, and the hole stayed latent
+# while coverage was accidentally full. The check runs BEFORE any scenario in
+# BOTH modes. Exceptions are named HERE with a written reason (as
+# UNMUTATED_OK in corpus-tools-bench); today there are none.
+UNMUTATED_OK: tuple[str, ...] = ()
+
+
+def check_tables() -> int:
+    covered = {scenario for _, _, scenario, _ in MUTATIONS}
+    missing = [name for name, _ in SCENARIOS
+               if name not in covered and name not in UNMUTATED_OK]
+    if (missing or len(MUTATIONS) != EXPECTED_MUTATIONS
+            or len(SCENARIOS) != EXPECTED_SCENARIOS):
+        print(f"costs-bench: ОТКАЗ -- мутаций {len(MUTATIONS)}/{EXPECTED_MUTATIONS},"
+              f" сценариев {len(SCENARIOS)}/{EXPECTED_SCENARIOS},"
+              f" без своей мутации: {missing or 'нет'}")
+        return 4
+    return 0
+
 
 def copy_tree(root: Path) -> None:
     (root / "tools").mkdir(parents=True)
@@ -546,6 +647,14 @@ def run_self_check() -> int:
             copy_tree(root)
             try:
                 mutate(root)
+            except UnparsableVictim as error:
+                # Circle 25, E-3: a replacement that broke the victim's parse
+                # is a broken INSTRUMENT, not a verdict about the product.
+                # The run stops BEFORE the reddening count: while the
+                # instrument is being fixed, no number of this run is to be
+                # trusted.
+                print(f"costs-bench: МУТАЦИЯ {name}: СЛОМАЛА РАЗБОР ЖЕРТВЫ -- {error}")
+                return 2
             except Exception as error:
                 print(f"costs-bench: МУТАЦИЯ {name}: FAIL: {error}")
                 continue
@@ -576,6 +685,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
+    # Table check BEFORE any run and in both modes (as check_mut_tables in
+    # corpus-tools-bench): a silent table drift re-aims the mutations at
+    # other people's rules, and an uncovered scenario cannot be proven at all.
+    if check_tables():
+        return 4
     return run_self_check() if args.self_check else run_scenarios()
 
 

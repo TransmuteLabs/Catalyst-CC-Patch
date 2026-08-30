@@ -9,6 +9,14 @@
 # Exit codes -- the kit's shared table (see the top of claude-patch-all.sh):
 #   0  the kit is assembled
 #   1  assembly refused: a required file is missing or a gate of the build said no
+# Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
+# traps) and is NOT a kit verdict (round 28, F-8).
+# 130 arrives when INT is delivered to the process GROUP (what a terminal does
+# on Ctrl-C); `kill -INT <script pid>` while a foreground child is alive is
+# dropped by bash -- the child runs to completion, the trap does NOT fire, and
+# the run finishes with its ordinary code. Nothing is truncated, so that code
+# is honest; but probing 130 with a single-pid kill yields the false
+# conclusion "the trap is broken" (measured, round 25, F-6).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

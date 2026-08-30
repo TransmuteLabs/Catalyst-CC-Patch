@@ -34,6 +34,16 @@ lexicographically smaller provider id for determinism.
     python3 set-model-costs.py               # sync and write
     python3 set-model-costs.py --dry-run     # show what would be written
     python3 set-model-costs.py --show        # print what is currently stored
+
+Exit codes (a subset of the kit-wide table, see the claude-patch-all.sh header):
+  0  sync done (or --dry-run/--show answered)
+  1  a refusal on the merits: the registry is unreachable/unparsable, the
+     stored config is unreadable
+The script itself CAN exit non-zero (круг 28, F-11): what makes a failed cost
+sync a WARNING is the CONVEYOR, which swallows this script's non-zero code as
+one (claude-patch-all.sh, the set-model-costs step) -- the image is already
+built and correct by then. The claim used to live here as "never exits
+fatally", which was true of the caller and false of this file.
 """
 
 import json
