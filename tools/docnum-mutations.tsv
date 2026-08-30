@@ -22,17 +22,17 @@
 # ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
 # явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
 D1	README.md	102 scenarios on a toy corpus	103 scenarios on a toy corpus	объявлено «102 scenarios» (владелец corpus-tools-bench)
-D2	README.md	corpus-tools-bench's 106 recorded mutations	corpus-tools-bench's 107 recorded mutations	объявлено «106 mutations» (владелец corpus-tools-bench)
+D2	README.md	corpus-tools-bench's 107 recorded mutations	corpus-tools-bench's 108 recorded mutations	объявлено «107 mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 66;	const EXPECTED_SCENARIOS = 67;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
 D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 40	EXPECTED_MUTATION_COUNT = 40	не объявляет свою величину
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=106	EXPECTED_MUTATION_COUNT=106	не объявляет свою величину
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=107	EXPECTED_MUTATION_COUNT=107	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение
 D11	claude-patch-all.sh	REACH = 8	REACH = 1	четыре слова между
-D12	scripts/kit-build.sh	 — docnum:historical)	)	объявлено «118 checks» (владелец pipeline)
+D12	scripts/kit-build.sh	 — docnum:historical)	)	объявлено «119 checks» (владелец pipeline)
 D13	claude-patch-all.sh	    if ext in ('.md', '.txt', ''):	    if True:	строковое значение в коде
 D14	claude-patch-all.sh	        lo, hi = sentence_span(at)	        lo, hi = max(0, at - 120), min(len(stream), at + 120)	пометка из соседнего предложения
 D15	claude-patch-all.sh	'стало', 'теперь', 'составляет', 'равно')	'теперь', 'составляет', 'равно')	связка «стало»
@@ -46,7 +46,7 @@ D22	claude-patch-all.sh	MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+|\[\^
 D23	claude-patch-all.sh	        if len(found) > 1:	        if False:	два владельца в предложении -- отказ
 D24	claude-patch-all.sh	    if ext == '.py':	    if ext == '.py-нет':	докстринг питона -- проза
 D25	claude-patch-all.sh	            elif re.match(r'(echo|say|printf)\b', stripped):	            elif False:	печатаемая строка -- проза
-D26	claude-patch-all.sh	    ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',	    ('pipeline', ('нетакогоимени', 'конвейера', 'конвейере',	## What the patches do (118 pipeline checks)
+D26	claude-patch-all.sh	    ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',	    ('pipeline', ('нетакогоимени', 'конвейера', 'конвейере',	## What the patches do (119 pipeline checks)
 D27	claude-patch-all.sh	        (('checks', 'проверок', 'проверки', 'проверкам', 'проверками',	        (('checks', 'проверок', 'проверки', 'проверками',	дательный падеж
 D28	claude-patch-all.sh	                if nxt_ch == '-' or prv_ch in ('~', '±'):	                if False:	составное число принадлежит своему слову
 D29	claude-patch-all.sh	            if not prev[:1].isalnum():	            if prev.casefold() not in WORDNUM:	числительное чужого предмета не женится
@@ -62,7 +62,7 @@ D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABL
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
 D36	README.md	probe-bench's 5 recorded mutations	probe-bench's 6 recorded mutations	объявлено «5 mutations» (владелец probe-bench)
-D37	README.md	checks-teeth's 16 recorded mutations	checks-teeth's 17 recorded mutations	объявлено «16 mutations» (владелец checks-teeth)
+D37	README.md	checks-teeth's 19 recorded mutations	checks-teeth's 20 recorded mutations	объявлено «19 mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
-D40	claude-patch-all.sh	все 118 проверок конвейера сошлись	все 118 сошлись	опущенным существительным
+D40	claude-patch-all.sh	все 119 проверок конвейера сошлись	все 119 сошлись	опущенным существительным

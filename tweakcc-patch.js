@@ -639,10 +639,41 @@ step('10 per-model context window', () => {
     `&&!(${ID})\\((${ID})\\((${ID})\\)\\)\\.startsWith\\("claude-"\\)\\)` +
       `return (${ID});return (${ID})\\}`,
   );
-  const m = js.match(rx);
-  if (!m) fail('context-window default not found');
-
-  const [, canonical, parse, model, envValue, fallback] = m;
+  let m = js.match(rx);
+  let canonical, parse, model, envValue, fallback;
+  if (m) {
+    [, canonical, parse, model, envValue, fallback] = m;
+  } else {
+    // 2.1.251 вынес инлайновую проверку в ИМЕНОВАННЫЙ помощник и добавила ему
+    // второе условие:
+    //   function jw(e,t){ ... let o=a.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+    //                     if(o!==void 0&&o>0&&Gw(e))return o; return q8e}
+    //   function Gw(e){let t=Ot(e);return!t.startsWith("claude-")&&!PMe(Ye(t))}
+    // Композицию канонизации НЕ угадываем: помощник выписывает её сам, и она
+    // читается из его тела -- `parse` это внутреннее Ot, `canonical` -- Ye, чей
+    // результат помощник и проверяет. Помощник обязан совпасть ЦЕЛИКОМ, вместе
+    // со вторым условием: частичное совпадение означало бы, что мы взяли имя
+    // от одной формы, а смысл у неё уже другой.
+    const rxHelper = new RegExp(`&&(${ID})\\((${ID})\\)\\)return (${ID});return (${ID})\\}`);
+    m = js.match(rxHelper);
+    if (!m) fail('context-window default not found');
+    const helper = m[1];
+    [, , model, envValue, fallback] = m;
+    const hb = js.match(
+      new RegExp(
+        `function ${rxEsc(helper)}\\((${ID})\\)\\{let (${ID})=(${ID})\\(\\1\\);` +
+          `return!\\2\\.startsWith\\("claude-"\\)&&!(${ID})\\((${ID})\\(\\2\\)\\)\\}`,
+      ),
+    );
+    if (!hb)
+      fail(
+        `context-window default: '${helper}()' stands where the claude- test was, ` +
+          'but its body is not the canonicalise-and-test shape this step reads the ' +
+          'lookup key from',
+      );
+    parse = hb[3];
+    canonical = hb[5];
+  }
 
   // The override belongs at the TOP of this function, not at its bottom.
   // On 2.1.246 the function reads:
@@ -687,12 +718,12 @@ step('10 per-model context window', () => {
   }
   const insertAt = m.index - headWindow.length + headMatch.index + headMatch[0].length;
 
-  // Tail first: editing from the end keeps the head offset valid.
-  js =
-    js.slice(0, m.index) +
-    `&&!${canonical}(${parse}(${model})).startsWith("claude-"))return ${envValue};` +
-    `return ${fallback}}` +
-    js.slice(m.index + m[0].length);
+  // Хвост НЕ переписывается. Прежде здесь стояла сборка того же текста из тех
+  // же групп в том же порядке -- доказуемый no-op на инлайновой форме. Под
+  // форму 2.1.251 та же сборка перестала быть тождеством: она развернула бы
+  // вызов ДВУХУСЛОВНОГО помощника обратно в ОДНО инлайновое условие, молча
+  // потеряв его второй множитель. Единственная правка этого шага -- вставка в
+  // голову функции, и её смещение не зависит от хвоста.
 
   const prelude =
     `let __ccw;try{__ccw=${cfg}().customModelContextWindows}catch{}` +
@@ -965,7 +996,19 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   // without it there are exactly those two. So the radius stopped being the
   // thing that tells ours from theirs, which it was never able to do -- it
   // only measured distance -- and became a bound the sweep must stay inside.
-  const droppedRx = new RegExp(`(?<![$\\w|&])${rxEsc(fork)}\\?void 0:(${ID})`, 'g');
+  // ДВЕ формы подавления, не одна. 2.1.251 оставил все три участка на прежних
+  // местах (-1167 / -1060 / -503 от якоря, тот же диапазон, что 2.1.245-247), но
+  // переодел два из них: `<fork>?void 0:<model>` стал `<fork>?"inherit":<model>`.
+  // "inherit" -- сентинел самого продукта: третий параметр q0() с этим значением
+  // означает «взять модель родителя», то есть ровно тот отъём выбора, который
+  // этот свип и снимает. Свип по одной старой форме прошёл бы зелёным, оставив
+  // форку принудительное наследование по ОБЕИМ дорогам резолва (лямбда и прямой
+  // вызов после плагин-хука) -- патч отчитался бы о работе, которой не сделал.
+  // Нижняя граница 2 поймала это; она здесь не формальность.
+  const droppedRx = new RegExp(
+    `(?<![$\\w|&])${rxEsc(fork)}\\?(?:void 0|"inherit"):(${ID})`,
+    'g',
+  );
   const anchorIdx = js.search(new RegExp(`is_fork:${rxEsc(fork)},`));
   if (anchorIdx < 0) fail('fork telemetry anchor vanished between match and sweep');
   const [mStart, mEnd] = moduleSliceAround(js, anchorIdx);
@@ -998,8 +1041,16 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   if (!droppedAll.some((mm) => body.slice(Math.max(0, mm.index - 6), mm.index) === 'model:'))
     fail('fork value-drop sites: the dispatch model is not among them');
   body = body.replace(droppedRx, '$1');
-  if (new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?void 0:`).test(body))
+  if (new RegExp(`(?<![$\\w])${rxEsc(fork)}\\?(?:void 0|"inherit"):`).test(body))
     fail('fork value-drop sites survived the sweep');
+  // Третья форма сентинела, если она появится, обязана остановить сборку, а не
+  // проехать молча. В окне свипа у флага форка есть и законные условные --
+  // `<fork>?{systemPrompt:...}`, `<fork>?<ident>:<ident>` -- это ветвление
+  // поведения форка, а не отъём значения. Отличает их правая часть: подавление
+  // записывается ЛИТЕРАЛОМ (`void 0` или строка-сентинел). Замерено на 251: в
+  // окне +-20000 нет ни одного `<fork>?"..."`, кроме двух снятых выше.
+  if (new RegExp(`(?<![$\\w|&])${rxEsc(fork)}\\?"`).test(body))
+    fail('fork value-drop: an unknown string sentinel sits beside the swept sites');
   js = js.slice(0, lo) + body + js.slice(hi);
 
   // (c) schema: add the two fields next to the existing `model`
@@ -2463,7 +2514,26 @@ step('22 judge consulted before a subagent dispatch', () => {
         // "record prune failed" -- the same channel a real prune failure uses,
         // which is how a benign race devalues the one message that means
         // something. A file already gone is the outcome this loop wanted.
-        'try{let __ls=(await __jfs.readdir(__jdir+"/records")).filter((__x)=>__x!==__n);' +
+        // Прополка НЕ трогает архив. `compact.py` сжимает старую запись в
+        // <имя>.json.gz и кладёт рядом; горизонт же считал .json и .json.gz
+        // одинаково, и сжатое выпадало из окна наравне с несжатым. Компонент
+        // назывался архивом, а хранил ровно столько же, сколько горячий
+        // каталог: замерено 2026-08-30 -- из 45 размеченных записей на диске
+        // оставалась 21, остальные 24 горизонт унёс, и доказательная база
+        // замеров таяла молча. Окно governs то, ради чего оно есть -- свежие
+        // несжатые записи (около 36 КБ каждая); сжатые (около 7 КБ) остаются,
+        // потому что ИМЕННО ЭТО значит слово «архив».
+        //
+        // Рост архива не ограничен НИЧЕМ, и это сказано прямо: compact.py
+        // удаляет архив только когда тот не читается и запись идёт на
+        // пересжатие, правил по возрасту у него нет. Около 7 КБ на
+        // сжатую запись -- то есть порядок сотен мегабайт за годы. Если
+        // когда-нибудь понадобится граница, её место у ВЛАДЕЛЬЦА архива
+        // (compact.py, где живут правила возраста), а не здесь: горизонт
+        // писателя записи безымянен для читателя и уже один раз съел то,
+        // что считалось сохранённым.
+        'try{let __ls=(await __jfs.readdir(__jdir+"/records"))' +
+          '.filter((__x)=>__x!==__n&&!__x.endsWith(".gz"));' +
           'if(__ls.length>=__jkeep){__ls.sort();' +
             'for(let __old of __ls.slice(0,__ls.length-__jkeep+1))' +
               'try{await __jfs.unlink(__jdir+"/records/"+__old)}' +
@@ -3898,9 +3968,16 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
     'Reissue the dispatch only with the change it names, and never repeat the identical call ' +
     '- an unchanged retry cannot succeed. This review is separate from the permission system ' +
     'and from any routing gate, so do not attribute a cancellation to either.';
+  // 2.1.251 вставил между вызовом сборщика и разворотами ЕЩЁ ОДИН элемент
+  // массива: `r6({...}),Voe(jn,za(d.model)),...t,...pe?[V0e]:[]`. Промежуток
+  // допускается, но ему запрещены скобки массива и объекта -- иначе выражение
+  // могло бы перешагнуть границу элемента и утащить в совпадение чужую
+  // структуру. Ленивый повтор берёт кратчайший промежуток, а не первый
+  // подходящий хвост. Единственность участка по-прежнему проверяется ниже.
   const rx = new RegExp(
     '(\\{isNonInteractive:(' + ID + ')\\.isNonInteractiveSession,' +
     'hasAppendSystemPrompt:\\2\\.hasAppendSystemPrompt\\}\\),' +
+    '[^\\[\\]{}]{0,160}?' +
     '\\.\\.\\.' + ID + ',\\.\\.\\.' + ID + '\\?\\[' + ID + '\\]:\\[\\])' +
     '\\]\\.filter\\(Boolean\\)',
   );

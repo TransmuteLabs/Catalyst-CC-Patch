@@ -203,7 +203,7 @@ to code defaults: a setting absent from the file is not configured by a human
 
 ## 8. How it is verified
 
-`claude-patch-all.sh` — 118 checks. `tools/probe-bench.js` — scenarios on the
+`claude-patch-all.sh` — 119 checks. `tools/probe-bench.js` — scenarios on the
 live carved-out code, of which the watcher's are: both verdicts,
 the memory filter, all cheap-count refusals (each verified by its REASON —
 they share the same outcome, and a swapped branch would pass green), live

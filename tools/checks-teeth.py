@@ -50,7 +50,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 16
+EXPECTED_MUTATIONS = 19
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.

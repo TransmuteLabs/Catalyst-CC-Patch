@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The build-path probe: the one part of this kit the 118 checks cannot see.
+# The build-path probe: the one part of this kit the 119 checks cannot see.
 #
 # Every check in claude-patch-all.sh is a byte search over the FINISHED image, so
 # all of them are blind to how that image came to be. The sweep across versions
@@ -82,7 +82,7 @@
 # dead three times in this kit.
 #
 # Usage:  bash tools/build-path-probe.sh [--case abcdurxpl] [--version 2.1.247]
-# Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 118
+# Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 119
 #         checks + the interface gate + the bench), so a few minutes each; case
 #         (r) and (x) build nothing and answer in milliseconds.
 

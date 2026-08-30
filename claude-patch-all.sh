@@ -768,7 +768,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 118 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 119 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -1395,7 +1395,7 @@ for _forms, _q in (
 
 # Форма «все N» с опущенным существительным (круг 28, F-12). Живой случай
 # (docnum:example): «Реестр выше говорит, что все 114 сошлись» при
-# EXPECTED_CHECKS = 118 в девяти строках выше -- счёт назван числом,
+# ТОГДАШНЕМ EXPECTED_CHECKS = 118 (docnum:historical) в девяти строках выше -- счёт назван числом,
 # существительное элидировано,
 # и пара «число + существительное» не возникала вовсе: гейт был слеп к
 # протухшему числу ПО УСТРОЙСТВУ. Такая форма -- тоже счёт: она обязана
@@ -1885,7 +1885,7 @@ def scan(text, table, aliases, path='<текст>'):
         if i + 1 >= len(toks) or not toks[i + 1][0].isdigit():
             continue
         num_tok, num_at = toks[i + 1]
-        # «все 118 проверок ...» (docnum:example) -- счётное существительное
+        # «все 119 проверок ...» (docnum:example) -- счётное существительное
         # стоит при числе,
         # счёт уже разобран обычным путём выше; повторный отчёт не нужен.
         after = toks[i + 2][0] if i + 2 < len(toks) else ''
@@ -2224,12 +2224,12 @@ python3 "$(dirname "$0")/tools/docnum-bench.py" || {
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-dd0cadb64e908f3aa8a0ca7dfbbe9e3de348f215}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "ddba6097dccd2b6e5f1c9d8ab20e490fa72338a0" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "dd0cadb64e908f3aa8a0ca7dfbbe9e3de348f215" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -2675,7 +2675,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 118 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 119 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -4533,8 +4533,15 @@ checks = {
     # record write, never swallowed.
     'the records directory is bounded': (
                                               bool(re.search(
+                                                  # Пинит РАМКУ прополки, а не содержимое фильтра: две его
+                                                  # оговорки принадлежат СВОИМ проверкам ниже («the record
+                                                  # just written is never pruned» и «the archive is out of
+                                                  # the window»). Пока эта строка несла обе, та из них, что
+                                                  # объявлена отдельной проверкой, не могла покраснеть в
+                                                  # одиночку -- проверка, которую нельзя провалить одну,
+                                                  # неотличима от работающей.
                                                   rb'let __ls=\(await __jfs\.readdir\(__jdir\+"/records"\)\)'
-                                                  rb'\.filter\(\(__x\)=>__x!==__n\)', d))
+                                                  rb'\.filter\(\(__x\)=>', d))
                                           and bool(re.search(
                                                   rb'if\(__ls\.length>=__jkeep\)\{__ls\.sort\(\);', d))
                                           and bool(re.search(
@@ -4685,9 +4692,17 @@ checks = {
                                           and bool(re.search(
                                               rb'new Date\(\)\.toISOString\(\)', d)),
     'the record just written is never pruned': bool(re.search(
-                                              rb'\.filter\(\(__x\)=>__x!==__n\)', d))
+                                              rb'\.filter\(\(__x\)=>__x!==__n&&', d))
                                           and bool(re.search(
                                               rb'__ls\.length>=__jkeep', d)),
+    # Отдельной проверкой, а не хвостом предыдущей: горизонт записей и
+    # неприкосновенность архива -- два разных обещания, и обещание про архив
+    # обязано уметь провалиться в одиночку. Прополка считает только несжатые
+    # записи; сжатое (<имя>.json.gz, куда compact.py кладёт старое) в счёт не
+    # идёт и не удаляется. Замерено 2026-08-30: пока .gz считался наравне,
+    # из 45 размеченных записей горизонт унёс 24.
+    'the archive is out of the window': bool(re.search(
+                                              rb'!__x\.endsWith\("\.gz"\)', d)),
     'a prune losing a race is not a failure': bool(re.search(
                                               rb'if\(__ue\?\.code!=="ENOENT"\)throw __ue', d)),
     'record names sort as time inside one millisecond': bool(re.search(
@@ -5098,7 +5113,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 118
+EXPECTED_CHECKS = 119
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -5110,11 +5125,11 @@ PY
 
 # --- 5a0. пол проверок: что остаётся зелёным на ПРИСТИННОМ образе -------------
 # Круг 28, F-12: фраза стояла «все 114 сошлись» (docnum:historical) при
-# EXPECTED_CHECKS = 118 в девяти строках выше -- существительное было
+# ТОГДАШНЕМ EXPECTED_CHECKS = 118 (docnum:historical) в девяти строках выше -- существительное было
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 118 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 119 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
