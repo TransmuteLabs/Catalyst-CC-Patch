@@ -974,7 +974,10 @@ t = open(p, encoding='utf-8').read()
 # -- ЕГО ПОДСТРОКА. Первая редакция контроля так и села на чужую ветку: мутация
 # «применилась», прогон вёл себя как исправный, и контроль объявил утверждение
 # беззубым, ничего о нём не измерив.
-NEEDLE = ('\n        staging = target.with_name(target.name + ".staging")\n'
+# Волна 31 (L-7): промежуточные имена получили pid писателя -- фиксированное
+# имя стадии делили два одновременных прогона. Якорь догнан за формой; сама
+# дисциплина «перевод строки + восемь пробелов» ниже не изменилась.
+NEEDLE = ('\n        staging = target.with_name(target.name + f".staging.{os.getpid()}")\n'
           '        download_binary(version, staging)\n')
 if t.count(NEEDLE) != 1:
     # Код 2: якорь уехал -- контроль НЕ ИЗМЕРЯЛ. sys.exit со строкой отдал бы
@@ -983,9 +986,9 @@ if t.count(NEEDLE) != 1:
                      % t.count(NEEDLE))
     sys.exit(2)
 t2 = t.replace(NEEDLE, '\n        staging = target\n        download_binary(version, staging)\n', 1)
-if t2.count('.with_name(target.name + ".staging")') != 1:
+if t2.count('.with_name(target.name + f".staging.{os.getpid()}")') != 1:
     sys.stderr.write('МУТАЦИЯ ЗАДЕЛА ЧУЖУЮ ВЕТКУ: стадий осталось %d\n'
-                     % t2.count('.with_name(target.name + ".staging")'))
+                     % t2.count('.with_name(target.name + f".staging.{os.getpid()}")'))
     sys.exit(2)
 open(p, 'w', encoding='utf-8').write(t2)
 MUT
