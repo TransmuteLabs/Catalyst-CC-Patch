@@ -2846,14 +2846,28 @@ step('22 judge consulted before a subagent dispatch', () => {
         '__amb=__cls.length>1,' +
         '__cl=__cls.length===1?__cls[0]:"",' +
         '__ag=String(__o.input?.subagent_type??""),' +
-        '__mt=(__l,__s)=>Array.isArray(__l)&&__l.length>0&&__l.some((__r)=>{try{return new RegExp(__r).test(__s)}catch{return !1}});' +
+        // Волна 31, K-11: негодный образец фильтра не имеет права стать
+        // «не совпало». catch{return !1} глотал SyntaxError от незакрытой
+        // группы, и при непустом classes_judge судья не консультировался
+        // НИ ПО ОДНОМУ вызову -- журнал писал filtered, снаружи «работает».
+        // __safe -- что негодный образец вносит в .some(): у skip-списков
+        // совпадение значит ПРОПУСТИТЬ судью, поэтому поломка вносит !1
+        // (иначе сама себе выписывает пропуск); у judge-списков совпадение
+        // значит СУДИТЬ, поэтому поломка вносит !0 (иначе отменяет судью
+        // для всех). Объявление однократное на ключ через __deg/__nseen.
+        '__mt=(__k,__l,__s,__safe)=>Array.isArray(__l)&&__l.length>0&&__l.some((__r)=>{' +
+          'try{return new RegExp(__r).test(__s)}catch{' +
+            'if(!__nseen[__k]){__nseen[__k]=1;' +
+              '__deg.push("bad-setting:"+__k+"="+__clip(__r,24)+' +
+                '" (need regexp), \\u0441\\u0447\\u0438\\u0442\\u0430\\u0435\\u043c "+(__safe?"\\u0441\\u043e\\u0432\\u043f\\u0430\\u0434\\u0435\\u043d\\u0438\\u0435\\u043c":"\\u043d\\u0435\\u0441\\u043e\\u0432\\u043f\\u0430\\u0434\\u0435\\u043d\\u0438\\u0435\\u043c"))}' +
+            'return __safe}});' +
         'let __by=null;' +
         'if(__amb)__deg.push("dispatch-class-ambiguous:"+__dcut(__cls,4));' +
-        'if(!__amb&&__mt(__f.classes_skip,__cl))__by="classes_skip";' +
-        'else if(__mt(__f.agents_skip,__ag))__by="agents_skip";' +
+        'if(!__amb&&__mt("classes_skip",__f.classes_skip,__cl,!1))__by="classes_skip";' +
+        'else if(__mt("agents_skip",__f.agents_skip,__ag,!1))__by="agents_skip";' +
         'else if(!__amb&&((Array.isArray(__f.classes_judge)&&__f.classes_judge.length>0)||' +
           '(Array.isArray(__f.agents_judge)&&__f.agents_judge.length>0))){' +
-          'if(!(__mt(__f.classes_judge,__cl)||__mt(__f.agents_judge,__ag)))' +
+          'if(!(__mt("classes_judge",__f.classes_judge,__cl,!0)||__mt("agents_judge",__f.agents_judge,__ag,!0)))' +
             '__by=__cl?"not_in_judge_list":"no_class_marker"}' +
         'if(__by){__ask=!1;await __jlog({outcome:"filtered",by:__by,cls:__cl||null,' +
           '...(__deg.length?{deg:__dcut(__deg,5)}:{})})}}' +

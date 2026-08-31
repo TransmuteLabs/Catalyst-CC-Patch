@@ -141,3 +141,85 @@ BLOCKED с сырым `grep -n`. Нашёл внутреннее противо�
 стоп по пункту. Диффы не выдумывать.
 
 <!-- BRIEF COMPLETE -->
+
+## ОТЧЁТ ИСПОЛНИТЕЛЯ
+
+Статус: DONE. Оба предмета закрыты. Коммитов нет.
+
+### Счётчики стендов ДО -> ПОСЛЕ
+
+Дословные строки ИТОГ/SELF-CHECK/EXIT= из прогонов:
+
+- ДО probe-bench: `probe-bench: ИТОГ сценариев=79 расхождений=0` EXIT=0
+- ДО corpus-tools-bench: `corpus-tools-bench: ИТОГ сценариев=110 расхождений=0` EXIT=0
+- RED probe-bench (стенд новый, код старый): `probe-bench: ИТОГ сценариев=82 расхождений=2` EXIT=1
+- RED corpus-tools-bench: `corpus-tools-bench: ИТОГ сценариев=113 расхождений=3` EXIT=1
+- ПОСЛЕ probe-bench: `probe-bench: ИТОГ сценариев=82 расхождений=0` EXIT=0
+- ПОСЛЕ probe-bench --self-check: `probe-bench: SELF-CHECK мутаций=5 ослепили=5` EXIT=0
+- ПОСЛЕ corpus-tools-bench: `corpus-tools-bench: ИТОГ сценариев=113 расхождений=0` EXIT=0
+- ПОСЛЕ corpus-tools-bench --self-check: `corpus-tools-bench: SELF-CHECK мутаций=127 покраснели=127` EXIT=0
+
+RED probe: 2 из 3 новых (положительный контроль `filter-valid-lists-still-discriminate` зелёный и на старом коде). RED corpus: 111, 112, 113.
+
+Гейт: `node --check tweakcc-patch.js` EXIT=0; `bash -n tools/sweep.sh` EXIT=0; docnum `ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ` (probe-bench scenarios=82 mutations=5; corpus-tools-bench scenarios=113 mutations=127) EXIT=0.
+
+Образ для probe-bench -- adhoc-patch `--script @tweakcc-patch.js` на копию 2.1.251.orig. Установленный бинарник не трогался.
+
+### 1. K-11 -- негодный образец фильтра
+
+`tweakcc-patch.js:2858-2870` (фильтрующий `__mt`; тезка внутри `__cut` на `:3079` не тронут).
+
+Новая форма:
+
+    __mt=(__k,__l,__s,__safe)=>Array.isArray(__l)&&__l.length>0&&__l.some((__r)=>{try{return new RegExp(__r).test(__s)}catch{if(!__nseen[__k]){__nseen[__k]=1;__deg.push("bad-setting:"+__k+"="+__clip(__r,24)+" (need regexp), считаем "+(__safe?"совпадением":"несовпадением"))}return __safe}});
+
+Вызовы: `:2866` classes_skip / !1; `:2867` agents_skip / !1; `:2870` classes_judge / !0 и agents_judge / !0.
+
+Журнальный текст (после u-раскрытия, как у соседнего live_kinds): `bad-setting:<ключ>=<образец> (need regexp), считаем совпадением|несовпадением`.
+
+Сценарии probe-bench:
+- `filter-bad-regexp-judge-still-consults` -- RED: outcome=filtered, канал=0; ПОСЛЕ: ok, канал=1, degExact совпадением.
+- `filter-bad-regexp-skip-does-not-skip` -- RED: ok/канал=1 без deg; ПОСЛЕ: degExact несовпадением.
+- `filter-valid-lists-still-discriminate` -- зелёный на RED и на ПОСЛЕ (годный skip=1c + judge=1c при классе 1e -> not_in_judge_list). Существующий `filtered` пинит годный skip=1e.
+
+Мутации harness probe-bench: 5/5 ослепили.
+
+Один авто-фикс в своём коде: первая сборка образа с сырой кириллицей в инъекции дала порчу на latin1-карве. Перевод в \\uXXXX, как у live_kinds :3740. Повторный прогон -- 82/0.
+
+### 2. W-1 -- зубы меряют образ прогона
+
+tools/sweep.sh:
+- :881-905 -- предполёт: ручка SWEEP_SKIP_CHECKS_TEETH и отказ «нет прибора» с прежними текстами; замер убран. Комментарий называет размен (сборка раньше проверки).
+- :1147-1188 -- после первой сборки (rc!=3 и есть $STATE/bin/$v.wave.bin), до сноса зелёной копии: python3 "$TEETH_PY" --image "$STATE/bin/$v.wave.bin". Шесть рук 0/5/3/2/4/6 сохранены, включая тексты и sum_line.
+- :1162-1171 -- рука 2 разделена: grep -q 'КОНТРОЛЬ ПРОВАЛЕН' -> «образ прогона красен ещё до мутаций -- реестр расходится с тем, что собрал этот прогон»; иначе прежняя дизъюнкция «якорь мутации, длина замены или контроль».
+- :1206-1209 -- седьмая ситуация: `SWEEP зубы реестра: НЕ ИЗМЕРЕНЫ -- ни одна версия не собралась` и та же пометка в сводке.
+
+Сценарии corpus-tools-bench и мутации 125-127:
+- 111 -- --image на bin/900.wave.bin, не ~/.local/bin/claude. Мутация 125 (убрать --image) -> НЕТ_--image.
+- 112 -- нет сборки (chmod 500 на bin): отдельная строка и сводка. Мутация 126 (echo -> :) -> ЗУБЫ_МОЛЧАТ.
+- 113 -- STUB_TEETH_CONTROL_FAIL: своё имя, не дизъюнкция. Мутация 127 (КОНТРОЛЬ ПРОВАЛЕН -> КОНТРОЛЬ НИКОГДА) -> ДИСЪЮНКЦИЯ.
+
+Мутация 78 перенацелена: PAT `2) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ` больше не встречается (рука стала `2) if grep -q`); PAT/REP -> `2) if grep -q` / `22) if grep -q`. Сценарий 78 по-прежнему краснеет классом 2->default.
+
+### Объявленные числа, которые догнал
+
+- tools/probe-bench.js: EXPECTED_SCENARIOS 79->82; poison self-check 82->81.
+- tools/corpus-tools-bench.sh: EXPECTED_SCENARIOS 110->113; EXPECTED_MUTATIONS 124->127.
+- README.md: «110 scenarios»->113, «124 recorded mutations»->127 (вне paths:, бриф велел догнать объявления; без этого docnum красный).
+- claude-patch-all.sh:5559: «probe-bench's 79 scenarios»->82 (то же).
+
+### Вне скоупа
+
+- README.md и claude-patch-all.sh -- только числа, см. выше.
+- Проза README про registry-teeth «a red instrument stops the sweep before the first build» устарела (теперь после первой сборки). Не переписывал гигантский абзац: это не счётчик.
+- Установленный образ / реестр 12 FAIL -- ожидаемое, не трогал.
+
+### Adjudication requests
+
+1. «Успешно собрана» = конвейер дошёл (rc!=3) и $STATE/bin/$v.wave.bin на месте. Красная по полям версия всё равно даёт образ этого прогона; зубы зовутся по ней, если она первая.
+2. Ручка пропуска осталась на предполёте (не мерит чужой образ); шесть рук уехали вместе с python3 --image.
+3. Седьмая ситуация не меняет код возврата: она сопутствует уже RED/UNMEASURED.
+
+### Self-Check: PASSED
+
+Файлы на месте (tweakcc-patch.js, tools/sweep.sh, tools/probe-bench.js, tools/corpus-tools-bench.sh). Счётчики -- дословный вывод прогонов выше. Статус DONE согласован с телом (неожиданного красного нет; 12 FAIL установленного образа -- объявленное брифом). Коммитов нет.

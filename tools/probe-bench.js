@@ -1015,6 +1015,31 @@ const scenarios = [
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', journalLines: 2, firstLineBroken: true,
                 recordCount: 1 } },
+  // Волна 31, K-11: негодный образец фильтра не имеет права стать «не совпало».
+  // Незакрытая группа в classes_judge прежде глоталась catch и судья не
+  // консультировался НИ ПО ОДНОМУ вызову (журнал: filtered). Безопасная
+  // сторона judge-списка -- совпадение: консультация проводится, поломка
+  // объявлена.
+  { name: 'filter-bad-regexp-judge-still-consults',
+    config: { filter: { classes_judge: ['1e('] } },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 1,
+                degExact: ['bad-setting:classes_judge=1e( (need regexp), считаем совпадением'] } },
+  // Негодный образец в classes_skip не выписывает себе пропуск: совпадение
+  // skip-списка значит ПРОПУСТИТЬ судью, поэтому поломка вносит несовпадение.
+  { name: 'filter-bad-regexp-skip-does-not-skip',
+    config: { filter: { classes_skip: ['1e('] } },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 1,
+                degExact: ['bad-setting:classes_skip=1e( (need regexp), считаем несовпадением'] } },
+  // Положительный контроль: годный образец в обоих списках работает как
+  // прежде. Без него правка «всё судить» прошла бы зелёной. skip=['1c'] не
+  // матчит класс 1e; judge=['1c'] тоже не матчит -- фильтр not_in_judge_list.
+  // Существующий сценарий `filtered` пинит годный skip=['1e'] отдельно.
+  { name: 'filter-valid-lists-still-discriminate',
+    config: { filter: { classes_skip: ['1c'], classes_judge: ['1c'] } },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'not_in_judge_list' } },
 ];
 
 // The same invariant the check registry carries, for the same reason it was
@@ -1024,7 +1049,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 79;
+const EXPECTED_SCENARIOS = 82;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1874,7 +1899,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 79;', to: 'EXPECTED_SCENARIOS = 78;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 82;', to: 'EXPECTED_SCENARIOS = 81;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },

@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=110
-EXPECTED_MUTATIONS=124
+EXPECTED_SCENARIOS=113
+EXPECTED_MUTATIONS=127
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -412,6 +412,11 @@ mark = os.environ.get('STUB_TEETH_MARK', '')
 if mark:
     with open(mark, 'w', encoding='utf-8') as fh:
         fh.write('прибор зубов звался\n')
+        fh.write('argv=%s\n' % ' '.join(sys.argv))
+if os.environ.get('STUB_TEETH_CONTROL_FAIL', ''):
+    print('checks-teeth: КОНТРОЛЬ ПРОВАЛЕН -- образ красен ещё до мутаций:',
+          file=sys.stderr)
+    sys.exit(2)
 rc = int(os.environ.get('STUB_TEETH_RC', '0') or 0)
 print('stub checks-teeth rc=%d' % rc)
 sys.exit(rc)
@@ -516,6 +521,7 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP_PROBE:-}" \
     SWEEP_LAST_N="$__bench_last_n" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
+    STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
     bash "$kit/tools/sweep.sh" "$@" 2>&1 9>&-
@@ -1473,7 +1479,7 @@ scenario_75() {   # прибор зубов реестра зовётся по �
   ok "75 предполёт зовёт прибор зубов реестра и объявляет его вердикт"
 }
 
-scenario_76() {   # красный прибор зубов останавливает свип ДО первой сборки
+scenario_76() {   # красный прибор зубов останавливает свип (после первой сборки -- W-1)
   local out rc
   out=$(STUB_TEETH_RC=1 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   LAST_EVID="rc=$rc :: $out"
@@ -1610,6 +1616,7 @@ run_all() {
   scenario_98; scenario_99; scenario_100; scenario_101; scenario_102
   scenario_103; scenario_104; scenario_105; scenario_106; scenario_107
   scenario_108; scenario_109; scenario_110
+  scenario_111; scenario_112; scenario_113
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -2124,6 +2131,7 @@ launch_sweep() {   # логфайл, аргументы свипа...
     SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP_PROBE:-}" \
     SWEEP_LAST_N="${BENCH_LAST_N:-}" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
+    STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
     bash "$K/tools/sweep.sh" "$@" > "$log" 2>&1 9>&- &
@@ -2594,6 +2602,7 @@ scenario_98() {   # волна 26, D-2: ребёнок форк-запаски, 
     SWEEP_KIT_DRAIN="${BENCH_KIT_DRAIN:-}" \
     SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP_PROBE:-}" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
+    STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
     perl -e 'use POSIX (); my $sid = POSIX::setsid();
@@ -3125,6 +3134,78 @@ scenario_110() {   # настоящая негодность числовой р
   ok "110 SWEEP_LAST_N: abc/-1/1.5/пусто/переполнение -- отказ 2"
 }
 
+scenario_111() {   # зубы меряют образ прогона, а не установленный
+  # W-1: стадия зубов прежде звала прибор без --image, и умолчание прибора --
+  # установленный ~/.local/bin/claude. После любой волны, меняющей пины,
+  # контроль «образ зелен до мутаций» проверял чужой артефакт.
+  local out rc mark
+  mark="$C/teeth.called"; rm -f "$mark"
+  out=$(STUB_TEETH_MARK="$mark" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: mark=$(cat "$mark" 2>/dev/null | tr '\n' '|') :: $out"
+  if (( rc != 0 )); then
+    bad "111 зубы по образу прогона: прогон отказал ($rc)"; return
+  fi
+  if [[ ! -e "$mark" ]]; then
+    LAST_EVID="ПРИБОР_НЕ_ЗВАЛСЯ :: $out"
+    bad "111 зубы по образу прогона: прибор не звался"; return
+  fi
+  if ! grep -q -- '--image' "$mark"; then
+    LAST_EVID="НЕТ_--image :: $(cat "$mark" | tr '\n' '|') :: $out"
+    bad "111 зубы по образу прогона: нет --image"; return
+  fi
+  if ! grep -q 'bin/900.wave.bin' "$mark"; then
+    LAST_EVID="НЕ_ОБРАЗ_ПРОГОНА :: $(cat "$mark" | tr '\n' '|') :: $out"
+    bad "111 зубы по образу прогона: --image не на 900.wave.bin"; return
+  fi
+  if grep -q '/.local/bin/claude' "$mark"; then
+    LAST_EVID="УСТАНОВЛЕННЫЙ_ОБРАЗ :: $(cat "$mark" | tr '\n' '|') :: $out"
+    bad "111 зубы по образу прогона: измерялся установленный образ"; return
+  fi
+  ok "111 зубы реестра зовутся с --image на образ прогона"
+}
+
+scenario_112() {   # ни одна версия не собралась -- зубы названы, а не тишина
+  # Молчание здесь неотличимо от зелёного: стадия просто не дошла, а сводка
+  # не говорила, что зубы не мерили.
+  mkdir -p "$S/bin"; rm -f "$S/bin/900.wave.bin"; chmod 500 "$S/bin"
+  local out rc sum
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  chmod 700 "$S/bin"
+  sum="$C/corpus/state/log/sweep-summary.txt"
+  LAST_EVID="rc=$rc :: $out"
+  if [[ "$out" != *"зубы реестра: НЕ ИЗМЕРЕНЫ -- ни одна версия не собралась"* ]]; then
+    LAST_EVID="ЗУБЫ_МОЛЧАТ :: rc=$rc :: $out"
+    bad "112 нет сборки: зубы не названы отдельной строкой"; return
+  fi
+  if [[ ! -f "$sum" ]] || ! grep -q 'зубы реестра проверок: НЕ ИЗМЕРЕНЫ -- ни одна версия не собралась' "$sum"; then
+    LAST_EVID="СВОДКА_МОЛЧИТ :: $(cat "$sum" 2>/dev/null | tr '\n' '|')"
+    bad "112 нет сборки: сводка молчит о зубах"; return
+  fi
+  ok "112 нет сборки -- зубы названы в потоке и в сводке, а не тишина"
+}
+
+scenario_113() {   # провал контроля зубов назван своим именем, а не дизъюнкцией
+  # Класс «прибор не может мерить» с провалом контроля прежде печатал
+  # «якорь мутации, длина замены или контроль» -- из дизъюнкции не видно,
+  # какая из трёх сработала. docnum:other
+  local out rc
+  out=$(STUB_TEETH_CONTROL_FAIL=1 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 2 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ :: rc=$rc :: $out"
+    bad "113 контроль зубов: код $rc, ждали 2"; return
+  fi
+  if [[ "$out" != *"образ прогона красен ещё до мутаций"* ]]; then
+    LAST_EVID="ДИСЪЮНКЦИЯ :: $out"
+    bad "113 контроль зубов: причина не своим именем"; return
+  fi
+  if [[ "$out" == *"якорь мутации, длина замены или контроль"* ]]; then
+    LAST_EVID="ДИСЪЮНКЦИЯ :: $out"
+    bad "113 контроль зубов: осталась дизъюнкция трёх"; return
+  fi
+  ok "113 провал контроля зубов назван своим именем"
+}
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -3201,7 +3282,9 @@ MUT_FILE=(x
   tools/sweep.sh claude-patch-all.real tools/lock-probe.sh tools/build-path-probe.real.sh
   claude-patch-all.real tools/lock-probe.sh tools/build-path-probe.real.sh
   tools/sweep.sh tools/sweep.sh tools/sweep.sh
-  tools/sweep.sh)
+  tools/sweep.sh
+  # Волна 31, закрывающий: зубы по образу прогона (111-113).
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -3284,7 +3367,7 @@ MUT_PAT=(x
   '    0\) echo "SWEEP зубы реестра проверок: ЗЕЛЁНО \(лог \$TEETH_LOG\)"'
   '    \*\) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
   '  echo "SWEEP зубы реестра проверок ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH=\$\{SWEEP_SKIP_CHECKS_TEETH\}"'
-  '    2\) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ'
+  '    2\) if grep -q'
   'SWEEP_TW_HOME="\$STATE/tweakcc-home"'
   'if \[\[ -z "\$\{SWEEP_KEEP_LIVE_TWEAKCC:-\}" \]\]; then'
   "tmp = path \+ '\.new\.%d' % os\.getpid\(\)"
@@ -3338,7 +3421,12 @@ MUT_PAT=(x
   '__envon SWEEP_SKIP_BUILD_PROBE; __env_rc=\$\?'
   '__envon SWEEP_SKIP_TOOLS_BENCH; __env_rc=\$\?'
   '__envon SWEEP_SKIP_CHECKS_TEETH; __env_rc=\$\?'
-  "      ''\|\*\[!0-9\]\*\)")
+  "      ''\|\*\[!0-9\]\*\)"
+  # Волна 31, закрывающий: 111 --image на образ прогона; 112 нет сборки;
+  # 113 контроль назван своим именем.
+  'python3 "\$TEETH_PY" --image "\$STATE/bin/\$v.wave.bin"'
+  'echo "SWEEP зубы реестра: НЕ ИЗМЕРЕНЫ -- ни одна версия не собралась"'
+  'КОНТРОЛЬ ПРОВАЛЕН')
 
 MUT_REP=(x
   'if false; then'
@@ -3411,7 +3499,7 @@ MUT_REP=(x
   '    0) :'
   '    9) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
   '  :'
-  '    22) echo "SWEEP ОТКАЗ: прибор зубов НЕ МЕРИЛ'
+  '    22) if grep -q'
   'SWEEP_TW_HOME="$STATE/tweakcc-none"'
   'if true; then'
   "tmp = path + '.new'"
@@ -3457,7 +3545,10 @@ MUT_REP=(x
   ': # mutation: build probe skip reader bypassed; __env_rc=1'
   ': # mutation: tools bench skip reader bypassed; __env_rc=1'
   ': # mutation: checks teeth skip reader bypassed; __env_rc=1'
-  '      never)')
+  '      never)'
+  'python3 "$TEETH_PY"'
+  ':'
+  'КОНТРОЛЬ НИКОГДА')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -3482,7 +3573,9 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                # Волна 31, бриф оболочек
                103 104 105 106 107 108
                109 109 109 109 109 109 109 109 109 109
-               110)
+               110
+               # Волна 31, закрывающий
+               111 112 113)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -3607,7 +3700,10 @@ MUT_CAUSE=(x
   'ZERO_ПРОПУСТИЛ_ЗОНД'
   'ИСТИННОСТЬ_РАЗОШЛАСЬ'
   'ИСТИННОСТЬ_РАЗОШЛАСЬ'
-  'НЕГОДНОСТЬ_ПРИНЯТА')
+  'НЕГОДНОСТЬ_ПРИНЯТА'
+  'НЕТ_--image'
+  'ЗУБЫ_МОЛЧАТ'
+  'ДИСЪЮНКЦИЯ')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

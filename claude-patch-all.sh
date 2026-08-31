@@ -5556,7 +5556,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 79 scenarios through a throwaway probes home —
+# and drives probe-bench's 82 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #
