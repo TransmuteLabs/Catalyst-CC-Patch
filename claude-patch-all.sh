@@ -1369,6 +1369,13 @@ OWNERS = (
     ('corpus-tools-bench', ('corpus-tools-bench',), ('tools', 'corpus-tools-bench.sh'),
      {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
       'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
+    ('build-path-probe', ('build-path-probe',), ('tools', 'build-path-probe.sh'),
+     {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
+      'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
+    ('backup-divergence-probe', ('backup-divergence-probe',),
+     ('tools', 'backup-divergence-probe.sh'),
+     {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
+      'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
     ('probes-sync-bench', ('probes-sync-bench',), ('tools', 'probes-sync-bench.sh'),
      {'scenarios': r'^EXPECTED_SCENARIOS=(\d+)$',
       'mutations': r'^EXPECTED_MUTATIONS=(\d+)$'}),
@@ -2346,6 +2353,17 @@ TWEAKCC_BACKUP="$TWEAKCC_HOME/native-binary.backup"
 # Запись, по которой tweakcc решает, освежать бэкап или восстанавливать его:
 # страж ниже обязан спрашивать ЕЁ, а не версию файла бэкапа.
 TWEAKCC_CFG="$TWEAKCC_HOME/config.json"
+# Канонный дом маркера, которым зонд пути сборки метит ОДОЛЖЕННЫЙ конфиг
+# tweakcc на время прогона. Дом здесь, а не в зонде, по одной причине:
+# claude-patch-all.sh не делает `source` НИ ОДНОГО файла и получить значение
+# извне не может, а зонд читать чужой файл умеет -- он и извлекает.
+#
+# СТОЛБЕЦ 0 ОБЯЗАТЕЛЕН: зонд достаёт значение якорем `^TWEAKCC_PROBE_CFG_MARKER=`
+# (tools/build-path-probe.sh), и отступ перед именем оставит его без маркера --
+# зонд тогда отказывает кодом 2, а не молчит. Объявление держится на верхнем
+# уровне, а не внутри ветки: константа кита не должна существовать только при
+# входе в условие.
+TWEAKCC_PROBE_CFG_MARKER='0.0.0-probe'
 # Дайджест бэкапа, снятый там, где восстановление применимо; пусто -- не
 # применимо. Объявлено здесь: под `set -u` пост-сверка читает его всегда.
 TWEAKCC_RESTORE_PINNED=""
@@ -2492,6 +2510,26 @@ try:
 except Exception:
     v = None
 print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
+    # --- killed-probe config marker guard --------------------------------------
+    if [[ "$CFG_VER" == "$TWEAKCC_PROBE_CFG_MARKER" ]]; then
+      echo "FATAL: tweakcc's config has ccVersion=$TWEAKCC_PROBE_CFG_MARKER, the" >&2
+      echo "  build-path probe marker. Continuing would make tweakcc refresh its backup" >&2
+      echo "  from the target and rewrite the human's return point: what" >&2
+      echo "  'tweakcc --restore' hands back." >&2
+      echo "  This marker has two possible meanings:" >&2
+      echo "    * a previous probe died under SIGKILL; SIGKILL does not run the probe's" >&2
+      echo "      trap, and its snapshots, if any, are under:" >&2
+      echo "        ${TMPDIR:-/tmp}/cc-build-path-probe.*/config.json.snapshot" >&2
+      echo "    * another build-path probe may be running now and borrowing this config." >&2
+      echo "      Check for: bash .../tools/build-path-probe.sh" >&2
+      echo "      If that process is alive, wait for it to finish; do not repair its loan." >&2
+      echo "  Only you know which of the two is the truth:" >&2
+      echo "    * for a dead predecessor, restore config.json.snapshot by hand, or write" >&2
+      echo "      the real Claude Code version as ccVersion if you know it;" >&2
+      echo "    * for a live probe, wait for it to finish and restore its own snapshot." >&2
+      exit 1
+    fi
+    # --- end killed-probe config marker guard ----------------------------------
     if [[ "$CFG_VER" == "$TGT_VER" ]]; then
       # Восстановление ПРИМЕНИМО: освежать бэкап tweakcc не станет.
       if ! cmp -s "$BIN" "$TWEAKCC_BACKUP"; then

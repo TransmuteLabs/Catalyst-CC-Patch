@@ -40,6 +40,9 @@
 #   u  the installer's own `--update` path, offline and in seconds: it must
 #      build BESIDE the target and swap by rename, never download over the live
 #      file. Its control is a copy of claude_patch.py with the staging removed.
+#   k  another probe owns the probe-only ccVersion now, or SIGKILL left it behind
+#      -> must refuse before snapshotting or writing anything. Its control removes
+#      that startup guard and must let the same toy HOME reach a fast case.
 #
 # Case (c) runs a mutant copy of the pipeline out of a directory of symlinks to
 # this kit, so nothing is written into the source tree; and it snapshots
@@ -57,7 +60,8 @@
 #      backup guard) says the kit is broken -- retrying will not help
 #   2  the call contract is broken (unknown argument, unknown case letter, an
 #      empty case set), OR an instrument of this probe cannot measure: the
-#      lock preamble moved, the backup guard's carve anchor is gone. Both
+#      lock preamble moved, the backup guard's carve anchor is gone, or the
+#      canonical probe-config marker cannot be extracted. All of these
 #      say "there is nothing to measure yet", not "the kit is broken" --
 #      different repairs, so they must not share a code
 #   3  the pipeline lock is held by another live run -- retry later
@@ -81,10 +85,10 @@
 # invisible to every check in the pipeline, and a tool nobody calls has been
 # dead three times in this kit.
 #
-# Usage:  bash tools/build-path-probe.sh [--case abcdurxpl] [--version 2.1.247]
+# Usage:  bash tools/build-path-probe.sh [--case abcdurxplk] [--version 2.1.247]
 # Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 119
 #         checks + the interface gate + the bench), so a few minutes each; case
-#         (r) and (x) build nothing and answer in milliseconds.
+#         (r), (x), (l) and (k) build nothing and answer in milliseconds.
 
 set -u
 
@@ -117,7 +121,11 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdurxpl
+CASES=abcdurxplk
+# Owner totals across the self-checking cases: K contributes 1/1 and L 4/4;
+# these declarations must move with either case's scenario or mutation table.
+EXPECTED_SCENARIOS=5
+EXPECTED_MUTATIONS=5
 WANT_VER=
 
 while [[ $# -gt 0 ]]; do
@@ -139,6 +147,102 @@ fi
 
 
 ALL_CASES="$CASES"
+
+# Значение принадлежит конвейеру: дубль здесь сделал бы случай (k) зелёным по
+# маркеру, которого исполняющийся конвейер уже не использует.
+TWEAKCC_PROBE_CFG_MARKER="$(sed -n "s/^TWEAKCC_PROBE_CFG_MARKER='\\(.*\\)'$/\\1/p" "$PIPELINE")"
+if [[ -z "$TWEAKCC_PROBE_CFG_MARKER" ]]; then
+  echo "build-path-probe: ОТКАЗ -- не найден непустой TWEAKCC_PROBE_CFG_MARKER в $PIPELINE" >&2
+  echo "  Прибор не знает, какое ccVersion является следом оборванного зонда." >&2
+  exit 2
+fi
+
+case_k() {   # чужой probe-marker: отказ до снимка, игрушечный HOME
+  local d home cfg before after out rc self kit mut mout mrc ver patched pristine f discrepancies=0
+  d="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe-k.XXXXXX")"
+  home="$d/home"; cfg="$home/.tweakcc/config.json"
+  ver=9.9.9
+  patched="$home/.local/share/claude/versions/$ver"
+  pristine="$patched.orig"
+  mkdir -p "$(dirname "$cfg")" "$(dirname "$patched")" "$d/tmp" "$d/kit/tools"
+  printf '{"ccVersion":"%s","kept":"byte-for-byte"}\n' "$TWEAKCC_PROBE_CFG_MARKER" > "$cfg"
+  printf 'prefix %s suffix\n' "$OUR_MARKER" > "$patched"
+  printf 'pristine toy bytes\n' > "$pristine"
+  before="$(shasum -a 256 "$cfg" | awk '{print $1}')"
+  self="$HERE/tools/build-path-probe.sh"
+
+  out="$(HOME="$home" TMPDIR="$d/tmp" bash "$self" --case r --version "$ver" 2>&1)"; rc=$?
+  after="$(shasum -a 256 "$cfg" | awk '{print $1}')"
+  if [[ $rc -ne 2 || "$out" != *"ccVersion is the build-path probe marker"* \
+        || "$out" != *"has two possible meanings"* \
+        || "$out" != *"SIGKILL does not run the probe's trap"* \
+        || "$out" != *"another build-path probe may be running now"* \
+        || "$out" != *"wait for it to finish"* ]]; then
+    echo "  FAIL   K: marker config answered rc=$rc without the startup guard's own reason" >&2
+    printf '%s\n' "$out" | sed 's/^/        /' >&2
+    rm -rf "$d"
+    return 1
+  fi
+  if [[ -z "$before" || "$before" != "$after" ]]; then
+    echo "  FAIL   K: the refusing probe changed the toy config ($before -> $after)" >&2
+    rm -rf "$d"
+    return 1
+  fi
+  echo "  ok     K: marker config is refused with code 2 before the file changes"
+
+  # Контроль исполняет тот же вход по копии зонда без одной ветки стража. Он
+  # обязан потерять ИМЕННО текст отказа; код ребёнка не используется как зуб,
+  # потому что случай (r) после снятого стража может упасть по соседней причине.
+  cp -p "$self" "$d/kit/tools/build-path-probe.sh"
+  ln -s "$PIPELINE" "$d/kit/claude-patch-all.sh"
+  for f in "$HERE"/tools/*; do
+    [[ "$(basename "$f")" == build-path-probe.sh ]] && continue
+    ln -s "$f" "$d/kit/tools/$(basename "$f")"
+  done
+  mut="$d/kit/tools/build-path-probe.sh"
+  python3 - "$mut" <<'PY_K_MUT'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text(encoding='utf-8')
+a = '# --- killed-predecessor config guard ----------------------------------------\n'
+b = '# --- end killed-predecessor config guard ------------------------------------\n'
+if s.count(a) != 1 or s.count(b) != 1 or s.index(a) >= s.index(b):
+    sys.stderr.write('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: ветка startup guard не найдена ровно один раз\n')
+    raise SystemExit(2)
+s = s[:s.index(a)] + s[s.index(b) + len(b):]
+p.write_text(s, encoding='utf-8')
+PY_K_MUT
+  mrc=$?
+  if [[ $mrc -ne 0 ]]; then
+    rm -rf "$d"
+    [[ $mrc -eq 2 ]] && return 2
+    return 1
+  fi
+  mout="$(HOME="$home" TMPDIR="$d/tmp" bash "$mut" --case r --version "$ver" 2>&1)"; mrc=$?
+  after="$(shasum -a 256 "$cfg" | awk '{print $1}')"
+  if [[ "$mout" != *"ccVersion is the build-path probe marker"* \
+        && -n "$before" && "$before" == "$after" ]]; then
+    echo "  RED    K mutation: removing the startup guard removes its own refusal text (child rc=$mrc)"
+  else
+    echo "  FAIL   K mutation kept the guard text or changed the toy config (rc=$mrc)" >&2
+    printf '%s\n' "$mout" | sed 's/^/        /' >&2
+    rm -rf "$d"
+    return 1
+  fi
+  rm -rf "$d"
+  echo "build-path-probe K: case held and its control showed teeth"
+}
+
+if [[ "$CASES" == *k* ]]; then
+  case_k || exit $?
+  CASES="${CASES//k/}"
+  if [[ -z "$CASES" ]]; then
+    echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
+    exit 0
+  fi
+fi
+
 case_l() {
   python3 - "$PIPELINE" <<'PY_LSOF'
 import os
@@ -235,7 +339,7 @@ for mutation, old, new, owner in mutations:
         failed += 1
         print("  FAIL   mutation %s did not redden %s" % (mutation, owner))
 
-print("build-path-probe L: сценариев=4 мутаций=4 расхождений=%d" % failed)
+print("build-path-probe L: case held and its controls showed teeth")
 raise SystemExit(1 if failed else 0)
 PY_LSOF
 }
@@ -447,6 +551,29 @@ CFG_SNAP="$ROOT/config.json.snapshot"
 # создаст сам зонд (тогда после прогона файл надо УБРАТЬ, а не «восстановить»);
 # конфиг был, но снять не удалось. Без третьего флага зонд, создавший конфиг на
 # чистой машине, оставлял бы его человеку навсегда.
+# --- killed-predecessor config guard ----------------------------------------
+PROBE_LIVE_CFG_VER="$(python3 -c 'import json,sys
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8")).get("ccVersion")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
+if [[ "$PROBE_LIVE_CFG_VER" == "$TWEAKCC_PROBE_CFG_MARKER" ]]; then
+  echo "build-path-probe: ОТКАЗ -- ccVersion is the build-path probe marker '$TWEAKCC_PROBE_CFG_MARKER'." >&2
+  echo "  This marker has two possible meanings:" >&2
+  echo "    * a previous probe died under SIGKILL; SIGKILL does not run the probe's trap," >&2
+  echo "      and its snapshots, if any, are under:" >&2
+  echo "        ${TMPDIR:-/tmp}/cc-build-path-probe.*/config.json.snapshot" >&2
+  echo "    * another build-path probe may be running now and borrowing this config." >&2
+  echo "      Check for: bash .../tools/build-path-probe.sh" >&2
+  echo "      If that process is alive, wait for it to finish; do not repair its loan." >&2
+  echo "  Only you know which of the two is the truth:" >&2
+  echo "    * for a dead predecessor, restore config.json.snapshot by hand, or write" >&2
+  echo "      the real Claude Code version as ccVersion if you know it;" >&2
+  echo "    * for a live probe, wait for it to finish and restore its own snapshot." >&2
+  exit 2
+fi
+# --- end killed-predecessor config guard ------------------------------------
 CFG_WAS_ABSENT=0
 if [[ -f "$TWEAKCC_CFG" ]]; then
   cp -p "$TWEAKCC_CFG" "$CFG_SNAP"
@@ -664,11 +791,11 @@ seed_version_mismatch() {
   # файл из одного ключа законен, а после прогона он убирается (CFG_WAS_ABSENT).
   mkdir -p "$(dirname "$TWEAKCC_CFG")"
   [[ -f "$TWEAKCC_CFG" ]] || printf '{}\n' > "$TWEAKCC_CFG"
-  python3 - "$TWEAKCC_CFG" <<'PY'
+  python3 - "$TWEAKCC_CFG" "$TWEAKCC_PROBE_CFG_MARKER" <<'PY'
 import json, os, sys
 p = sys.argv[1]
 cfg = json.load(open(p))
-cfg['ccVersion'] = '0.0.0-probe'
+cfg['ccVersion'] = sys.argv[2]
 # The LIVE config of the person running this probe. Staged and renamed: the
 # probe's restore runs from a trap, and a trap does not run on SIGKILL, so a
 # torn write here would outlive the probe.
@@ -1276,10 +1403,10 @@ if [[ $FAILED -eq 0 ]]; then
   # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d), (u) и
   # (x) -- мутационные контроли, и без них зелёная строка обещала бы
   # доказательство, которого прогон не получал (раунд 18, H-2).
-  if [[ "$CASES" == *c* || "$CASES" == *d* || "$CASES" == *u* || "$CASES" == *x* || "$CASES" == *r* || "$CASES" == *p* ]]; then
+  if [[ "$ALL_CASES" == *c* || "$ALL_CASES" == *d* || "$ALL_CASES" == *u* || "$ALL_CASES" == *x* || "$ALL_CASES" == *r* || "$ALL_CASES" == *p* || "$ALL_CASES" == *l* || "$ALL_CASES" == *k* ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
   else
-    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p/l) не гонялся -- зубы не доказаны"
+    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p/l/k) не гонялся -- зубы не доказаны"
   fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2

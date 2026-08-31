@@ -25,6 +25,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/../claude-patch-all.sh"
+EXPECTED_SCENARIOS=12
+EXPECTED_MUTATIONS=1
 [ -f "$SCRIPT" ] || { echo "нет $SCRIPT" >&2; exit 2; }
 
 # Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
@@ -86,6 +88,15 @@ for l in lines:
 if marker is None:
     die('строка OUR_MARKER= не найдена')
 
+probe_marker = None
+for l in lines:
+    m = re.match(r"^TWEAKCC_PROBE_CFG_MARKER='(.*)'$", l)
+    if m:
+        probe_marker = m.group(1)
+        break
+if not probe_marker:
+    die('непустая строка TWEAKCC_PROBE_CFG_MARKER= не найдена')
+
 # --- условие активации ------------------------------------------------------
 act = next((i for i, l in enumerate(lines) if l == 'if [[ $ONLY_OURS -eq 0 ]]; then'), None)
 if act is None:
@@ -105,8 +116,11 @@ g1 = next((j for j in range(g0 + 1, len(lines)) if lines[j] == '  fi'), None)
 if g1 is None:
     die('закрывающий fi стража не найден')
 guard = '\n'.join(lines[g0:g1 + 1])
-if 'FATAL: the target and tweakcc' not in guard or 'does not name its version' not in guard:
-    die('в извлечённом страже нет одного из двух его сообщений')
+if ('FATAL: the target and tweakcc' not in guard
+        or 'does not name its version' not in guard
+        or 'has two possible meanings' not in guard
+        or 'another build-path probe may be running now' not in guard):
+    die('в извлечённом страже нет одного из трёх его сообщений')
 
 # --- пост-сверка дайджеста ---------------------------------------------------
 p0 = next((i for i, l in enumerate(lines) if l == 'if [[ -n "$TWEAKCC_RESTORE_PINNED" ]]; then'), None)
@@ -120,8 +134,10 @@ if 'changed WHILE the tweakcc stage' not in post:
     die('в извлечённой пост-сверке нет её сообщения')
 
 open(work + '/marker.txt', 'w', encoding='utf-8').write(marker)
+open(work + '/probe-marker.txt', 'w', encoding='utf-8').write(probe_marker)
 open(work + '/guard.sh', 'w', encoding='utf-8').write(
     'set -euo pipefail\nOUR_MARKER=' + repr(marker).replace('"', '\\"') + '\n'
+    + 'TWEAKCC_PROBE_CFG_MARKER=' + repr(probe_marker).replace('"', '\\"') + '\n'
     + guard + '\n'
     + '[ -z "${STAGE_HOOK:-}" ] || eval "$STAGE_HOOK"\n'
     + post + '\necho GUARD-PASSED\n')
@@ -131,6 +147,7 @@ PY
 
 # repr питона даёт одинарные кавычки -- для bash это ровно то, что нужно.
 MARKER="$(cat "$WORK/marker.txt")"
+PROBE_MARKER="$(cat "$WORK/probe-marker.txt")"
 
 mkimg() {   # $1 путь, $2 версия ('-' = не называет версию), $3 начинка
   if [ "$2" = "-" ]; then
@@ -176,6 +193,7 @@ run_case() {  # $1 имя, $2 исход (fired|passed), $3 цель, $4 бэк�
 CFG_MATCH="$WORK/cfg-match.json";  mkcfg 2.1.247 "$CFG_MATCH"
 CFG_STALE="$WORK/cfg-stale.json";  mkcfg 2.1.246 "$CFG_STALE"
 CFG_NONE="$WORK/cfg-missing.json"  # намеренно не создаётся
+CFG_PROBE="$WORK/cfg-probe.json";  mkcfg "$PROBE_MARKER" "$CFG_PROBE"
 mkimg "$WORK/backup" 2.1.247 backup-bytes
 
 # (a) цель несёт НАШ маркер -- штатная пересборка живого образа.
@@ -194,11 +212,15 @@ mkimg "$WORK/diverged" 2.1.247 target-bytes
 run_case "конфиг другой версии -- молчит"              passed "$WORK/diverged" "$WORK/backup" "$CFG_STALE"
 run_case "конфига нет -- молчит"                       passed "$WORK/diverged" "$WORK/backup" "$CFG_NONE"
 
-# (e) единственный случай подмены: запись совпадает, байты разные.
+# (e) маркер другого зонда или след SIGKILL -- отказ ДО сравнения версий.
+run_case "маркер зонда в конфиге -- ОТКАЗ"            fired  "$WORK/diverged" "$WORK/backup" "$CFG_PROBE" "" \
+         "has two possible meanings"
+
+# (f) единственный случай подмены: запись совпадает, байты разные.
 run_case "запись совпадает, байты разные -- ОТКАЗ"     fired  "$WORK/diverged" "$WORK/backup" "$CFG_MATCH" "" \
          "the target and tweakcc's backup are DIFFERENT images"
 
-# (f) версия цели не устанавливается -- отказ, а не молчание и не смерть.
+# (g) версия цели не устанавливается -- отказ, а не молчание и не смерть.
 mkimg "$WORK/nover" - target-bytes
 run_case "цель не называет версию -- ОТКАЗ"            fired  "$WORK/nover"    "$WORK/backup" "$CFG_MATCH" "" \
          "the target does not name its version"
@@ -209,7 +231,7 @@ mkdir -p "$WORK/dir-target"
 run_case "цель -- каталог -- ОТКАЗ"                    fired  "$WORK/dir-target" "$WORK/backup" "$CFG_MATCH" "" \
          "the target does not name its version"
 
-# (g) гонка check/use: бэкап подменён ВНУТРИ стадии.
+# (h) гонка check/use: бэкап подменён ВНУТРИ стадии.
 cp -p "$WORK/backup" "$WORK/same2"
 run_case "бэкап подменён внутри стадии -- ОТКАЗ"       fired  "$WORK/same2"   "$WORK/backup" "$CFG_MATCH" \
          'mkimg_race() { printf "#!/bin/sh\ncase \"\$1\" in --version) echo \"2.1.247 (Claude Code)\";; esac\n: foreign\n" > "$TWEAKCC_BACKUP"; chmod +x "$TWEAKCC_BACKUP"; }; mkimg_race' \
@@ -218,13 +240,41 @@ run_case "бэкап подменён внутри стадии -- ОТКАЗ"  
 cp -p "$WORK/backup" "$WORK/backup-intact"; cp -p "$WORK/backup" "$WORK/same3"
 run_case "бэкап не менялся внутри стадии -- молчит"    passed "$WORK/same3"   "$WORK/backup-intact" "$CFG_MATCH"
 
+# Зуб новой ветки: вырезается ТОЛЬКО отказ по probe-marker. Тот же вход обязан
+# пройти старую таблицу до GUARD-PASSED; иной ненулевой ответ -- чужая причина.
+python3 - "$WORK/guard.sh" "$WORK/guard-no-probe-marker.sh" <<'PY_MUT'
+from pathlib import Path
+import sys
+src, dst = map(Path, sys.argv[1:])
+s = src.read_text(encoding='utf-8')
+a = '# --- killed-probe config marker guard --------------------------------------\n'
+b = '# --- end killed-probe config marker guard ----------------------------------\n'
+if s.count(a) != 1 or s.count(b) != 1 or s.index(a) >= s.index(b):
+    sys.stderr.write('ЯКОРЬ ПРОПАЛ: ветка probe-marker не найдена ровно один раз\n')
+    raise SystemExit(2)
+s = s[:s.index(a)] + s[s.index(b) + len(b):]
+dst.write_text(s, encoding='utf-8')
+PY_MUT
+set +e
+MUT_OUT="$(BIN="$WORK/diverged" TWEAKCC_BACKUP="$WORK/backup" TWEAKCC_CFG="$CFG_PROBE" \
+           TWEAKCC_RESTORE_PINNED="" STAGE_HOOK="" \
+           bash "$WORK/guard-no-probe-marker.sh" 2>&1)"; MUT_RC=$?
+set -e
+if [[ $MUT_RC -eq 0 && "$MUT_OUT" == *"GUARD-PASSED"* ]]; then
+  echo "  RED   мутация без ветки probe-marker пропускает её собственный случай"
+else
+  echo "  КРАСНО мутация probe-marker дала ЧУЖУЮ причину (rc=$MUT_RC)" >&2
+  echo "$MUT_OUT" | sed 's/^/        /' >&2
+  FAILED=1
+fi
+
 __DONE=1   # таблица пройдена целиком; дальше только вердикт
 if [[ $BADCASE -ne 0 ]]; then
   echo "страж «цель против бэкапа»: таблица НЕ ИЗМЕРЕНА -- случай объявлен без причины отказа" >&2
   exit 2
 fi
 if [[ $FAILED -eq 0 ]]; then
-  echo "страж «цель против бэкапа»: таблица из 11 случаев сошлась"
+  echo "backup-divergence-probe: таблица из $EXPECTED_SCENARIOS случаев и $EXPECTED_MUTATIONS мутации сошлась"
 else
   echo "страж «цель против бэкапа»: таблица истинности НЕ сошлась" >&2
   exit 1
