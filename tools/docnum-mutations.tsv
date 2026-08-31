@@ -22,12 +22,12 @@
 # ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
 # явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
 D1	README.md	113 scenarios on a toy corpus	114 scenarios on a toy corpus	объявлено «113 scenarios» (владелец corpus-tools-bench)
-D2	README.md	corpus-tools-bench's 127 recorded mutations	corpus-tools-bench's 128 recorded mutations	объявлено «127 mutations» (владелец corpus-tools-bench)
+D2	README.md	corpus-tools-bench's 128 recorded mutations	corpus-tools-bench's 129 recorded mutations	объявлено «128 mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 82;	const EXPECTED_SCENARIOS = 83;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
 D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 40	EXPECTED_MUTATION_COUNT = 40	не объявляет свою величину
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=127	EXPECTED_MUTATION_COUNT=127	не объявляет свою величину
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=128	EXPECTED_MUTATION_COUNT=128	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение

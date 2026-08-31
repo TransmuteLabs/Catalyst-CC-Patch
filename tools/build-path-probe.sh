@@ -106,7 +106,9 @@ __envon() {  # имя переменной; 0 истина, 1 ложь, 2 неи
        return 2 ;;
   esac
 }
-__envon KEEP_ROOT; __keep_root_rc=$?
+# Форма с `||`: см. claude-patch-all.sh -- `; rc=$?` под `set -e` обрывает молча.
+__keep_root_rc=0
+__envon KEEP_ROOT || __keep_root_rc=$?
 (( __keep_root_rc != 2 )) || exit 2
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"

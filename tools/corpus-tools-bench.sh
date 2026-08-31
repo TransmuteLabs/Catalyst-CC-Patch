@@ -61,7 +61,7 @@
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 EXPECTED_SCENARIOS=113
-EXPECTED_MUTATIONS=127
+EXPECTED_MUTATIONS=128
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -3088,7 +3088,8 @@ PY_BACKUP
 }
 
 scenario_109() {   # env-ручки читаются одной строгой истинностью
-  local mark out rc helper phelper lhelper bhelper hrc forms pout lout bout
+  local mark out rc helper phelper lhelper bhelper hrc survived pout lout bout
+  local pair sfile sknob site shelper sout found
   mark="$C/probe-zero.called"; rm -f "$mark"
   out=$(BENCH_SKIP_PROBE=0 STUB_PROBE_MARK="$mark" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   if (( rc != 0 )) || [[ ! -e "$mark" ]]; then
@@ -3103,20 +3104,52 @@ scenario_109() {   # env-ручки читаются одной строгой �
   lout=$(bash -c "$lhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"')
   bhelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/build-path-probe.real.sh")
   bout=$(bash -c "$bhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"')
-  forms=0
-  grep -q '__envon SWEEP_SKIP_BUILD_PROBE;' "$K/tools/sweep.sh" && forms=$((forms+1))
-  grep -q '__envon SWEEP_SKIP_TOOLS_BENCH;' "$K/tools/sweep.sh" && forms=$((forms+1))
-  grep -q '__envon SWEEP_SKIP_CHECKS_TEETH;' "$K/tools/sweep.sh" && forms=$((forms+1))
-  grep -q '__envon CLAUDE_PATCH_SKIP_MODELS;' "$K/claude-patch-all.real" && forms=$((forms+1))
-  grep -q '^__envon KEEP_ROOT;' "$K/tools/lock-probe.sh" && forms=$((forms+1))
-  grep -q '^__envon KEEP_ROOT;' "$K/tools/build-path-probe.real.sh" && forms=$((forms+1))
-  LAST_EVID="helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout формы=$forms"
+  # Раньше здесь стоял греп ФОРМЫ вызова -- и он запинил форму `__envon ИМЯ; rc=$?`,
+  # которая под `set -e` обрывает скрипт молча на невыставленной ручке (измерено на
+  # приёмке волны 31: установка проходила, конвейер объявлял отказ 1 сразу после
+  # свапа). Греп формы был доволен: он проверял НАПИСАНИЕ, а не то, переживает ли
+  # сайт свою же самую частую входную ситуацию. Теперь для каждого потребителя
+  # берутся ЕГО байты (читатель + строки вызова из файла) и исполняются под
+  # `set -euo pipefail` с СНЯТОЙ ручкой: выжил -- значит дошли до следующей строки.
+  # Два разных дефекта -- два разных следа. «Читателя на сайте не стало» и
+  # «сайт есть, но обрывается на снятой ручке» ловятся разными мутациями и
+  # обязаны называться по-разному: слитый след объявил бы удалённый читатель
+  # обрывом, то есть доказал бы чужое правило. Поэтому сайт ищется формой,
+  # ДОПУСКАЮЩЕЙ обе записи (`|| rc=$?` и `; rc=$?`) -- иначе возврат сломанной
+  # формы читался бы как исчезновение сайта.
+  found=0; survived=0
+  for pair in "tools/sweep.sh SWEEP_SKIP_BUILD_PROBE" \
+              "tools/sweep.sh SWEEP_SKIP_TOOLS_BENCH" \
+              "tools/sweep.sh SWEEP_SKIP_CHECKS_TEETH" \
+              "claude-patch-all.real CLAUDE_PATCH_SKIP_MODELS" \
+              "tools/lock-probe.sh KEEP_ROOT" \
+              "tools/build-path-probe.real.sh KEEP_ROOT"; do
+    sfile="${pair%% *}"; sknob="${pair##* }"
+    site=$(grep -B1 -E "^__envon $sknob(;| \|\|) " "$K/$sfile" | grep -v '^--$')
+    [[ "$site" == *"__envon $sknob"* ]] || continue
+    found=$((found+1))
+    shelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/$sfile")
+    sout=$(env -u "$sknob" bash -c "set -euo pipefail
+$shelper
+$site
+printf ДОШЛИ" 2>&1)
+    [[ "$sout" == *ДОШЛИ* ]] && survived=$((survived+1))
+  done
+  LAST_EVID="helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout найдено=$found выжили=$survived"
   if (( hrc != 0 )) || [[ "$out" != "0/1/2" || "$pout" != 0 \
-       || "$lout" != "1/2" || "$bout" != "1/2" || "$forms" != 6 ]]; then
-    LAST_EVID="ИСТИННОСТЬ_РАЗОШЛАСЬ helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout формы=$forms"
-    bad "109 env-ручки: true/false/неизвестное и шесть потребителей не сошлись"; return
+       || "$lout" != "1/2" || "$bout" != "1/2" ]]; then
+    LAST_EVID="ИСТИННОСТЬ_РАЗОШЛАСЬ helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout выжили=$survived"
+    bad "109 env-ручки: true/false/неизвестное у читателей не сошлись"; return
   fi
-  ok "109 env-ручки: true/false/invalid едины; 0 не пропускает зонд"
+  if [[ "$found" != 6 ]]; then
+    LAST_EVID="САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ найдено=$found из 6 :: sweep=$out patch=$pout lock=$lout build=$bout"
+    bad "109 env-ручки: у потребителя не стало сайта чтения ручки"; return
+  fi
+  if [[ "$survived" != 6 ]]; then
+    LAST_EVID="ОБРЫВ_НА_СНЯТОЙ_РУЧКЕ выжили=$survived из 6 :: sweep=$out patch=$pout lock=$lout build=$bout"
+    bad "109 env-ручки: сайт вызова обрывается под set -e, когда ручка не выставлена"; return
+  fi
+  ok "109 env-ручки: true/false/invalid едины; все 6 сайтов переживают снятую ручку под set -e"
 }
 
 
@@ -3284,7 +3317,8 @@ MUT_FILE=(x
   tools/sweep.sh tools/sweep.sh tools/sweep.sh
   tools/sweep.sh
   # Волна 31, закрывающий: зубы по образу прогона (111-113).
-  tools/sweep.sh tools/sweep.sh tools/sweep.sh)
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  claude-patch-all.real)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -3415,18 +3449,19 @@ MUT_PAT=(x
   '    1\|true\|yes\|on\) return 0 ;;'
   "    ''\|0\|false\|no\|off\) return 1 ;;"
   '       return 2 ;;'
-  '__envon CLAUDE_PATCH_SKIP_MODELS; __env_rc=\$\?'
-  '__envon KEEP_ROOT; __keep_root_rc=\$\?'
-  '__envon KEEP_ROOT; __keep_root_rc=\$\?'
-  '__envon SWEEP_SKIP_BUILD_PROBE; __env_rc=\$\?'
-  '__envon SWEEP_SKIP_TOOLS_BENCH; __env_rc=\$\?'
-  '__envon SWEEP_SKIP_CHECKS_TEETH; __env_rc=\$\?'
+  '__envon CLAUDE_PATCH_SKIP_MODELS \|\| __env_rc=\$\?'
+  '__envon KEEP_ROOT \|\| __keep_root_rc=\$\?'
+  '__envon KEEP_ROOT \|\| __keep_root_rc=\$\?'
+  '__envon SWEEP_SKIP_BUILD_PROBE \|\| __env_rc=\$\?'
+  '__envon SWEEP_SKIP_TOOLS_BENCH \|\| __env_rc=\$\?'
+  '__envon SWEEP_SKIP_CHECKS_TEETH \|\| __env_rc=\$\?'
   "      ''\|\*\[!0-9\]\*\)"
   # Волна 31, закрывающий: 111 --image на образ прогона; 112 нет сборки;
   # 113 контроль назван своим именем.
   'python3 "\$TEETH_PY" --image "\$STATE/bin/\$v.wave.bin"'
   'echo "SWEEP зубы реестра: НЕ ИЗМЕРЕНЫ -- ни одна версия не собралась"'
-  'КОНТРОЛЬ ПРОВАЛЕН')
+  'КОНТРОЛЬ ПРОВАЛЕН'
+  '__envon CLAUDE_PATCH_SKIP_MODELS \|\| __env_rc=\$\?')
 
 MUT_REP=(x
   'if false; then'
@@ -3548,7 +3583,8 @@ MUT_REP=(x
   '      never)'
   'python3 "$TEETH_PY"'
   ':'
-  'КОНТРОЛЬ НИКОГДА')
+  'КОНТРОЛЬ НИКОГДА'
+  '__envon CLAUDE_PATCH_SKIP_MODELS; __env_rc=$?')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -3575,7 +3611,7 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                109 109 109 109 109 109 109 109 109 109
                110
                # Волна 31, закрывающий
-               111 112 113)
+               111 112 113 109)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -3694,16 +3730,17 @@ MUT_CAUSE=(x
   'ИСТИННОСТЬ_РАЗОШЛАСЬ'
   'ИСТИННОСТЬ_РАЗОШЛАСЬ'
   'ИСТИННОСТЬ_РАЗОШЛАСЬ'
-  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
-  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
-  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ'
+  'САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ'
+  'САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ'
   'ZERO_ПРОПУСТИЛ_ЗОНД'
-  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
-  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ'
+  'САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ'
   'НЕГОДНОСТЬ_ПРИНЯТА'
   'НЕТ_--image'
   'ЗУБЫ_МОЛЧАТ'
-  'ДИСЪЮНКЦИЯ')
+  'ДИСЪЮНКЦИЯ'
+  'ОБРЫВ_НА_СНЯТОЙ_РУЧКЕ')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

@@ -761,7 +761,11 @@ __envon() {  # имя переменной; 0 истина, 1 ложь, 2 неи
 
 PROBE_LOG="$STATE/log/build-path-probe.log"
 PROBE_SH="$HERE/tools/build-path-probe.sh"
-__envon SWEEP_SKIP_BUILD_PROBE; __env_rc=$?
+# Форма с `||`: см. claude-patch-all.sh -- `; rc=$?` под `set -e` обрывает
+# молча. Здесь `set -e` нет, но форма одна на весь кит: она не должна
+# зависеть от того, какие флаги включит следующая правка шапки.
+__env_rc=0
+__envon SWEEP_SKIP_BUILD_PROBE || __env_rc=$?
 (( __env_rc != 2 )) || exit 2
 if (( __env_rc == 0 )); then
   echo "SWEEP зонд пути сборки ПРОПУЩЕН по ручке SWEEP_SKIP_BUILD_PROBE=${SWEEP_SKIP_BUILD_PROBE}"
@@ -830,7 +834,8 @@ fi
 
 BENCH_LOG="$STATE/log/corpus-tools-bench.log"
 BENCH_SH="$HERE/tools/corpus-tools-bench.sh"
-__envon SWEEP_SKIP_TOOLS_BENCH; __env_rc=$?
+__env_rc=0
+__envon SWEEP_SKIP_TOOLS_BENCH || __env_rc=$?
 (( __env_rc != 2 )) || exit 2
 if (( __env_rc == 0 )); then
   echo "SWEEP стенд корпусных инструментов ПРОПУЩЕН по ручке SWEEP_SKIP_TOOLS_BENCH=${SWEEP_SKIP_TOOLS_BENCH}"
@@ -889,7 +894,8 @@ fi
 TEETH_LOG="$STATE/log/checks-teeth.log"
 TEETH_PY="$HERE/tools/checks-teeth.py"
 TEETH_DONE=0
-__envon SWEEP_SKIP_CHECKS_TEETH; __env_rc=$?
+__env_rc=0
+__envon SWEEP_SKIP_CHECKS_TEETH || __env_rc=$?
 (( __env_rc != 2 )) || exit 2
 if (( __env_rc == 0 )); then
   echo "SWEEP зубы реестра проверок ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH=${SWEEP_SKIP_CHECKS_TEETH}"
