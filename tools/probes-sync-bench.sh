@@ -15,19 +15,25 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=6
-EXPECTED_MUTATIONS=6
+EXPECTED_SCENARIOS=7
+EXPECTED_MUTATIONS=8
+# Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
+# не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
+# прибор объявлял отказ там, где дефекта нет.
+WAIT_READY_STEPS=600      # 30 с -- вход первого писателя в cp
+WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после освобождения
 # Круг 25, E-4: номер сценария, который красит каждая мутация. Таблица
 # отдельная от самих мутаций, и сверка ниже требует, чтобы КАЖДЫЙ сценарий
 # был чьим-то зубом -- как check_mut_tables у corpus-tools-bench. До этой
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7)
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
 LAST_EVID=''
+TW_RC1=''; TW_RC2=''; TW_DIFF=''; TW_DIFF_RC=''; TW_REASON=''; TW_SECOND_LOG=''
 
 say() { printf '%s\n' "$*"; }
 ok() { RUN=$((RUN + 1)); say "  ok     $*"; }
@@ -61,6 +67,10 @@ mk_kit() {
   local dst="$1" f
   mkdir -p "$dst/scripts" "$dst/probes/judge" "$dst/probes/idle-watch" "$dst/judge"
   cp "$KIT/scripts/probes-sync.sh" "$dst/scripts/probes-sync.sh"
+  # Стенд копируется в игрушечный кит, потому что сценарий 7 меряет ЕГО путь
+  # отказа: мутация правит копию, а сценарий исполняет её, а не работающий файл.
+  mkdir -p "$dst/tools"
+  cp "$BENCH" "$dst/tools/probes-sync-bench.sh"
   printf 'probe config\n' > "$dst/probes/probes.toml"
   printf 'judge prompt\n' > "$dst/probes/judge/prompt.md"
   printf '{}\n' > "$dst/probes/judge/body.json"
@@ -81,8 +91,8 @@ make_env() {
   mkdir -p "$CLAUDE_CONFIG_DIR" "$CLAUDE_LAUNCH_AGENTS_DIR"
 }
 
-wait_file() {
-  local path="$1" left=100
+wait_file() {   # <путь> [шагов по 0.05 с]
+  local path="$1" left="${2:-$WAIT_READY_STEPS}"
   while [[ ! -e "$path" && $left -gt 0 ]]; do
     sleep 0.05
     left=$((left - 1))
@@ -90,14 +100,32 @@ wait_file() {
   [[ -e "$path" ]]
 }
 
-scenario_1() {
-  local root script stub ready release first_log second_log first_pid rc2 rc1 diff rc_diff
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s1.XXXXXX")
-  mk_kit "$root/kit"; make_env "$root"
+# Ограниченное ожидание смерти процесса. Голое `wait` потолка не имеет: если
+# писатель не умирает (его передний ребёнок держит сигнал), стенд встаёт
+# навсегда, а вместе с ним весь свип.
+wait_death() {   # <pid> [шагов по 0.05 с]; 0 -- умер, 1 -- бюджет исчерпан
+  local pid="$1" left="${2:-$WAIT_DEATH_STEPS}"
+  while kill -0 "$pid" 2>/dev/null && (( left > 0 )); do
+    sleep 0.05
+    left=$((left - 1))
+  done
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+# Пляска двух писателей. Режим `signal` -- заглушка сообщает о входе файлом
+# ready (боевой случай сценария 1); режим `silent` -- НЕ сообщает никогда
+# (случай, на котором меряется путь отказа). Обе стороны исполняют ОДИН код:
+# копия рано или поздно разошлась бы с боевой.
+#
+# Возврат: 0 -- дошли до вердикта удачного пути (TW_RC1/TW_RC2/TW_DIFF/TW_DIFF_RC
+# заполнены); 1 -- путь отказа отработал и НАЗВАЛ причину в TW_REASON.
+two_writers() {   # <корень> <signal|silent>
+  local root="$1" mode="$2" script stub ready release first_log second_log first_pid
   script="$root/kit/scripts/probes-sync.sh"
   stub="$root/stub"; mkdir -p "$stub"
   ready="$root/ready"; release="$root/release"
-  cat > "$stub/cp" <<'CP'
+  if [[ "$mode" == signal ]]; then
+    cat > "$stub/cp" <<'CP'
 #!/usr/bin/env bash
 if [[ ! -e "$SYNC_BENCH_READY" ]]; then
   : > "$SYNC_BENCH_READY"
@@ -105,28 +133,64 @@ if [[ ! -e "$SYNC_BENCH_READY" ]]; then
 fi
 exec /bin/cp "$@"
 CP
+  else
+    cat > "$stub/cp" <<'CP'
+#!/usr/bin/env bash
+# О входе НЕ сообщает: ready не появится никогда -- ровно тот вход, на котором
+# путь отказа обязан кончиться, а не зависнуть. Свой номер пишет ДО ожидания:
+# по нему сценарий 7 проверяет, что заглушка не осталась сиротой.
+printf '%s\n' "$$" > "$SYNC_BENCH_STUBPID"
+while [[ ! -e "$SYNC_BENCH_RELEASE" ]]; do sleep 0.05; done
+exec /bin/cp "$@"
+CP
+  fi
   chmod +x "$stub/cp"
   first_log="$root/first.log"; second_log="$root/second.log"
   PATH="$stub:$PATH" SYNC_BENCH_READY="$ready" SYNC_BENCH_RELEASE="$release" \
+    SYNC_BENCH_STUBPID="$root/stub.pid" \
     bash "$script" --to-home >"$first_log" 2>&1 &
   first_pid=$!
   if ! wait_file "$ready"; then
-    kill "$first_pid" 2>/dev/null; wait "$first_pid" 2>/dev/null
-    LAST_EVID='УСЛОВИЕ_НЕ_ДОСТИГНУТО: первый писатель не вошёл в cp'
+    # Освобождение ПЕРВЫМ действием, ДО сигнала: заглушка ждёт release, а bash
+    # не доставляет сигнал, пока исполняется его ПЕРЕДНИЙ ребёнок. kill без
+    # освобождения не убивает никого, а следом голое `wait` встаёт навсегда.
+    : > "$release"
+    kill "$first_pid" 2>/dev/null
+    wait_death "$first_pid" || kill -9 "$first_pid" 2>/dev/null
+    wait "$first_pid" 2>/dev/null
+    TW_REASON='УСЛОВИЕ_НЕ_ДОСТИГНУТО: первый писатель не вошёл в cp'
+    return 1
+  fi
+  bash "$script" --to-home >"$second_log" 2>&1; TW_RC2=$?
+  : > "$release"
+  if ! wait_death "$first_pid"; then
+    kill -9 "$first_pid" 2>/dev/null
+    wait "$first_pid" 2>/dev/null
+    TW_REASON='ПИСАТЕЛЬ_НЕ_УМЕР: после освобождения первый писатель не завершился в бюджете'
+    return 1
+  fi
+  wait "$first_pid"; TW_RC1=$?
+  TW_DIFF=$(bash "$script" --diff 2>&1); TW_DIFF_RC=$?
+  TW_SECOND_LOG=$(cat "$second_log")
+  return 0
+}
+
+scenario_1() {
+  local root
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s1.XXXXXX")
+  mk_kit "$root/kit"; make_env "$root"
+  if ! two_writers "$root" signal; then
+    LAST_EVID="$TW_REASON"
     rm -rf "$root"
-    bad '1 замок писателей: прибор не дождался первого писателя'
+    bad '1 замок писателей: путь отказа назвал причину'
     return
   fi
-  bash "$script" --to-home >"$second_log" 2>&1; rc2=$?
-  : > "$release"
-  wait "$first_pid"; rc1=$?
-  diff=$(bash "$script" --diff 2>&1); rc_diff=$?
-  LAST_EVID="первый=$rc1 второй=$rc2 diff=$rc_diff :: $(cat "$second_log") :: $diff"
+  LAST_EVID="первый=$TW_RC1 второй=$TW_RC2 diff=$TW_DIFF_RC :: $TW_SECOND_LOG :: $TW_DIFF"
   rm -rf "$root"
-  if [[ $rc1 -eq 0 && $rc2 -eq 3 && $rc_diff -eq 0 ]]; then
+  if [[ $TW_RC1 -eq 0 && $TW_RC2 -eq 3 && $TW_DIFF_RC -eq 0 ]]; then
     ok '1 два писателя: второй получает 3, после первого дом чист'
   else
-    bad "1 два писателя: ждали 0/3/0, получили $rc1/$rc2/$rc_diff"
+    bad "1 два писателя: ждали 0/3/0, получили $TW_RC1/$TW_RC2/$TW_DIFF_RC"
   fi
 }
 
@@ -294,7 +358,7 @@ scenario_5() {
   ok '5 стадии: --diff не считает расхождением стадию живого писателя'
 }
 run_scenario() {
-  case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; 6) scenario_6 ;; *) return 2 ;; esac
+  case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; 6) scenario_6 ;; 7) scenario_7 ;; 8) scenario_7 ;; *) return 2 ;; esac
 }
 
 # Круг 25, E-3: тела heredoc'ов .sh-жертвы, поданные питону, по правилу гейта
@@ -336,6 +400,42 @@ scenario_6() {
     bad '6 стадии: прополка не сняла стадию вместе с владельцем'; return
   fi
   ok '6 стадии: номер жив, но чужая lstart делает стадию мёртвой; стадия и владелец убраны'
+}
+
+scenario_7() {   # путь отказа обязан КОНЧАТЬСЯ, а не виснуть
+  local root start elapsed rc pid wd stub_pid orphan
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s7.XXXXXX")
+  mk_kit "$root/kit"; make_env "$root"
+  start=$(date +%s)
+  bash "$KIT/tools/probes-sync-bench.sh" --hang-case "$root" >"$root/hang.log" 2>&1 &
+  pid=$!
+  ( sleep 90; kill -9 "$pid" 2>/dev/null ) &
+  wd=$!
+  wait "$pid"; rc=$?
+  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  elapsed=$(( $(date +%s) - start ))
+  # Сирота проверяется ДО собственного освобождения: освободишь раньше --
+  # заглушка выйдет сама, и утечка станет невидимой.
+  stub_pid=$(cat "$root/stub.pid" 2>/dev/null || true)
+  orphan=нет
+  if [[ -n "$stub_pid" ]] && kill -0 "$stub_pid" 2>/dev/null; then orphan=да; fi
+  : > "$root/release" 2>/dev/null || true
+  [[ -n "$stub_pid" ]] && wait_death "$stub_pid" 100 >/dev/null 2>&1 || true
+  LAST_EVID="rc=$rc секунд=$elapsed сирота=$orphan :: $(cat "$root/hang.log" 2>/dev/null)"
+  if (( rc != 0 )) || (( elapsed >= 90 )); then
+    LAST_EVID="ПУТЬ_ОТКАЗА_ЗАВИС rc=$rc секунд=$elapsed"
+    rm -rf "$root"
+    bad '7 путь отказа обязан кончиться отказом, а не зависнуть'
+    return
+  fi
+  if [[ "$orphan" == да ]]; then
+    LAST_EVID="СИРОТА_ЗАГЛУШКИ pid=$stub_pid остался жив после пути отказа"
+    rm -rf "$root"
+    bad '7 путь отказа обязан освободить заглушку, а не бросить её'
+    return
+  fi
+  rm -rf "$root"
+  ok '7 первый писатель не вошёл в cp: путь отказа кончился в бюджете и не бросил сироту'
 }
 
 python_heredoc_bodies() {   # файл-жертва, каталог для тел; печатает число тел
@@ -390,7 +490,11 @@ mutate() {
   # уровня под `set -u` ронял скрипт «root: unbound variable».
   local root n file
   root="$1"; n="$2"
-  file="$root/kit/scripts/probes-sync.sh"
+  # Жертва мутаций 7 и 8 -- САМ СТЕНД в копии кита: она меряет его путь отказа.
+  case "$n" in
+    7|8) file="$root/kit/tools/probes-sync-bench.sh" ;;
+    *) file="$root/kit/scripts/probes-sync.sh" ;;
+  esac
   python3 - "$file" "$n" <<'PY'
 import sys
 path, number = sys.argv[1], int(sys.argv[2])
@@ -415,6 +519,22 @@ elif number == 5:
                 '  if false; then  # mutation: every stage counts as divergence\n')
 elif number == 6:
     old, new = ('[[ "$__now" == "$__owner_start" ]]', 'true  # mutation: owner lstart ignored')
+elif number == 7:
+    # Вся починка снимается разом -- порядок И потолки: ветка возвращается к
+    # форме, измеренной 2026-08-31, где путь отказа висел вечно. Свойство
+    # «путь отказа кончается» несут обе ноги вместе, поэтому зуб на зависание
+    # может быть только таким.
+    old, new = ('    : > "$release"\n'
+                '    kill "$first_pid" 2>/dev/null\n'
+                '    wait_death "$first_pid" || kill -9 "$first_pid" 2>/dev/null\n'
+                '    wait "$first_pid" 2>/dev/null\n',
+                '    kill "$first_pid" 2>/dev/null; wait "$first_pid" 2>/dev/null\n')
+elif number == 8:
+    # Снимается ТОЛЬКО освобождение: потолки на месте, зависания нет -- но
+    # заглушка остаётся сиротой навсегда. Своя причина у этой ноги приходит
+    # не через зависание, а через проверку сироты.
+    old, new = ('    : > "$release"\n    kill "$first_pid" 2>/dev/null\n',
+                '    kill "$first_pid" 2>/dev/null  # mutation: release withheld\n')
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)
@@ -438,7 +558,7 @@ PY
 
 self_check() {
   local n root before reddened=0
-  for n in 1 2 3 4 5 6; do
+  for n in 1 2 3 4 5 6 7 8; do
     root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-mut.XXXXXX")
     mk_kit "$root/kit"
     if ! mutate "$root" "$n"; then rm -rf "$root"; return 2; fi
@@ -454,6 +574,8 @@ self_check() {
         4:*"НЕ_НАЗВАНА"*) reddened=$((reddened + 1)); say '  ok     мутация 4 покраснила сценарий 4 своей причиной' ;;
         5:*"rc=1"*) reddened=$((reddened + 1)); say '  ok     мутация 5 покраснила сценарий 5 своей причиной' ;;
         6:*"rc=0"*) reddened=$((reddened + 1)); say '  ok     мутация 6 покраснила сценарий 6 своей причиной' ;;
+        7:*"ПУТЬ_ОТКАЗА_ЗАВИС"*) reddened=$((reddened + 1)); say '  ok     мутация 7 покраснила сценарий 7 своей причиной' ;;
+        8:*"СИРОТА_ЗАГЛУШКИ"*) reddened=$((reddened + 1)); say '  ok     мутация 8 покраснила сценарий 7 своей причиной' ;;
         *) say "  ПРОВАЛ мутация $n покраснила чужой причиной: $LAST_EVID" ;;
       esac
       FAILED=$before
@@ -469,7 +591,7 @@ self_check() {
 case "${1:-}" in
   '')
     check_mut_tables || exit 4
-    scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6
+    scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6; scenario_7
     say "probes-sync-bench: ИТОГ сценариев=$RUN расхождений=$FAILED"
     [[ $RUN -eq $EXPECTED_SCENARIOS ]] || exit 4
     [[ $FAILED -eq 0 ]] || exit 1
@@ -478,5 +600,14 @@ case "${1:-}" in
     check_mut_tables || exit 4
     self_check || exit $?
     ;;
+  --hang-case)
+    # Служебный режим: исполняет пляску двух писателей в режиме silent и
+    # печатает исход. Зовётся сценарием 7 из КОПИИ кита.
+    if two_writers "$2" silent; then
+      say "ХОД: дошли до удачного пути (в режиме silent это невозможно)"
+      exit 1
+    fi
+    say "ХОД: $TW_REASON"
+    exit 0 ;;
   *) say "probes-sync-bench: ОТКАЗ -- неизвестный режим $1" >&2; exit 2 ;;
 esac
