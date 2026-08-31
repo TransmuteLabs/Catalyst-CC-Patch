@@ -13,6 +13,7 @@ import argparse
 import glob
 import gzip
 import json
+import math
 import os
 import re
 import sys
@@ -22,6 +23,83 @@ import sys
 # wrong corpus annotation, which model selection then relies on.
 DEFAULT_IMAGE = '~/.local/bin/claude'
 _VOCAB_CACHE = {}
+
+
+# Общие argparse-типы числовых ручек судейских инструментов. Дом -- replay.py:
+# его уже импортируют и validate.py, и adjudicate.py, поэтому второй копии типа
+# быть не должно -- три читателя --limit с тремя своими недосмотрами и были
+# находкой круга 26 (K-5/K-7/K-13/K-14). ArgumentTypeError argparse сам
+# превращает в код 2 «контракт вызова», назвав ручку, -- тот же код, которым
+# соседи уже отвергают --jobs/--repeat (круг 28, F-10). Прежние type=int /
+# type=float пропускали значение дальше, и потребитель толковал его молча:
+# files[-limit:] при --limit=-1 МОЛЧА выкидывал самую старую запись, а
+# --limit=-5 давал пустой список и код 5 «записи не найдены» при записях на диске.
+def nonneg_int(value):
+    """Целое >= 0; ноль сохраняет свой действующий смысл «без потолка»."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f'ожидалось целое число, получено {value!r}')
+    if number < 0:
+        raise argparse.ArgumentTypeError(
+            f'значение не может быть отрицательным: {value!r}')
+    return number
+
+
+def bounded_float(name, lo, hi, note=''):
+    """Конечное число (не nan, не inf) в отрезке [lo, hi]; возвращает тип.
+
+    note дописывается к отказу «вне отрезка»: у --timeout в нём единицы --
+    самая дорогая описка там миллисекунды из соседнего toml, скопированные
+    в секундную ручку (240000 секунд -- это ~67 часов прогона, который не
+    кончится), и отказ обязан назвать это словами, а не только числом.
+    """
+
+    def parse(value):
+        try:
+            number = float(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f'{name}: ожидалось число, получено {value!r}')
+        if not math.isfinite(number):
+            raise argparse.ArgumentTypeError(
+                f'{name}: ожидалось конечное число, получено {value!r}')
+        if not lo <= number <= hi:
+            raise argparse.ArgumentTypeError(
+                f'{name}: {value!r} вне отрезка [{lo}, {hi}]'
+                + (f'; {note}' if note else ''))
+        return number
+
+    return parse
+
+
+def append_jsonl(path, payload):
+    """Дописывает payload в jsonl-файл, ВОССТАНАВЛИВАЯ границу строки.
+
+    Оборванный предыдущий писатель оставляет хвост без перевода строки, и
+    следующая ПОЛНОЦЕННАЯ метка приклеивается к обломку -- толерантный читатель
+    теряет ОБЕ (круг 26, L-5): повторный label возвращал 0 и печатал свой JSON,
+    а перечень показывал для той же записи «нет метки». Увидев непустой файл,
+    чей последний байт не \\n, писатель предваряет полезную нагрузку переводом
+    строки -- обломок теряет ровно ОДНУ метку, свою. Контракт общий с ядром
+    кита (tweakcc-patch.js, дозапись journal.jsonl, волна 31 бриф 1):
+    границу ВОССТАНАВЛИВАЕТ писатель, читатель остаётся толерантным.
+    Проверка и дозапись -- один вызов write на весь payload: строка не делится
+    между write(2), замер этой механики -- в adjudicate.py.
+    """
+    prefix = ''
+    try:
+        with open(path, 'rb') as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell():
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b'\n':
+                    prefix = '\n'
+    except FileNotFoundError:
+        pass
+    with open(path, 'a', encoding='utf-8') as fh:
+        fh.write(prefix + payload)
 
 
 def verdict_vocabulary(image_path=None, probe='judge'):
@@ -216,7 +294,7 @@ def main():
     parser.add_argument('--url')
     parser.add_argument('--effort', default='high')
     parser.add_argument('--channel', choices=('pool', 'http', 'auto'), default='auto')
-    parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--limit', type=nonneg_int, default=0)
     parser.add_argument('--timeout', type=float, default=120)
     # Идентичность пробы протянута до конца: словарь вердиктов у каждой пробы
     # СВОЙ, а разбор шёл судейским независимо от того, чьи это записи -- записи

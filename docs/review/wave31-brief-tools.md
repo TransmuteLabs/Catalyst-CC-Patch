@@ -175,3 +175,285 @@ echo $?` показывает код хвоста и как подтвержде
 стоп по пункту. Диффы не выдумывать.
 
 <!-- BRIEF COMPLETE -->
+
+---
+
+## ОТЧЁТ ИСПОЛНИТЕЛЯ
+
+Статус: **DONE**. Все 4 правки исполнены, коммитов нет, изменения в рабочем
+дереве (6 файлов: `judge/replay.py`, `judge/validate.py`, `judge/adjudicate.py`,
+`judge/compact.py`, `tools/checks-teeth.py`, `tools/judge-tools-bench.py`).
+
+Порядок работы — красный прогон ДО правок: сценарии 38-44 добавлены в стенд
+первыми и увидены красными на нетронутом дереве (7 из 7 FAIL своими причинами,
+старые 37 OK), затем правки, затем зелёный (44/44 OK), затем мутации и
+self-check. Сырой вывод красного прогона (сценарии 38-44):
+
+```
+judge-tools-bench: СЦЕНАРИЙ 38: FAIL: validate.py: --limit=-1 не отвергнут кодом 2 (rc=0)
+judge-tools-bench: СЦЕНАРИЙ 39: FAIL: --timeout 0 не отвергнут кодом 2 (rc=0)
+judge-tools-bench: СЦЕНАРИЙ 40: FAIL: --older-than-hours -1 не отвергнут кодом 2 (rc=0)
+judge-tools-bench: СЦЕНАРИЙ 41: FAIL: --jobs=0 не отвергнут кодом 2 (rc=5)
+judge-tools-bench: СЦЕНАРИЙ 42: FAIL: реплики подрезаны чужим ключом context_chars: 60000 из 100000
+judge-tools-bench: СЦЕНАРИЙ 43: FAIL: усечённый target не переписан побайтово равным источнику
+judge-tools-bench: СЦЕНАРИЙ 44: FAIL: граница строки не восстановлена: переводов 1, ожидалось 2 (обломок и новая метка)
+judge-tools-bench: ИТОГ сценариев=44 расхождений=7
+```
+
+Зелёный после правок: `judge-tools-bench: ИТОГ сценариев=44 расхождений=0`,
+EXIT=0 (без пайпа). Self-check: `КОНТРОЛЬ без мутации: ЗЕЛЁНО`,
+`SELF-CHECK мутаций=52 покраснели=52`, EXIT=0 (без пайпа).
+
+### Правка 1 — общий тип аргумента (K-5, K-7, K-13, K-14)
+
+Дом — `judge/replay.py` (его и импортируют соседи; новых файлов не заводил).
+
+* `judge/replay.py:37` — `def nonneg_int(value)`: целое >= 0, иначе
+  `argparse.ArgumentTypeError` («ожидалось целое число…» /
+  «значение не может быть отрицательным»); argparse сам называет ручку и
+  отдаёт код 2.
+* `judge/replay.py:50` — `def bounded_float(name, lo, hi, note='')`: фабрика;
+  отказы — «не число», «ожидалось конечное число» (nan/inf), «вне отрезка
+  [lo, hi]» + `note`. NOTE-плечо нужно для единиц у `--timeout` (см.
+  adjudication request №1).
+* Применения: `judge/validate.py:754` (`--limit` → `replay.nonneg_int`),
+  `judge/adjudicate.py:241` (`--limit`), `judge/replay.py:297` (`--limit`),
+  `judge/validate.py:761` (`--timeout` →
+  `replay.bounded_float('--timeout', 0.001, 86400, NOTE_TIMEOUT_UNITS)`,
+  константа единиц `NOTE_TIMEOUT_UNITS` — `judge/validate.py:735`,
+  дословно: `--timeout в СЕКУНДАХ; timeout_ms в соседнем toml — в миллисекундах`),
+  `judge/compact.py:53` (`--older-than-hours` →
+  `replay.bounded_float('--older-than-hours', 0, 876000)`; импорт replay —
+  `judge/compact.py:27-29`).
+* `tools/checks-teeth.py:273` — гейт `if opts.jobs < 1: return 2` сразу после
+  parse_args (ДО поисков раннера/образа и замка), `tools/checks-teeth.py:362` —
+  `ProcessPoolExecutor(max_workers=opts.jobs)` без `max(1, …)`. Шапка кода 2
+  дополнена (`tools/checks-teeth.py:23-24`).
+
+Дословная новая форма (replay.py, обе функции целиком):
+
+```python
+def nonneg_int(value):
+    """Целое >= 0; ноль сохраняет свой действующий смысл «без потолка»."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f'ожидалось целое число, получено {value!r}')
+    if number < 0:
+        raise argparse.ArgumentTypeError(
+            f'значение не может быть отрицательным: {value!r}')
+    return number
+
+
+def bounded_float(name, lo, hi, note=''):
+    …фабрика; parse(value) отвергает не-число, не-конечное, вне [lo, hi]…
+```
+
+Живой замер отказа (прямой прогон, дословно):
+
+```
+validate.py run: error: argument --limit: значение не может быть отрицательным: '-1'   EXIT=2
+validate.py run: error: argument --timeout: --timeout: '240000' вне отрезка [0.001, 86400]; --timeout в СЕКУНДАХ; timeout_ms в соседнем toml — в миллисекундах   EXIT=2
+validate.py run: error: argument --timeout: --timeout: ожидалось конечное число, получено 'nan'   EXIT=2
+```
+
+Мутации (все RED своими сценариями, сырой вывод self-check):
+
+```
+judge-tools-bench: МУТАЦИЯ M45: RED (сценарий 38)   # --limit validate → type=int
+judge-tools-bench: МУТАЦИЯ M46: RED (сценарий 39)   # --timeout → type=float
+judge-tools-bench: МУТАЦИЯ M47: RED (сценарий 40)   # --older-than-hours → type=float
+judge-tools-bench: МУТАЦИЯ M48: RED (сценарий 41)   # гейт --jobs → if False
+```
+
+Причины покраснений: M45 «--limit=-1 не отвергнут кодом 2», M46 «--timeout 0
+не отвергнут кодом 2», M47 «--older-than-hours -1 не отвергнут кодом 2»,
+M48 «--jobs=0 не отвергнут кодом 2». Сценарий 38 проверяет все ТРИ читателя
+(validate/adjudicate/replay, каждый --limit=-1 → 2 с именем ручки) плюс ноль
+(«без потолка»: 5 записей → 5 строк прогона); сценарий 39 — 0/-1/nan/240000
+→ 2 (240000 — с «СЕКУНД» в сообщении) и здоровое значение 30 → 0; сценарий 40 —
+-1/nan → 2 и 24ч на свежей записи → `skipped=1, done=0` (прежнее поведение);
+сценарий 41 — `--jobs 0 --image <несуществующий>` → 2 ДО поиска образа
+(иначе нетронутое дерево отвечало бы rc=5, а не зелёным).
+
+### Правка 2 — context_chars: одно имя, один смысл (K-6)
+
+* `judge/validate.py:211-236` — `apply_context_limit(body, tail_chars)`:
+  читает СВОЙ ключ, `limit < 0` остался (`:225`), ноль — ЯВНЫЙ возврат без
+  подрезки (`:226-231`, комментарий фиксирует, что прежде верность держалась
+  на `s[-0:]` — совпадении, а не решении).
+* `judge/validate.py:254` и `:273-274` — `compose_body` (ветка recompose)
+  читает `recompose_message_tail_chars` из глобального и проектного конфигов.
+* `judge/validate.py:276-282` — при присутствии `context_chars` в конфиге и
+  включённом слое recompose ровно ОДНА строка в stderr:
+  «ВНИМАНИЕ: context_chars принадлежит ядру (бюджет всей ленты) и слоем
+  recompose НЕ применяется; хвост реплик подрезает recompose_message_tail_chars».
+
+Дословная новая форма (ключевой участок):
+
+```python
+        if 'context_chars' in global_config or 'context_chars' in project_config:
+            sys.stderr.write(
+                'ВНИМАНИЕ: context_chars принадлежит ядру (бюджет всей ленты) '
+                'и слоем recompose НЕ применяется; хвост реплик подрезает '
+                'recompose_message_tail_chars\n')
+        replace_system_message(body, prompt)
+        if max_tokens is not None:
+            body['max_tokens'] = max_tokens
+        apply_context_limit(body, tail_chars)
+```
+
+Мутации (RED, сырой вывод):
+
+```
+judge-tools-bench: МУТАЦИЯ M49: RED (сценарий 42)   # tail_chars снова читает context_chars
+judge-tools-bench: МУТАЦИЯ M50: RED (сценарий 42)   # предупреждение вырвано (if False)
+```
+
+Причины: M49 «реплики подрезаны чужим ключом» (100000 → 60000), M50
+«молчание о чужом ключе». Сценарий 42: context_chars=60000 → реплики НЕ
+подрезаны + одна строка stderr, называющая ОБА ключа; tail=5 → хвост
+подрезан; tail=0 → не подрезан; -5 → ValueError.
+
+### Правка 3 — доказательная база по содержимому (L-4)
+
+* `judge/validate.py:557-576` — `_same_bytes`: сначала размер, при совпадении
+  sha256 обоих.
+* `judge/validate.py:583-630` — `keep_labelled`: существующий target принят
+  только при побайтовом равенстве; копия идёт в `target + f'.new.{os.getpid()}'`
+  и публикуется `os.replace`; исключение убирает временное имя. Дословная
+  форма:
+
+```python
+        target = os.path.join(LABELLED_HOME, os.path.basename(candidate))
+        if os.path.exists(target) and _same_bytes(candidate, target):
+            return target
+        tmp = target + f'.new.{os.getpid()}'
+        try:
+            shutil.copy2(candidate, tmp)
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return target
+```
+
+Докстринг фиксирует: идемпотентность по СОДЕРЖИМОМУ; тот же приём снимает
+гонку двух одновременных `label` — последний писатель публикует ЦЕЛЫЙ файл.
+
+Мутация (RED, сырой вывод):
+
+```
+judge-tools-bench: МУТАЦИЯ M51: RED (сценарий 43)   # приём по имени возвращён (без _same_bytes)
+```
+
+Причина: «усечённый target не переписан». Сценарий 43: усечённый до 100 байт
+target + повтор `label` → target побайтово равен источнику, временного имени
+нет, повтор по целому файлу его не трогает (mtime не меняется).
+
+### Правка 4 — граница строки в labels.jsonl (L-5)
+
+* `judge/replay.py:77-104` — `append_jsonl(path, payload)`: если файл существует,
+  непуст и последний байт не `\n`, полезная нагрузка предваряется `\n`;
+  проверка и дозапись — один вызов write на весь payload. В докстринге
+  названа связка с ядром: «Контракт общий с ядром кита (tweakcc-patch.js,
+  дозапись journal.jsonl, волна 31 бриф 1): границу ВОССТАНАВЛИВАЕТ писатель,
+  читатель остаётся толерантным».
+* `judge/validate.py:633-638` — `command_label` дописывает метку через
+  `replay.append_jsonl(LABELS_PATH, … + '\n')`.
+* `judge/adjudicate.py:355` — батч меток дописывается тем же
+  `replay.append_jsonl(LABELS_PATH, batch)`; измеренный комментарий о
+  недробимости write и об отсутствии замка сохранён и дополнен строкой о
+  восстановлении границы.
+* Комментарии толерантных читателей (`judge/validate.py:119-130`,
+  `judge/adjudicate.py:186-199`) переписаны под новый инвариант: «одна битая
+  строка теряет ОДНУ метку» — теперь следствие контракта писателей, а не
+  обещание.
+
+Мутация (RED, сырой вывод):
+
+```
+judge-tools-bench: МУТАЦИЯ M52: RED (сценарий 44)   # восстановление границы вырвано (if False)
+```
+
+Причина: «граница строки не восстановлена». Сценарий 44: хвост
+`{"rec": "stale", …` без `\n` + новый `label` → в файле ДВЕ физические строки,
+новая метка разбирается и видна в `list` (`labels_by_record`); вызов
+адъюдикатора закреплён формой
+(`replay.append_jsonl(LABELS_PATH, batch)` в тексте adjudicate.py) — его
+штатный прогон требует сети, приём пина формы объявлен в докстринге сценария
+(тот же, что у сценариев 17-18, 20, 27).
+
+### Счётчики стенда ДО → ПОСЛЕ
+
+* `tools/judge-tools-bench.py`: `EXPECTED_SCENARIOS` 37 → **44**,
+  `EXPECTED_MUTATIONS` 44 → **52**. Измерено: `ИТОГ сценариев=44
+  расхождений=0` (EXIT=0); `SELF-CHECK мутаций=52 покраснели=52` (EXIT=0);
+  `КОНТРОЛЬ без мутации: ЗЕЛЁНО`. Сверка покрытия (`check_tables`): сценариев
+  без своей мутации нет; UNMUTATED_OK остался пустым.
+* `copy_tree` стенда дополнен копией `tools/checks-teeth.py` — иначе мутация
+  M48 применялась бы к живому дереву, а сценарий 41 мерил нетронутый файл.
+
+### Объявленные числа, которые догнал
+
+Гейт чисел кита (`python3 dg.py claude-patch-all.sh`, извлечение
+`sed -n '1343,2181p'`) — ДО и ПОСЛЕ, оба без пайпа:
+
+```
+ДО:    ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (… mutations: … judge-tools-bench=44 …; scenarios: … judge-tools-bench=37 …)  EXIT=0
+ПОСЛЕ: ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (… mutations: … judge-tools-bench=52 …; scenarios: … judge-tools-bench=44 …)  EXIT=0
+```
+
+Других носителей числа судейского стенда в сканируемых гейтом домах нет
+(README.md упоминает стенд без счёта; docs/review/ — дом журнала, гейтом не
+читается). `claude-patch-all.sh`, `tools/sweep.sh`, `claude_patch.py`,
+`scripts/probes-sync.sh` НЕ тронуты: гейт читает константы из самого стенда.
+
+### Гейты
+
+* `python3 -m py_compile judge/replay.py judge/validate.py judge/adjudicate.py
+  judge/compact.py tools/checks-teeth.py tools/judge-tools-bench.py` →
+  `PYCOMPILE_EXIT=0`.
+* Полный конвейер и свип НЕ запускались (по брифу).
+
+### Найденное вне скоупа (флаги, не правки)
+
+1. Каталога `tests/` в репозитории НЕТ — бриф называет дом сценариев как
+   `grep -rl 'validate\|adjudicate' tests/`. Существующий стенд инструментов
+   судьи — `tools/judge-tools-bench.py` (единственный, покрывающий
+   validate/adjudicate/replay/compact); сценарии добавлены туда, новый стенд
+   не заводился. Диспатч формулирует скоуп как «…и стенды» без пути —
+   конфликта решения нет, но расхождение пути брифа с деревом фиксирую.
+2. Раскатка судейского дома отстала от канона ровно на 4 правленых файла:
+   `probes-sync.sh --diff` → «расходится: judge/replay.py, judge/compact.py,
+   judge/validate.py, judge/adjudicate.py. ИТОГ: расходится файлов: 4»,
+   EXIT=1. Раскатка (`bash scripts/probes-sync.sh --to-home`) — вне моего
+   скоупа записи, решение за контроллером (гейт конвейера без неё красный).
+3. `probes/probes.toml` ([defaults], вне скоупа) по-прежнему несёт
+   `context_chars = 60000` — это ключ ЯДРА и после правки 2 продолжает
+   работать по-своему; при прогонах validate с `--project-layer recompose`
+   отныне будет одна строка stderr про чужой ключ (проектное поведение
+   правки). Заводить ли `recompose_message_tail_chars` в конфиг — решение
+   контроллера, не заводил.
+4. `judge/adjudicate.py` (бывшая строка 23) и `judge/validate.py` (бывшая 28)
+   цитаты брифа «import replay» совпали с деревом; все прочие цитаты
+   (`:666`, `:38`, `:351`, `:205-212`, `:230`, `:248-249`, `:524-539`,
+   `:551-559`, `:555-556`, `:342-349`, `:113-125`) сверены до правок —
+   расхождений не было.
+
+### Adjudication requests (для контроллера)
+
+1. `bounded_float` получил необязательный 4-й параметр `note=''`: бриф задаёт
+   фабрику тремя аргументами `bounded_float('--timeout', 0.001, 86400)`, но
+   одновременно требует, чтобы отказ при 240000 называл единицы («--timeout в
+   СЕКУНДАХ; timeout_ms … — в миллисекундах»). Трёхаргументная форма осталась
+   валидной (так вызывается compact.py), единицы едут четвёртым аргументом из
+   validate.py (константа NOTE_TIMEOUT_UNITS). Если контроллер хотел другую
+   несущую поверхность для единиц — сказать, переставлю.
+2. Путь `tests/` из брифа (см. флаг 1) истолкован как ярлык стенда
+   инструментов судьи; если имелся в виду иной дом — сценарии переносятся
+   без изменений логики.

@@ -46,11 +46,11 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 37
+EXPECTED_SCENARIOS = 44
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 44
+EXPECTED_MUTATIONS = 52
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -1133,6 +1133,343 @@ def scenario_37() -> None:
                     "дом ТРОНУТ, хотя замок держал другой писатель")
 
 
+# Сценарии 38-44 -- зубы волны 31, бриф 3 (круг 26): числовые ручки инструментов
+# судьи (K-5/K-7/K-13/K-14), собственный ключ подрезки реплик (K-6),
+# доказательная база меток (L-4) и граница строки в labels.jsonl (L-5).
+def toy_judge_records(directory: Path, count: int = 5) -> None:
+    """Записи минимальной формы, которую читают replay.load и compose_body."""
+    for i in range(count):
+        record = {
+            "request": {"model": "bench-model",
+                        "messages": [{"role": "user", "content": f"запись {i}"}]},
+            "verdict": "ok: запись",
+        }
+        (directory / f"rec-{i}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def run_validate_run(records: Path, image: Path, out: Path,
+                     *extra: str) -> subprocess.CompletedProcess[str]:
+    """Прогон validate.py run в герметичном окружении.
+
+    Адрес -- заведомо закрытый порт: единственный ожидаемый исход канала --
+    отказ соединения, пойманный в error-строку прогона. Образ -- синтетическая
+    фикстура (словарь из synthetic_image), дом проб не перенаправляется:
+    --url и --models перекрывают все, что validate мог бы прочитать из
+    боевого probes.toml.
+    """
+    command = [
+        sys.executable, str(ROOT / "judge" / "validate.py"), "run",
+        "--records", str(records),
+        "--models", "bench-model",
+        "--channel", "http",
+        "--url", "http://127.0.0.1:1",
+        "--image", str(image),
+        "--out", str(out),
+        *extra,
+    ]
+    env = dict(os.environ)
+    env.pop("ANTHROPIC_BASE_URL", None)
+    return subprocess.run(command, capture_output=True, text=True, env=env)
+
+
+def scenario_38() -> None:
+    """--limit отвергает минус кодом 2 у всех трёх читателей; ноль -- без потолка.
+
+    Прежний type=int пропускал минус, и files[-limit:] молча выкидывал самые
+    старые записи: --limit=-1 терял ОДНУ, --limit=-5 давал пустой список и код 5
+    «записи не найдены» при записях на диске.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        records = base / "records"
+        records.mkdir()
+        toy_judge_records(records, 5)
+        image = base / "image"
+        synthetic_image(image)
+        out = base / "out.jsonl"
+
+        for tool, args, env_extra in (
+            # validate: полный прогон нужен потому, что отказ обязан прийти ОТ
+            # argparse, а не от отсутствия образа -- иначе на машине без образа
+            # неотремонтированное дерево отвечало бы кодом 2 впустую.
+            ("validate.py",
+             ["run", "--records", str(records), "--models", "bench-model",
+              "--channel", "http", "--url", "http://127.0.0.1:1",
+              "--image", str(image), "--out", str(out), "--limit=-1"], None),
+            ("adjudicate.py",
+             [str(records), "--model", "bench-model", "--channel", "http",
+              "--image", str(image), "--dry-run", "--limit=-1"],
+             {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}),
+            ("replay.py",
+             [str(records), "--model", "bench-model", "--channel", "http",
+              "--url", "http://127.0.0.1:1", "--limit=-1"],
+             {"CLAUDE_JUDGE_IMAGE": str(image),
+              "ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}),
+        ):
+            env = dict(os.environ)
+            env.pop("ANTHROPIC_BASE_URL", None)
+            if env_extra:
+                env.update(env_extra)
+            done = subprocess.run(
+                [sys.executable, str(ROOT / "judge" / tool), *args],
+                capture_output=True, text=True, env=env)
+            combined = done.stdout + done.stderr
+            require(done.returncode == 2,
+                    f"{tool}: --limit=-1 не отвергнут кодом 2 (rc={done.returncode})")
+            require("--limit" in combined, f"{tool}: отказ не назвал ручку --limit")
+
+        # Ноль сохраняет действующий смысл «без потолка»: пять записей -- пять
+        # строк прогона.
+        done = run_validate_run(records, image, out, "--limit=0")
+        require(done.returncode == 0,
+                f"--limit=0 не прошёл прогон: rc={done.returncode}\n"
+                f"{done.stdout}{done.stderr}")
+        rows = [line for line in out.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        require(len(rows) == 5, f"--limit=0 взял {len(rows)} записей, а не все 5")
+
+
+def scenario_39() -> None:
+    """--timeout конечен и в отрезке; отказ при 240000 называет единицы.
+
+    Верхняя граница -- сутки: timeout_ms=240000 из соседнего toml,
+    скопированный в --timeout, -- это 240000 СЕКУНД (~67 часов), и потолок
+    превращает описку в громкий отказ вместо прогона, который не кончится.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        records = base / "records"
+        records.mkdir()
+        toy_judge_records(records, 1)
+        image = base / "image"
+        synthetic_image(image)
+        for value in ("0", "-1", "nan", "240000"):
+            done = run_validate_run(records, image, base / "out.jsonl",
+                                    f"--timeout={value}")
+            combined = done.stdout + done.stderr
+            require(done.returncode == 2,
+                    f"--timeout {value} не отвергнут кодом 2 (rc={done.returncode})")
+            require("--timeout" in combined,
+                    f"--timeout {value}: отказ не назвал ручку")
+            if value == "240000":
+                require("СЕКУНД" in combined.upper(),
+                        "отказ при 240000 не назвал единицы: --timeout в СЕКУНДАХ, "
+                        "timeout_ms соседнего toml -- в миллисекундах")
+        # Здоровое значение по-прежнему принимается: затянуть гайки до «не
+        # работает никогда» -- не чинка.
+        done = run_validate_run(records, image, base / "out.jsonl", "--timeout=30")
+        require(done.returncode == 0,
+                f"--timeout=30 отвергнут здоровым значением: rc={done.returncode}\n"
+                f"{done.stdout}{done.stderr}")
+
+
+def scenario_40() -> None:
+    """--older-than-hours конечен и неотрицателен; 24 на свежих -- прежнее поведение.
+
+    Прежний type=float пропускал минус и nan: минус кладывал cutoff в будущее и
+    сжимал ВСЁ живое, nan делал сравнение всегда ложным с тем же исходом -- при
+    коде выхода 0 и счётчике «сжато: N», выглядящем как штатный проход.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        directory = Path(raw)
+        source = directory / "fresh.json"
+        write_record(source, "fresh")
+        for value in ("-1", "nan"):
+            done = subprocess.run(
+                [sys.executable, str(COMPACT), "--dir", str(directory),
+                 "--older-than-hours", value],
+                capture_output=True, text=True)
+            require(done.returncode == 2,
+                    f"--older-than-hours {value} не отвергнут кодом 2 "
+                    f"(rc={done.returncode})")
+            require("--older-than-hours" in done.stdout + done.stderr,
+                    f"--older-than-hours {value}: отказ не назвал ручку")
+        # Прежнее поведение цело: сутки на свежей записи -- пропуск, не сжатие.
+        counters, _ = run_compact(directory, older_than_hours=24)
+        require_counters(counters, skipped=1, done=0)
+
+
+def scenario_41() -> None:
+    """checks-teeth отвергает --jobs < 1 кодом 2, как соседи validate/adjudicate.
+
+    Прежний молчаливый подъём max(1, opts.jobs) означал, что объявленный
+    параллелизм и настоящий -- разные числа. Образ называется заведомо
+    несуществующим: контракт вызова обязан проверяться ДО поиска образа, и на
+    неотремонтированном дереве прогон должен отличаться от пропуска (rc=5), а
+    не совпадать с отказом по другой причине.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        missing = Path(raw) / "нет-такого-образа"
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "checks-teeth.py"),
+             "--jobs", "0", "--image", str(missing)],
+            capture_output=True, text=True)
+        require(done.returncode == 2,
+                f"--jobs=0 не отвергнут кодом 2 (rc={done.returncode})")
+        require("--jobs" in done.stderr, "отказ не назвал ручку --jobs")
+
+
+def scenario_42() -> None:
+    """Подрезку реплик ведёт recompose_message_tail_chars, а не context_chars.
+
+    Ключ context_chars принадлежит ядру (бюджет JSON-длины ВСЕЙ ленты), а слой
+    recompose прежде читал его как хвост КАЖДОГО user-сообщения: одно значение
+    рулило двумя разными операциями, и владелец, выставивший его ядру, получал
+    незаметную подрезку реплик. Молчать о чужом ключе нельзя -- молчание и был
+    дефект.
+    """
+    module = import_tool("validate")
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        prompt = base / "prompt.md"
+        prompt.write_text("судейский промт стенда\n", encoding="utf-8")
+        long_reply = "д" * 100000
+        record = {"request": {"model": "bench-model", "messages": [
+            {"role": "user", "content": long_reply}]},
+            "cfg": None}
+
+        def compose(config):
+            args = SimpleNamespace(prompt=str(prompt), project_layer="recompose")
+            buffer = io.StringIO()
+            stderr = sys.stderr
+            sys.stderr = buffer
+            try:
+                body, _ = module.compose_body(record, "bench-model", "high",
+                                              args, config)
+            finally:
+                sys.stderr = stderr
+            return body, buffer.getvalue()
+
+        def user_content(body):
+            return next(message["content"] for message in body["messages"]
+                        if message.get("role") == "user")
+
+        # Чужой ключ объявляется одной строкой и НЕ применяется.
+        body, warnings = compose({"context_chars": 60000})
+        require(len(user_content(body)) == len(long_reply),
+                f"реплики подрезаны чужим ключом context_chars: "
+                f"{len(user_content(body))} из {len(long_reply)}")
+        require("context_chars" in warnings
+                and "recompose_message_tail_chars" in warnings,
+                f"молчание о чужом ключе context_chars: {warnings.strip()!r}")
+        require(warnings.count("\n") == 1,
+                "предупреждение о чужом ключе не одна строка")
+
+        # Свой ключ подрезает хвост реплики.
+        body, warnings = compose({"recompose_message_tail_chars": 5})
+        require(user_content(body) == long_reply[-5:],
+                "recompose_message_tail_chars не подрезает хвост реплики")
+        require(warnings == "",
+                "предупреждение появилось там, где чужого ключа нет")
+
+        # Ноль -- явное «без подрезки», а не совпадение s[-0:].
+        body, _ = compose({"recompose_message_tail_chars": 0})
+        require(len(user_content(body)) == len(long_reply),
+                "recompose_message_tail_chars = 0 подрезает реплики")
+
+        # Отрицательный предел отвергается и после смены ключа.
+        try:
+            module.apply_context_limit({"messages": []}, -5)
+        except ValueError:
+            pass
+        else:
+            require(False, "отрицательный предел подрезки больше не отвергается")
+
+
+def scenario_43() -> None:
+    """Дом доказательной базы принимает существующий target только побайтово равным.
+
+    Прежняя копия shutil.copy2 прямо под конечным именем и признак готовности
+    os.path.exists означали: смерть посреди копии оставляла УСЕЧЁННЫЙ файл, а
+    повторный label его не переписывал -- CLI возвращал 0, а база хранила обрезок.
+    """
+    module = import_tool("validate")
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        home = base / "probes-home"
+        labelled = base / "labelled"
+        records = home / "judge" / "records"
+        records.mkdir(parents=True)
+        source = records / "rec.json"
+        payload = ("доказательная база " + "x" * 5000).encode("utf-8")
+        source.write_bytes(payload)
+        labelled.mkdir()
+        target = labelled / "rec.json"
+        target.write_bytes(payload[:100])
+
+        saved = os.environ.get("CLAUDE_JUDGE_LABELLED_DIR")
+        os.environ["CLAUDE_JUDGE_LABELLED_DIR"] = str(labelled)
+        try:
+            module.configure_paths(str(home), "judge")
+            kept = module.keep_labelled("rec.json")
+            require(kept == str(target),
+                    f"keep_labelled вернул {kept}, а не {target}")
+            require(target.read_bytes() == payload,
+                    "усечённый target не переписан побайтово равным источнику")
+            require(not list(labelled.glob("*.new.*")),
+                    "временное имя копии осталось в доме доказательной базы")
+            # Идемпотентность по содержимому: повтор не трогает целое.
+            before = target.stat().st_mtime_ns
+            module.keep_labelled("rec.json")
+            require(target.stat().st_mtime_ns == before,
+                    "повторная разметка переписывает байтово равный target")
+        finally:
+            if saved is None:
+                os.environ.pop("CLAUDE_JUDGE_LABELLED_DIR", None)
+            else:
+                os.environ["CLAUDE_JUDGE_LABELLED_DIR"] = saved
+
+
+def scenario_44() -> None:
+    """Писатель меток восстанавливает границу строки в labels.jsonl.
+
+    Оборванный предыдущий писатель оставлял хвост без перевода строки, и
+    следующая полноценная метка приклеивалась к обломку -- читатель терял ОБЕ,
+    а второй label возвращал 0 и печатал свой JSON. Контракт общий с ядром
+    (tweakcc-patch.js, journal.jsonl, волна 31 бриф 1): границу восстанавливает
+    писатель, читатель остаётся толерантным.
+    """
+    module = import_tool("validate")
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        home = base / "probes-home"
+        labelled = base / "labelled"
+        records = home / "judge" / "records"
+        records.mkdir(parents=True)
+        (records / "rec.json").write_text(
+            '{"verdict": "ok: запись"}', encoding="utf-8")
+        labels = home / "judge" / "labels.jsonl"
+        labels.write_text('{"rec": "stale", "truth": "OK"', encoding="utf-8")
+
+        saved = os.environ.get("CLAUDE_JUDGE_LABELLED_DIR")
+        os.environ["CLAUDE_JUDGE_LABELLED_DIR"] = str(labelled)
+        try:
+            module.configure_paths(str(home), "judge")
+            module.command_label(
+                SimpleNamespace(record="rec.json", truth="OK", note=""))
+            text = labels.read_text(encoding="utf-8")
+            require(text.count("\n") == 2,
+                    "граница строки не восстановлена: переводов "
+                    f"{text.count(chr(10))}, ожидалось 2 (обломок и новая метка)")
+            lines = text.split("\n")
+            require(json.loads(lines[1]).get("rec") == "rec.json",
+                    "новая метка не разбирается как JSON")
+            seen = module.labels_by_record()
+            require(seen.get("rec.json", {}).get("human", {}).get("truth") == "OK",
+                    "новая метка не видна читателю меток")
+            # Второй писатель (адъюдикатор) пользуется той же функцией границы.
+            # Его штатный прогон -- сеть и живые модели, поэтому вызов пинится
+            # формой и это объявлено: тот же приём, что у сценариев 17-18, 20, 27.
+            adj = (ROOT / "judge" / "adjudicate.py").read_text(encoding="utf-8")
+            require("replay.append_jsonl(LABELS_PATH, batch)" in adj,
+                    "адъюдикатор дописывает метки мимо общей функции границы")
+        finally:
+            if saved is None:
+                os.environ.pop("CLAUDE_JUDGE_LABELLED_DIR", None)
+            else:
+                os.environ["CLAUDE_JUDGE_LABELLED_DIR"] = saved
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -1174,6 +1511,13 @@ def run_scenarios() -> int:
         (35, scenario_35),
         (36, scenario_36),
         (37, scenario_37),
+        (38, scenario_38),
+        (39, scenario_39),
+        (40, scenario_40),
+        (41, scenario_41),
+        (42, scenario_42),
+        (43, scenario_43),
+        (44, scenario_44),
     ]
     mismatches = 0
     for number, case in cases:
@@ -1762,6 +2106,100 @@ def mutation_m44(root: Path) -> None:
         )
 
 
+# M45-M52 -- зубы волны 31, бриф 3 (круг 26: K-5/K-6/K-7/K-13/K-14 + L-4/L-5).
+def mutation_m45(root: Path) -> None:
+    # --limit снова пропускает минус: files[-limit:] молча теряет записи.
+    replace_once(
+        root / "judge" / "validate.py",
+        "    run.add_argument('--limit', type=replay.nonneg_int, default=0)",
+        "    run.add_argument('--limit', type=int, default=0)",
+        "M45",
+    )
+
+
+def mutation_m46(root: Path) -> None:
+    # --timeout снова принимает всё подряд: миллисекундная описка из соседнего
+    # toml превращается в прогон на ~67 часов вместо громкого отказа.
+    replace_once(
+        root / "judge" / "validate.py",
+        "type=replay.bounded_float('--timeout', 0.001, 86400,\n"
+        "                                               NOTE_TIMEOUT_UNITS))",
+        "type=float)",
+        "M46",
+    )
+
+
+def mutation_m47(root: Path) -> None:
+    # --older-than-hours снова пропускает минус и nan: cutoff уезжает в
+    # будущее, сжимается всё живое, код 0 выглядит штатным проходом.
+    replace_once(
+        root / "judge" / "compact.py",
+        "    p.add_argument('--older-than-hours', type=replay.bounded_float(\n"
+        "        '--older-than-hours', 0, 876000), default=24)\n",
+        "    p.add_argument('--older-than-hours', type=float, default=24)\n",
+        "M47",
+    )
+
+
+def mutation_m48(root: Path) -> None:
+    # Молчаливый подъём параллелизма возвращается: объявленный и настоящий
+    # --jobs снова разные числа.
+    replace_once(
+        root / "tools" / "checks-teeth.py",
+        "    if opts.jobs < 1:\n",
+        "    if False:\n",
+        "M48",
+    )
+
+
+def mutation_m49(root: Path) -> None:
+    # Подрезку реплик снова ведёт чужой ключ ядра: одно имя -- две операции,
+    # владелец context_chars молча получает вторую.
+    replace_once(
+        root / "judge" / "validate.py",
+        "        tail_chars = global_config.get('recompose_message_tail_chars')",
+        "        tail_chars = global_config.get('context_chars')",
+        "M49",
+    )
+
+
+def mutation_m50(root: Path) -> None:
+    # Молчание о чужом ключе: прежний дефект K-6 -- тихое двойное толкование
+    # настройки -- возвращается без единого сообщения.
+    replace_once(
+        root / "judge" / "validate.py",
+        "        if 'context_chars' in global_config or 'context_chars' in project_config:\n",
+        "        if False:\n",
+        "M50",
+    )
+
+
+def mutation_m51(root: Path) -> None:
+    # Существующий target снова принимается по имени: усечённая прежняя
+    # копия остаётся в доказательной базе, повторный label её не чинит.
+    replace_once(
+        root / "judge" / "validate.py",
+        "        if os.path.exists(target) and _same_bytes(candidate, target):\n"
+        "            return target",
+        "        if os.path.exists(target):\n"
+        "            return target",
+        "M51",
+    )
+
+
+def mutation_m52(root: Path) -> None:
+    # Писатель снова не восстанавливает границу строки: новая метка
+    # приклеивается к обломку, читатель теряет ОБЕ.
+    replace_once(
+        root / "judge" / "replay.py",
+        "                if fh.read(1) != b'\\n':\n"
+        "                    prefix = '\\n'",
+        "                if False:\n"
+        "                    prefix = '\\n'",
+        "M52",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -1807,6 +2245,14 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M42", mutation_m42, 12, "лаунчер tmp живого процесса снят"),
     ("M43", mutation_m43, 23, "импорт adjudicate требует образа"),
     ("M44", mutation_m44, 37, "ожидался класс 3"),
+    ("M45", mutation_m45, 38, "--limit=-1 не отвергнут кодом 2"),
+    ("M46", mutation_m46, 39, "--timeout 0 не отвергнут кодом 2"),
+    ("M47", mutation_m47, 40, "--older-than-hours -1 не отвергнут кодом 2"),
+    ("M48", mutation_m48, 41, "--jobs=0 не отвергнут кодом 2"),
+    ("M49", mutation_m49, 42, "реплики подрезаны чужим ключом"),
+    ("M50", mutation_m50, 42, "молчание о чужом ключе"),
+    ("M51", mutation_m51, 43, "усечённый target не переписан"),
+    ("M52", mutation_m52, 44, "граница строки не восстановлена"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно
@@ -1853,6 +2299,9 @@ def copy_tree(root: Path) -> None:
     shutil.copy2(ROOT / "set-model-costs.py", root / "set-model-costs.py")
     shutil.copy2(BENCH, root / "tools" / "judge-tools-bench.py")
     shutil.copy2(ROOT / "tools" / "probe-bench.js", root / "tools" / "probe-bench.js")
+    # Сценарий 41 гоняет checks-teeth.py сабпроцессом: без копии мутация по
+    # нему применлялась бы к живому дереву, а сценарий мерил бы нетронутый файл.
+    shutil.copy2(ROOT / "tools" / "checks-teeth.py", root / "tools" / "checks-teeth.py")
     shutil.copy2(ROOT / "claude-patch-all.sh", root / "claude-patch-all.sh")
     shutil.copy2(ROOT / "scripts" / "probes-sync.sh", root / "scripts" / "probes-sync.sh")
     for name in ("replay.py", "validate.py", "channel.py", "adjudicate.py",

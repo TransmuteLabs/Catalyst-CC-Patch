@@ -5,7 +5,8 @@
   0  прогоны исполнены и записаны
   2  контракт вызова нарушен: --prompt при --project-layer off, --truth вне
      словаря, --repeat/--jobs меньше 1 (круг 28, F-10: прежде отдавалось
-     кодом 1 через SystemExit-строку)
+     кодом 1 через SystemExit-строку), недопустимые --limit/--timeout
+     (argparse-типы replay.nonneg_int/bounded_float, круг 26, K-5/K-7)
   5  нечего мерить: записей для прогона не найдено -- пропуск, а не отказ
      (решение контроллера, круг 28, F-10)
 """
@@ -14,6 +15,7 @@ import concurrent.futures
 import copy
 import datetime
 import glob
+import hashlib
 import json
 import math
 import os
@@ -120,7 +122,11 @@ def labels_by_record():
                     # Одна битая строка теряет ОДНУ метку и называет себя.
                     # Ронять весь отчёт из-за хвоста, оборванного дописыванием,
                     # значит отдавать всю накопленную разметку за один
-                    # незавершённый append.
+                    # незавершённый append. Это утверждение -- не обещание, а
+                    # следствие контракта писателей: replay.append_jsonl
+                    # восстанавливает границу строки перед дозаписью (круг 26,
+                    # L-5), поэтому обломок НЕ приклеивает к себе следующую
+                    # метку -- до этого терялись ОБЕ, включая полноценную.
                     sys.stderr.write(
                         f'ВНИМАНИЕ: {LABELS_PATH}:{lineno} не разбирается ({exc}); строка пропущена\n')
                     continue
@@ -202,12 +208,27 @@ def replace_system_message(body, prompt):
     body['messages'] = messages
 
 
-def apply_context_limit(body, context_chars):
-    if context_chars is None:
+def apply_context_limit(body, tail_chars):
+    """Подрезка хвоста КАЖДОГО user-сообщения; ключ -- recompose_message_tail_chars.
+
+    Прежнее имя параметра -- context_chars -- принадлежит ядру
+    (tweakcc-patch.js, __cut: бюджет JSON-длины ВСЕЙ ленты), а здесь им
+    подрезали хвост каждой реплики: одно значение из probes.toml рулило двумя
+    РАЗНЫМИ операциями, и владелец, выставивший 60000 ядру, молча получал
+    вторую (круг 26, K-6). Здесь читается СВОЙ ключ, чужой -- объявляется
+    вызывающим.
+    """
+    if tail_chars is None:
         return
-    limit = int(context_chars)
+    limit = int(tail_chars)
     if limit < 0:
-        raise ValueError('context_chars не может быть отрицательным')
+        raise ValueError('recompose_message_tail_chars не может быть отрицательным')
+    if limit == 0:
+        # Ноль -- ЯВНОЕ «без подрезки», решение, а не совпадение: в Python
+        # s[-0:] -- это вся строка, и прежняя верная работа нуля держалась на
+        # свойстве языка, а не на выборе. Заодно ноль отличается от None
+        # семантически: ключ в конфиге есть, потолка нет.
+        return
     body['messages'] = [
         dict(message, content=str(message.get('content') or '')[-limit:])
         if message.get('role') == 'user' and len(str(message.get('content') or '')) > limit
@@ -227,8 +248,12 @@ def compose_body(record, model, effort, args, global_config):
     elif args.project_layer == 'recompose':
         prompt = read_text(os.path.expanduser(args.prompt)) if args.prompt else read_text(PROMPT_PATH)
         max_tokens = global_config.get('max_tokens')
-        context_chars = global_config.get('context_chars')
+        # Хвост реплик подрезает СВОЙ ключ (K-6): context_chars принадлежит
+        # ядру, и читать его здесь -- тихо пускать одну настройку в две
+        # разные операции.
+        tail_chars = global_config.get('recompose_message_tail_chars')
         cfg = record.get('cfg')
+        project_config = {}
         if cfg:
             cfg = os.path.expanduser(cfg)
             if not os.path.isdir(cfg):
@@ -245,12 +270,20 @@ def compose_body(record, model, effort, args, global_config):
                 project_config = probe_settings(os.path.join(os.path.dirname(cfg), 'probes.toml'))
                 if 'max_tokens' in project_config:
                     max_tokens = project_config['max_tokens']
-                if 'context_chars' in project_config:
-                    context_chars = project_config['context_chars']
+                if 'recompose_message_tail_chars' in project_config:
+                    tail_chars = project_config['recompose_message_tail_chars']
+        if 'context_chars' in global_config or 'context_chars' in project_config:
+            # Молчать нельзя -- молчание и был дефект K-6: значение ядра
+            # незаметно меняло поведение этого слоя. Одна строка в stderr
+            # называет владельца ключа и ручку подрезки.
+            sys.stderr.write(
+                'ВНИМАНИЕ: context_chars принадлежит ядру (бюджет всей ленты) '
+                'и слоем recompose НЕ применяется; хвост реплик подрезает '
+                'recompose_message_tail_chars\n')
         replace_system_message(body, prompt)
         if max_tokens is not None:
             body['max_tokens'] = max_tokens
-        apply_context_limit(body, context_chars)
+        apply_context_limit(body, tail_chars)
 
     return body, layer_missing
 
@@ -521,12 +554,47 @@ def resolve_record_name(value):
     raise SystemExit(2)
 
 
+def _same_bytes(path_a, path_b):
+    """Побайтовое равенство двух файлов.
+
+    Сначала размер -- дёшево и отсекает почти всё, -- при совпадении sha256
+    обоих: имя и длина не доказывают содержимое, а признак готовности по имени
+    и был дефектом L-4.
+    """
+    try:
+        if os.path.getsize(path_a) != os.path.getsize(path_b):
+            return False
+    except OSError:
+        return False
+
+    def digest(path):
+        hasher = hashlib.sha256()
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b''):
+                hasher.update(chunk)
+        return hasher.digest()
+
+    try:
+        return digest(path_a) == digest(path_b)
+    except OSError:
+        return False
+
+
 def keep_labelled(name):
     """Копия размеченной записи в дом доказательной базы; путь или None.
 
     Копия, а не перенос: ядро и прополка продолжают работать со своим окном, а
-    у замера появляется набор, который никто не удаляет. Идемпотентно --
-    повторная разметка той же записи ничего не переписывает.
+    у замера появляется набор, который никто не удаляет. Идемпотентность -- по
+    СОДЕРЖИМОМУ, а не по имени: существующий target принимается только при
+    побайтовом равенстве источнику (размер, затем sha256), иначе перезаписывается
+    атомарно. Прежняя copy2 прямо в конечное имя и признак готовности
+    os.path.exists означали: смерть посреди копии оставляла УСЕЧЁННЫЙ файл,
+    повторный label его НЕ переписывал, CLI возвращал 0 и печатал «запись
+    унесена», а база хранила обрезок (круг 26, L-4). Тот же приём снимает гонку
+    двух одновременных label над одним target: копия идёт в
+    target + '.new.<pid>' и публикуется os.replace, и последний писатель
+    публикует ЦЕЛЫЙ файл -- то же правило, что у остальных писателей кита
+    (validate.py run, adjudicate.py): промежуточное имя принадлежит писателю.
     """
     os.makedirs(LABELLED_HOME, exist_ok=True)
     for candidate in (os.path.join(DEFAULT_RECORDS, name),
@@ -534,8 +602,18 @@ def keep_labelled(name):
         if not os.path.isfile(candidate):
             continue
         target = os.path.join(LABELLED_HOME, os.path.basename(candidate))
-        if not os.path.exists(target):
-            shutil.copy2(candidate, target)
+        if os.path.exists(target) and _same_bytes(candidate, target):
+            return target
+        tmp = target + f'.new.{os.getpid()}'
+        try:
+            shutil.copy2(candidate, tmp)
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         return target
     return None
 
@@ -552,8 +630,12 @@ def command_label(args):
     # а запись без метки безвредна. Порядок выбран так, чтобы обрыв
     # посередине не рождал первого.
     kept = keep_labelled(name)
-    with open(LABELS_PATH, 'a', encoding='utf-8') as fh:
-        fh.write(json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n')
+    # Дозапись идёт через replay.append_jsonl: писатель ВОССТАНАВЛИВАЕТ
+    # границу строки (хвост без перевода строки от оборванного писателя не
+    # приклеивает к себе эту метку -- иначе читатель терял ОБЕ, круг 26, L-5).
+    replay.append_jsonl(
+        LABELS_PATH,
+        json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n')
     print(json.dumps(item, ensure_ascii=False))
     if kept:
         print(f'запись унесена в дом доказательной базы: {kept}')
@@ -646,6 +728,14 @@ def command_report(args):
     print_summary(rows)
 
 
+# Единицы -- часть контракта --timeout: самая дорогая описка здесь --
+# миллисекунды из соседнего toml (timeout_ms = 240000), скопированные в
+# секундную ручку: 240000 секунд -- это ~67 часов прогона, который не кончится.
+# Отказ обязан назвать единицы словами, а не только границей отрезка.
+NOTE_TIMEOUT_UNITS = (
+    '--timeout в СЕКУНДАХ; timeout_ms в соседнем toml — в миллисекундах')
+
+
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('--home', default=argparse.SUPPRESS,
@@ -661,9 +751,15 @@ def build_parser():
     run.add_argument('--records', default=None)
     run.add_argument('--models')
     run.add_argument('--repeat', type=int, default=1)
-    run.add_argument('--limit', type=int, default=0)
+    run.add_argument('--limit', type=replay.nonneg_int, default=0)
     run.add_argument('--jobs', type=int, default=4)
-    run.add_argument('--timeout', type=float, default=180)
+    # Отрезок [0.001, 86400] -- решение контроллера (K-7): полмиллисекунды и
+    # сутки. Верхняя граница превращает миллисекундную описку из соседнего
+    # toml в громкий отказ (см. NOTE_TIMEOUT_UNITS), нижняя -- отвергает
+    # заведомо нерабочий ноль и минус.
+    run.add_argument('--timeout', default=180,
+                     type=replay.bounded_float('--timeout', 0.001, 86400,
+                                               NOTE_TIMEOUT_UNITS))
     run.add_argument('--prompt')
     run.add_argument('--project-layer', choices=('record', 'recompose', 'off'), default='record')
     run.add_argument('--url')

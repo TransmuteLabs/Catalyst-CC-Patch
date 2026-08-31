@@ -17,7 +17,16 @@ after the archive has been written and read back.
   2  контракт вызова нарушен: argparse отверг аргументы (питон отдаёт 2 сам)
 Круг 28, F-10: шапка заведена, чтобы объявленный код был виден вызывающему.
 """
-import argparse, glob, gzip, json, os, re, shutil, time
+import argparse, glob, gzip, json, os, re, shutil, sys, time
+
+# argparse-типы общих числовых ручек живут в replay.py: его уже импортируют
+# validate.py и adjudicate.py, и второй копии типа не должно быть (круг 26,
+# K-13/K-14 -- три читателя одной ручки с тремя своими недосмотрами). Каталог
+# судьи кладётся в sys.path по той же причине, что и у соседей: раскатка
+# (scripts/probes-sync.sh) держит judge/*.py в одном каталоге.
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import replay
 
 # Возраст, после которого tmp не может принадлежать здоровому писателю: он
 # создаёт временный файл и переименовывает его в те же секунды. Порог служит
@@ -35,7 +44,14 @@ def main():
     p.add_argument('--probe', default='judge', help='идентификатор пробы')
     p.add_argument('--dir', default=None,
                    help='каталог записей (умолчание: <дом>/<проба>/records)')
-    p.add_argument('--older-than-hours', type=float, default=24)
+    # Отрезок [0, 876000]: ноль -- буквальное «старше нуля часов» (решение
+    # контроллера, не менять), верхняя граница -- сто лет: конечность и
+    # неотрицательность -- часть контракта. Прежний type=float пропускал минус
+    # и nan молча: минус клал cutoff в БУДУЩЕЕ и сжимал всё живое, nan делал
+    # `mtime > nan` всегда ложным с тем же исходом -- при коде 0 и счётчике
+    # «сжато: N», выглядящем как штатный проход (круг 26, K-14).
+    p.add_argument('--older-than-hours', type=replay.bounded_float(
+        '--older-than-hours', 0, 876000), default=24)
     p.add_argument('--dry-run', action='store_true')
     a = p.parse_args()
     if a.dir is None:
