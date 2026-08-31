@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=102
-EXPECTED_MUTATIONS=107
+EXPECTED_SCENARIOS=110
+EXPECTED_MUTATIONS=124
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -324,6 +324,10 @@ mk_kit() {   # каталог-назначение
   # Заглушка печатает РОВНО те маркеры, по которым свип считает поля вердикта,
   # и умеет убрать любой из них (STUB_TWEAK) или вернуть любой код (STUB_RC).
   # Так каждое слагаемое вердикта получает свой сценарий и свою мутацию.
+  # Настоящий источник сохраняется без суффикса .sh: сценарий env-ручек обязан
+  # читать и мутировать ТОТ ЖЕ код, но перепись shell-потребителей замка не
+  # должна принять неисполняемую копию стенда за ещё один самостоятельный дом.
+  mv "$dir/claude-patch-all.sh" "$dir/claude-patch-all.real"
   cat > "$dir/claude-patch-all.sh" <<'STUB'
 #!/usr/bin/env bash
 # Заглушка конвейера для tools/corpus-tools-bench.sh. Печатает маркеры, по
@@ -490,6 +494,9 @@ printf '{}\n' > "$TW_FIXTURE/config.json"
 
 run_sweep() {   # kit, corpus-dir, list, аргументы...
   local kit=$1 cdir=$2 list=$3; shift 3
+  # Стенд всегда называет значение: 5 имитирует боевое умолчание, а явно
+  # заданная пустая строка остаётся пустой и доходит до валидатора как негодность.
+  local __bench_last_n="${BENCH_LAST_N-5}"
   # Условие пересматривается ПЕРЕД КАЖДЫМ игрушечным свипом: настоящий прогон,
   # начатый после старта стенда, отказал бы этому свипу своим стражем общего
   # состояния -- и сценарий покраснел бы по чужой причине (круг 21, F-3).
@@ -507,7 +514,7 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     STUB_BENCH_RC="${STUB_BENCH_RC:-0}" STUB_BENCH_MARK="${STUB_BENCH_MARK:-}" \
     SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" \
     SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP_PROBE:-}" \
-    SWEEP_LAST_N="${BENCH_LAST_N:-}" \
+    SWEEP_LAST_N="$__bench_last_n" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
@@ -1601,6 +1608,8 @@ run_all() {
   scenario_91; scenario_92; scenario_93
   scenario_94; scenario_95; scenario_96; scenario_97
   scenario_98; scenario_99; scenario_100; scenario_101; scenario_102
+  scenario_103; scenario_104; scenario_105; scenario_106; scenario_107
+  scenario_108; scenario_109; scenario_110
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -2875,6 +2884,247 @@ WRAP
   ok "82 сорванное переименование не оставляет обломка стадии"
 }
 
+
+scenario_103() {   # SWEEP_LAST_N=08 -- десятичные восемь
+  local d out rc n
+  d="$C/lastn-08"; mk_decimal_corpus "$d"
+  out=$(BENCH_LAST_N=08 run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 9[0-9][0-9]: exit=')
+  LAST_EVID="rc=$rc :: измерено=$n :: $out"
+  if (( rc != 0 )) || [[ "$n" != 8 ]]; then
+    LAST_EVID="НЕ_ДЕСЯТИЧНЫЕ_ВОСЕМЬ rc=$rc измерено=$n :: $out"
+    bad "103 SWEEP_LAST_N=08: измерено $n версий вместо 8"; return
+  fi
+  ok "103 SWEEP_LAST_N=08 -- ровно 8 версий"
+}
+
+scenario_104() {   # любой будущий путь к пустому SRC обязан отказать кодом 5
+  local k out rc changed
+  k=$(mktemp -d "$ROOT/kit.empty.XXXXXX")
+  # В self-check $K уже несёт мутацию жертвы; повторный mk_kit скопировал бы
+  # живое дерево и незаметно выбросил именно ту правку, зубы которой меряются.
+  cp -R "$K/." "$k/"
+  changed=$(python3 - "$k/tools/sweep.sh" <<'PY_EMPTY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+old = '    SRC=("${__sorted[@]: -__n}")'
+if s.count(old) != 1:
+    print(0)
+else:
+    p.write_text(s.replace(old, '    SRC=() # test fixture: force the generic empty-set guard', 1))
+    print(1)
+PY_EMPTY
+)
+  if [[ "$changed" != 1 ]]; then
+    LAST_EVID="УСЛОВИЕ_НЕ_ДОСТИГНУТО: не удалось заставить SRC опустеть"
+    bad "104 пустой набор: прибор не подготовил путь"; return
+  fi
+  out=$(BENCH_LAST_N=1 run_sweep "$k" "$C/corpus" "$C/versions.txt"); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 5 )) || [[ "$out" != *"набор версий пуст -- мерить нечего"* ]] \
+     || [[ "$out" == *"все 0 версий измерены"* ]]; then
+    LAST_EVID="ПУСТОЙ_НАБОР_ЗЕЛЁНЫЙ rc=$rc :: $out"
+    bad "104 пустой набор: ждали код 5 без зелёного хвоста"; return
+  fi
+  ok "104 пустой набор версий -- код 5, не зелёный хвост"
+}
+
+mk_decimal_corpus() {   # каталог; двенадцать версий для отличия 10 от восьмеричных 8
+  local d=$1 v plat h
+  rm -rf "$d"; mkdir -p "$d/corpus"
+  plat=$(grep '^# platform:' "$C/versions.txt")
+  { echo "# игрушечный десятичный список"
+    echo "$plat"
+    for v in 920 921 922 923 924 925 926 927 928 929 930 931; do
+      toy_image "$d/corpus/0.0.$v.pristine" "0.0.$v"
+      h=$(shasum -a 256 "$d/corpus/0.0.$v.pristine" | awk '{print $1}')
+      echo "$v 0.0.$v $h"
+    done
+  } > "$d/versions.txt"
+}
+
+scenario_105() {   # ведущие нули не меняют десятичное значение
+  local d out rc n
+  d="$C/lastn-0010"; mk_decimal_corpus "$d"
+  out=$(BENCH_LAST_N=0010 run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 9[0-9][0-9]: exit=')
+  LAST_EVID="rc=$rc :: измерено=$n :: $out"
+  if (( rc != 0 )) || [[ "$n" != 10 ]]; then
+    LAST_EVID="ВОСЬМЕРИЧНЫЕ_ВОСЕМЬ rc=$rc :: измерено=$n :: $out"
+    bad "105 SWEEP_LAST_N=0010: измерено $n версий вместо 10"; return
+  fi
+  ok "105 SWEEP_LAST_N=0010 -- ровно 10 версий"
+}
+
+scenario_106() {   # суточный снимок с живым жильцом не сносится прополкой
+  local state stale holder out rc left alive
+  state="$C/corpus/state"; mkdir -p "$state"
+  stale=$(mktemp -d "$state/kit.XXXXXX")
+  cat > "$stale/hold.sh" <<'HOLD'
+#!/usr/bin/env bash
+while :; do sleep 1; done
+HOLD
+  chmod +x "$stale/hold.sh"
+  bash "$stale/hold.sh" 9>&- & holder=$!
+  sleep 0.2
+  touch -t 202601010000 "$stale"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  left=$([[ -d "$stale" ]] && echo 1 || echo 0)
+  alive=$(kill -0 "$holder" 2>/dev/null && echo 1 || echo 0)
+  LAST_EVID="rc=$rc :: каталог=$left процесс=$alive :: $out"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  rm -rf "$stale"
+  if (( rc != 0 )) || [[ "$left" != 1 || "$alive" != 1 ]] \
+     || [[ "$out" != *"снимок кита НЕ убран"* ]]; then
+    LAST_EVID="СНЕСЁН_ЖИВОЙ_ОБЛОМОК rc=$rc каталог=$left процесс=$alive :: $out"
+    bad "106 прополка: живой суточный снимок обязан остаться"; return
+  fi
+  ok "106 живой суточный обломок кита остаётся и объявляется"
+}
+
+scenario_107() {   # автоцель патчера -- только полное имя версии
+  local d out rc
+  d=$(mktemp -d "$ROOT/patch-target.XXXXXX")
+  out=$(python3 - "$K/claude_patch.py" "$d" <<'PY_TARGET'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+modpath, raw = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('ccpatch_target_test', modpath)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+d = Path(raw)
+mod.shutil.which = lambda _: None
+mod.versions_dir = lambda: d
+mod.is_windows = lambda: False
+for name in ('2.1.250', '2.1.251', '.claude-patched-leftover'):
+    (d / name).write_bytes(name.encode())
+os.utime(d / '2.1.250', (10, 10)); os.utime(d / '2.1.251', (20, 20)); os.utime(d / '.claude-patched-leftover', (30, 30))
+chosen = mod.resolve_active_binary()
+if chosen.name != '2.1.251':
+    print('ОБЛОМОК_ВЫБРАН=' + chosen.name)
+    raise SystemExit(1)
+(d / '2.1.250').unlink(); (d / '2.1.251').unlink()
+try:
+    mod.resolve_active_binary()
+except SystemExit as exc:
+    if exc.code != 2:
+        print('НЕВЕРНЫЙ_КОД=' + str(exc.code)); raise SystemExit(1)
+else:
+    print('ОБЛОМОК_ПРИНЯТ_ЦЕЛЬЮ'); raise SystemExit(1)
+for child in list(d.iterdir()): child.unlink()
+mod.is_windows = lambda: True
+(d / '2.1.251.exe').write_bytes(b'win')
+if mod.resolve_active_binary().name != '2.1.251.exe':
+    print('EXE_НЕ_ВЫБРАН'); raise SystemExit(1)
+print('ИМЯ_ВЕРСИИ_ВЫБРАНО')
+PY_TARGET
+); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$d"
+  if (( rc != 0 )) || [[ "$out" != *"ИМЯ_ВЕРСИИ_ВЫБРАНО"* ]]; then
+    LAST_EVID="НЕВЕРНАЯ_АВТОЦЕЛЬ rc=$rc :: $out"
+    bad "107 автоцель патчера: обломок не должен быть кандидатом"; return
+  fi
+  ok "107 патчер выбирает только имя версии, а каталог обломков даёт 2"
+}
+
+scenario_108() {   # промежуточный backup принадлежит процессу-писателю
+  local d driver p1 p2 r1 r2 t1 t2 final out
+  d=$(mktemp -d "$ROOT/backup-race.XXXXXX")
+  printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' > "$d/A"
+  printf 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n' > "$d/B"
+  driver="$d/driver.py"
+  cat > "$driver" <<'PY_BACKUP'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+import time
+modpath, srcraw, backupraw, rootraw = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('ccpatch_backup_test', modpath)
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+src, backup, root = Path(srcraw), Path(backupraw), Path(rootraw)
+def controlled_copy(source, tmp):
+    data = Path(source).read_bytes()
+    with open(tmp, 'wb') as fh:
+        fh.write(data[:len(data)//2]); fh.flush(); os.fsync(fh.fileno())
+        (root / ('ready.' + str(os.getpid()))).write_text(str(tmp))
+        until = time.time() + 10
+        while len(list(root.glob('ready.*'))) < 2 and time.time() < until: time.sleep(.01)
+        if len(list(root.glob('ready.*'))) < 2: raise RuntimeError('barrier timeout')
+        fh.write(data[len(data)//2:]); fh.flush(); os.fsync(fh.fileno())
+mod.shutil.copy2 = controlled_copy
+mod._replace_backup(src, backup)
+PY_BACKUP
+  python3 "$driver" "$K/claude_patch.py" "$d/A" "$d/backup" "$d" >"$d/one.log" 2>&1 & p1=$!
+  python3 "$driver" "$K/claude_patch.py" "$d/B" "$d/backup" "$d" >"$d/two.log" 2>&1 & p2=$!
+  wait "$p1"; r1=$?; wait "$p2"; r2=$?
+  t1=$(cat "$d/ready.$p1" 2>/dev/null); t2=$(cat "$d/ready.$p2" 2>/dev/null)
+  final=bad
+  cmp -s "$d/backup" "$d/A" 2>/dev/null && final=A
+  cmp -s "$d/backup" "$d/B" 2>/dev/null && final=B
+  out="r1=$r1 r2=$r2 tmp1=$t1 tmp2=$t2 final=$final :: $(cat "$d/one.log" "$d/two.log")"
+  LAST_EVID="$out"
+  rm -rf "$d"
+  if (( r1 != 0 || r2 != 0 )) || [[ -z "$t1" || "$t1" == "$t2" || "$final" == bad ]]; then
+    LAST_EVID="ОБЩАЯ_СТАДИЯ :: $out"
+    bad "108 два backup-писателя: стадии должны различаться, итог -- один источник"; return
+  fi
+  ok "108 два backup-писателя имеют разные .new.<pid>, итог целиком из одного источника"
+}
+
+scenario_109() {   # env-ручки читаются одной строгой истинностью
+  local mark out rc helper phelper lhelper bhelper hrc forms pout lout bout
+  mark="$C/probe-zero.called"; rm -f "$mark"
+  out=$(BENCH_SKIP_PROBE=0 STUB_PROBE_MARK="$mark" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  if (( rc != 0 )) || [[ ! -e "$mark" ]]; then
+    LAST_EVID="ZERO_ПРОПУСТИЛ_ЗОНД rc=$rc mark=$([[ -e "$mark" ]] && echo есть || echo нет) :: $out"
+    bad "109 env-ручки: SWEEP_SKIP_BUILD_PROBE=0 обязан запускать зонд"; return
+  fi
+  helper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/sweep.sh")
+  out=$(bash -c "$helper"$'\n''TEST_FLAG=true; __envon TEST_FLAG; a=$?; TEST_FLAG=false; __envon TEST_FLAG; b=$?; TEST_FLAG=ага; __envon TEST_FLAG >/dev/null 2>&1; c=$?; printf "%s/%s/%s\n" "$a" "$b" "$c"'); hrc=$?
+  phelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/claude-patch-all.real")
+  pout=$(bash -c "$phelper"$'\n''CLAUDE_PATCH_SKIP_MODELS=true; __envon CLAUDE_PATCH_SKIP_MODELS; printf "%s\n" "$?"')
+  lhelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/lock-probe.sh")
+  lout=$(bash -c "$lhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"')
+  bhelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/build-path-probe.real.sh")
+  bout=$(bash -c "$bhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"')
+  forms=0
+  grep -q '__envon SWEEP_SKIP_BUILD_PROBE;' "$K/tools/sweep.sh" && forms=$((forms+1))
+  grep -q '__envon SWEEP_SKIP_TOOLS_BENCH;' "$K/tools/sweep.sh" && forms=$((forms+1))
+  grep -q '__envon SWEEP_SKIP_CHECKS_TEETH;' "$K/tools/sweep.sh" && forms=$((forms+1))
+  grep -q '__envon CLAUDE_PATCH_SKIP_MODELS;' "$K/claude-patch-all.real" && forms=$((forms+1))
+  grep -q '^__envon KEEP_ROOT;' "$K/tools/lock-probe.sh" && forms=$((forms+1))
+  grep -q '^__envon KEEP_ROOT;' "$K/tools/build-path-probe.real.sh" && forms=$((forms+1))
+  LAST_EVID="helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout формы=$forms"
+  if (( hrc != 0 )) || [[ "$out" != "0/1/2" || "$pout" != 0 \
+       || "$lout" != "1/2" || "$bout" != "1/2" || "$forms" != 6 ]]; then
+    LAST_EVID="ИСТИННОСТЬ_РАЗОШЛАСЬ helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout формы=$forms"
+    bad "109 env-ручки: true/false/неизвестное и шесть потребителей не сошлись"; return
+  fi
+  ok "109 env-ручки: true/false/invalid едины; 0 не пропускает зонд"
+}
+
+
+scenario_110() {   # настоящая негодность числовой ручки -- код 2 с именем
+  local d value out rc
+  d="$C/lastn-invalid"; mk_decimal_corpus "$d"
+  for value in abc -1 1.5 '' 99999999999999999999; do
+    out=$(BENCH_LAST_N="$value" run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
+    if (( rc != 2 )) || [[ "$out" != *"SWEEP_LAST_N"* ]]; then
+      LAST_EVID="НЕГОДНОСТЬ_ПРИНЯТА value=[$value] rc=$rc :: $out"
+      bad "110 SWEEP_LAST_N=[$value]: ждали код 2 с именем ручки"; return
+    fi
+  done
+  LAST_EVID='все пять негодных форм отвергнуты кодом 2 с именем SWEEP_LAST_N'
+  ok "110 SWEEP_LAST_N: abc/-1/1.5/пусто/переполнение -- отказ 2"
+}
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -2944,7 +3194,14 @@ MUT_FILE=(x
   tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/fetch-corpus.sh
   tools/lock-probe.sh
   # Волна 29
-  tools/corpus-tools-bench.real.sh)
+  tools/corpus-tools-bench.real.sh
+  # Волна 31, бриф оболочек: обязательные зубы сценариев 103-110.
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  claude_patch.py claude_patch.py
+  tools/sweep.sh claude-patch-all.real tools/lock-probe.sh tools/build-path-probe.real.sh
+  claude-patch-all.real tools/lock-probe.sh tools/build-path-probe.real.sh
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -2981,7 +3238,7 @@ MUT_PAT=(x
   # Волна 24: снос переехал из трапа в __drop_kit_when_idle; якорь -- сам
   # снос, а не строка трапа. Взгляд вперёд отделяет его от упоминания в
   # комментарии выше.
-  'rm -rf "\$HERE"(?=\n    return 0)'
+  'rm -rf "\$__path"(?=\n    return 0)'
   'if label in labels:'
   "if pin != '-' and not PIN\.match\(pin\):"
   'if not VERSION\.match\(version\):'
@@ -2992,7 +3249,7 @@ MUT_PAT=(x
   '\[\[ "\$digest" == "1" \]\] \|\| why\+=\("конвейер не объявил запинованные байты"\)'
   'exec 8>"\$STATE/sweep\.lock"'
   '  return \$rc'
-  'rm -rf "\$__stale" && echo "SWEEP убрал обломок'
+  '__drop_kit_when_idle "\$__stale" 0'
   'exit\(flock\(\$fh, LOCK_EX\|LOCK_NB\) \? 0 : 1\);'
   'os\.replace\(tmp, path\)'
   '  bash "\$PROBE_SH" > "\$PROBE_LOG" 2>&1 8>&-'
@@ -3023,7 +3280,7 @@ MUT_PAT=(x
   '    SWEEP_SKIP_TOOLS_BENCH="\$\{BENCH_SKIP_TOOLS:-\}" \\\n    SWEEP_SKIP_BUILD_PROBE="\$\{BENCH_SKIP_PROBE:-\}" \\'
   '    \[\[ "\$\{tw:-0\}" != "0" \]\] \|\| why\+=\("tweakcc не применил ни одного патча"\)'
   '    SRC=\("\$\{__sorted\[\@\]: -__n\}"\)'
-  '  __n="\$\{SWEEP_LAST_N:-\$SWEEP_LAST_N_DEFAULT\}"'
+  '    __n_raw="\$SWEEP_LAST_N"'
   '    0\) echo "SWEEP зубы реестра проверок: ЗЕЛЁНО \(лог \$TEETH_LOG\)"'
   '    \*\) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
   '  echo "SWEEP зубы реестра проверок ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH=\$\{SWEEP_SKIP_CHECKS_TEETH\}"'
@@ -3048,7 +3305,7 @@ MUT_PAT=(x
   # же, что прежде: снимает проверку несовпадения метки целиком.
   'if \[\[ "\$__now" != "\$__start" \]\]; then'
   '"\$STATE"\/sweep\.self\.\?\?\?\?\?\? "\$STATE"\/sweep\.pgid'
-  '  __GUARD_KIT=0\n  # Проверка ВСЕГДА'
+  '    __GUARD_KIT=0\n  fi\n  # Проверка ВСЕГДА'
   "trap 'exit 143' TERM\n# Провал копирования"
   "trap 'exit 143' TERM\nFETCH_LOCK="
   "trap 'exit 143' TERM\n\n# Драйвер случая \(u\)"
@@ -3064,7 +3321,24 @@ MUT_PAT=(x
   '  if \[\[ -z "\$__now" \]\]; then\n    echo "SWEEP --stop: лидер группы \$__pgid мёртв, группа жива -- дверью не остановить" >&2\n    echo "  нужен ручной сигнал по группе: kill -TERM -- -\$__pgid" >&2\n    exit 1\n  fi\n  if \[\[ "\$__now" != "\$__start" \]\]; then'
   'if \[\[ "\$__ppid" =~ \^\[0-9\]\+\$ \]\] && kill -0 "\$__ppid" 2>/dev/null; then\n    continue\n  fi'
   'grep -Ev .*'
-  '\nunset SWEEP_LEADER SWEEP_KIT SWEEP_SELF SWEEP_LAST_N\n')
+  '\nunset SWEEP_LEADER SWEEP_KIT SWEEP_SELF SWEEP_LAST_N\n'
+  '  __n=\$\(validated_nonnegative_integer SWEEP_LAST_N "\$__n_raw"\)'
+  'if \(\( \$\{#SRC\[\@\]\} == 0 \)\); then'
+  '  __n=\$\(validated_nonnegative_integer SWEEP_LAST_N "\$__n_raw"\)'
+  '__drop_kit_when_idle "\$__stale" 0'
+  'if p\.is_file\(\) and version_name\.fullmatch\(p\.name\)'
+  'tmp = backup\.with_name\(backup\.name \+ f"\.new\.\{os\.getpid\(\)\}"\)'
+  '    1\|true\|yes\|on\) return 0 ;;'
+  '    1\|true\|yes\|on\) return 0 ;;'
+  "    ''\|0\|false\|no\|off\) return 1 ;;"
+  '       return 2 ;;'
+  '__envon CLAUDE_PATCH_SKIP_MODELS; __env_rc=\$\?'
+  '__envon KEEP_ROOT; __keep_root_rc=\$\?'
+  '__envon KEEP_ROOT; __keep_root_rc=\$\?'
+  '__envon SWEEP_SKIP_BUILD_PROBE; __env_rc=\$\?'
+  '__envon SWEEP_SKIP_TOOLS_BENCH; __env_rc=\$\?'
+  '__envon SWEEP_SKIP_CHECKS_TEETH; __env_rc=\$\?'
+  "      ''\|\*\[!0-9\]\*\)")
 
 MUT_REP=(x
   'if false; then'
@@ -3102,7 +3376,7 @@ MUT_REP=(x
   ':'
   'echo $$ > "$STATE/sweep.pgid"; exec 8>"$STATE/sweep.lock"'
   '  return 0'
-  'echo "не убрал обломок'
+  ':'
   'exit(0);'
   "open(path, 'w').write('\\n'.join(lines) + '\\n')"
   '  : > "$PROBE_LOG"'
@@ -3133,7 +3407,7 @@ MUT_REP=(x
   $'    SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" \\\n    SWEEP_SKIP_BUILD_PROBE="${SWEEP_SKIP_BUILD_PROBE:-}" \\'
   '    :'
   '    SRC=("${ALL[@]}")'
-  '  __n="$SWEEP_LAST_N_DEFAULT"'
+  '    __n_raw="$SWEEP_LAST_N_DEFAULT"'
   '    0) :'
   '    9) echo "SWEEP ОТКАЗ: проверка прошла мутацию молча'
   '  :'
@@ -3150,7 +3424,7 @@ MUT_REP=(x
   'if (0) {'
   'if false; then'
   '"$STATE"/sweep.self.??????'
-  '  # Проверка ВСЕГДА'
+  $'    : # mutation: guard remains armed\n  fi\n  # Проверка ВСЕГДА'
   $'trap \'__exit_guard\' EXIT INT TERM\n# Провал копирования'
   $'trap \'__fetch_guard\' EXIT INT TERM\nFETCH_LOCK='
   $'trap cleanup EXIT INT TERM\n\n# Драйвер случая (u)'
@@ -3166,7 +3440,24 @@ MUT_REP=(x
   '  if [[ -z "$__now" || "$__now" != "$__start" ]]; then'
   $'if [[ "$__ppid" =~ ^[0-9]+$ ]] && kill -0 "$__ppid" 2>/dev/null; then\n    continue\n  fi\n  [[ "$__ppid" =~ ^[0-9]+$ ]] || continue'
   $'grep -v ":[0-9]*:  \'")'
-  $'\n:\n')
+  $'\n:\n'
+  '  __n=7 # mutation: decimal eight changed to seven'
+  'if false; then'
+  '  __n=8 # mutation: decimal ten changed to eight'
+  'rm -rf "$__stale"'
+  'if p.is_file()'
+  'tmp = backup.with_name(backup.name + ".new")'
+  '    0|1|true|yes|on) return 0 ;;'
+  '    1|yes|on) return 0 ;;'
+  "    ''|false|no|off) return 1 ;;"
+  '       return 1 ;;'
+  ': # mutation: CLAUDE_PATCH_SKIP_MODELS reader bypassed; __env_rc=1'
+  ': # mutation: lock-probe KEEP_ROOT reader bypassed; __keep_root_rc=1'
+  ': # mutation: build-path KEEP_ROOT reader bypassed; __keep_root_rc=1'
+  ': # mutation: build probe skip reader bypassed; __env_rc=1'
+  ': # mutation: tools bench skip reader bypassed; __env_rc=1'
+  ': # mutation: checks teeth skip reader bypassed; __env_rc=1'
+  '      never)')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -3187,7 +3478,11 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                # Волна 26
                98 99 100 101 102
                # Волна 29: самоснятие бухгалтерии у самого стенда
-               66)
+               66
+               # Волна 31, бриф оболочек
+               103 104 105 106 107 108
+               109 109 109 109 109 109 109 109 109 109
+               110)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -3295,7 +3590,24 @@ MUT_CAUSE=(x
   'ПЕРЕИСПОЛЬЗОВАН_НА_МЁРТВОМ_ЛИДЕРЕ'
   'ОСТАЛСЯ_ОБЛОМОК_МКТЕМП'
   'ПЕРЕПИСЬ_ОСЛЕПЛА'
-  'ФОРМА_СНЯТИЯ_РАЗОШЛАСЬ')
+  'ФОРМА_СНЯТИЯ_РАЗОШЛАСЬ'
+  'НЕ_ДЕСЯТИЧНЫЕ_ВОСЕМЬ'
+  'ПУСТОЙ_НАБОР_ЗЕЛЁНЫЙ'
+  'ВОСЬМЕРИЧНЫЕ_ВОСЕМЬ'
+  'СНЕСЁН_ЖИВОЙ_ОБЛОМОК'
+  'НЕВЕРНАЯ_АВТОЦЕЛЬ'
+  'ОБЩАЯ_СТАДИЯ'
+  'ZERO_ПРОПУСТИЛ_ЗОНД'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'ZERO_ПРОПУСТИЛ_ЗОНД'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'ИСТИННОСТЬ_РАЗОШЛАСЬ'
+  'НЕГОДНОСТЬ_ПРИНЯТА')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь
@@ -3426,7 +3738,7 @@ mutate() {   # номер
   # у будущей .py-жертвы появится встроенное тело -- страж обязан вырасти и
   # на него.
   case "${MUT_FILE[$n]}" in
-    *.sh) sh_victim_parses "$f" || return 2 ;;
+    *.sh|*.real) sh_victim_parses "$f" || return 2 ;;
     *.py) python3 -c 'import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True)' \
             "$f" >/dev/null 2>&1 || return 2 ;;
   esac

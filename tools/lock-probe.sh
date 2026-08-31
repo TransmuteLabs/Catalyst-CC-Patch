@@ -54,6 +54,27 @@
 
 set -u
 
+# Значения-истина: 1 true yes on (без учёта регистра). Ложь: пусто,
+# отсутствие, 0 false no off. Всё прочее -- ОТКАЗ кодом 2 с именем ручки:
+# в оболочке отказ дёшев и громок, а тихо выбранная сторона у ручки,
+# меняющей измеряемое, -- это ровно тот дефект, который здесь чинится.
+# В ядре, tweakcc-patch.js, та же семья решена иначе -- безопасная сторона
+# плюс строка в журнал: там отказ убил бы живую сессию человека.
+# Копии правила живут в tools/sweep.sh, tools/build-path-probe.sh и
+# claude-patch-all.sh; расхождение ловится сценарием стенда, а не чтением.
+__envon() {  # имя переменной; 0 истина, 1 ложь, 2 неизвестное значение
+  local __name="$1" __raw="${!1-}" __value
+  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  case "$__value" in
+    1|true|yes|on) return 0 ;;
+    ''|0|false|no|off) return 1 ;;
+    *) echo "lock-probe: ОТКАЗ -- $__name='$__raw', ожидается 1/true/yes/on или 0/false/no/off" >&2
+       return 2 ;;
+  esac
+}
+__envon KEEP_ROOT; __keep_root_rc=$?
+(( __keep_root_rc != 2 )) || exit 2
+
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PIPELINE="$HERE/claude-patch-all.sh"
 [[ -f "$PIPELINE" ]] || { echo "ОТКАЗ: не нашёл $PIPELINE" >&2; exit 2; }
@@ -78,8 +99,11 @@ cleanup() {
   __rc=$?
   # Осиротевшие держатели переживают зонд и заблокировали бы следующий прогон.
   [[ -n "${HOLDER_KIDS:-}" ]] && kill -9 $HOLDER_KIDS 2>/dev/null
-  [[ -n "${KEEP_ROOT:-}" ]] && echo "lock-probe: KEEP_ROOT=${KEEP_ROOT} -- корень $ROOT оставлен" >&2
-  [[ -n "${KEEP_ROOT:-}" ]] || rm -rf "$ROOT"
+  if __envon KEEP_ROOT; then
+    echo "lock-probe: KEEP_ROOT=${KEEP_ROOT} -- корень $ROOT оставлен" >&2
+  else
+    rm -rf "$ROOT"
+  fi
   if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
     echo "lock-probe: ОТКАЗ -- прогон оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
     exit 1

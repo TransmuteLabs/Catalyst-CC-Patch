@@ -5259,6 +5259,10 @@ fi
 # A full session start on a machine already running builds is not a two-second
 # affair, and a healthy build that misses the budget is reported as a failure.
 # 40s was a guess that a loaded box can lose; this is generous and adjustable.
+# Вторая копия десятичного правила живёт в tools/sweep.sh у SWEEP_LAST_N;
+# расхождение ловится сценарием стенда, а не чтением. Общая библиотека не
+# вводится: оба файла исполняются из копируемых снимков кита, и пропуск одного
+# пути в списке копирования оставил бы прогон без валидатора.
 validated_nonnegative_integer() {
   local name="$1" value="$2" digits
   case "$value" in
@@ -5761,6 +5765,25 @@ if [[ $DO_UPDATE -eq 1 ]]; then
   prune_config_backups
 fi
 
+# Значения-истина: 1 true yes on (без учёта регистра). Ложь: пусто,
+# отсутствие, 0 false no off. Всё прочее -- ОТКАЗ кодом 2 с именем ручки:
+# в оболочке отказ дёшев и громок, а тихо выбранная сторона у ручки,
+# меняющей измеряемое, -- это ровно тот дефект, который здесь чинится.
+# В ядре, tweakcc-patch.js, та же семья решена иначе -- безопасная сторона
+# плюс строка в журнал: там отказ убил бы живую сессию человека.
+# Копии правила живут в tools/sweep.sh, tools/lock-probe.sh и
+# tools/build-path-probe.sh; расхождение ловится сценарием стенда, а не чтением.
+__envon() {  # имя переменной; 0 истина, 1 ложь, 2 неизвестное значение
+  local __name="$1" __raw="${!1-}" __value
+  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  case "$__value" in
+    1|true|yes|on) return 0 ;;
+    ''|0|false|no|off) return 1 ;;
+    *) echo "FATAL: $__name='$__raw' -- expected 1/true/yes/on or 0/false/no/off" >&2
+       return 2 ;;
+  esac
+}
+
 # --- 7. the model data the patches read --------------------------------------
 # Patches #8 and #10 only teach the binary WHERE to look: customModelCosts and
 # customModelContextWindows in ~/.claude.json. What is IN those keys is a
@@ -5774,7 +5797,9 @@ fi
 # Never fatal. The sync needs the proxy up (for its model listing) and
 # models.dev reachable; neither has anything to do with whether the binary was
 # patched correctly, so a failure is a warning and the old numbers stay.
-if [[ "${CLAUDE_PATCH_SKIP_MODELS:-0}" == "1" ]]; then
+__envon CLAUDE_PATCH_SKIP_MODELS; __env_rc=$?
+(( __env_rc != 2 )) || exit 2
+if (( __env_rc == 0 )); then
   echo "Model data: SKIPPED — CLAUDE_PATCH_SKIP_MODELS=1; prices and context windows are stale"
 elif [[ ! -f "$COSTS_SYNC" ]]; then
   echo "Model data: SKIPPED — $(basename "$COSTS_SYNC") is not in this kit; prices and context windows are stale" >&2

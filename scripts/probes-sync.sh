@@ -116,11 +116,13 @@ diff_one() {  # $1 canon, $2 home, $3 display name
 # а подменять дом нельзя: рядом с раскатанными файлами лежат журналы и записи
 # машины. Смешанное состояние из этого окна видит `--diff` -- тот самый гейт,
 # который дом и читает.
-STAGE_TMP=(); STAGE_DST=(); STAGE_NAME=()
+STAGE_TMP=(); STAGE_DST=(); STAGE_NAME=(); STAGE_OWNER=()
 cleanup_staged() {
   local __i
-  for ((__i=0; __i<${#STAGE_TMP[@]}; __i++)); do rm -f "${STAGE_TMP[$__i]}"; done
-  STAGE_TMP=()
+  for ((__i=0; __i<${#STAGE_TMP[@]}; __i++)); do
+    rm -f "${STAGE_TMP[$__i]}" "${STAGE_OWNER[$__i]}"
+  done
+  STAGE_TMP=(); STAGE_OWNER=()
 }
 # Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с EXIT-трапом
 # умирает на фатальной ошибке ПОДСТАНОВКИ (unbound под `set -u`, `${x:?}`, bad
@@ -148,7 +150,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 stage_one() {  # $1 canon, $2 home, $3 display name
-  local A="$1" B="$2" name="$3" src dst tmp
+  local A="$1" B="$2" name="$3" src dst tmp owner owner_start
   case "$MODE" in
     --to-home)   src="$A"; dst="$B" ;;
     --from-home) src="$B"; dst="$A" ;;
@@ -160,10 +162,20 @@ stage_one() {  # $1 canon, $2 home, $3 display name
   fi
   mkdir -p "$(dirname "$dst")"
   tmp="$dst.sync-new.$$"
+  owner="$dst.sync-owner.$$"
+  owner_start="$(LC_ALL=C ps -o lstart= -p $$ 2>/dev/null)"
+  # Владелец пишется ДО стадии: существующая стадия без владельца тем самым
+  # однозначно принадлежит оборванному писателю. Другой инфикс обязателен:
+  # sync-owner не попадает в глоб sync-new.* и не становится ложной стадией.
+  if ! printf '%s\t%s\n' "$$" "$owner_start" > "$owner"; then
+    echo "ОТКАЗ: не записать владельца стадии для $name ($owner)" >&2
+    FAILED=$((FAILED+1))
+    return 0
+  fi
   if cp "$src" "$tmp"; then
-    STAGE_TMP+=("$tmp"); STAGE_DST+=("$dst"); STAGE_NAME+=("$name")
+    STAGE_TMP+=("$tmp"); STAGE_DST+=("$dst"); STAGE_NAME+=("$name"); STAGE_OWNER+=("$owner")
   else
-    rm -f "$tmp"
+    rm -f "$tmp" "$owner"
     echo "ОТКАЗ: не удалось разложить $name ($dst)" >&2
     FAILED=$((FAILED+1))
   fi
@@ -291,11 +303,29 @@ for_each_sync_stage() {  # $1 -- функция-потребитель пути
   done
 }
 
-prune_one_sync_stage() {
+sync_stage_owner() {  # стадия; печатает путь файла-владельца
   local __stage="$1" __pid="${1##*.sync-new.}"
+  printf '%s.sync-owner.%s' "${__stage%.sync-new.*}" "$__pid"
+}
+sync_stage_writer_alive() {  # стадия; pid жив И время старта принадлежит писателю
+  local __stage="$1" __pid="${1##*.sync-new.}" __owner __line __owner_pid __owner_start __now
+  case "$__pid" in ''|*[!0-9]*) return 1 ;; esac
+  __owner=$(sync_stage_owner "$__stage")
+  [[ -f "$__owner" ]] || return 1
+  __line=$(cat "$__owner" 2>/dev/null) || return 1
+  __owner_pid="${__line%%$'\t'*}"
+  __owner_start="${__line#*$'\t'}"
+  [[ "$__owner_start" != "$__line" && "$__owner_pid" == "$__pid" ]] || return 1
+  kill -0 "$__pid" 2>/dev/null || return 1
+  __now="$(LC_ALL=C ps -o lstart= -p "$__pid" 2>/dev/null)"
+  [[ "$__now" == "$__owner_start" ]]
+}
+prune_one_sync_stage() {
+  local __stage="$1" __pid="${1##*.sync-new.}" __owner
   case "$__pid" in ''|*[!0-9]*) return 0 ;; esac
-  if ! kill -0 "$__pid" 2>/dev/null; then
-    rm -f "$__stage" && echo "убрана осиротевшая стадия: $__stage"
+  __owner=$(sync_stage_owner "$__stage")
+  if ! sync_stage_writer_alive "$__stage"; then
+    rm -f "$__stage" "$__owner" && echo "убрана осиротевшая стадия: $__stage"
   fi
 }
 prune_sync_stages() { for_each_sync_stage prune_one_sync_stage; }
@@ -303,15 +333,10 @@ report_one_sync_stage() {
   local __pid="${1##*.sync-new.}"
   # Стадия ЖИВОГО писателя -- не расхождение: параллельный --diff во время
   # идущей синхронизации красил бы живого писателя и вешал ложный
-  # красный на гейт, стоящий на коде возврата. Проверка живости --
-  # та же, что у прополки.
-  case "$__pid" in ''|*[!0-9]*)
-    echo "расходится: стадия синхронизации осталась: $1"
-    DIFFERS=$((DIFFERS+1))
-    return 0
-    ;;
-  esac
-  if kill -0 "$__pid" 2>/dev/null; then
+  # красный на гейт. Живость -- та же тройка, что у прополки: файл-владелец,
+  # живой pid и совпавшее время старта. Один kill -0 верит чужому процессу,
+  # которому достался номер уже умершего писателя.
+  if sync_stage_writer_alive "$1"; then
     echo "(стадия живого писателя pid $__pid -- идёт, не расхождение)"
   else
     echo "расходится: стадия синхронизации осталась: $1"
@@ -354,6 +379,7 @@ else
   __moved=0
   for ((__i=0; __i<${#STAGE_TMP[@]}; __i++)); do
     if mv "${STAGE_TMP[$__i]}" "${STAGE_DST[$__i]}"; then
+      rm -f "${STAGE_OWNER[$__i]}"
       __moved=$((__moved+1))
       [[ "$MODE" == "--to-home" ]] && echo "-> ${STAGE_NAME[$__i]}" || echo "<- ${STAGE_NAME[$__i]}"
     else
@@ -365,7 +391,7 @@ else
       __DONE=1; exit 1
     fi
   done
-  STAGE_TMP=()
+  STAGE_TMP=(); STAGE_OWNER=()
   [[ "$PLIST_IN_SET" -eq 1 && "$MODE" == "--to-home" ]] && \
     echo "   (plist обновлён — нужен launchctl bootout+bootstrap)"
   true

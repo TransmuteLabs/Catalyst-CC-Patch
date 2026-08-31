@@ -288,25 +288,21 @@ def resolve_active_binary() -> Path:
             return real
     vdir = versions_dir()
     if vdir.is_dir():
-        # Отсеиваются не только .orig. Незавершённый прогон оставляет рядом
-        # <версия>.staging (сборка в него идёт ДО переключения лаунчера), а
-        # документированный рецепт восстановления оставляет .restore. Оба —
-        # файлы, а .staging к тому же САМЫЙ СВЕЖИЙ по mtime, поэтому правило
-        # "новейший" выбирало именно его. Эта ветка достижима ровно в
-        # первозапускном состоянии (лаунчера ещё нет), то есть там, где
-        # ошибиться дороже всего: цель выбирается из обломков прошлого падения.
-        # `.download` -- обломок оборванной загрузки (см. download_binary): он
-        # САМЫЙ СВЕЖИЙ по mtime, как и .staging, и по правилу «новейший» был бы
-        # выбран целью.
-        skip = (".orig", ".staging", ".restore", ".repair", ".new", ".tmp", ".bak",
-                ".download")
+        # Кандидат задаётся ПОЛОЖИТЕЛЬНОЙ формой имени версии. Отрицательный
+        # список нельзя дописать до полноты: прежняя правка добавила .download,
+        # следующая должна была бы знать про .claude-patched-, а следующий
+        # писатель придумал бы ещё одно промежуточное имя. Обломок оборванного
+        # прогона целью не бывает, даже если он самый свежий по mtime.
+        version_name = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:\.exe)?$" if is_windows()
+                                  else r"^[0-9]+\.[0-9]+\.[0-9]+$")
         cands = [p for p in vdir.iterdir()
-                 if p.is_file() and not p.name.endswith(skip)]
+                 if p.is_file() and version_name.fullmatch(p.name)]
         if cands:
             # newest by mtime — matches what the launcher points at after an update
             return max(cands, key=lambda p: p.stat().st_mtime)
-    die("could not locate a Claude Code binary; pass its path explicitly "
-        "or run with --update", code=2)
+    die("could not locate a Claude Code binary: the versions directory has no file "
+        "whose name is a version; interrupted-run leftovers are never patch targets. "
+        "Pass the binary path explicitly or run with --update", code=2)
 
 
 def _sweep_stale_launcher_tmps(link: Path) -> None:
@@ -475,7 +471,10 @@ def _replace_backup(src: Path, backup: Path) -> None:
     binary while reporting success. Same staging-and-rename the rest of the kit
     uses for live files, for the same reason.
     """
-    tmp = backup.with_name(backup.name + ".new")
+    # The staging name belongs to this writer. Two direct invocations are a
+    # supported surface; a fixed <backup>.new let one process rename the inode
+    # while the other was still writing it, publishing bytes from both sources.
+    tmp = backup.with_name(backup.name + f".new.{os.getpid()}")
     shutil.copy2(src, tmp)
     os.replace(tmp, backup)
 
@@ -627,7 +626,7 @@ def main(argv: list[str]) -> None:
         # staging file. The pipeline patches THAT and renames it over the target
         # once every gate has passed.
         if target.exists():
-            staging = target.with_name(target.name + ".staging")
+            staging = target.with_name(target.name + f".staging.{os.getpid()}")
             download_binary(version, staging)
             info(f"{version} is already installed; built pristine beside it -> {staging}")
             if not backup.exists() or not _is_pristine(backup):
@@ -698,7 +697,7 @@ def main(argv: list[str]) -> None:
         # source than a snapshot of whatever is on disk), patch the staging file,
         # and only then rename it over the target. A run that dies anywhere
         # before that rename leaves the installation exactly as it was.
-        staging = target.with_name(target.name + ".staging")
+        staging = target.with_name(target.name + f".staging.{os.getpid()}")
         download_binary(version, staging)
         backup = target.with_name(target.name + ".orig")
         if not backup.exists() or not _is_pristine(backup):

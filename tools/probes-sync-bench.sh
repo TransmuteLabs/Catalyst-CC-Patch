@@ -15,15 +15,15 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=5
-EXPECTED_MUTATIONS=5
+EXPECTED_SCENARIOS=6
+EXPECTED_MUTATIONS=6
 # Круг 25, E-4: номер сценария, который красит каждая мутация. Таблица
 # отдельная от самих мутаций, и сверка ниже требует, чтобы КАЖДЫЙ сценарий
 # был чьим-то зубом -- как check_mut_tables у corpus-tools-bench. До этой
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5)
+MUT_SCENARIO=(x 1 2 3 4 5 6)
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -142,7 +142,9 @@ scenario_2() {
   stale="$CLAUDE_PROBES_DIR/probes.toml.sync-new.$dead"
   sleep 30 & live_holder=$!
   live="$CLAUDE_PROBES_DIR/probes.toml.sync-new.$live_holder"
+  local live_owner="$CLAUDE_PROBES_DIR/probes.toml.sync-owner.$live_holder"
   printf 'stale\n' > "$stale"; printf 'live\n' > "$live"
+  printf '%s\t%s\n' "$live_holder" "$(LC_ALL=C ps -o lstart= -p "$live_holder" 2>/dev/null)" > "$live_owner"
   out=$(bash "$script" --diff 2>&1); rc=$?
   bash "$script" --to-home >/dev/null 2>&1
   # Наличие снимается ДО уборки дерева и проверяется по снятым значениям:
@@ -279,6 +281,8 @@ scenario_5() {
     bad '5 живая стадия: исходная раскатка отказала'; return; }
   sleep 60 & live=$!
   printf 'идёт\n' > "$CLAUDE_PROBES_DIR/probes.toml.sync-new.$live"
+  printf '%s\t%s\n' "$live" "$(LC_ALL=C ps -o lstart= -p "$live" 2>/dev/null)" \
+    > "$CLAUDE_PROBES_DIR/probes.toml.sync-owner.$live"
   out=$(bash "$script" --diff 2>&1); rc=$?
   kill "$live" 2>/dev/null; wait "$live" 2>/dev/null
   LAST_EVID="rc=$rc :: $out"
@@ -290,7 +294,7 @@ scenario_5() {
   ok '5 стадии: --diff не считает расхождением стадию живого писателя'
 }
 run_scenario() {
-  case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; *) return 2 ;; esac
+  case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; 6) scenario_6 ;; *) return 2 ;; esac
 }
 
 # Круг 25, E-3: тела heredoc'ов .sh-жертвы, поданные питону, по правилу гейта
@@ -300,6 +304,40 @@ run_scenario() {
 # probes-sync.sh таких тел нет, но страж пишется по ПРАВИЛУ, а не по факту
 # сегодняшнего файла: первая же мутация в питонье тело потребует этой
 # проверки, а не случайности (решение контроллера, волна 25).
+
+scenario_6() {
+  local root script live live_start other_start stage owner out rc stage_left owner_left
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s6.XXXXXX")
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '6 стадии: исходная раскатка отказала'; return; }
+  sleep 60 & live=$!
+  live_start=$(LC_ALL=C ps -o lstart= -p "$live" 2>/dev/null)
+  other_start='Mon Jan  1 00:00:00 2001'
+  [[ "$live_start" != "$other_start" ]] || other_start='Tue Jan  2 00:00:00 2001'
+  stage="$CLAUDE_PROBES_DIR/probes.toml.sync-new.$live"
+  owner="$CLAUDE_PROBES_DIR/probes.toml.sync-owner.$live"
+  printf 'stale\n' > "$stage"
+  printf '%s\t%s\n' "$live" "$other_start" > "$owner"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  bash "$script" --to-home >/dev/null 2>&1
+  stage_left=$([[ -e "$stage" ]] && echo 1 || echo 0)
+  owner_left=$([[ -e "$owner" ]] && echo 1 || echo 0)
+  LAST_EVID="rc=$rc stage=$stage_left owner=$owner_left live=$live_start чужая=$other_start :: $out"
+  kill "$live" 2>/dev/null; wait "$live" 2>/dev/null
+  rm -rf "$root"
+  if (( rc != 1 )) || [[ "$out" != *"sync-new.$live"* ]]; then
+    bad '6 стадии: переиспользованный номер с чужой меткой не объявлен расхождением'; return
+  fi
+  if [[ "$stage_left" != 0 || "$owner_left" != 0 ]]; then
+    LAST_EVID="ОСТАЛСЯ_ЧУЖОЙ_ВЛАДЕЛЕЦ stage=$stage_left owner=$owner_left :: $out"
+    bad '6 стадии: прополка не сняла стадию вместе с владельцем'; return
+  fi
+  ok '6 стадии: номер жив, но чужая lstart делает стадию мёртвой; стадия и владелец убраны'
+}
+
 python_heredoc_bodies() {   # файл-жертва, каталог для тел; печатает число тел
   local f="$1" out="$2" line pre rest mid tag n=0
   local OPEN_RE="<<'([A-Za-z_][A-Za-z0-9_]*)'[[:space:]]*\$"
@@ -373,8 +411,10 @@ elif number == 4:
                 'for ((__i=0; __i<0; __i++)); do  # mutation: canon side not walked\n')
 elif number == 5:
     # Проверка живости в отчёте выключается: каждая стадия снова расходится.
-    old, new = ('  if kill -0 "$__pid" 2>/dev/null; then\n',
+    old, new = ('  if sync_stage_writer_alive "$1"; then\n',
                 '  if false; then  # mutation: every stage counts as divergence\n')
+elif number == 6:
+    old, new = ('[[ "$__now" == "$__owner_start" ]]', 'true  # mutation: owner lstart ignored')
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)
@@ -398,7 +438,7 @@ PY
 
 self_check() {
   local n root before reddened=0
-  for n in 1 2 3 4 5; do
+  for n in 1 2 3 4 5 6; do
     root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-mut.XXXXXX")
     mk_kit "$root/kit"
     if ! mutate "$root" "$n"; then rm -rf "$root"; return 2; fi
@@ -413,6 +453,7 @@ self_check() {
         3:*"B=3"*) reddened=$((reddened + 1)); say '  ok     мутация 3 покраснила сценарий 3 своей причиной' ;;
         4:*"НЕ_НАЗВАНА"*) reddened=$((reddened + 1)); say '  ok     мутация 4 покраснила сценарий 4 своей причиной' ;;
         5:*"rc=1"*) reddened=$((reddened + 1)); say '  ok     мутация 5 покраснила сценарий 5 своей причиной' ;;
+        6:*"rc=0"*) reddened=$((reddened + 1)); say '  ok     мутация 6 покраснила сценарий 6 своей причиной' ;;
         *) say "  ПРОВАЛ мутация $n покраснила чужой причиной: $LAST_EVID" ;;
       esac
       FAILED=$before
@@ -428,7 +469,7 @@ self_check() {
 case "${1:-}" in
   '')
     check_mut_tables || exit 4
-    scenario_1; scenario_2; scenario_3; scenario_4; scenario_5
+    scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6
     say "probes-sync-bench: ИТОГ сценариев=$RUN расхождений=$FAILED"
     [[ $RUN -eq $EXPECTED_SCENARIOS ]] || exit 4
     [[ $FAILED -eq 0 ]] || exit 1

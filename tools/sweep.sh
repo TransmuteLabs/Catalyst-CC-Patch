@@ -146,20 +146,25 @@ __GUARD_KIT=0
 #
 # Снимок процессов снимается ДО awk: аргументы самого awk содержат путь
 # снимка (`-v here=...`), и он засчитал бы себя жильцом.
-__drop_kit_when_idle() {
-  [[ -n "${HERE:-}" ]] || return 0
-  local __wait_left=${SWEEP_KIT_DRAIN:-60} __snap_users __users
-  # Флаг снимается ДО цикла ожидания, а не после: дренаж -- единственная фаза
-  # завершения, способная висеть до бюджета, и повторный вход в гвард (сигнал
-  # посреди ожидания) иначе стартовал бы дренаж СО СВЕЖИМ бюджетом. Снятый
-  # заранее флаг держит суммарное ожидание в пределах одного бюджета.
-  __GUARD_KIT=0
+__drop_kit_when_idle() {  # [путь, по умолчанию $HERE] [бюджет, по умолчанию SWEEP_KIT_DRAIN]
+  local __path="${1:-${HERE:-}}" __wait_left="${2:-${SWEEP_KIT_DRAIN:-60}}" __snap_users __users
+  [[ -n "$__path" ]] || return 0
+  # Флаг принадлежит только СВОЕМУ снимку. Прополка чужого обломка проходит
+  # тем же безопасным примитивом, но не имеет права снимать гвард текущего:
+  # сигнал после такой прополки иначе оставил бы $HERE без штатной уборки.
+  if [[ "$__path" == "${HERE:-}" ]]; then
+    # Флаг снимается ДО цикла ожидания, а не после: дренаж -- единственная фаза
+    # завершения, способная висеть до бюджета, и повторный вход в гвард (сигнал
+    # посреди ожидания) иначе стартовал бы дренаж СО СВЕЖИМ бюджетом. Снятый
+    # заранее флаг держит суммарное ожидание в пределах одного бюджета.
+    __GUARD_KIT=0
+  fi
   # Проверка ВСЕГДА хотя бы одна: с нулевым бюджетом ожидания цикл `while ((
   # __wait_left > 0 ))` не исполнялся ни разу, `__users` оставался пустым, и
   # снимок сносился без единого взгляда на жильцов.
   while :; do
     __snap_users=$(ps -eo pid,args)
-    __users=$(printf '%s\n' "$__snap_users" | awk -v here="$HERE" -v me="$$" '
+    __users=$(printf '%s\n' "$__snap_users" | awk -v here="$__path" -v me="$$" '
       $1 != me && index($0, here) { print $1 }' || true)
     [[ -z "$__users" ]] && break
     (( __wait_left > 0 )) || break
@@ -167,11 +172,11 @@ __drop_kit_when_idle() {
     __wait_left=$(( __wait_left - 1 ))
   done
   if [[ -z "$__users" ]]; then
-    rm -rf "$HERE"
+    rm -rf "$__path"
     return 0
   fi
   echo "SWEEP: снимок кита НЕ убран -- из него ещё исполняются процессы (pid: $__users)" >&2
-  echo "  каталог: $HERE" >&2
+  echo "  каталог: $__path" >&2
   return 0
 }
 __exit_guard() {
@@ -388,7 +393,17 @@ for __stale in "$STATE"/kit.?????? "$STATE"/sweep.self.?????? "$STATE"/sweep.pgi
   [[ "$__stale" == "${SWEEP_SELF:-}" ]] && continue
   if [[ -z "$(find "$__stale" -maxdepth 0 -mtime +0 2>/dev/null)" ]] \
      && ! __stale_future "$__stale"; then continue; fi
-  rm -rf "$__stale" && echo "SWEEP убрал обломок прошлого прогона: $__stale"
+  # Каталоги kit.* и sweep.self.* исполняют shell/python/node прямо из
+  # себя, поэтому даже протухший по времени обломок удаляется только после
+  # проверки жильцов. sweep.pgid -- файл данных, из него ничего не исполняется:
+  # ему ожидание не даёт гарантии и он остаётся прямым rm -f.
+  case "$__stale" in
+    */sweep.pgid)
+      rm -f "$__stale" && echo "SWEEP убрал обломок прошлого прогона: $__stale" ;;
+    *)
+      __drop_kit_when_idle "$__stale" 0
+      [[ -e "$__stale" ]] || echo "SWEEP убрал обломок прошлого прогона: $__stale" ;;
+  esac
 done
 
 # Идентификатор группы пишется ПОСЛЕ замка и ПОСЛЕ прополки.
@@ -540,10 +555,40 @@ else
   # списка по НОМЕРУ, а не последние N строк файла: строку в список дописывают
   # руками, и порядок в файле -- не гарантия. Полный корпус по-прежнему
   # достижим: назвать версии аргументами или SWEEP_LAST_N=0.
-  __n="${SWEEP_LAST_N:-$SWEEP_LAST_N_DEFAULT}"
-  case "$__n" in ''|*[!0-9]*)
-    echo "SWEEP ОТКАЗ: SWEEP_LAST_N='$__n' -- не число" >&2; exit 2 ;;
-  esac
+  # Вторая копия этого правила живёт в claude-patch-all.sh у
+  # validated_nonnegative_integer; расхождение ловится сценарием стенда, а не
+  # чтением. Общий файл здесь нельзя вводить: неполный список копирования кита
+  # оставил бы один из двух исполняемых снимков без читателя.
+  validated_nonnegative_integer() {
+    local name="$1" value="$2" digits
+    case "$value" in
+      ''|*[!0-9]*)
+        echo "SWEEP ОТКАЗ: $name='$value' -- не неотрицательное целое" >&2
+        return 2
+        ;;
+    esac
+    # Ведущие нули снимаются до сравнения и до арифметики: bash иначе читает
+    # 08 как ошибочный восьмеричный литерал, а 0010 как восемь.
+    digits="$value"
+    while [[ "$digits" == 0* && "$digits" != "0" ]]; do digits="${digits#0}"; done
+    if (( ${#digits} > 19 )) \
+       || { [[ "${#digits}" == 19 ]] && [[ "$digits" > "9223372036854775807" ]]; }; then
+      echo "SWEEP ОТКАЗ: $name='$value' -- больше 9223372036854775807" >&2
+      return 2
+    fi
+    printf '%d\n' "$((10#$digits))"
+  }
+  # Отсутствие берёт умолчание, но ЯВНО заданная пустая строка остаётся
+  # негодным значением и получает тот же код 2, что abc/-1/1.5: `${x:-d}`
+  # смешало бы «не задано» и «задано пустым» до входа в валидатор.
+  if [[ -z "${SWEEP_LAST_N+x}" ]]; then
+    __n_raw="$SWEEP_LAST_N_DEFAULT"
+  else
+    __n_raw="$SWEEP_LAST_N"
+  fi
+  __n=$(validated_nonnegative_integer SWEEP_LAST_N "$__n_raw")
+  __nrc=$?
+  (( __nrc == 0 )) || exit "$__nrc"
   if (( __n == 0 )) || (( __n >= ${#ALL[@]} )); then
     SRC=("${ALL[@]}")
     SET_NOTE="ВЕСЬ корпус, ${#SRC[@]} версий (SWEEP_LAST_N=$__n)"
@@ -557,6 +602,14 @@ else
     SET_NOTE="последние $__n версий корпуса -- ${SRC[*]%%:*} (весь корпус: SWEEP_LAST_N=0 либо версии аргументами)"
     echo "SWEEP набор: $SET_NOTE"
   fi
+fi
+# Пустой набор -- самостоятельный отказ независимо от причины, которая его
+# породила. Иначе хвост печатает «все 0 версий измерены» (docnum:example -- это
+# цитата прежней строки хвоста, а не счёт кита) и превращает отсутствие
+# измерения в зелёный вердикт.
+if (( ${#SRC[@]} == 0 )); then
+  echo "SWEEP ОТКАЗ: набор версий пуст -- мерить нечего" >&2
+  exit 5
 fi
 # Отсутствующий образ -- ОТКАЗ, и до первой сборки.
 #
@@ -687,9 +740,30 @@ num() { case "$1" in ''|*[!0-9]*) echo "БИТО";; *) echo "$1";; esac; }
 # остальное -- отказ свипа до первой сборки. Выключатель есть, но объявляется
 # и в потоке, и в сводке: молчаливый пропуск вернул бы ровно то состояние,
 # против которого предполёт заведён.
+# Значения-истина: 1 true yes on (без учёта регистра). Ложь: пусто,
+# отсутствие, 0 false no off. Всё прочее -- ОТКАЗ кодом 2 с именем ручки:
+# в оболочке отказ дёшев и громок, а тихо выбранная сторона у ручки,
+# меняющей измеряемое, -- это ровно тот дефект, который здесь чинится.
+# В ядре, tweakcc-patch.js, та же семья решена иначе -- безопасная сторона
+# плюс строка в журнал: там отказ убил бы живую сессию человека.
+# Копии правила живут в claude-patch-all.sh, tools/lock-probe.sh и
+# tools/build-path-probe.sh; расхождение ловится сценарием стенда, а не чтением.
+__envon() {  # имя переменной; 0 истина, 1 ложь, 2 неизвестное значение
+  local __name="$1" __raw="${!1-}" __value
+  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  case "$__value" in
+    1|true|yes|on) return 0 ;;
+    ''|0|false|no|off) return 1 ;;
+    *) echo "SWEEP ОТКАЗ: $__name='$__raw' -- ожидается 1/true/yes/on или 0/false/no/off" >&2
+       return 2 ;;
+  esac
+}
+
 PROBE_LOG="$STATE/log/build-path-probe.log"
 PROBE_SH="$HERE/tools/build-path-probe.sh"
-if [[ -n "${SWEEP_SKIP_BUILD_PROBE:-}" ]]; then
+__envon SWEEP_SKIP_BUILD_PROBE; __env_rc=$?
+(( __env_rc != 2 )) || exit 2
+if (( __env_rc == 0 )); then
   echo "SWEEP зонд пути сборки ПРОПУЩЕН по ручке SWEEP_SKIP_BUILD_PROBE=${SWEEP_SKIP_BUILD_PROBE}"
   sum_line "# зонд пути сборки: ПРОПУЩЕН по ручке"
 elif [[ ! -f "$PROBE_SH" ]]; then
@@ -756,7 +830,9 @@ fi
 
 BENCH_LOG="$STATE/log/corpus-tools-bench.log"
 BENCH_SH="$HERE/tools/corpus-tools-bench.sh"
-if [[ -n "${SWEEP_SKIP_TOOLS_BENCH:-}" ]]; then
+__envon SWEEP_SKIP_TOOLS_BENCH; __env_rc=$?
+(( __env_rc != 2 )) || exit 2
+if (( __env_rc == 0 )); then
   echo "SWEEP стенд корпусных инструментов ПРОПУЩЕН по ручке SWEEP_SKIP_TOOLS_BENCH=${SWEEP_SKIP_TOOLS_BENCH}"
   sum_line "# стенд корпусных инструментов: ПРОПУЩЕН по ручке"
 elif [[ ! -f "$BENCH_SH" ]]; then
@@ -813,7 +889,9 @@ fi
 # Цена измерена: ~40 с на прогон реестра, мутации идут по три разом.
 TEETH_LOG="$STATE/log/checks-teeth.log"
 TEETH_PY="$HERE/tools/checks-teeth.py"
-if [[ -n "${SWEEP_SKIP_CHECKS_TEETH:-}" ]]; then
+__envon SWEEP_SKIP_CHECKS_TEETH; __env_rc=$?
+(( __env_rc != 2 )) || exit 2
+if (( __env_rc == 0 )); then
   echo "SWEEP зубы реестра проверок ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH=${SWEEP_SKIP_CHECKS_TEETH}"
   sum_line "# зубы реестра проверок: ПРОПУЩЕНЫ по ручке"
 elif [[ ! -f "$TEETH_PY" ]]; then

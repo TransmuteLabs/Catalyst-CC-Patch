@@ -343,3 +343,111 @@ Self-Check: PASSED — статус BLOCKED соответствует двум 
 Остальные пять правок и все прочие сценарии — без изменений.
 
 <!-- BRIEF COMPLETE -->
+
+## ОТЧЁТ ИСПОЛНИТЕЛЯ
+
+DONE (own diff green; 6/6 правок завершены)
+
+### 1. K-4 — десятичный `SWEEP_LAST_N` и самостоятельный отказ пустого набора
+
+- `tools/sweep.sh:562-578` — перенесён канонический `validated_nonnegative_integer`: ведущие нули снимаются до проверки диапазона, результат считается дословной формой `printf '%d\n' "$((10#$digits))"`; негодное и переполненное значение возвращает 2 и называет `SWEEP_LAST_N`.
+- `tools/sweep.sh:584-592` — отсутствие и явно заданная пустая строка разделены дословной формой:
+  ```bash
+  if [[ -z "${SWEEP_LAST_N+x}" ]]; then
+    __n_raw="$SWEEP_LAST_N_DEFAULT"
+  else
+    __n_raw="$SWEEP_LAST_N"
+  fi
+  __n=$(validated_nonnegative_integer SWEEP_LAST_N "$__n_raw")
+  ```
+- `tools/sweep.sh:608-612` — после формирования `SRC` стоит независимый отказ:
+  ```bash
+  if (( ${#SRC[@]} == 0 )); then
+    echo "SWEEP ОТКАЗ: набор версий пуст -- мерить нечего" >&2
+    exit 5
+  fi
+  ```
+- Зубы: мутация 108 `НЕ_ДЕСЯТИЧНЫЕ_ВОСЕМЬ` краснит сценарий 103; 109 `ПУСТОЙ_НАБОР_ЗЕЛЁНЫЙ` — сценарий 104; 110 `ВОСЬМЕРИЧНЫЕ_ВОСЕМЬ` — сценарий 105; 124 `НЕГОДНОСТЬ_ПРИНЯТА` — сценарий 110.
+
+### 2. L-1 — прополка исполняемых обломков через один дренаж
+
+- `tools/sweep.sh:149-178` — `__drop_kit_when_idle` принимает путь и бюджет, снимает процессы непосредственно перед удалением и удаляет только при пустом списке жильцов; дословная форма удаления: `rm -rf "$__path"` только внутри `if [[ -z "$__users" ]]`.
+- `tools/sweep.sh:391-406` — `kit.??????` и `sweep.self.??????` вызывают `__drop_kit_when_idle "$__stale" 0`; `sweep.pgid` остаётся файлом данных и удаляется прямым `rm -f`.
+- Зуб: мутация 111 `СНЕСЁН_ЖИВОЙ_ОБЛОМОК` краснит сценарий 106 своей причиной. Обновлённый прежний зуб 43 по-прежнему краснит сценарий 50 `ОСТАЛСЯ_ОБЛОМОК`.
+
+### 3. L-2 — автоцель только по полному имени версии
+
+- `claude_patch.py:296-300` — дословная положительная форма:
+  ```python
+  version_name = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:\.exe)?$" if is_windows()
+                            else r"^[0-9]+\.[0-9]+\.[0-9]+$")
+  cands = [p for p in vdir.iterdir()
+           if p.is_file() and version_name.fullmatch(p.name)]
+  ```
+  Каталог без такого файла отказывает кодом 2 и прямо называет leftovers непригодными как patch target.
+- Зуб: мутация 112 `НЕВЕРНАЯ_АВТОЦЕЛЬ` краснит сценарий 107.
+
+### 4. L-7 — все фиксированные Python-стадии принадлежат писателю
+
+- `claude_patch.py:477` — `tmp = backup.with_name(backup.name + f".new.{os.getpid()}")`.
+- `claude_patch.py:629` и `claude_patch.py:700` — обе update/download-ветки используют `staging = target.with_name(target.name + f".staging.{os.getpid()}")`.
+- Механический свип `claude_patch.py` подтвердил, что остальные промежуточные имена уже имели PID: download `:236`, launcher `:393`, системный tempfile `:541`.
+- Зуб: мутация 113 `ОБЩАЯ_СТАДИЯ` краснит сценарий 108.
+
+### 5. L-8 — owner записи `probes-sync` содержит PID и `lstart`
+
+- `scripts/probes-sync.sh:165-176` — до `<dst>.sync-new.<pid>` пишется `<dst>.sync-owner.<pid>` строкой `printf '%s\t%s\n' "$$" "$owner_start"`, где `owner_start="$(LC_ALL=C ps -o lstart= -p $$ 2>/dev/null)"`.
+- `scripts/probes-sync.sh:306-322` — `sync_stage_writer_alive` требует owner, совпавший PID, живой процесс и дословное `[[ "$__now" == "$__owner_start" ]]`.
+- `scripts/probes-sync.sh:323-329`, `:382` — осиротевшая стадия удаляется вместе с owner; owner штатного писателя удаляется после успешного `mv`.
+- Зуб: мутация 6 (`[[ "$__now" == "$__owner_start" ]]` → `true  # mutation: owner lstart ignored`) краснит сценарий 6: `--diff` ошибочно принимает переиспользованный номер, стадия и owner остаются.
+
+### 6. K-10 — одна строгая истинность env-ручек
+
+- Четыре дословно одинаковых читателя по форме case находятся в `claude-patch-all.sh:5776-5786`, `tools/sweep.sh:750-760`, `tools/lock-probe.sh:65-73`, `tools/build-path-probe.sh:99-107`:
+  ```bash
+  case "$__value" in
+    1|true|yes|on) return 0 ;;
+    ''|0|false|no|off) return 1 ;;
+    *) ...; return 2 ;;
+  esac
+  ```
+- Потребители: `CLAUDE_PATCH_SKIP_MODELS` — `claude-patch-all.sh:5800`; `SWEEP_SKIP_BUILD_PROBE` — `tools/sweep.sh:763`; `SWEEP_SKIP_TOOLS_BENCH` — `:832`; `SWEEP_SKIP_CHECKS_TEETH` — `:891`; `KEEP_ROOT` — `tools/lock-probe.sh:75,102` и `tools/build-path-probe.sh:109,529,1252`.
+- Обязательная смена поведения: `SWEEP_SKIP_BUILD_PROBE=0` теперь НЕ пропускает зонд.
+- Зубы: мутации 114-123 краснят сценарий 109. Имена причин: 114 и 121 — `ZERO_ПРОПУСТИЛ_ЗОНД`; 115-120 и 122-123 — `ИСТИННОСТЬ_РАЗОШЛАСЬ`.
+
+### Стенды ДО → ПОСЛЕ и гейты
+
+- `tools/corpus-tools-bench.sh`: 102 сценария → **110 сценариев, 0 расхождений**, EXIT 0.
+- Его зубы: 107 мутаций → **124 мутации, покраснели 124**, EXIT 0.
+- `tools/probes-sync-bench.sh`: 5 сценариев → **6 сценариев, 0 расхождений**, EXIT 0.
+- Его зубы: 5 мутаций → **6 мутаций, покраснели 6**, EXIT 0.
+- RED-first был увиден до продуктивного кода: corpus 109 сценариев / 7 расхождений, EXIT 1; probes-sync 6 сценариев / 1 расхождение, EXIT 1. После первой реализации промежуточные старые fixtures и проверки формы также были красными до их исправления.
+- `bash -n` — EXIT 0 для `claude-patch-all.sh`, `scripts/probes-sync.sh`, `tools/sweep.sh`, `tools/lock-probe.sh`, `tools/build-path-probe.sh`, `tools/corpus-tools-bench.sh`, `tools/probes-sync-bench.sh`.
+- `PYTHONPYCACHEPREFIX=<session scratchpad> python3 -m py_compile claude_patch.py` — EXIT 0; bytecode в репозиторий не записан.
+- `git diff --check` — EXIT 0.
+- Полный конвейер и полный свип не запускались по прямому запрету брифа.
+
+### Непереведённые совпадения `-n "${...:-}"`
+
+- `tools/build-path-probe.sh:524` `__CLI_HOLDER` — внутренний PID держателя, не булева env-ручка.
+- `tools/lock-probe.sh:101,137,151` `HOLDER_KIDS`, `INHERIT_BODY`, `HOLDFIFO` — внутреннее состояние и fixture зонда, не операторские булевы ручки.
+- `tools/sweep.sh:196` `__PGID_OURS`/`STATE` — внутреннее состояние и путь; `tools/sweep.sh:975` `XDG_CONFIG_HOME` — стандартный путь.
+- `tools/corpus-tools-bench.sh:170,180` `ROOT` — внутренний путь стенда.
+- `claude-patch-all.sh:205` `CLAUDE_PATCH_LOCK_HELD_BY` — маркер наследования замка; `:2242` `TWEAKCC_LOCAL`, `:2319` `XDG_CONFIG_HOME`, `:5191` `CLAUDE_PATCH_FLOOR_IMAGE` — пути, не boolean controls.
+- Вне write-скоупа: `scripts/kit-build.sh:53` `STAGE` — внутренний путь стадии, не boolean control; не изменён.
+
+### Точный diff working tree
+
+`git diff --numstat`: `26 1 claude-patch-all.sh`; `17 18 claude_patch.py`; `108 0 docs/review/wave31-brief-shell.md`; `45 19 scripts/probes-sync.sh`; `27 2 tools/build-path-probe.sh`; `328 16 tools/corpus-tools-bench.sh`; `26 2 tools/lock-probe.sh`; `48 7 tools/probes-sync-bench.sh`; `96 19 tools/sweep.sh`.
+
+### Вне скоупа и незавершённое
+
+- Вне write-скоупа ничего не изменено; `tweakcc-patch.js` не тронут.
+- Созданные этой задачей временные диагностические файлы находились только в session scratchpad, в репозиторий не попали и перед сдачей удалены.
+- Ничего из шести правок не осталось незавершённым. Коммит не сделан.
+
+### Self-Check: PASSED
+
+Созданные сценарии 103-110 и probes-sync сценарий 6 существуют; дословные счётчики выше взяты из реально запущенных команд; все обязательные зубы покраснели своей названной причиной; финальный статус соответствует зелёному own diff и отсутствию неожиданных красных гейтов.
+
+<!-- BRIEF COMPLETE -->
