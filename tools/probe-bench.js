@@ -787,7 +787,7 @@ const scenarios = [
     config: { threshold: -1 },
     response: 'SILENT: причина',
     expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
-                degExact: ['bad-setting:threshold=-1 (need >=1), using 1'] } },
+                degExact: ['bad-setting:threshold=-1 (need 1..inf), using 1'] } },
   // The other direction: `Number("abc")` is NaN, `1>=NaN` is false, and the
   // threshold stopped applying at all — the gate never refused however busy
   // the fleet was. With one mark and the default restored it must refuse, and
@@ -800,7 +800,7 @@ const scenarios = [
     response: 'NUDGE: не должно дойти',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
                 by: 'fleet-busy:1',
-                degExact: ['bad-setting:threshold=abc (need >=1), using 1'] } },
+                degExact: ['bad-setting:threshold=abc (need 1..inf), using 1'] } },
   // Positive control for the two above: a valid non-default value must be
   // taken AS GIVEN and report NOTHING. Without this a sanitiser that flagged
   // every setting, or silently replaced good ones with defaults, would pass
@@ -823,14 +823,14 @@ const scenarios = [
   { name: 'records-keep-zero-refused', seedRecords: 3, config: { records_keep: 0 },
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', recordCount: 4,
-                degExact: ['bad-setting:records_keep=0 (need >=1), using 500'] } },
+                degExact: ['bad-setting:records_keep=0 (need 1..inf), using 500'] } },
   // The budget travels to the provider. A negative one used to go as given and
   // come back a 400 attributed to the channel; now it is replaced by the
   // default and the config is named as the cause.
   { name: 'budget-negative', config: { max_tokens: -5 },
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', requestMaxTokens: 8000,
-                degExact: ['bad-setting:max_tokens=-5 (need >=1), using 8000'] } },
+                degExact: ['bad-setting:max_tokens=-5 (need 1..inf), using 8000'] } },
   // Судья решает, осталось ли внутри задачи решение. Замер 2026-08-29
   // (Catalyst-Judge-Eval, 500 записей): 381 диспатч называет .md-файл, которого
   // проба не видела, и на лучшем промте ВСЕ ошибки четырёх моделей, кроме двух,
@@ -910,6 +910,111 @@ const scenarios = [
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok',
                 dispatchExcludes: 'ПРИ НУЛЕВОМ БЮДЖЕТЕ ЭТОГО БЫТЬ НЕ ДОЛЖНО' } },
+  // Волна 31, правка 1+2: потолок timeout_ms. Значение выше 2^31-1 уходило в
+  // setTimeout, который сжимает такую задержку до 1 мс, а журнал печатал
+  // ЗАПРОШЕННОЕ число -- отказоустойчивость, которая стреляла мгновенно и
+  // называла себя терпеливой. Теперь отказ назван, с обеими границами.
+  { name: 'timeout-cap-refused', config: { timeout_ms: 2147483648 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', recordCount: 1, journalLines: 1,
+                degExact: ['bad-setting:timeout_ms=2147483648 (need 1..2147483647), using 8000'] } },
+  // Волна 31, правка 1: тип. Number(true)===1, поэтому enforce-подобная опечатка
+  // в числовой ручке проходила КАК ЧИСЛО -- здесь именно она, и выход не единица.
+  { name: 'timeout-type-refused', config: { timeout_ms: true },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', recordCount: 1, journalLines: 1,
+                degExact: ['bad-setting:timeout_ms=true (need 1..2147483647), using 8000'] } },
+  // Волна 31, правка 3: max_tokens=0 НА ЖИВОМ ШАБЛОНЕ. Прежний стенд гонял без
+  // шаблона и дефект не видел: ноль ложен, до __num не доходит, и потолок
+  // шаблона (1200) остаётся молча -- тот же ноль без шаблона объявлялся.
+  // Шаблонный путь -- это raw-http, поэтому сценарий поднимает свой приёмник
+  // и читает бюджет из ОТПРАВЛЕННОГО тела.
+  { name: 'max-tokens-zero-on-template', httpServer: true,
+    bodyTemplate: '{"model":"{{MODEL}}","max_tokens":1200,"messages":'
+      + '[{"role":"system","content":"{{PROMPT}}"},{"role":"user","content":'
+      + '"{{LABEL}}\\n\\n{{CONTEXT}}\\n\\n{{DISPATCH}}"}]}',
+    config: { max_tokens: 0 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 0, requestMaxTokens: 1200,
+                recordCount: 1, journalLines: 1,
+                degExact: ['bad-setting:max_tokens=0 (need 1..inf), using 1200'] } },
+  // Волна 31, правка 4: Bun.TOML отдаёт чужой тип как есть, и enforce=1
+  // выглядел включённым в файле, оставаясь выключенным по делу. Гейт идёт в
+  // безопасную сторону (включён) и это объявлено.
+  { name: 'enforce-number-safe-on', config: { enforce: 1 },
+    response: 'BLOCK: бриф не готов',
+    expected: { passed: false, outcome: 'block', errorIncludes: 'бриф не готов',
+                degExact: ['bad-setting:enforce=1 (need true/false), using true'] } },
+  // Волна 31, правка 5: непустая строка в JS истинна, и CLAUDE_JUDGE=0 пробу
+  // ВКЛЮЧАЛ. Ноль -- это ответ, а не имя.
+  { name: 'switch-zero-means-off', switchValue: '0',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: null, poolCalls: 0, journalLines: 0,
+                recordCount: 0 } },
+  // Волна 31, правка 5, вторая половина: значение enforce -- законный способ
+  // включить пробу и отменять её вердикты; чинится выкл, а не вкл.
+  { name: 'switch-enforce-cancels', switchValue: 'enforce', config: { enforce: false },
+    response: 'BLOCK: бриф не готов',
+    expected: { passed: false, outcome: 'block', errorIncludes: 'бриф не готов' } },
+  // Волна 31, правка 6: пустой массив истинен, и live_kinds=[] тихо отключал
+  // учёт живой работы. Теперь пустой список ПРИНЯТ (ни один род не считается
+  // живым -- законная настройка) и ОБЪЯВЛЕН: консультация здесь происходит,
+  // работающий local_agent её не останавливает.
+  { name: 'live-kinds-empty-accepted-declared', probe: 'watch', toolName: 'Read',
+    watchState: OLD, tasks: { t1: { id: 't1', type: 'local_agent', status: 'running' } },
+    config: { live_kinds: [] },
+    response: 'SILENT: флот молчит',
+    expected: { passed: true, outcome: 'silent', poolCalls: 1, nudges: 0,
+                degExact: ['live_kinds:[] -- ни один род не считается живым'] } },
+  // Волна 31, правка 6: не-массив -- негодное значение, дефолт возвращается и
+  // это объявлено; без объявления живой учёт молча менял бы смысл.
+  { name: 'live-kinds-non-array-refused', probe: 'watch', toolName: 'Read',
+    watchState: OLD, tasks: { t1: { id: 't1', type: 'local_agent', status: 'running' } },
+    config: { live_kinds: 'local_agent' },
+    response: 'SILENT: не должно дойти',
+    expected: { passed: true, outcome: 'filtered', poolCalls: 0, nudges: 0,
+                by: 'live-work:1',
+                degExact: ['bad-setting:live_kinds=local_agent (need list), using '
+                  + '["local_agent","remote_agent","in_process_teammate"]'] } },
+  // Волна 31, правка 7: context_chars ниже 60 расходился с полом __cut -- пол
+  // поднимался к читателю молча. Теперь это названный отказ.
+  { name: 'context-chars-low-refused', config: { context_chars: 30 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', recordCount: 1, journalLines: 1,
+                degExact: ['bad-setting:context_chars=30 (need 60..inf), using 60000'] } },
+  // Волна 31, правка 8, утверждение первое: окно считает ТОЛЬКО *.json.
+  // Посторонняя форма (обломок compact.py) не занимает место в окне, и
+  // положенное вытеснение происходит среди настоящих записей.
+  { name: 'records-window-counts-json-only', seedRecords: 3,
+    seedStrayRecords: ['x.json.gz.tmp.999999'], config: { records_keep: 2 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', jsonCount: 2, recordSeeds: 1,
+                strayCount: 1 } },
+  // Волна 31, правка 8, утверждение второе: посторонняя форма не считается И
+  // НЕ УДАЛЯЕТСЯ -- прежде горизонт мог снести tmp compact.py в миг между его
+  // верификацией и os.replace.
+  { name: 'records-stray-survives-pressure', seedRecords: 2,
+    seedStrayRecords: ['y.json.gz.tmp.4242'], config: { records_keep: 1 },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', jsonCount: 1, recordSeeds: 0,
+                strayCount: 1 } },
+  // Волна 31, правка 9: запись идёт в .part.<pid> и переименовывается. Смерть
+  // посреди записи моделируется отказом rename: конечное имя занято каталогом
+  // (время застужено, имя предсказано), и остаток -- именно .part.<pid> с
+  // ПОЛНОЙ записью, а не усечённый файл под конечным именем, который следующий
+  // validate.py run принял бы за запись.
+  { name: 'record-death-leaves-part', fixedTime: 1769900000000,
+    blockFinalRecord: true,
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', jsonCount: 0, partCount: 1,
+                partIsRecord: true, journalRec: null } },
+  // Волна 31, правка 10: хвост-обломок без \n приклеивал следующую ПОЛНОЦЕННУЮ
+  // запись к себе, и построчный читатель терял ОБЕ. Писатель восстанавливает
+  // границу: две физические строки, обломок не разбирается, запись цела.
+  { name: 'journal-torn-tail-boundary', journalSeed: 'TORN-FRAGMENT-WITHOUT-NEWLINE{"pid":',
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', journalLines: 2, firstLineBroken: true,
+                recordCount: 1 } },
 ];
 
 // The same invariant the check registry carries, for the same reason it was
@@ -919,7 +1024,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 66;
+const EXPECTED_SCENARIOS = 79;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1176,6 +1281,12 @@ function expectationText(expected) {
   if (expected.dispatchExcludes !== undefined) parts.push(`нагрузка без «${expected.dispatchExcludes}»`);
   if (expected.systemIncludes !== undefined) parts.push(`инструкция содержит «${expected.systemIncludes}»`);
   if (expected.systemExcludes !== undefined) parts.push(`инструкция без «${expected.systemExcludes}»`);
+  if (expected.jsonCount !== undefined) parts.push(`записей *.json=${expected.jsonCount}`);
+  if (expected.strayCount !== undefined) parts.push(`посторонних в каталоге=${expected.strayCount}`);
+  if (expected.partCount !== undefined) parts.push(`обломков .part=${expected.partCount}`);
+  if (expected.partIsRecord !== undefined) parts.push(`обломок -- полная запись=${expected.partIsRecord}`);
+  if (expected.firstLineBroken !== undefined) parts.push(`первая строка не разбирается=${expected.firstLineBroken}`);
+  if (expected.journalRec !== undefined) parts.push(`указатель на запись=${expected.journalRec === null ? 'нет' : 'есть'}`);
   return parts.join(', ');
 }
 
@@ -1235,6 +1346,23 @@ const CHECKS = [
   // ПОВТОР строки, и без счёта строк её отсутствие неотличимо от исправности:
   // сценарий с одним прогоном зелен и с памяткой, и без неё.
   { key: 'journalLines', ok: (r, e) => r.journalLines === e.journalLines, got: (r) => r.journalLines },
+  // Волна 31: считаются ТОЛЬКО обычные файлы *.json. records_keep не видит
+  // посторонних форм -- и стенд обязан видеть то же, что горизонт.
+  { key: 'jsonCount', ok: (r, e) => r.jsonCount === e.jsonCount, got: (r) => String(r.jsonCount) },
+  { key: 'strayCount', ok: (r, e) => r.strayCount === e.strayCount, got: (r) => String(r.strayCount) },
+  // Остаток .part.<pid> -- это ЗАПИСЬ, не мусор: она обязана быть полной
+  // (разбирается как запись), иначе «конечное имя после полной записи»
+  // доказано только словами.
+  { key: 'partCount', ok: (r, e) => r.partCount === e.partCount, got: (r) => String(r.partCount) },
+  { key: 'partIsRecord', ok: (r, e) => r.partIsRecord === e.partIsRecord,
+    got: (r) => String(r.partIsRecord) },
+  { key: 'firstLineBroken', ok: (r, e) => r.firstLineBroken === e.firstLineBroken,
+    got: (r) => String(r.firstLineBroken) },
+  // Указатель на запись в строке журнала: при отказе записи его нет -- и это
+  // единственное журнальное свидетельство отказа (снимок deg берётся в момент
+  // вызова __jlog, ДО __jsave, поэтому rec-write: в строку не попадает).
+  { key: 'journalRec', ok: (r, e) => r.journalRec === e.journalRec,
+    got: (r) => String(r.journalRec) },
 ];
 
 // Дверь загрузки на опечатку в ключе expected: сравнивающий читает только
@@ -1282,6 +1410,12 @@ async function runScenario(probe, scenario) {
   const savedFleet = Object.getOwnPropertyDescriptor(globalThis, '__ccFleet');
   const savedWatch = Object.getOwnPropertyDescriptor(globalThis, '__ccWatch');
   const savedToml = globalThis.Bun.TOML;
+  // Волна 31: приёмник и часы объявлены ВНЕ try -- их убирает finally, а let
+  // из try для finally невидим; step() глотает ReferenceError, и сервер
+  // оставался жив (процесс не выходил после ИТОГ), а замороженные Date --
+  // утекали в следующие сценарии.
+  let httpServer = null;
+  let savedDate = null;
   const savedRecSeq = Object.getOwnPropertyDescriptor(globalThis, '__ccRecSeq');
   delete globalThis.__ccRecSeq;
   delete globalThis.__ccProbe;
@@ -1309,6 +1443,23 @@ async function runScenario(probe, scenario) {
           path.join(recDir, `2020-01-01T00-00-0${i}-000Z-seed-0-${i}.json`), '{}');
       }
     }
+    // Посторонние формы в каталоге записей: обломок compact.py -- файл, который
+    // НЕ является записью и не обязан выживать из-за своих прав, а обязан
+    // выживать потому, что он чужой. Сеётся ДО прогона: горизонт решает его
+    // судьбу, и сценарий проверяет приговор.
+    if (scenario.seedStrayRecords) {
+      const recDir = path.join(probeDir, 'records');
+      fs.mkdirSync(recDir, { recursive: true });
+      for (const name of scenario.seedStrayRecords) {
+        fs.writeFileSync(path.join(recDir, name), 'seed-stray-body');
+      }
+    }
+    // Хвост-обломок журнала: БЕЗ замыкающего перевода строки. Пишется до
+    // прогона -- писатель волны 31 обязан восстановить границу, а не читать
+    // её из предположения.
+    if (scenario.journalSeed !== undefined) {
+      fs.writeFileSync(path.join(probeDir, 'journal.jsonl'), scenario.journalSeed);
+    }
     setScenarioEnvironment(tempDir, scenario);
     if (scenario.withoutTomlParser) globalThis.Bun.TOML = undefined;
     // The project layer is reproduced ONLY by changing the working directory:
@@ -1328,6 +1479,40 @@ async function runScenario(probe, scenario) {
     }
 
     const config = { ...baseConfig(scenario), ...(scenario.config || {}) };
+    // Приёмник сценария: шаблонная полоса уходит по raw-http, и бюджет
+    // читается из ОТПРАВЛЕННОГО тела -- заглушка пула его не видит.
+    // Порт 0 -- свободный, имя подставляется в настройки до их записи.
+    const httpBodies = [];
+    if (scenario.httpServer) {
+      httpServer = Bun.serve({
+        port: 0,
+        fetch: async (req) => {
+          httpBodies.push(await req.text());
+          return Response.json({
+            choices: [{ message: { content: scenario.httpReply ?? scenario.response } }],
+          });
+        },
+      });
+      config.url = `http://127.0.0.1:${httpServer.port}`;
+    }
+    // Застуженное время: имя записи строится из метки времени, и отказ rename
+    // можно попросить ТОЧНО -- заняв конечное имя каталогом. Предсказание
+    // повторяет сборку имени ядром (санитизация метки, хвост ключа, pid,
+    // счётчик с нуля до шести).
+    if (scenario.fixedTime !== undefined) {
+      savedDate = globalThis.Date;
+      const frozen = scenario.fixedTime;
+      globalThis.Date = class extends savedDate {
+        constructor(...args) { super(...(args.length ? args : [frozen])); }
+      };
+    }
+    if (scenario.blockFinalRecord) {
+      const recDir = path.join(probeDir, 'records');
+      fs.mkdirSync(recDir, { recursive: true });
+      const stamp = new Date(scenario.fixedTime).toISOString().replace(/[:.]/g, '-');
+      fs.mkdirSync(path.join(recDir,
+        `${stamp}-ol-use-1-${process.pid}-000001.json`));
+    }
     // A machine that has never run probes-sync has NO settings file. Every
     // scenario until now wrote one, so the posture of that state was described
     // in prose and never measured -- and the prose said the opposite of the
@@ -1345,6 +1530,12 @@ async function runScenario(probe, scenario) {
       // тот же текст БЕЗ хвоста — это и есть измерение обрыва.
       const prompt = scenario.truncPrompt ? body : `${body}\n<!-- END OF RULES -->\n`;
       fs.writeFileSync(path.join(probeDir, 'prompt.md'), prompt);
+    }
+    // Живой шаблон body.json: шаблонный путь -- отдельная полоса (raw-http,
+    // свой потолок бюджета), и до волны 31 стенд её не гонял ВООБЩЕ -- дефект
+    // «ноль ложен» жил именно там.
+    if (scenario.bodyTemplate !== undefined) {
+      fs.writeFileSync(path.join(probeDir, 'body.json'), scenario.bodyTemplate);
     }
 
     if (scenario.fleet) globalThis.__ccFleet = scenario.fleet();
@@ -1455,10 +1646,23 @@ async function runScenario(probe, scenario) {
       errorText = sanitizeText(error?.message ?? error, tempDir);
     }
 
+    if (httpBodies.length > 0) {
+      // Первое тело -- первая попытка первой ступени: там бюджет, который
+      // ядро решило отправить. Читается ЧТО ОТПРАВЛЕНО, а не что вернулось.
+      try { requestMaxTokens = JSON.parse(httpBodies[0]).max_tokens ?? null; }
+      catch { requestMaxTokens = null; }
+    }
     const journalFile = path.join(probeDir, 'journal.jsonl');
-    const journalLines = fs.existsSync(journalFile)
-      ? fs.readFileSync(journalFile, 'utf8').split(/\r?\n/).filter(Boolean).length
-      : 0;
+    const journalRaw = fs.existsSync(journalFile) ? fs.readFileSync(journalFile, 'utf8') : '';
+    const journalLines = journalRaw.split(/\r?\n/).filter(Boolean).length;
+    // Первая ФИЗИЧЕСКАЯ строка: обломок без границы склеивается со следующей
+    // записью, и до волны 31 их было не различить. Разбор здесь -- тот же,
+    // каким журнал читает потребитель.
+    let firstLineBroken = false;
+    {
+      const first = journalRaw.split(/\r?\n/, 1)[0] ?? '';
+      if (first !== '') { try { JSON.parse(first); } catch { firstLineBroken = true; } }
+    }
     const journal = readLastJournal(probeDir);
     const entry = journal.entry ? sanitizeValue(journal.entry, tempDir) : null;
     if (!errorText && journal.error) errorText = sanitizeText(journal.error, tempDir);
@@ -1512,6 +1716,33 @@ async function runScenario(probe, scenario) {
       recordSeeds: fs.existsSync(path.join(probeDir, 'records'))
         ? fs.readdirSync(path.join(probeDir, 'records')).filter((n) => n.includes('-seed-')).length
         : 0,
+      // Волна 31: обычные файлы *.json против всего прочего в каталоге.
+      // Каталог на месте конечного имени записи (сценарий обрыва) не считается
+      // записью -- и не считается посторонним: он наш, просто не файл.
+      ...(() => {
+        const dir = path.join(probeDir, 'records');
+        if (!fs.existsSync(dir)) return { jsonCount: 0, strayCount: 0, partCount: 0, partIsRecord: false };
+        const entries = fs.readdirSync(dir).map((name) => {
+          let isFile = false;
+          try { isFile = fs.statSync(path.join(dir, name)).isFile(); } catch { }
+          return { name, isFile };
+        });
+        const parts = entries.filter((e) => e.isFile && /\.part\.\d+$/.test(e.name));
+        let partIsRecord = false;
+        if (parts.length === 1) {
+          try {
+            partIsRecord = Array.isArray(JSON.parse(
+              fs.readFileSync(path.join(dir, parts[0].name), 'utf8')).attempts);
+          } catch { }
+        }
+        return {
+          jsonCount: entries.filter((e) => e.isFile && e.name.endsWith('.json')).length,
+          strayCount: entries.filter((e) => !e.name.endsWith('.json')).length,
+          partCount: parts.length,
+          partIsRecord,
+        };
+      })(),
+      firstLineBroken,
       result: passed ? 'прошёл' : 'отменён',
       outcome: entry?.outcome ?? null,
       sid: entry === null ? undefined : (entry.sid ?? null),
@@ -1520,6 +1751,7 @@ async function runScenario(probe, scenario) {
       msrc: entry === null ? undefined : (entry.msrc ?? null),
       cfg: entry === null ? undefined : (entry.cfg ?? null),
       by: entry?.by ?? null,
+      journalRec: entry?.rec ?? null,
       deg: entry?.deg ?? null,
       poolCalls,
       nudges: nudges.length,
@@ -1548,6 +1780,9 @@ async function runScenario(probe, scenario) {
       }
     });
     step(() => { if (scenario.withoutTomlParser) globalThis.Bun.TOML = savedToml; });
+    // Приёмник и часы -- собственность сценария и уходят вместе с ним.
+    step(() => { if (httpServer) httpServer.stop(true); });
+    step(() => { if (savedDate) globalThis.Date = savedDate; });
     step(() => fs.rmSync(tempDir, { recursive: true, force: true }));
   }
 }
@@ -1639,7 +1874,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 66;', to: 'EXPECTED_SCENARIOS = 65;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 79;', to: 'EXPECTED_SCENARIOS = 78;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },

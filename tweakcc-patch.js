@@ -2009,9 +2009,13 @@ step('21 current turn reachable at tool dispatch', () => {
   // Gated on the same switch as the judge itself: an entry is removed only when
   // the judge READS it, so with the judge off nothing would ever clear this map
   // — it would sit at its 64-entry cap holding message arrays for a feature that
-  // is not running. Off has to mean off.
+  // is not running. Off has to mean off -- and since wave 31 (K-3) "0" means
+  // off too: any non-empty string turned this ON, so CLAUDE_JUDGE=0 kept the
+  // map filling forever. The inline reader is the canonical __envon from the
+  // core's declaration list, spelled out here because this site sits outside
+  // the core function's scope.
   const stash =
-    '(process.env.CLAUDE_JUDGE?((globalThis.__ccJudgeTurn??=new Map()),' +
+    '((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()?((globalThis.__ccJudgeTurn??=new Map()),' +
     'globalThis.__ccJudgeTurn.set($5.id,$2.includes($3)?$2.slice():[...$2,$3]),' +
     'globalThis.__ccJudgeTurn.size>64&&(()=>{' +
     'let __k=globalThis.__ccJudgeTurn.keys().next().value;' +
@@ -2347,15 +2351,28 @@ step('22 judge consulted before a subagent dispatch', () => {
     // stops applying at all. `||` cannot tell "absent" from "invalid"; this
     // does, keeps the default, and says so in the journal, because a setting
     // silently ignored is a guarantee silently dropped.
+    // Wave 31 (K-1/K-9) adds TWO more gates, paid for by the same reader: the
+    // TYPE and the CEILING. Number() coerces anything -- Number(true)===1,
+    // Number([])===0, Number([7])===7 -- so a wrong-typed value in a NUMERIC
+    // knob read as a legitimate small number and the journal called the
+    // setting applied. A number now comes only from typeof "number" or from a
+    // non-empty string; everything else is NaN and takes the refusal branch.
+    // The ceiling: timeout_ms reaches setTimeout, which CLAMPS any delay above
+    // 2^31-1 down to 1 ms -- while the journal printed the REQUESTED number as
+    // if patience had been configured. Callers feeding setTimeout pass
+    // __cap=2147483647; the refusal line names BOTH bounds ("1..2147483647",
+    // "60..inf"), so the human reads the whole lawful window, not its floor.
     // No `let` here and a comma at the end: this whole block is ONE declaration
     // list (`let __t0=…,__jtry=…,__deg=[],…,__jdir=…;`), so a second `let`
     // inside it parses as a binding NAMED `let` — a strict-mode reserved word,
     // and the emit gate refuses the block outright.
-    '__num=(__k,__v,__d,__min,__q)=>{if(__v===void 0||__v===null||__v==="")return __d;' +
-      'let __x=Number(__v);' +
-      'if(!Number.isFinite(__x)||__x<__min){' +
+    '__num=(__k,__v,__d,__min,__q,__cap)=>{if(__v===void 0||__v===null||__v==="")return __d;' +
+      'let __x=typeof __v==="number"?__v:' +
+        '(typeof __v==="string"&&__v.trim()!==""?Number(__v):NaN);' +
+      'if(!Number.isFinite(__x)||__x<__min||(__cap!==void 0&&__x>__cap)){' +
         'if(!__q&&!__nseen[__k]){__nseen[__k]=1;' +
-          '__deg.push("bad-setting:"+__k+"="+__clip(__v,24)+" (need >="+__min+"), using "+__d)}' +
+          '__deg.push("bad-setting:"+__k+"="+__clip(__v,24)+' +
+            '" (need "+__min+".."+(__cap===void 0?"inf":__cap)+"), using "+__d)}' +
         'return __d}' +
       'return __x},' +
     // The degradation list is cut with a declaration: a silently dropped sixth
@@ -2403,6 +2420,43 @@ step('22 judge consulted before a subagent dispatch', () => {
     '__clip=(__s,__k)=>{let __x=String(__s??"");return __x.length<=__k?__x:'+
       '__sur(__x.slice(0,__k))+" [\\u0432\\u044b\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+'+
       '(__x.length-__k)+" \\u0437\\u043d\\u0430\\u043a\\u043e\\u0432]"},' +
+    // Волна 31 (K-2): булевы ручки принимали только `===!0`. Bun.TOML отдаёт
+    // чужой ТИП как есть: `enforce = 1` приходит числом, `fail_closed =
+    // "true"` строкой -- ни то ни другое не равно true, и гейт выглядел
+    // включённым в файле, оставаясь выключенным по делу. Безопасная сторона
+    // выбрана, а не угадана: у ручек приговора ложная отмена дешевле
+    // молчаливого пропуска (то же направление, что __cfgbad); raw_http
+    // безопасно остаётся на пуле. Небулево значение применяется как
+    // безопасное И называется в журнале.
+    '__bl3=(__k,__v,__safe)=>{if(__v===void 0||__v===null)return !1;' +
+      'if(__v===!0)return !0;if(__v===!1)return !1;' +
+      'if(!__nseen[__k]){__nseen[__k]=1;' +
+        '__deg.push("bad-setting:"+__k+"="+__clip(__v,24)+" (need true/false), using "+__safe)}' +
+      'return __safe},' +
+    // Волна 31 (K-3): любая непустая строка в JS истинна, поэтому
+    // CLAUDE_JUDGE=0 пробу ВКЛЮЧАЛ. Ноль/false/off/no -- это ответы, а не
+    // имена. Этот читатель -- каноническая форма; все четыре места применения
+    // лежат ВНЕ функции ядра (области мест врезки), и каждое несёт то же
+    // выражение инлайном -- какой вид встал где, названо в отчёте волны.
+    '__envon=(__v)=>{if(__v===void 0||__v===null)return !1;' +
+      'let __s=String(__v).trim().toLowerCase();' +
+      'return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")},' +
+    // Волна 31 (K-12): список живых родов. `live_kinds||[...]` принимал пустой
+    // массив молча (пустой массив истинен) -- и live_kinds=[] тихо выключал
+    // учёт живой работы. Пустой список -- законная настройка («ни один род не
+    // считается живым»), и она ОБЪЯВЛЯЕТСЯ; не-массив -- негодное значение
+    // со строкой bad-setting и дефолтом; отсутствие -- дефолт молча. Читателю
+    // нужны __deg/__nseen, поэтому он живёт в ядре, а наблюдатель зовёт его
+    // через __svc.list -- сервисы передаются аргументом (см. комментарий у
+    // __svc: всё объявленное здесь невидимо с места врезки).
+    '__lkr=(__k,__v,__d,__e0)=>{if(__v===void 0||__v===null)return __d;' +
+      'if(Array.isArray(__v)){if(!__v.length&&__e0&&!__nseen[__k]){__nseen[__k]=1;' +
+        '__deg.push(__k+":[] -- "+__e0)}' +
+        'return __v}' +
+      'if(!__nseen[__k]){__nseen[__k]=1;' +
+        '__deg.push("bad-setting:"+__k+"="+__clip(__v,24)+' +
+          '" (need list), using "+JSON.stringify(__d))}' +
+      'return __d},' +
     // The probes home is computed ONCE. It used to be spelled out twice, in
     // two identical expressions, and derived two names for one and the same
     // string -- so an edit to either would have sent the journal to a different
@@ -2495,7 +2549,19 @@ step('22 judge consulted before a subagent dispatch', () => {
         'let __out=__data;' +
         'if(__jgz){try{let __z=await import("node:zlib");__out=__z.gzipSync(Buffer.from(__data))}' +
           'catch{__n=__n.replace(/\\.gz$/,"")}}' +
-        'await __jfs.writeFile(__jdir+"/records/"+__n,__out);' +
+        // Волна 31 (L-3): конечное имя появляется только над ПОЛНОЙ записью.
+        // Прежде writeFile открывал/обрезал сразу конечное имя, и смерть
+        // посреди записи оставала файл, который следующий `validate.py run`
+        // принимал за запись и умирал на ней разбором. Байты идут в
+        // <имя>.part.<pid> и переходят конечным именем через rename --
+        // переименование внутри одного каталога атомарно, читатель видит
+        // либо ничего, либо запись целиком. Неудачный rename попадает в
+        // существующую ветку «record write failed» ниже, её текст не менялся.
+        // Промежуточная форма невидима прополке после правки L-6 (не кончается
+        // на .json) -- две правки один механизм, см. комментарий у фильтра.
+        'await __jfs.writeFile(__jdir+"/records/"+__n+".part."+process.pid,__out);' +
+        'await __jfs.rename(__jdir+"/records/"+__n+".part."+process.pid,' +
+          '__jdir+"/records/"+__n);' +
         // Two things this loop must not do.
         //
         // It must not delete the record THIS consultation just wrote. Names are
@@ -2532,8 +2598,19 @@ step('22 judge consulted before a subagent dispatch', () => {
         // (compact.py, где живут правила возраста), а не здесь: горизонт
         // писателя записи безымянен для читателя и уже один раз съел то,
         // что считалось сохранённым.
+        //
+        // Волна 31 (L-6): список стал ДОПУСТИМЫМ, а не запретным.
+        // Отрицательный список (.gz) не знает имён, которых ещё не
+        // придумали: compact.py кладёт рядом <имя>.json.gz.tmp.<pid>,
+        // обломок не кончался на .gz и считался ГОРЯЧЕЙ ЗАПИСЬЮ -- окно
+        // records_keep=N вытесняло настоящую запись ради чужого обломка, а
+        // прополка могла снести сам обломок в миг между его верификацией и
+        // os.replace. Кончается на .json -- запись; всё прочее -- не наше
+        // и не трогается. (Сюда же опирается запись .part.<pid> из правки
+        // L-3 ниже: промежуточная форма невидима горизонту по этой же
+        // причине -- она не кончается на .json.)
         'try{let __ls=(await __jfs.readdir(__jdir+"/records"))' +
-          '.filter((__x)=>__x!==__n&&!__x.endsWith(".gz"));' +
+          '.filter((__x)=>__x!==__n&&__x.endsWith(".json"));' +
           'if(__ls.length>=__jkeep){__ls.sort();' +
             'for(let __old of __ls.slice(0,__ls.length-__jkeep+1))' +
               'try{await __jfs.unlink(__jdir+"/records/"+__old)}' +
@@ -2580,10 +2657,24 @@ step('22 judge consulted before a subagent dispatch', () => {
       // exactly the lines by which the human was supposed to understand what to
       // fix (they went to stderr, not to the journal).
       'try{if(!__jfs)throw new Error("fs unavailable");' +
-        'try{await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}' +
+        // Волна 31 (L-9): писатель восстанавливает границу строки. Оборванный
+        // предыдущий писатель оставляет хвост без перевода строки, и следующая
+        // ПОЛНОЦЕННАЯ запись приклеивалась к обломку -- построчный читатель
+        // терял ОБЕ. Если файл непуст и последний байт не \n, полезная
+        // нагрузка предваряется \n: обломок остаётся обломком (толерантный
+        // читатель на стороне python ловит ровно ОДНУ потерянную строку, как
+        // заявлен), а новая запись цела. Ошибка взгляда на файл гасится:
+        // не смогли посмотреть -- пишем как писали.
+        'let __pfx="";try{let __st=await __jfs.stat(__jdir+"/journal.jsonl");' +
+          'if(__st.size>0){let __fh=await __jfs.open(__jdir+"/journal.jsonl","r");' +
+            'try{let __b1=Buffer.alloc(1);' +
+              'await __fh.read(__b1,0,1,__st.size-1);' +
+              'if(__b1[0]!==10)__pfx="\\n"}finally{await __fh.close()}}}' +
+        'catch{}' +
+        'try{await __jfs.appendFile(__jdir+"/journal.jsonl",__pfx+__r+"\\n")}' +
         'catch(__ae){if(__ae?.code!=="ENOENT")throw __ae;' +
           'await __jfs.mkdir(__jdir,{recursive:!0});' +
-          'await __jfs.appendFile(__jdir+"/journal.jsonl",__r+"\\n")}}' +
+          'await __jfs.appendFile(__jdir+"/journal.jsonl",__pfx+__r+"\\n")}}' +
       'catch(__we){try{console.error(__o.tag+" journal write failed: "+' +
         '(__we?.message??__we)+" | "+__r)}catch{}}};' +
     // The core's services, handed to the consumer as an ARGUMENT.
@@ -2602,7 +2693,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     // Per-consultation, not global: __jlog closes over THIS call's
     // directory, tag and timers, so a shared copy would attribute one
     // consultation's lines to another whenever two overlap.
-    'let __svc={log:__jlog,clip:__clip,num:__num};' +
+    'let __svc={log:__jlog,clip:__clip,num:__num,list:__lkr};' +
     'try{' +
       // The turn snapshot is the JUDGE's material and the judge's alone, so the
       // core only asks its caller for it. It used to read and DELETE the stash
@@ -2849,8 +2940,13 @@ step('22 judge consulted before a subagent dispatch', () => {
       // An unparsed config = enforce and fail_closed UNKNOWN. Treating them as
       // off would mean one broken file switches the gate off, so here they
       // count as on: a false cancellation is cheaper than a silent pass.
-      'let __en=__o.sw==="enforce"||__cfg.enforce===!0||__cfgbad;' +
-      'let __fcl=__cfgbad||__cfg.fail_closed===!0;' +
+      // Wave 31 (K-2): the ===!0 comparisons are gone -- Bun.TOML hands a
+      // foreign TYPE through as itself (enforce = 1 is the number 1), and the
+      // gate looked enabled in the file while being off in fact. The typed
+      // reader __bl3 applies the safe side and names the value; direction per
+      // knob is fixed at its declaration above.
+      'let __en=__o.sw==="enforce"||__bl3("enforce",__cfg.enforce,!0)||__cfgbad;' +
+      'let __fcl=__cfgbad||__bl3("fail_closed",__cfg.fail_closed,!0);' +
       'if(__ask){__jarm=!!__o.arm&&__en&&__fcl;' +
       // The transcript is handed over as a JSON ARRAY, not as labelled lines.
       // A text prefix cannot carry trust: content and label share one
@@ -2881,7 +2977,11 @@ step('22 judge consulted before a subagent dispatch', () => {
       //     before the request. Hence removal marks instead of cutting out; the
       //     array is compacted once; discarding within a share goes with a
       //     single cursor from the head.
-      'let __cut=(__n)=>{' +
+        'let __cut=(__n)=>{' +
+        // Волна 31 (K-6): пол в 60 выживает ради ПРЯМЫХ вызовов. Оба читателя
+        // настроек (__max и ступень) теперь отказываются от значений ниже 60
+        // со строкой bad-setting, так что через конфиг __n<60 недостижим --
+        // и полу больше нечего молча закрывать расхождение между __b и __n.
         'let __b=Math.max(60,__n),__pb=Math.floor(__b*0.35),__sb=Math.floor(__b*0.3);' +
         'let __d=0,__dp=0;' +
         'let __cs=(__x)=>JSON.stringify(__x).length+1;' +
@@ -2966,11 +3066,14 @@ step('22 judge consulted before a subagent dispatch', () => {
             '+(__dp?"; \\u0412\\u042b\\u0422\\u0415\\u0421\\u041d\\u0415\\u041d\\u041e \\u0417\\u0410\\u041a\\u0420\\u0415\\u041f\\u041b\\u0401\\u041d\\u041d\\u042b\\u0425: "+__dp:"")+((__cd=__ctd())?"; \\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e \\u043f\\u043e \\u0442\\u0435\\u043a\\u0441\\u0442\\u0443: "+__cd:"")+"]";' +
           'let __sm=()=>"[\\u043f\\u043e\\u0434\\u0440\\u0435\\u0437\\u0430\\u043d\\u043e "+__d+"]";' +
           // __b, not __n: every loop above trims towards __b = max(60, __n), and
-          // the marker phase chased __n. With context_chars set below 60 the
-          // two disagree, the phase pursues a target the rest of the function
-          // will never reach, and it exits on its break conditions instead of
-          // on the budget -- so "paid for by shrinking the transcript by its own
-          // cost" stops being true exactly where the budget is tightest.
+          // the marker phase chased __n. До волны 31 настроенный context_chars
+          // ниже 60 позволял им расходиться: фаза гналась за целью, которой
+          // остальная функция никогда не достигнет, и выходила по своим
+          // условиям обрыва, а не по бюджету -- «оплачивается уменьшением
+          // транскрипта на собственную цену» переставало быть верным ровно
+          // там, где бюджет теснее всего. Читатели настроек отказываются от
+          // значений ниже 60 (волна 31, K-6), поэтому расхождение достижимо
+          // только прямым вызовом -- и __b остаётся словом записи.
           'if(__cs({src:"injected",text:__mt()})*4>__b)__mt=__sm;' +
           'let __mc=__cs({src:"injected",text:__mt()})+120;' +
           'for(let __g=0;__g<20000&&__tot+__mc>__b&&__a.length>0;__g++){' +
@@ -2984,7 +3087,12 @@ step('22 judge consulted before a subagent dispatch', () => {
           '__dd=new Array(__a.length).fill(!1);' +
           '__a.unshift({src:"injected",text:__mt()})}' +
         'return JSON.stringify(__a)};' +
-      'let __max=__num("context_chars",__cfg.context_chars,60000,0);' +
+      // Волна 31 (K-6): пол держит ЧИТАТЕЛЬ, а не резак. Настроенный
+      // context_chars ниже 60 прежде проходил как есть: __cut молча поднимал
+      // его к 60, а фаза маркера гналась за настроенным числом -- бюджет
+      // врал человеку молчанием. Теперь отказ ИМЕНОВАН (need 60..inf) и
+      // применён дефолт; 60 внутри __cut охраняет только прямые вызовы.
+      'let __max=__num("context_chars",__cfg.context_chars,60000,60);' +
       'let __ctx=__cut(__max);' +
       // Dispatch trimming is declared by the same convention as transcript
       // trimming. The dispatch is the one object whose completeness the judge
@@ -3186,13 +3294,19 @@ step('22 judge consulted before a subagent dispatch', () => {
         // so without this override `models` and `max_tokens` from config.json
         // are silent no-ops — measured twice: first with the model, then with
         // a 1200-token ceiling that truncated a cancel verdict into silence.
+        // Wave 31 (K-8): наличие проверяется `??`, а не истинностью. Ноль
+        // ложен -- `||` ронял его ДО __num, и одна величина получала два
+        // ответа: на живом шаблоне молча оставался потолок шаблона (1200),
+        // без шаблона тот же ноль становился 8000 СО строкой bad-setting.
+        // Теперь ноль -- НАЗВАННЫЙ отказ в обоих случаях; разные дефолты
+        // остаются разными законно: у шаблона свой потолок, и он объявлен.
         'let __obj=JSON.parse(__tpl);__obj.model=__mdl;' +
-        'let __mt=__e.max_tokens||__cfg.max_tokens;' +
-        'if(__mt)__obj.max_tokens=__num("max_tokens",__mt,__obj.max_tokens??__mtd,1);' +
+        'let __mt=__e.max_tokens??__cfg.max_tokens;' +
+        'if(__mt!==void 0&&__mt!==null)__obj.max_tokens=__num("max_tokens",__mt,__obj.max_tokens??__mtd,1);' +
         'if(__e.effort)__obj.reasoning_effort=__e.effort;' +
         'return JSON.stringify(__obj)}catch{' +
         'return JSON.stringify({model:__mdl,' +
-          'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,__mtd,1),' +
+          'max_tokens:__num("max_tokens",__e.max_tokens??__cfg.max_tokens,__mtd,1),' +
           'messages:[{role:"system",content:__sys},' +
           '{role:"user",content:"=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp}]})}};' +
       'let __pool=typeof ' + QM + '==="function"?' + QM + ':null;' +
@@ -3200,14 +3314,21 @@ step('22 judge consulted before a subagent dispatch', () => {
       // The pool is the default path. Raw HTTP remains ONLY as an explicitly
       // named address (the bench probe hits its own receiver) or as a fallback
       // if no pool binding was found in this build: a judge that lost its
-      // channel must degrade, not go silent.
-      'let __http=!!(__o.urlEnv||__cfg.url||__cfg.raw_http===!0)||!__pool;' +
+      // channel must degrade, not go silent. Wave 31 (K-2): raw_http is read
+      // by the typed reader too, safe side OFF -- staying on the pool is the
+      // degradation that still answers.
+      'let __http=!!(__o.urlEnv||__cfg.url||__bl3("raw_http",__cfg.raw_http,!1))||!__pool;' +
       '__jurl=__http?__purl:"pool";' +
-      'let __tmo=__num("timeout_ms",__o.tmoEnv||__cfg.timeout_ms,8000,1);' +
+      // Волна 31 (K-1): потолок -- часть договора. Значение этого чтения
+      // доезжает до setTimeout ниже, а setTimeout СЖИМАЕТ любую задержку выше
+      // 2^31-1 до 1 мс -- журнал при этом печатал ЗАПРОШЕННОЕ число («our cap
+      // …ms fired») для таймаута, который уже сработал. Пятый довод !1
+      // оставляет отказ громким, шестой называет потолок.
+      'let __tmo=__num("timeout_ms",__o.tmoEnv||__cfg.timeout_ms,8000,1,!1,2147483647);' +
       'let __call=async(__cx,__ms,__e)=>{' +
         'let __s0=globalThis.__ccMono(),__a={model:__e.model,via:__http?"http":"pool",ctx_chars:__cx.length,' +
           'timeout_ms:__ms,' +
-          'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,null,1,!0),' +
+          'max_tokens:__num("max_tokens",__e.max_tokens??__cfg.max_tokens,null,1,!0),' +
           'effort:__e.effort||null};__jatt.push(__a);' +
         'let __ac=new AbortController(),__mine=!1,' +
         '__to=setTimeout(()=>{__mine=!0;__ac.abort()},__ms);' +
@@ -3240,7 +3361,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           // maxOutputTokensOverride, also the single budget home on this path.
           'let __ut="=== SESSION SO FAR ===\\n"+__cx+"\\n\\n=== "+__lbl+" ===\\n"+__disp;' +
           '__jreq=JSON.stringify({via:"pool",model:__e.model,effort:__e.effort||null,' +
-            'max_tokens:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,__mtd,1),' +
+            'max_tokens:__num("max_tokens",__e.max_tokens??__cfg.max_tokens,__mtd,1),' +
             'messages:[{role:"system",content:__sys},{role:"user",content:__ut}]});' +
           'let __r2=await __pool({messages:[{type:"user",message:{role:"user",content:__ut},' +
               'uuid:(globalThis.crypto?.randomUUID?.()||String(Date.now())),' +
@@ -3248,7 +3369,7 @@ step('22 judge consulted before a subagent dispatch', () => {
             'systemPrompt:[__sys],thinkingConfig:{type:"disabled"},tools:[],signal:__ac.signal,' +
             'options:{model:__e.model,isNonInteractiveSession:!0,hasAppendSystemPrompt:!1,' +
               'agents:[],mcpTools:[],querySource:"hook_prompt",toolChoice:void 0,' +
-              'maxOutputTokensOverride:__num("max_tokens",__e.max_tokens||__cfg.max_tokens,__mtd,1),' +
+              'maxOutputTokensOverride:__num("max_tokens",__e.max_tokens??__cfg.max_tokens,__mtd,1),' +
               'effortValue:__e.effort||void 0,agentId:__o.ctx?.agentId,agentContext:__o.ctx?.agentContext,' +
               'getToolPermissionContext:async()=>__o.ctx?.getAppState?.()?.toolPermissionContext}});' +
           'let __t2=JSON.stringify(__r2);__jres=__t2;__a.resp=__clip(__t2,800);' +
@@ -3383,8 +3504,11 @@ step('22 judge consulted before a subagent dispatch', () => {
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
         'try{__jtry=__i+1;__jm=__e.model;' +
           '__raw=await __call(__e.context_chars?' +
-            '__cut(__num("rung.context_chars",__e.context_chars,__max,0)):__ctx,' +
-            '__num("rung.timeout_ms",__e.timeout_ms,__tmo,1),__e);' +
+            '__cut(__num("rung.context_chars",__e.context_chars,__max,60)):__ctx,' +
+            // Оба чтения ступени несут свои границы (волна 31): контекст --
+            // пол 60 (K-6), таймаут -- потолок setTimeout (K-1), тот же
+            // 2147483647, что у __tmo, по той же причине.
+            '__num("rung.timeout_ms",__e.timeout_ms,__tmo,1,!1,2147483647),__e);' +
           '__v=__pv(__raw);if(__v)break;' +
           // A 2xx with no verdict (budget spent on reasoning, finish_reason
           // "length") is a failure like any other — the chain must move on, or
@@ -3416,8 +3540,10 @@ step('22 judge consulted before a subagent dispatch', () => {
         // Bound above by the rung, not only below by a second: with a rung under
         // two seconds the bare floor made the salvage cost MORE than the attempt
         // it salvages. Read once into __rt -- twice in one statement is the
-        // defect named four lines up for __rcc.
-        'let __rt=__num("rung.timeout_ms",__e.timeout_ms,__tmo,1);' +
+        // defect named four lines up for __rcc. Wave 31 (K-1): the ceiling
+        // argument is the setTimeout cap, the same 2147483647 as __tmo -- this
+        // clock reaches setTimeout exactly like the main one.
+        'let __rt=__num("rung.timeout_ms",__e.timeout_ms,__tmo,1,!1,2147483647);' +
         'try{__raw=await __call(__cut(__rcc),' +
           'Math.min(__rt,Math.max(1000,Math.round(__rt/2))),' +
           '__e);__v=__pv(__raw);' +
@@ -3509,7 +3635,11 @@ step('22 judge consulted before a subagent dispatch', () => {
     // the same position it held when it sat in front of the dispatcher's call.
     // Nothing above it in the body does anything but destructure, so a
     // cancellation leaves nothing half-done.
-    'if(process.env.CLAUDE_JUDGE&&($2.name==="Agent"||$2.name==="Task")' +
+    // Волна 31 (K-3): проверка ВКЛ/ВЫКЛ читается типизированным читателем
+    // (каноническая форма -- __envon в списке деклараций ядра; здесь инлайн,
+    // потому что место врезки вне области видимости ядра). Непустая строка
+    // истинна, и CLAUDE_JUDGE=0 прежде ВКЛЮЧАЛ пробу.
+    'if((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&($2.name==="Agent"||$2.name==="Task")' +
       '&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Judge]",dirName:"judge",arm:!0,' +
@@ -3559,7 +3689,10 @@ step('22 judge consulted before a subagent dispatch', () => {
     'globalThis.__ccFleet??=[];' +
     'if($2.name==="Agent"||$2.name==="Task"){globalThis.__ccFleet.push(globalThis.__ccMono());' +
       'if(globalThis.__ccFleet.length>256)globalThis.__ccFleet=globalThis.__ccFleet.slice(-256)}' +
-    'if(process.env.CLAUDE_IDLE&&$4?.agentContext?.agentType==="main")' +
+    // Волна 31 (K-3): тот же типизированный читатель для выключателя
+    // наблюдателя -- CLAUDE_IDLE=0 обязан значить ВЫКЛ, инлайн по той же
+    // причине области видимости (каноническая форма -- __envon в ядре).
+    'if((()=>{let __s=String(process.env.CLAUDE_IDLE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Watch]",dirName:"idle-watch",arm:!1,label:"FLEET",' +
       // Its own vocabulary: the watcher has nothing to permit or forbid; it
@@ -3589,7 +3722,8 @@ step('22 judge consulted before a subagent dispatch', () => {
         '__w=__svc.num("window_min",__c.window_min,30,1)*60000,__th=__svc.num("threshold",__c.threshold,1,1),' +
         '__cd=__svc.num("cooldown_min",__c.cooldown_min,30,1)*60000,' +
         '__lth=__svc.num("live_threshold",__c.live_threshold,1,1),' +
-        '__lk=__c.live_kinds||["local_agent","remote_agent","in_process_teammate"],' +
+        '__lk=__svc.list("live_kinds",__c.live_kinds,["local_agent","remote_agent","in_process_teammate"],' +
+          '"\\u043d\\u0438 \\u043e\\u0434\\u0438\\u043d \\u0440\\u043e\\u0434 \\u043d\\u0435 \\u0441\\u0447\\u0438\\u0442\\u0430\\u0435\\u0442\\u0441\\u044f \\u0436\\u0438\\u0432\\u044b\\u043c"),' +
         '__rc=__svc.num("live_recheck_ms",__c.live_recheck_ms,60000,1000);' +
         // `last` is the moment of the previous consultation and `null` is
         // its absence. It cannot be a 0: this clock is monotonic and its
@@ -3997,7 +4131,10 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
   if (all.length !== 1) fail(`expected 1 system-prompt assembly site, found ${all.length}`);
   js = js.replace(
     rx,
-    '$1,...(process.env.CLAUDE_JUDGE&&$2?.agentContext?.agentType==="main"?' +
+    // Волна 31 (K-3): то же правило для правила в системном промпте --
+    // выключенный судья не должен оставлять свой текст. Инлайн-читатель
+    // (каноническая форма __envon объявлена в ядре, сюда не видна).
+    '$1,...((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&$2?.agentContext?.agentType==="main"?' +
       JSON.stringify(RULE).replace(/^/, '[').replace(/$/, ']') +
       ':[])].filter(Boolean)',
   );

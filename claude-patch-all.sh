@@ -3331,7 +3331,12 @@ def _judge_rides_the_tool(d):
     if len(set(cores)) != 1 or len(cores[0]) < 15000:
         return False
 
-    JUDGE = rb'if\(process\.env\.CLAUDE_JUDGE&&\('
+    # Волна 31 (K-3): потребитель-судья опознаётся по своему
+    # типизированному выключателю (сырая истинность строки ушла вместе с
+    # `CLAUDE_JUDGE=0`); наблюдатель несёт такой же читатель для
+    # CLAUDE_IDLE -- в блоке судьи его нет, и наоборот.
+    JUDGE = (rb'String\(process\.env\.CLAUDE_JUDGE\?\?""\)\.trim\(\)\.toLowerCase\(\);'
+             rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}\)\(\)')
     WATCH = rb'globalThis\.__ccFleet\?\?=\[\];'
     judge_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
                    if re.search(JUDGE, d[c:e])]
@@ -3420,7 +3425,8 @@ def _turn_belongs_to_the_judge(d):
     suppliers = [i for i, (c, e) in enumerate(zip(core_end, ends))
                  if b'turn:()=>{' in d[c:e]]
     judges = [i for i, (c, e) in enumerate(zip(core_end, ends))
-              if re.search(rb'if\(process\.env\.CLAUDE_JUDGE&&\(', d[c:e])]
+              if re.search(rb'String\(process\.env\.CLAUDE_JUDGE\?\?""\)\.trim\(\)\.toLowerCase\(\);'
+                           rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}\)\(\)', d[c:e])]
     if suppliers != judges or len(suppliers) != 1:
         return False
     c, e = core_end[suppliers[0]], ends[suppliers[0]]
@@ -3663,7 +3669,13 @@ def _cancellation_rule_is_whole(d):
     of them can be dropped without touching the others, and the opening clause
     alone proves none of them.
     """
-    if not re.search(rb'\.\.\.\(process\.env\.CLAUDE_JUDGE&&' + ID
+    # Волна 31 (K-3): перед arm стоит типизированный читатель выключателя
+    # (инлайн-форма канонического __envon из ядра), и пин проходит по нему
+    # целиком -- ослабления нет, пин стал длиннее прежнего.
+    if not re.search(rb'\.\.\.\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_JUDGE\?\?""\)'
+                     rb'\.trim\(\)\.toLowerCase\(\);'
+                     rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
+                     rb'\)\(\)&&' + ID
                      + rb'\?\.agentContext\?\.agentType==="main"\?\['
                      rb'"A subagent dispatch may be reviewed before it runs\.', d):
         return False
@@ -4081,12 +4093,21 @@ checks = {
     # tool_use block alone
     'judge stashes the current turn': bool(re.search(
                                               rb'\.streamingToolExecutor\.addTool\(' + ID + rb',' + ID + rb','
-                                              rb'\(process\.env\.CLAUDE_JUDGE\?'
+                                              # волна 31 (K-3): стэш гейтится тем же типизированным читателем --
+                                              # CLAUDE_JUDGE=0 больше не наполняет карту хода
+                                              rb'\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_JUDGE\?\?""\)'
+                                              rb'\.trim\(\)\.toLowerCase\(\);'
+                                              rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
+                                              rb'\)\(\)\?'
                                               rb'\(\(globalThis\.__ccJudgeTurn\?\?=new Map\(\)\)', d)),
     # judge part 2: consulted before a subagent dispatch, off unless
     # CLAUDE_JUDGE is set, fail-open on every path
     'judge consulted before dispatch': bool(re.search(
-                                              rb'if\(process\.env\.CLAUDE_JUDGE&&\(' + ID + rb'\.name==="Agent"'
+                                              # волна 31 (K-3): инлайн-читатель выключателя (см. E1)
+                                              rb'if\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_JUDGE\?\?""\)'
+                                              rb'\.trim\(\)\.toLowerCase\(\);'
+                                              rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
+                                              rb'\)\(\)&&\(' + ID + rb'\.name==="Agent"'
                                               rb'\|\|' + ID + rb'\.name==="Task"\)&&' + ID +
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{', d)),
@@ -4140,7 +4161,12 @@ checks = {
     # The watcher is the second consumer of the SAME core. A separate
     # definition here would mean the decomposition into a core never happened.
     'watcher rides the same core': bool(re.search(
-                                              rb'if\(process\.env\.CLAUDE_IDLE&&' + ID +
+                                              # волна 31 (K-3): тот же типизированный читатель для
+                                              # выключателя наблюдателя
+                                              rb'if\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_IDLE\?\?""\)'
+                                              rb'\.trim\(\)\.toLowerCase\(\);'
+                                              rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
+                                              rb'\)\(\)&&' + ID +
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{'
                                               rb'tag:"\[Watch\]",dirName:"idle-watch",arm:!1,'
@@ -4308,10 +4334,13 @@ checks = {
     # a 2xx whose budget went entirely into reasoning returns no verdict, and
     # silence reads as consent — that must advance the chain like any failure
     # the body template carries its own ceiling, so config.json's max_tokens is
-    # a silent no-op without this override — that silence once ate a cancellation
+    # a silent no-op without this override — that silence once ate a cancellation.
+    # Волна 31 (K-8): наличие -- `??` и страж от void 0/null, а не истинность:
+    # ноль прежде не доезжал до __num, и один и тот же ноль получал два
+    # ответа -- на живом шаблоне молча оставался его потолок.
     'judge budget has one home': bool(re.search(
-                                              rb'let __mt=__e\.max_tokens\|\|__cfg\.max_tokens;'
-                                              rb'if\(__mt\)__obj\.max_tokens=__num\("max_tokens",__mt,'
+                                              rb'let __mt=__e\.max_tokens\?\?__cfg\.max_tokens;'
+                                              rb'if\(__mt!==void 0&&__mt!==null\)__obj\.max_tokens=__num\("max_tokens",__mt,'
                                               rb'__obj\.max_tokens\?\?__mtd,1\)', d)),
     'judge treats a verdictless reply as a failure': bool(re.search(
                                               rb'__v=__pv\(__raw\);if\(__v\)break;', d))
@@ -4320,10 +4349,12 @@ checks = {
     # each rung of the ladder carries its own deadline and transcript size,
     # because the reasons a rung fails differ
     'judge ladder rungs carry their own limits': bool(re.search(
+                                              # волна 31: у ступеней те же границы, что у главных
+                                              # чтений -- пол 60 (K-6) и потолок setTimeout 2^31-1 (K-1)
                                               rb'__raw=await __call\(__e\.context_chars\?'
                                               rb'__cut\(__num\("rung\.context_chars",__e\.context_chars,'
-                                              rb'__max,0\)\):__ctx,'
-                                              rb'__num\("rung\.timeout_ms",__e\.timeout_ms,__tmo,1\),'
+                                              rb'__max,60\)\):__ctx,'
+                                              rb'__num\("rung\.timeout_ms",__e\.timeout_ms,__tmo,1,!1,2147483647\),'
                                               rb'__e\)', d)),
     # Ни `for` (это ладдер), ни присваивание счётчика не требуют, чтобы повтор
     # СОСТОЯЛСЯ: выбросить сам вызов -- и проверка остаётся зелёной, а имя её
@@ -4394,8 +4425,10 @@ checks = {
     # a whole-ladder failure under fail_closed = cancellation, not a silent pass
     'judge can fail closed': bool(re.search(
                                               rb'__fc=!__v&&__en&&__fcl', d))
+                                          # волна 31 (K-2): fail_closed читается типизированным
+                                          # читателем, безопасная сторона -- включён
                                           and bool(re.search(
-                                              rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
+                                              rb'let __fcl=__cfgbad\|\|__bl3\("fail_closed",__cfg\.fail_closed,!0\)', d))
                                           and bool(re.search(rb'if\(__fc\)await __o\.onNoVerdict\(', d))
                                           # ...and the judge's reaction to it must be a throw,
                                           # otherwise fail_closed turns into fail-open with a one-line edit at the call site
@@ -4511,18 +4544,25 @@ checks = {
                                           # send path had already used 1200
                                           and bool(re.search(
                                               rb'max_tokens:__num\("max_tokens",'
-                                              rb'__e\.max_tokens\|\|__cfg\.max_tokens,null,1,!0\)', d))
+                                              rb'__e\.max_tokens\?\?__cfg\.max_tokens,null,1,!0\)', d))
                                           and bool(re.search(
-                                              rb'__num=\(__k,__v,__d,__min,__q\)=>\{if\(__v===void 0\|\|'
+                                              rb'__num=\(__k,__v,__d,__min,__q,__cap\)=>\{if\(__v===void 0\|\|'
                                               rb'__v===null\|\|__v===""\)return __d;', d))
+                                          # волна 31 (K-1/K-9): вход типизирован (Number(true)===1
+                                          # больше не проходит числом), у чтений появился потолок
                                           and bool(re.search(
-                                              rb'if\(!Number\.isFinite\(__x\)\|\|__x<__min\)\{'
+                                              rb'let __x=typeof __v==="number"\?__v:'
+                                              rb'\(typeof __v==="string"&&__v\.trim\(\)!==""\?Number\(__v\):NaN\);', d))
+                                          and bool(re.search(
+                                              rb'if\(!Number\.isFinite\(__x\)\|\|__x<__min\|\|\(__cap!==void 0&&__x>__cap\)\)\{'
                                               rb'if\(!__q&&!__nseen\[__k\]\)\{__nseen\[__k\]=1;'
                                               rb'__deg\.push\("bad-setting:"', d))
                                           # the watcher's gate is a callback closed over ITS
                                           # splice site, so the sanitiser reaches it only as a
                                           # handed-over service -- and both ends must agree
-                                          and bool(re.search(rb'__svc=\{log:__jlog,clip:__clip,num:__num\}', d))
+                                          # волна 31 (K-12): в сервисах появился читатель списков
+                                          # (live_kinds), __svc.num-счёт ниже не тронут
+                                          and bool(re.search(rb'__svc=\{log:__jlog,clip:__clip,num:__num,list:__lkr\}', d))
                                           and bool(re.search(rb'__g=await __o\.gate\(__cfg,__svc\)', d))
                                           and bool(re.search(rb'gate:\(__c,__svc\)=>', d))
                                           and len(re.findall(rb'__svc\.num\("', d)) == 5),
@@ -4697,12 +4737,16 @@ checks = {
                                               rb'__ls\.length>=__jkeep', d)),
     # Отдельной проверкой, а не хвостом предыдущей: горизонт записей и
     # неприкосновенность архива -- два разных обещания, и обещание про архив
-    # обязано уметь провалиться в одиночку. Прополка считает только несжатые
-    # записи; сжатое (<имя>.json.gz, куда compact.py кладёт старое) в счёт не
-    # идёт и не удаляется. Замерено 2026-08-30: пока .gz считался наравне,
-    # из 45 размеченных записей горизонт унёс 24.
+    # обязано уметь провалиться в одиночку. Волна 31 (L-6) перевела фильтр с
+    # запретного списка на ДОПУСТИМЫЙ: записью считается кончающееся на
+    # .json, всё прочее -- не наше. Сжатое (<имя>.json.gz, куда compact.py
+    # кладёт старое) в счёт не идёт и не удаляется -- как и обломок
+    # <имя>.json.gz.tmp.<pid>, который запретный список не знал и считал
+    # ГОРЯЧЕЙ ЗАПИСЬЮ: из 45 размеченных записей горизонт унёс 24 (замер
+    # 2026-08-30), а чужой обломок мог быть снесён в миг между его
+    # верификацией и os.replace.
     'the archive is out of the window': bool(re.search(
-                                              rb'!__x\.endsWith\("\.gz"\)', d)),
+                                              rb'__x\.endsWith\("\.json"\)', d)),
     'a prune losing a race is not a failure': bool(re.search(
                                               rb'if\(__ue\?\.code!=="ENOENT"\)throw __ue', d)),
     'record names sort as time inside one millisecond': bool(re.search(
@@ -4910,11 +4954,13 @@ checks = {
                                               rb'let __c0=await __ldt\(__phome\+"/probes\.toml"\);'
                                               rb'if\(__c0===!1\)__cfgbad=!0;else if\(__c0\)'
                                               rb'\{__cfgseen=!0;__cfg=__eff\(__c0,__o\.dirName\)\}', d))
-                                          # unknown enforce/fail_closed count as ON
+                                          # unknown enforce/fail_closed count as ON;
+                                          # волна 31 (K-2): сравнения ===!0 заменены типизированным
+                                          # читателем __bl3 с безопасной стороной (см. ядро)
                                           and bool(re.search(
-                                              rb'__cfg\.enforce===!0\|\|__cfgbad', d))
+                                              rb'__bl3\("enforce",__cfg\.enforce,!0\)\|\|__cfgbad', d))
                                           and bool(re.search(
-                                              rb'let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0', d))
+                                              rb'let __fcl=__cfgbad\|\|__bl3\("fail_closed",__cfg\.fail_closed,!0\)', d))
                                           # an unreadable layer is distinct from a missing one:
                                           # "no such path" (ENOENT/ENOTDIR/ELOOP) versus
                                           # "the path exists, no access" (EACCES/EPERM)
@@ -5506,7 +5552,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 66 scenarios through a throwaway probes home —
+# and drives probe-bench's 79 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #

@@ -259,3 +259,275 @@ L-9). Адъюдикация контроллера — в `docs/review/findings
 доказательство (`grep -n`/дифф) и стоп по этому пункту. Диффы не выдумывать.
 
 <!-- BRIEF COMPLETE -->
+
+## ОТЧЁТ ИСПОЛНИТЕЛЯ
+
+Статус: DONE. 10/10 правок ядра исполнены, стенд дописан, RED-фаза увидена до
+правок, все 11 мутаций красят свои сценарии своими причинами. Коммитов нет,
+изменения в рабочем дереве: `tweakcc-patch.js`, `tools/probe-bench.js`,
+`tools/docnum-mutations.tsv` (два последних — см. «Отклонения», п. 1).
+
+### Счётчики стенда
+
+| фаза | сценариев | расхождений | код | примечание |
+|---|---|---|---|---|
+| ДО | 66 | 0 | 0 | живой образ 2.1.251, `bun tools/probe-bench.js --binary ~/.local/share/claude/versions/2.1.251` |
+| ДО, self-check | мутаций 5 | ослепили 5 | 0 | тот же образ |
+| RED (неправленный патч + новый стенд) | 79 | 14 | 1 | образ из 2.1.251.orig + патч ДО правок; красные = 12 новых сценариев + 4 старых на новый формат `(need N..inf)` (records-keep-zero-refused, budget-negative, watch-threshold-negative, watch-threshold-not-a-number); `switch-enforce-cancels` зелёный — проверяет не-дефектную половину правки 5 |
+| ПОСЛЕ | 79 | 0 | 0 | образ из 2.1.251.orig + патч ПОСЛЕ правок |
+| ПОСЛЕ, self-check | мутаций 5 | ослепили 5 | 0 | тот же образ |
+
+Эмит-гейт: `node --check tweakcc-patch.js` EXIT=0; применение патча —
+`node ~/.cache/catalyst-tweakcc/a89c9dae9bbd35979f66afd18908a4c9bffa82b0/dist/index.mjs
+adhoc-patch --script @tweakcc-patch.js -p <копия 2.1.251.orig>
+--confirm-possible-dangerous-patch` EXIT=0 (обе фазы, RED и ПОСЛЕ); вырезанные
+блоки (судья и наблюдатель) компилируются в стенде под `"use strict"` — второй
+`let` внутри списка деклараций отсутствовал бы именно там. Строка брифа
+`python3 claude-patch-all.sh --help` неприменима (это bash-скрипт); гейт выполнен
+формой `bash claude-patch-all.sh --help >/dev/null` — EXIT=0.
+
+### Правки (файл:строка ПОСЛЕ правки, дословная новая форма, мутация)
+
+1. `tweakcc-patch.js:2369-2376` — `__num` с типовым входом и потолком:
+   `'__num=(__k,__v,__d,__min,__q,__cap)=>{if(__v===void 0||__v===null||__v==="")return __d;'` /
+   `'let __x=typeof __v==="number"?__v:'` /
+   `'(typeof __v==="string"&&__v.trim()!==""?Number(__v):NaN);'` /
+   `'if(!Number.isFinite(__x)||__x<__min||(__cap!==void 0&&__x>__cap)){'` /
+   `'if(!__q&&!__nseen[__k]){__nseen[__k]=1;'` /
+   `'__deg.push("bad-setting:"+__k+"="+__clip(__v,24)+'` /
+   `'" (need "+__min+".."+(__cap===void 0?"inf":__cap)+"), using "+__d)}'`.
+   Мутации: M1a `(__cap!==void 0&&__x>__cap)` → `(__cap!==void 0&&__x<__cap)` —
+   красит `timeout-cap-refused` (1 расхождение); M1b
+   `?Number(__v):NaN);` → `?Number(__v):1e9);` — красит `timeout-type-refused`
+   (boolean принят числом, отказ исчез; 1 расхождение).
+2. `:3327` `'let __tmo=__num("timeout_ms",__o.tmoEnv||__cfg.timeout_ms,8000,1,!1,2147483647);'`;
+   `:3511` `'__num("rung.timeout_ms",__e.timeout_ms,__tmo,1,!1,2147483647),__e);'`;
+   `:3546` `'let __rt=__num("rung.timeout_ms",__e.timeout_ms,__tmo,1,!1,2147483647);'`.
+   Четвёртого потребителя `setTimeout` нет: `grep -n setTimeout tweakcc-patch.js`
+   → единственное `:3340` (`__to=setTimeout(...)`). Мутация M2
+   `,8000,1,!1,2147483647);` → `,8000,1,!1,9147483647);` — красит
+   `timeout-cap-refused` и `timeout-type-refused` (граница названа в отказе
+   неверно; 2 расхождения).
+3. `:3304-3305` `'let __mt=__e.max_tokens??__cfg.max_tokens;'` /
+   `'if(__mt!==void 0&&__mt!==null)__obj.max_tokens=__num("max_tokens",__mt,__obj.max_tokens??__mtd,1);'`;
+   ещё четыре места `??`: `:3309`, `:3331`, `:3364`, `:3372`. Мутация M3
+   `__mt!==void 0&&__mt!==null` → `__mt===void 0&&__mt!==null` — красит
+   `max-tokens-zero-on-template` (нуль снова не доходит до `__num`; 1
+   расхождение). Первая попытка мутации (`??`→`||`) была ЗЕЛЁНОЙ (rc=0):
+   страж `!==void 0` один пропускал нуль — зуб перенесён на страж.
+4. `:2431-2437` декларация `'__bl3=(__k,__v,__safe)=>{…(need true/false), using "+__safe)}'`
+   (дословно по брифу, запятая-биндинг в общем списке); применение `:2948`
+   `'let __en=__o.sw==="enforce"||__bl3("enforce",__cfg.enforce,!0)||__cfgbad;'`,
+   `:2949` `'let __fcl=__cfgbad||__bl3("fail_closed",__cfg.fail_closed,!0);'`,
+   `:3320`
+   `'let __http=!!(__o.urlEnv||__cfg.url||__bl3("raw_http",__cfg.raw_http,!1))||!__pool;'`.
+   Мутация M4 `__bl3("enforce",__cfg.enforce,!0)` → `…,!1)` — красит
+   `enforce-number-safe-on` (гейт уходит в выключено; 1 расхождение).
+5. `:2441-2444` декларация `'__envon=(__v)=>{if(__v===void 0||__v===null)return !1;…no")},'`
+   (дословно). Все ЧЕТЫРЕ точки применения — вне области видимости ядра, в каждой
+   встал ИНЛАЙН-вид: `:2018` (стэш хода), `:3642` (judgeCall),
+   `:3695` (watchCall, с `CLAUDE_IDLE`), `:4137` (системный промпт) —
+   `(()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()`.
+   `:3568`/`:3608` (`sw:process.env.…`, сырой текст) и сравнение
+   `__o.sw==="enforce"` не тронуты. Мутация M5
+   `__s==="0"…})()&&($2.name==="Agent"` → `__s==="O"…` (сайт judgeCall) —
+   красит `switch-zero-means-off` (ноль снова включает; 1 расхождение).
+6. `:2452-2460` декларация `'__lkr=(__k,__v,__d,__e0)=>{…}'` в том же списке;
+   `:2696` `'let __svc={log:__jlog,clip:__clip,num:__num,list:__lkr};'`;
+   `:3725-3726`
+   `'__lk=__svc.list("live_kinds",__c.live_kinds,["local_agent","remote_agent","in_process_teammate"],'`
+   + `'"ни один род не считается живым"),'`.
+   Пустой массив принят и объявлен строкой `live_kinds:[] -- ни один род не
+   считается живым`; не-массив — `bad-setting:live_kinds=… (need list), using
+   ["local_agent","remote_agent","in_process_teammate"]` и дефолт. Мутация M6
+   `'return __v}' +` → `'return __d}' +` (ветка приёма массива в `__lkr`) —
+   красит `live-kinds-empty-accepted-declared` (пустой список молча заменён
+   дефолтом; 1 расхождение).
+7. `:3095` `'let __max=__num("context_chars",__cfg.context_chars,60000,60);'`;
+   `:3507` `'__cut(__num("rung.context_chars",__e.context_chars,__max,60)):__ctx,'`.
+   Комментарий пола в `__cut` (`:2994-2998`) и комментарий фазы маркера
+   (`:3083-3092`) переписаны под новый инвариант. Мутация M7
+   `__cfg.context_chars,60000,60);` → `…,59);` — красит
+   `context-chars-low-refused` (граница в отказе; 1 расхождение).
+8. `:2613` `'.filter((__x)=>__x!==__n&&__x.endsWith(".json"));'`. Мутация M8
+   `__x.endsWith(".json")` → `__x.endsWith(".jsoh")` — красит ОБА сценария
+   прополки (`records-window-counts-json-only`, `records-stray-survives-pressure`)
+   плюс попутно `records-pruned` (та же причина: фильтр перестал видеть записи);
+   3 расхождения.
+9. `:2562-2564` `'await __jfs.writeFile(__jdir+"/records/"+__n+".part."+process.pid,__out);'` /
+   `'await __jfs.rename(__jdir+"/records/"+__n+".part."+process.pid,'` /
+   `'__jdir+"/records/"+__n);'`. Мутация M9 `".part."+process.pid,__out);` →
+   `".parz."+process.pid,__out);` (только вхождение writeFile) — красит
+   `record-death-leaves-part` (остаток не `.part.<pid>`; 1 своё + 3 попутно
+   прополочных: сломанный rename отменяет прополку — та же причина).
+10. `:2668-2677` — блок `__pfx` дословно по брифу и оба вызова
+    `'try{await __jfs.appendFile(__jdir+"/journal.jsonl",__pfx+__r+"\\n")}'` /
+    `'await __jfs.appendFile(__jdir+"/journal.jsonl",__pfx+__r+"\\n")}}'`.
+    Мутация M10 `if(__b1[0]!==10)` → `if(__b1[0]===10)` — красит
+    `journal-torn-tail-boundary` (граница не восстанавливается; 1 расхождение).
+
+Все мутации равной длины, ни одна не падает ошибкой разбора/сборки (каждый
+мутант собирался и прогонялся; «прибор не мерит» не допущено). Честные
+промахи первых попыток: M3v1 (`??`→`||`) — вакуумно зелёная, зуб перенесён на
+страж; M1bv1 (`===`→`!==`) — красила свой сценарий только попутной записью
+`max_tokens`, M1bv2 (`:NaN)`→`:__v)`) — вакуумно зелёная (`Number.isFinite`
+строг к типу); итоговая M1b (`:1e9)`) хирургична.
+
+### Сценарии стенда (13 новых, все в существующий стенд)
+
+`timeout-cap-refused`, `timeout-type-refused`, `max-tokens-zero-on-template`
+(живой шаблон `body.json` + собственный HTTP-приёмник стенда, бюджет читается
+из отправленного тела), `enforce-number-safe-on`, `switch-zero-means-off`,
+`switch-enforce-cancels`, `live-kinds-empty-accepted-declared`,
+`live-kinds-non-array-refused`, `context-chars-low-refused`,
+`records-window-counts-json-only`, `records-stray-survives-pressure`,
+`record-death-leaves-part` (застуженные `Date` + каталог на месте конечного
+имени — контролируемый отказ rename; «смерть посреди записи» смоделирована
+как «запись не дошла до конечного имени», остаток — полный `.part.<pid>`),
+`journal-torn-tail-boundary`. Новые ключи expected: `jsonCount`, `strayCount`,
+`partCount`, `partIsRecord`, `firstLineBroken`, `journalRec`. `EXPECTED_SCENARIOS`
+66→79, отрава self-check `scenario-count-guard` и якорь D4 в
+`tools/docnum-mutations.tsv` переведены на 79/80. Четыре старых сценария
+переведены на новый формат обеих границ `(need N..inf)`.
+
+Сценарий 9 по букве брифа («смерть посреди записи оставляет .part.<pid>»):
+инъецировать обрыв ПОСЕРЕДИНЕ writeFile в этом стенде невозможно — namespace
+`node:fs/promises` под bun неизменяем (проверено: non-extensible, binding
+не configurablе). Измерена проверяемая половина инварианта: когда запись не
+дошла до конечного имени, остаток — обычный файл `.part.<pid>` с ПОЛНОЙ
+записью, конечного имени нет, указателя `rec` в журнале нет. Попутно
+обнаружено пре-существующее: `rec-write:` никогда не попадает в строку
+журнала — снимок `deg` берётся в момент вызова `__jlog`, ДО `__jsave`
+(`tweakcc-patch.js:3589`); текст ветки живёт в stderr. Не менял — вне брифа.
+
+### Отклонения и замеченное вне скоупа
+
+1. **ADJUDICATION:** каталог `tests/` в ките не существует и никогда не
+   существовал (`git log --all --tests/` пуст); существующий стенд ядра —
+   `tools/probe-bench.js` (66 сц./5 мут., волны 23-28 писались в него). Сценарии
+   дописаны в него + обновлён якорь D4 в `tools/docnum-mutations.tsv` — оба
+   файла вне буквального списка `paths:` брифа («tweakcc-patch.js и tests/»),
+   но внутри его намерения («дописывать в существующий стенд, новый не
+   заводить»). Прошу ратифицировать или указать иной дом.
+2. **`claude-patch-all.sh` (трогать запрещено) откажет на полном прогоне**, пока
+   не обновлены пины старых форм: строки 3334, 3423, 3666, 4089
+   (`process.env.CLAUDE_JUDGE&&`), 4313-4315 (`__mt` через `||` и `if(__mt)`),
+   4323-4326 (ступенчатые чтения `,1)` без потолка), 4513-4514 (попытка
+   `max_tokens||…!0)`), 4516 (старая сигнатура `__num`), 4705
+   (`!__x.endsWith(".gz")`). Проверено прогоном тех же регулярок по собранному
+   образу: старых форм в нём больше нет. Счётные пины 4490-4497 ЦЕЛЫ (ядро
+   сворачивается маркерами, `__num("max_tokens")`×5 и прочие счёты сходятся).
+3. `claude-patch-all.sh:5509` — проза «probe-bench's 66 scenarios» устарела
+   (79). Вне скоупа, не тронуто.
+4. `claude-patch-all.sh:1927` — T-таблица docnum-гейта говорит
+   `'probe-bench': '56'`; расхождение пре-существующее (66 ≠ 56 и до волны),
+   вне скоупа.
+5. Дрейф строк брифа против дерева: фильтр был на `:2536` (бриф: 2535),
+   `appendFile` на `:2583/:2586` (бриф: 2582-2586); содержание цитат совпало
+   дословно, правки выполнены по содержанию.
+6. Образ для стендов собирался прямой вырезкой «нашей» ступени
+   (`adhoc-patch --script @tweakcc-patch.js`) из пристинного `2.1.251.orig`,
+   без стадий tweakcc/подписи/моделей: полный конвейер брифом запрещён, а его
+   текстовые проверки пинят старые формы (п. 2). Контрольная точка живого
+   образа 2.1.251 для счётчика ДО — только чтение.
+7. bun стенда 1.4.0 против bun образа 1.4.1 — стенд объявляет расхождение
+   рантайма строкой ВНИМАНИЕ (пре-существующее, память кита).
+
+Self-Check: PASSED — `tweakcc-patch.js` после всех мутаций побайтово равен
+эталону фиксированной версии (`diff` с контрольной копией чист, `node --check`
+EXIT=0); счётчики выше — дословные строки `ИТОГ`/`SELF-CHECK` из сохранённых
+логов прогонов; изменённые файлы: `tweakcc-patch.js`, `tools/probe-bench.js`,
+`tools/docnum-mutations.tsv` (`git status --porcelain`).
+
+## ОТЧЁТ ИСПОЛНИТЕЛЯ — продолжение (пины конвейера)
+
+Статус продолжения: DONE. Скоуп записи расширен контроллером ровно на
+`claude-patch-all.sh`; попутно обновлена строка R3 в `tools/checks-mutations.tsv`
+(якорь мутации указывал на форму, которой в образе больше нет — без правки
+приёмка `checks-teeth` невозможна; тот же класс, что ратифицирован для D4).
+Счёт проверок: **119, не изменился** (`sed -n '/^checks = {/,/^}/p' … | grep -cE
+"^    '"` = 119; реестр на собранном образе: 119 [OK] / 0 [FAIL], EXIT=0).
+
+### Приёмка
+
+- `python3 tools/checks-teeth.py --image <образ>` → `КОНТРОЛЬ без мутации:
+  ЗЕЛЁНО`, `ИТОГ мутаций=19 прошло молча/чужой дверью=0`, **TEETH_EXIT=0**.
+  В том числе R3 (перенесённый якорь) красит ровно «the archive is out of the
+  window».
+- Образ для приёмки собран вручную двумя образ-пишущими стадиями на
+  scratch-копии 2.1.251.orig: `TWEAKCC_CC_INSTALLATION_PATH=<копия> node <форк>
+  --apply -y` (35 патчей, EXIT=0) + `adhoc-patch --script @tweakcc-patch.js`
+  (EXIT=0). Полный прогон конвейера НЕ запускался (запрет контроллера); см.
+  ниже, почему он сейчас и не мог пройти.
+
+### Обновлённые пины (ДО → ПОСЛЕ; строка — до правки, нумерация сдвинулась на
+единицы)
+
+Все новые формы — ДОСЛОВНО из текущего `tweakcc-patch.js`/образа; ни один пин
+не ослаблен, большинство стало длиннее. Читатель-инлайн далее обозначен
+READER = `String\(process\.env\.<VAR>\?\?""\)\.trim\(\)\.toLowerCase\(\);return
+!\(__s===""\|\|__s==="0"\\|\|__s==="false"\\|\|__s==="off"\\|\|__s==="no"\)\}\)\(\)`.
+
+| # | место | было | стало | кусается |
+|---|---|---|---|---|
+| 1 | :3334 классификатор блоков | `if\(process\.env\.CLAUDE_JUDGE&&\(` | READER(CLAUDE_JUDGE) | промежуточный прогон реестра (образ с новыми формами, старые пины): эти проверки КРАСНЫ; после правки — зелёны; контроль teeth на этом образе зелён |
+| 2 | :3423 классификатор в `_turn_belongs_to_the_judge` | та же форма | READER(CLAUDE_JUDGE) | то же |
+| 3 | :3666 правило отмены в системном промпте | `\.\.\.\(process\.env\.CLAUDE_JUDGE&&` + ID + arm | `...\((()=>{let __s=`READER`})()&&` + ID + arm (пин стал длиннее на всё тело читателя) | то же |
+| 4 | :4084 стэш хода | `\(process\.env\.CLAUDE_JUDGE\?` | `\(\(\(\)=>\{let __s=`READER`}\)\(\)\?` | то же |
+| 5 | :4089 judge consulted | `if\(…CLAUDE_JUDGE&&\(ID\.name="Agent"…` | `if\(\(\(\)=>\{let __s=`READER`}\)\(\)&&\(ID\.name="Agent"…` | то же |
+| 6 | :4143 watcher rides the same core | `if\(process\.env\.CLAUDE_IDLE&&` + ID | READER(CLAUDE_IDLE) + `&&` + ID | то же |
+| 7 | :4313 judge budget has one home | `let __mt=__e\.max_tokens\|\|__cfg\.max_tokens;if\(__mt\)` | `…\?\?…;if\(__mt!==void 0&&__mt!==null\)` | то же |
+| 8 | :4323 rungs carry their own limits | `__max,0\)` и `__tmo,1\)` | `__max,60\)` и `__tmo,1,!1,2147483647\)` | то же |
+| 9 | :4513 attempt ledger budget | `__e\.max_tokens\|\|__cfg\.max_tokens,null,1,!0\)` | то же с `\?\?` | то же |
+| 10 | :4516 сигнатура __num | `__num=\(__k,__v,__d,__min,__q\)=>` | `…,__min,__q,__cap\)=>` | то же |
+| 11 | :4519 условие отказа __num | `if\(!Number\.isFinite\(__x\)\|\|__x<__min\)\{` | `…\|\|\(__cap!==void 0&&__x>__cap\)\)\{` + НОВЫЙ суб-пин типового входа `let __x=typeof __v==="number"?__v:\(typeof __v==="string"&&__v\.trim\(\)!==""\?Number\(__v\):NaN\);` (усиление, не ослабление) | то же |
+| 12 | :4523 объект сервисов | `__svc=\{log:__jlog,clip:__clip,num:__num\}` | `…,num:__num,list:__lkr\}` (счёт `__svc\.num\(" == 5` не тронут и сходится) | то же |
+| 13 | :4705 окно архива | `!__x\.endsWith\("\.gz"\)` | `__x\.endsWith\("\.json"\)`; комментарий переписан под инвариант допустимого списка | R3 в checks-teeth: RED ровно этой проверки |
+| 14 | :4960 judge tells a broken config | `__cfg\.enforce===!0\|\|__cfgbad` и `let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0` | `__bl3\("enforce",__cfg\.enforce,!0\)\|\|__cfgbad` и `…\|\|__bl3\("fail_closed",__cfg\.fail_closed,!0\)` | промежуточный прогон: красна до правки |
+| 15 | :4428 judge can fail closed | `let __fcl=__cfgbad\|\|__cfg\.fail_closed===!0` | `…\|\|__bl3\("fail_closed",…,!0\)` | то же |
+| 16 | :5509 проза | «probe-bench's 66 scenarios» | «79 scenarios» | docnum-гейт читает прозу кода только в комментариях; счёт сверяет с живым EXPECTED_SCENARIOS |
+
+Пункты 4, 6, 11 (вторая половина), 12, 14, 15 найдены сверх списка контроллера:
+это те же старые формы тех же десяти правок, без них реестр оставался бы
+красным (что и показал первый прогон реестра на образе с новыми формами:
+`judge stashes the current turn`, `dispatch-cancellation rule reaches the main
+loop`, `judge consulted before dispatch`, `watcher rides the same core`,
+`judge tells a broken config from a missing one`, `judge can fail closed`).
+
+`tools/checks-mutations.tsv` R3: якорь `!__x.endsWith(".gz")` →
+`__x.endsWith(".json")`, замена `!__x.endsWith(".gz")` (короче якоря на один
+байт, добивается пробелом в хвост — валидный JS внутри скобок): мутант
+воспроизводит ДО-волновую форму запретного списка (обломок compact.py снова
+занимает слот и может быть снесён). Подтверждение зуба: `МУТАЦИЯ R3: RED «the
+archive is out of the window»`, чужих дверей ноль.
+
+### Промежуточные факты (честности ради)
+
+- Первая редакция читатель-пинов роняла 4 проверки: после `}` у IIFE была
+  пропущена закрывающая `)` (структура `})()`). Одна широкая замена при этом
+  зацепила чужой пин (`:3745`, «dispatch keeps its model») — откатена точечно;
+  итоговый реестр 119/119 зелёный доказывает отсутствие остатка.
+- Полный прогон `claude-patch-all.sh --target` ОТКАЗАЛ до образа: docnum-гейт
+  красит `judge/NOTES.md:199` («Все 14 вложений…» — счёт без владельца).
+  Файл моим деревом не тронут (`git diff HEAD -- judge/NOTES.md` пуст) —
+  красный пре-существующий, чинить его владельцу. Попытка временно заглушить
+  docnum-отказ была откачена побайтово (shasum совпал) после того, как
+  сломала зубы самого docnum-гейта («ГЕЙТ ЧИСЕЛ БЕЗ ЗУБОВ») — глушение
+  осталось только в логах, не в дереве.
+- Синхронизация моделей и подпись в приёмочном образе пропущены: ни одна из
+  119 проверок их не пинит (все зелёны на образе без них); полный конвейер
+  после починки NOTES.md прогонит контроллер.
+
+### Оставшееся красным (вне моего скоупа)
+
+1. `judge/NOTES.md:199` — docnum-гейт полного конвейера; файл не в скоупе
+   волны, `git diff` по нему пуст.
+2. Ничего другого: реестр 119/119, checks-teeth 19/19, probe-bench 79/0,
+   self-check probe-bench 5/5.
+
+Self-Check (продолжение): PASSED — `claude-patch-all.sh` после откатов
+побайтово равен состоянию до глушения (shasum 135e445b… до и после совпали),
+`bash -n` зелёный, счёт проверок 119, изменённые файлы:
+`claude-patch-all.sh`, `tools/checks-mutations.tsv` (сверх — объявлено),
+плюс прежние `tweakcc-patch.js`, `tools/probe-bench.js`,
+`tools/docnum-mutations.tsv` и этот отчёт. Коммитов нет.

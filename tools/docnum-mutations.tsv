@@ -24,7 +24,7 @@
 D1	README.md	102 scenarios on a toy corpus	103 scenarios on a toy corpus	объявлено «102 scenarios» (владелец corpus-tools-bench)
 D2	README.md	corpus-tools-bench's 107 recorded mutations	corpus-tools-bench's 108 recorded mutations	объявлено «107 mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
-D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 66;	const EXPECTED_SCENARIOS = 67;	владелец probe-bench
+D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 79;	const EXPECTED_SCENARIOS = 80;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
 D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 40	EXPECTED_MUTATION_COUNT = 40	не объявляет свою величину
 D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=107	EXPECTED_MUTATION_COUNT=107	не объявляет свою величину
