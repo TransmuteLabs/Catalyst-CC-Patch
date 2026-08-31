@@ -1023,11 +1023,16 @@ for entry in "${SRC[@]}"; do
     # сам патчер (сводка при этом неотличима от эталонной), SKIP_BENCH и
     # GATE_BUDGET снимают и ослабляют гейты, ALLOW_TWEAKCC_FAILURES отменяет
     # фатальность падения tweakcc, SIGN_ID меняет подпись артефакта
-    # (раунд 19, В-4 и В-5). CLAUDE_PATCH_LOCK НЕ снимается: им стенд уводит
+    # (раунд 19, В-4 и В-5). PROBE_CFG_LOAN снимает стража маркера конфига
+    # tweakcc: его объявляет ЗОНД про свой собственный заём, и унаследованный
+    # от оператора он молча распространил бы это объявление на сборки свипа,
+    # которые ничего не одалживали (волна 32, W-4).
+    # CLAUDE_PATCH_LOCK НЕ снимается: им стенд уводит
     # игрушечные прогоны с боевого замка.
     env -u CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES -u CLAUDE_PATCH_SKIP_BENCH \
         -u CLAUDE_PATCH_GATE_BUDGET -u CLAUDE_PATCH_SIGN_ID -u TWEAKCC_LOCAL \
         -u CATALYST_TWEAKCC_REPO -u CATALYST_TWEAKCC_SHA \
+        -u CLAUDE_PATCH_PROBE_CFG_LOAN \
       CLAUDE_PATCH_SKIP_MODELS=1 CLAUDE_PATCH_FLOOR_IMAGE="$src" \
       bash "$HERE/claude-patch-all.sh" \
       --target "$STATE/bin/$v.wave.bin" --expect-sha "$want" > "$log" 2>&1 8>&-

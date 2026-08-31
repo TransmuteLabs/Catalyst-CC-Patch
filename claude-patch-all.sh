@@ -2512,22 +2512,26 @@ except Exception:
 print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
     # --- killed-probe config marker guard --------------------------------------
     if [[ "$CFG_VER" == "$TWEAKCC_PROBE_CFG_MARKER" ]]; then
-      echo "FATAL: tweakcc's config has ccVersion=$TWEAKCC_PROBE_CFG_MARKER, the" >&2
-      echo "  build-path probe marker. Continuing would make tweakcc refresh its backup" >&2
-      echo "  from the target and rewrite the human's return point: what" >&2
-      echo "  'tweakcc --restore' hands back." >&2
-      echo "  This marker has two possible meanings:" >&2
-      echo "    * a previous probe died under SIGKILL; SIGKILL does not run the probe's" >&2
-      echo "      trap, and its snapshots, if any, are under:" >&2
-      echo "        ${TMPDIR:-/tmp}/cc-build-path-probe.*/config.json.snapshot" >&2
-      echo "    * another build-path probe may be running now and borrowing this config." >&2
-      echo "      Check for: bash .../tools/build-path-probe.sh" >&2
-      echo "      If that process is alive, wait for it to finish; do not repair its loan." >&2
-      echo "  Only you know which of the two is the truth:" >&2
-      echo "    * for a dead predecessor, restore config.json.snapshot by hand, or write" >&2
-      echo "      the real Claude Code version as ccVersion if you know it;" >&2
-      echo "    * for a live probe, wait for it to finish and restore its own snapshot." >&2
-      exit 1
+      if [[ "${CLAUDE_PATCH_PROBE_CFG_LOAN:-0}" == "1" ]]; then
+        echo "Probe config marker guard: SKIPPED — caller declared the config loan as its own (CLAUDE_PATCH_PROBE_CFG_LOAN=1)"
+      else
+        echo "FATAL: tweakcc's config has ccVersion=$TWEAKCC_PROBE_CFG_MARKER, the" >&2
+        echo "  build-path probe marker. Continuing would make tweakcc refresh its backup" >&2
+        echo "  from the target and rewrite the human's return point: what" >&2
+        echo "  'tweakcc --restore' hands back." >&2
+        echo "  This marker has two possible meanings:" >&2
+        echo "    * a previous probe died under SIGKILL; SIGKILL does not run the probe's" >&2
+        echo "      trap, and its snapshots, if any, are under:" >&2
+        echo "        ${TMPDIR:-/tmp}/cc-build-path-probe.*/config.json.snapshot" >&2
+        echo "    * another build-path probe may be running now and borrowing this config." >&2
+        echo "      Check for: bash .../tools/build-path-probe.sh" >&2
+        echo "      If that process is alive, wait for it to finish; do not repair its loan." >&2
+        echo "  Only you know which of the two is the truth:" >&2
+        echo "    * for a dead predecessor, restore config.json.snapshot by hand, or write" >&2
+        echo "      the real Claude Code version as ccVersion if you know it;" >&2
+        echo "    * for a live probe, wait for it to finish and restore its own snapshot." >&2
+        exit 1
+      fi
     fi
     # --- end killed-probe config marker guard ----------------------------------
     if [[ "$CFG_VER" == "$TGT_VER" ]]; then

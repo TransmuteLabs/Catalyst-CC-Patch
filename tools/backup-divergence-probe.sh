@@ -25,8 +25,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/../claude-patch-all.sh"
-EXPECTED_SCENARIOS=12
-EXPECTED_MUTATIONS=1
+EXPECTED_SCENARIOS=13
+EXPECTED_MUTATIONS=2
 [ -f "$SCRIPT" ] || { echo "нет $SCRIPT" >&2; exit 2; }
 
 # Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
@@ -165,8 +165,8 @@ BADCASE=0
 # по родовому «FATAL:» (раунд 18, E-4): случай «цель не называет версию» прошёл
 # бы и тогда, когда страж отказал по расхождению с бэкапом, то есть проверял не
 # ту дверь. Для passed-случаев причина не нужна: их след -- GUARD-PASSED.
-run_case() {  # $1 имя, $2 исход (fired|passed), $3 цель, $4 бэкап, $5 конфиг, $6 хук, $7 причина
-  local name="$1" want="$2" cause="${7:-}" out rc got
+run_case() {  # $1 имя, $2 исход, $3 цель, $4 бэкап, $5 конфиг, $6 хук, $7 причина, $8 заём, $9 объявление
+  local name="$1" want="$2" cause="${7:-}" loan="${8:-}" notice="${9:-}" out rc got
   if [[ "$want" == fired && -z "$cause" ]]; then
     echo "  КРАСНО $name: случай ждёт отказа, но не назвал причину" >&2
     BADCASE=1
@@ -174,11 +174,14 @@ run_case() {  # $1 имя, $2 исход (fired|passed), $3 цель, $4 бэк�
   fi
   set +e
   out="$(BIN="$3" TWEAKCC_BACKUP="$4" TWEAKCC_CFG="$5" TWEAKCC_RESTORE_PINNED="" \
-         STAGE_HOOK="${6:-}" bash "$WORK/guard.sh" 2>&1)"; rc=$?
+         CLAUDE_PATCH_PROBE_CFG_LOAN="$loan" STAGE_HOOK="${6:-}" \
+         bash "$WORK/guard.sh" 2>&1)"; rc=$?
   set -e
   if [[ $rc -eq 1 && "$out" == *"FATAL:"* && -n "$cause" && "$out" != *"$cause"* ]]; then
     got="fired-ЧУЖОЙ-ПРИЧИНОЙ (нет «${cause}»)"
   elif [[ $rc -eq 1 && "$out" == *"FATAL:"* ]]; then got=fired
+  elif [[ $rc -eq 0 && "$out" == *"GUARD-PASSED"* && -n "$notice" && "$out" != *"$notice"* ]]; then
+    got="passed-МОЛЧА (нет «${notice}»)"
   elif [[ $rc -eq 0 && "$out" == *"GUARD-PASSED"* ]]; then got=passed
   else got="died(rc=$rc)"; fi
   if [[ "$got" == "$want" ]]; then
@@ -215,6 +218,12 @@ run_case "конфига нет -- молчит"                       passed "$
 # (e) маркер другого зонда или след SIGKILL -- отказ ДО сравнения версий.
 run_case "маркер зонда в конфиге -- ОТКАЗ"            fired  "$WORK/diverged" "$WORK/backup" "$CFG_PROBE" "" \
          "has two possible meanings"
+
+# Тот же вход принадлежит самому вызывающему зонду: объявленный заём проходит,
+# но молчаливый проход не засчитывается -- снятие стража обязано быть видно.
+run_case "маркер с объявленным займом -- ПРОХОД С ОБЪЯВЛЕНИЕМ" passed \
+         "$WORK/diverged" "$WORK/backup" "$CFG_PROBE" "" "" "1" \
+         "Probe config marker guard: SKIPPED — caller declared the config loan as its own (CLAUDE_PATCH_PROBE_CFG_LOAN=1)"
 
 # (f) единственный случай подмены: запись совпадает, байты разные.
 run_case "запись совпадает, байты разные -- ОТКАЗ"     fired  "$WORK/diverged" "$WORK/backup" "$CFG_MATCH" "" \
@@ -257,7 +266,7 @@ dst.write_text(s, encoding='utf-8')
 PY_MUT
 set +e
 MUT_OUT="$(BIN="$WORK/diverged" TWEAKCC_BACKUP="$WORK/backup" TWEAKCC_CFG="$CFG_PROBE" \
-           TWEAKCC_RESTORE_PINNED="" STAGE_HOOK="" \
+           TWEAKCC_RESTORE_PINNED="" CLAUDE_PATCH_PROBE_CFG_LOAN="" STAGE_HOOK="" \
            bash "$WORK/guard-no-probe-marker.sh" 2>&1)"; MUT_RC=$?
 set -e
 if [[ $MUT_RC -eq 0 && "$MUT_OUT" == *"GUARD-PASSED"* ]]; then
@@ -265,6 +274,32 @@ if [[ $MUT_RC -eq 0 && "$MUT_OUT" == *"GUARD-PASSED"* ]]; then
 else
   echo "  КРАСНО мутация probe-marker дала ЧУЖУЮ причину (rc=$MUT_RC)" >&2
   echo "$MUT_OUT" | sed 's/^/        /' >&2
+  FAILED=1
+fi
+
+# Мутация 2: ручка объявлена, но страж её игнорирует и всегда отказывает.
+python3 - "$WORK/guard.sh" "$WORK/guard-ignore-loan.sh" <<'PY_MUT_LOAN'
+from pathlib import Path
+import sys
+src, dst = map(Path, sys.argv[1:])
+s = src.read_text(encoding='utf-8')
+old = 'if [[ "${CLAUDE_PATCH_PROBE_CFG_LOAN:-0}" == "1" ]]; then'
+if s.count(old) != 1:
+    sys.stderr.write('ЯКОРЬ ПРОПАЛ: условие объявленного займа не найдено ровно один раз\n')
+    raise SystemExit(2)
+dst.write_text(s.replace(old, 'if false; then', 1), encoding='utf-8')
+PY_MUT_LOAN
+set +e
+LOAN_MUT_OUT="$(BIN="$WORK/diverged" TWEAKCC_BACKUP="$WORK/backup" TWEAKCC_CFG="$CFG_PROBE" \
+                TWEAKCC_RESTORE_PINNED="" CLAUDE_PATCH_PROBE_CFG_LOAN="1" STAGE_HOOK="" \
+                bash "$WORK/guard-ignore-loan.sh" 2>&1)"; LOAN_MUT_RC=$?
+set -e
+if [[ $LOAN_MUT_RC -eq 1 && "$LOAN_MUT_OUT" == *"FATAL:"* \
+      && "$LOAN_MUT_OUT" == *"has two possible meanings"* ]]; then
+  echo "  RED   мутация, игнорирующая заём, отказывает собственному случаю займа"
+else
+  echo "  КРАСНО мутация займа дала ЧУЖУЮ причину (rc=$LOAN_MUT_RC)" >&2
+  echo "$LOAN_MUT_OUT" | sed 's/^/        /' >&2
   FAILED=1
 fi
 

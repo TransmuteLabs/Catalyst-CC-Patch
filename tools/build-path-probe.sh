@@ -814,10 +814,13 @@ run_pipeline() {  # <script> <bindir> <logfile> [аргументы конвей
     CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES= CLAUDE_PATCH_SKIP_BENCH= \
     CLAUDE_PATCH_GATE_BUDGET= CLAUDE_PATCH_SIGN_ID= TWEAKCC_LOCAL= \
     CATALYST_TWEAKCC_REPO= CATALYST_TWEAKCC_SHA= \
+    # Объявленный заём: ccVersion с probe-marker записал ЭТОТ зонд, а не
+    # посторонний процесс; страж конвейера пропускает только этот названный вход.
     # Объявленный пропуск: каждая сборка зонда идёт без sync цен, и это
-    # снятое покрытие (раунд 18, G-1). Строка печатается зондом, а не только
-    # прячется в логе случая.
-    CLAUDE_PATCH_SKIP_MODELS=1 bash "$1" "${@:4}" ) >"$3" 2>&1
+    # снятое покрытие (раунд 18, G-1). Обе уступки печатаются в логе, а не
+    # остаются молчаливыми.
+    CLAUDE_PATCH_PROBE_CFG_LOAN=1 CLAUDE_PATCH_SKIP_MODELS=1 \
+      bash "$1" "${@:4}" ) >"$3" 2>&1
 }
 
 # --- case a: live patched, pristine copy beside it ---------------------------
