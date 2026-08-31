@@ -5080,7 +5080,7 @@ checks = {
                                           and bool(re.search(
                                               rb'if\(__amb\)__deg\.push\("dispatch-class-ambiguous:"'
                                               rb'\+__dcut\(__cls,4\)\);'
-                                              rb'if\(!__amb&&__mt\(__f\.classes_skip,__cl\)\)', d)),
+                                              rb'if\(!__amb&&__mt\("classes_skip",__f\.classes_skip,__cl,!1\)\)', d)),
     # Вытеснение из стэша хода -- усечение материала судьи, и оно объявляется:
     # без метки «хода не было» не отличалось от «ход вытеснен» (круг 20, D-11).
     'an evicted turn is declared': bool(re.search(
