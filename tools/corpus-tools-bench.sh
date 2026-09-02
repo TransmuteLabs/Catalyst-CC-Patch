@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=113
-EXPECTED_MUTATIONS=128
+EXPECTED_SCENARIOS=115
+EXPECTED_MUTATIONS=130
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -366,7 +366,15 @@ unless() { [[ "$tweak" == "$1" ]] || printf '%s\n' "$2"; }
 ver=$(awk '{print $2; exit}' "$target" 2>/dev/null)
 [[ "$tweak" != otherver ]] || ver=0.0.999
 sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}')
-unless notw       'Customizations applied successfully'
+# Баннер прогона tweakcc: полный, либо частичный (режимы parttw*); NOTE
+# конвейера об объявленных непроходах печатает только parttw, а
+# parttw_undeclared оставляет частичный баннер без неё.
+case "$tweak" in
+  notw) ;;
+  parttw|parttw_undeclared) printf 'Customizations applied with some failures.\n' ;;
+  *) printf 'Customizations applied successfully\n' ;;
+esac
+[[ "$tweak" != parttw ]] || printf 'NOTE: объявленные непроходы tweakcc на %s (гейт держится на остальных):\n' "$ver"
 unless nopatches  '    ✓ site'
 unless noours  'Script patch applied'
 unless nook    '  [OK] stub check'
@@ -1617,6 +1625,8 @@ run_all() {
   scenario_103; scenario_104; scenario_105; scenario_106; scenario_107
   scenario_108; scenario_109; scenario_110
   scenario_111; scenario_112; scenario_113
+  # Волна 34a: частичный прогон tweakcc с объявленными непроходами / без них.
+  scenario_114; scenario_115
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -3239,6 +3249,21 @@ scenario_113() {   # провал контроля зубов назван св�
   ok "113 провал контроля зубов назван своим именем"
 }
 
+scenario_114() {   # частичный прогон tweakcc с ОБЪЯВЛЕННЫМИ непроходами -- зелёный
+  # Волна 33 научила конвейер принимать объявленный непроход правки tweakcc
+  # (tools/tweakcc-known-misses.txt), а вердикт свипа считал прогоном только
+  # полный баннер -- законный прогон 257 читался как «прогонов tweakcc 0».
+  local out rc
+  out=$(STUB_TWEAK=parttw run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    bad "114 частичный прогон tweakcc с объявленными непроходами объявлен красным (код $rc)"
+  else
+    ok "114 частичный прогон tweakcc с объявленными непроходами -- SWEEP DONE"
+  fi
+}
+scenario_115() { expect_red "115 частичный прогон tweakcc БЕЗ объявленных непроходов -- КРАСНАЯ" parttw_undeclared "частичный прогон tweakcc без объявленных непроходов"; }
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -3318,7 +3343,9 @@ MUT_FILE=(x
   tools/sweep.sh
   # Волна 31, закрывающий: зубы по образу прогона (111-113).
   tools/sweep.sh tools/sweep.sh tools/sweep.sh
-  claude-patch-all.real)
+  claude-patch-all.real
+  # Волна 34a: частичный прогон tweakcc (114-115).
+  tools/sweep.sh tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -3461,7 +3488,11 @@ MUT_PAT=(x
   'python3 "\$TEETH_PY" --image "\$STATE/bin/\$v.wave.bin"'
   'echo "SWEEP зубы реестра: НЕ ИЗМЕРЕНЫ -- ни одна версия не собралась"'
   'КОНТРОЛЬ ПРОВАЛЕН'
-  '__envon CLAUDE_PATCH_SKIP_MODELS \|\| __env_rc=\$\?')
+  '__envon CLAUDE_PATCH_SKIP_MODELS \|\| __env_rc=\$\?'
+  # Волна 34a: 114 частичный баннер перестаёт считаться прогоном; 115 дверь
+  # «частичный без объявленных непроходов» снята.
+  'twruns=\$\(\( twok \+ twpart \)\)'
+  '\[\[ "\$twpart" == "0" \|\| "\$twnote" == "1" \]\] \|\| why\+=\("частичный прогон tweakcc без объявленных непроходов"\)')
 
 MUT_REP=(x
   'if false; then'
@@ -3584,7 +3615,9 @@ MUT_REP=(x
   'python3 "$TEETH_PY"'
   ':'
   'КОНТРОЛЬ НИКОГДА'
-  '__envon CLAUDE_PATCH_SKIP_MODELS; __env_rc=$?')
+  '__envon CLAUDE_PATCH_SKIP_MODELS; __env_rc=$?'
+  'twruns=$twok'
+  ':')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -3611,7 +3644,9 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                109 109 109 109 109 109 109 109 109 109
                110
                # Волна 31, закрывающий
-               111 112 113 109)
+               111 112 113 109
+               # Волна 34a
+               114 115)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -3740,7 +3775,9 @@ MUT_CAUSE=(x
   'НЕТ_--image'
   'ЗУБЫ_МОЛЧАТ'
   'ДИСЪЮНКЦИЯ'
-  'ОБРЫВ_НА_СНЯТОЙ_РУЧКЕ')
+  'ОБРЫВ_НА_СНЯТОЙ_РУЧКЕ'
+  'прогонов tweakcc 0'
+  'SWEEP DONE')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

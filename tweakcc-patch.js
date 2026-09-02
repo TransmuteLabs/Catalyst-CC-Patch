@@ -1054,11 +1054,44 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   js = js.slice(0, lo) + body + js.slice(hi);
 
   // (c) schema: add the two fields next to the existing `model`
-  const strFnMatch = js.match(
-    new RegExp(`description:(${ID})\\(\\)\\.describe\\("A short \\(3-5 word\\)`),
+  //
+  // 2.1.257 ВЫНЕС строки схемы Agent-tool в именованные константы:
+  //   var yt="Agent",bnr="Launch a new agent...",Tnr="The task for the agent to perform",
+  //       wnr="A short (3-5 word) description of the task",...
+  //   ...description:i().describe(wnr),prompt:i().describe(Tnr),...
+  // Прежний пин ждал ЛИТЕРАЛ прямо в вызове describe и на 257 не находил
+  // ничего -- шаг падал, а вместе с ним каскадом падал шаг 22.
+  //
+  // Поэтому аргумент describe допускается в двух видах: сам литерал (сборки
+  // до 257) ЛИБО имя, про которое В ЭТОМ ЖЕ образе ДОКАЗАНО объявлением, что
+  // оно держит ровно этот текст. Голый `<ID>` без такого доказательства сюда
+  // не годится: он принял бы любую строку и якорь перестал бы утверждать, что
+  // правится схема ИМЕННО этого инструмента. Имена минифицированы и локальны
+  // для чанка, поэтому одного имени мало -- участок дополнительно связан
+  // обратной ссылкой: описание и prompt обязаны строиться ОДНИМ И ТЕМ ЖЕ
+  // строителем, как это и выглядит в обеих сборках.
+  //
+  // Замерено: на 252 совпадение одно и строитель `i`, константы нет вовсе; на
+  // 257 совпадение одно, строитель `i`, константа `wnr`. Ровно одно совпадение
+  // -- это и есть граница: второй участок той же формы означал бы, что рядом
+  // появилась схема другого инструмента, и вставка полей могла бы уехать в неё.
+  const strConstNames = [
+    ...js.matchAll(
+      new RegExp(`(?<![$\\w])(${ID})="A short \\(3-5 word\\) description of the task"`, 'g'),
+    ),
+  ].map((mm) => rxEsc(mm[1]));
+  const strFnRx = new RegExp(
+    `description:(${ID})\\(\\)\\.describe\\(` +
+      `(?:"A short \\(3-5 word\\)[^"]*"${strConstNames.map((n) => `|${n}`).join('')})` +
+      `\\),prompt:\\1\\(\\)\\.describe\\(`,
   );
-  if (!strFnMatch) fail('schema string builder not found');
-  const str = strFnMatch[1];
+  const strFnAll = [...js.matchAll(new RegExp(strFnRx.source, 'g'))];
+  if (strFnAll.length !== 1)
+    fail(
+      `schema string builder: expected exactly 1 site, found ${strFnAll.length}` +
+        ` (describe holds the literal or one of: ${strConstNames.join(',') || 'no hoisted constant'})`,
+    );
+  const str = strFnAll[0][1];
   const bgField = new RegExp(`(,)(run_in_background:${ID}\\(\\)\\.optional\\(\\)\\.describe\\("Agents run in the background)`);
   if (!bgField.test(js)) fail('schema insertion point not found');
   const newFields =
@@ -1862,7 +1895,16 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
     `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"` +
       `(?:,truncatedAfterOutput:([^,;{}]{0,80}))?((?:,[^;]{0,300}?)?)\\}\\),(${ID})!=="credited"\\)` +
       `\\5="credited",(${ID})\\+=([^;]{0,300}?);break (${ID})\\}` +
-      `throw (${ID})\\("tengu_streaming_fallback_to_non_streaming",\\{model:(${ID})\\.model,` +
+      // 2.1.257 обернул модель в вызов: было `{model:<opts>.model,`, стало
+      // `{model:<fn>(<opts>.model),`. Голое `<ID>.model` перестало совпадать, и
+      // шаг падал целиком. Обёртка допускается необязательной, но захватов
+      // теперь ДВА: всё выражение целиком -- чтобы `tail` восстанавливал байты
+      // ДОСЛОВНО, а не пересобирал их по своей догадке о форме, -- и отдельно
+      // объект настроек, потому что ветка восстановления ниже читает у него
+      // `isNonInteractiveSession` и `querySource`. Спутать обёртку с объектом
+      // здесь дороже всего: `recoverable` молча стал бы читать поля у функции.
+      `throw (${ID})\\("tengu_streaming_fallback_to_non_streaming",` +
+      `\\{model:((?:${ID}\\()?(${ID})\\.model\\)?),` +
       `error:(${ID}) instanceof Error\\?`,
   );
   const mFinal = js.match(rxFinal);
@@ -1885,13 +1927,28 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
     accExpr,
     label,
     throwFn,
+    modelExpr,
     opts,
     errVar,
   ] = mFinal;
 
+  // Захваченный объект обязан быть ТЕМ САМЫМ объектом запроса, а не обёрткой
+  // вокруг него: ниже у него читаются `isNonInteractiveSession` и
+  // `querySource`, и ошибка здесь не покраснела бы ничем -- ветка
+  // восстановления просто перестала бы срабатывать, а сборка осталась зелёной.
+  // Заземление берётся из соседнего выражения того же участка: начисление
+  // передаёт `querySource` того же объекта. Замерено: на 252 объект `d`, на
+  // 257 -- `f`, и в обоих случаях начисление его подтверждает.
+  if (!accExpr.includes(`${opts}.querySource`))
+    fail(
+      `streaming partial-finalize: the captured options object '${opts}' is not ` +
+        'the one the accrual reads querySource from -- the model expression ' +
+        'shape changed and the capture landed on the wrapper',
+    );
+
   const tail =
     `throw ${throwFn}("tengu_streaming_fallback_to_non_streaming",` +
-    `{model:${opts}.model,error:${errVar} instanceof Error?`;
+    `{model:${modelExpr},error:${errVar} instanceof Error?`;
 
   if (truncExpr === undefined) {
     // No truncation marker in this build: nothing downstream can recover from
@@ -4175,9 +4232,15 @@ step('27 full-bypass mode keeps only the peer-machine immunity', () => {
   // f=p&&l?.behavior==="ask"?_B(l.decisionReason,FMn):void 0;
   // Anchored on shape, not on names: p is the mode predicate computed a line
   // above, l the accumulated decision, FMn the immunity predicate.
+  // 2.1.257 дописал в ТУ ЖЕ цепочку `let` следующее объявление, и выражение
+  // кончается теперь ЗАПЯТОЙ, а не точкой с запятой. Терминатор захватывается и
+  // воспроизводится дословно: замена ниже собирает строку заново, и жёстко
+  // вписанная `;` разорвала бы цепочку -- соседнее объявление превратилось бы в
+  // присваивание необъявленной переменной. Ослабить пин, не тронув замену, было
+  // бы хуже отказа: сборка стала бы зелёной и сломанной.
   const rx = new RegExp(
     `(${ID})=(${ID})&&(${ID})\\?\\.behavior==="ask"\\?` +
-      `(${ID})\\(\\3\\.decisionReason,(${ID})\\):void 0;`,
+      `(${ID})\\(\\3\\.decisionReason,(${ID})\\):void 0([;,])`,
   );
   const m = js.match(rx);
   if (!m) fail('bypass-immunity site not found');
@@ -4190,10 +4253,15 @@ step('27 full-bypass mode keeps only the peer-machine immunity', () => {
     fail('bypass-immunity site is not the permission-mode branch');
   }
 
-  // The registry on 2.1.246 marks exactly two breakers bypassImmune:
-  //   dangerousRemoval:      {bypassImmune:!0, classifierRouted:!0}
-  //   isolatePeerMachines:   {bypassImmune:!0, classifierRouted:!1}
-  //   backgroundOperator / suspiciousWindowsPath: bypassImmune:!1
+  // Реестр предохранителей РАСТЁТ от версии к версии, и перечень здесь -- не
+  // закрытый список, а замер. На 2.1.246 иммунными были двое; замер 2026-09-01:
+  //   2.1.252: dangerousRemoval, isolatePeerMachines, restrictedMode
+  //   2.1.257: те же плюс outsideReadsBlocked
+  //   (backgroundOperator и suspiciousWindowsPath -- bypassImmune:!1 в обеих)
+  //
+  // Сужение ниже адресное: иммунитет снимается ИМЕНОВАННО у dangerousRemoval,
+  // поэтому всякий новый предохранитель сохраняет иммунитет по умолчанию. Это и
+  // есть причина писать правку через имя, а не через «оставить только первый».
   //
   // Writing `void 0` here dropped BOTH. isolatePeerMachines is the guard that
   // keeps one machine's session from acting on another machine through a peer
@@ -4216,7 +4284,7 @@ step('27 full-bypass mode keeps only the peer-machine immunity', () => {
     js.slice(0, m.index) +
     `${m[1]}=${m[2]}&&${m[3]}?.behavior==="ask"?` +
       `${m[4]}(${m[3]}.decisionReason,(__ccbr)=>` +
-      `__ccbr.circuitBreaker!=="dangerousRemoval"&&${m[5]}(__ccbr)):void 0;` +
+      `__ccbr.circuitBreaker!=="dangerousRemoval"&&${m[5]}(__ccbr)):void 0${m[6]}` +
     js.slice(m.index + m[0].length);
 
   applied.push(

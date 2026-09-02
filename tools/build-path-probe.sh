@@ -43,6 +43,17 @@
 #   k  another probe owns the probe-only ccVersion now, or SIGKILL left it behind
 #      -> must refuse before snapshotting or writing anything. Its control removes
 #      that startup guard and must let the same toy HOME reach a fast case.
+#   m  the two-sided reconciliation of DECLARED tweakcc misses against what
+#      actually happened. The blind knob (CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES)
+#      switches off the whole layer at once, and both the sweep and this probe
+#      scrub it on purpose -- so a single upstream-rewritten edit used to leave
+#      the kit with no way to say "this one, on this version" without going
+#      blind everywhere. The case drives the pipeline's own function over toy
+#      files: a declared miss passes with a NOTE, an undeclared one refuses, a
+#      declared miss that did NOT happen refuses too (a row must not outlive its
+#      cause), a row declared for a NEIGHBOURING version does not cover this one,
+#      and an image with no version marker refuses rather than silently matching
+#      nothing. Its controls disable each of those guards in turn.
 #
 # Case (c) runs a mutant copy of the pipeline out of a directory of symlinks to
 # this kit, so nothing is written into the source tree; and it snapshots
@@ -65,6 +76,10 @@
 #      say "there is nothing to measure yet", not "the kit is broken" --
 #      different repairs, so they must not share a code
 #   3  the pipeline lock is held by another live run -- retry later
+#   4  a declared number does not match the actual one: the scenario or mutation
+#      table of a self-checking case was edited without moving its counter. The
+#      kit's shared meaning of 4 -- "the bytes are not the ones that were named"
+#      -- read for a table instead of an image
 #   5  nothing to measure ON THIS MACHINE (no patched install with a pristine
 #      twin beside it) -- a skip, not a refusal
 #   6  the lock machinery is broken (perl flock unusable): retrying will not help
@@ -85,10 +100,10 @@
 # invisible to every check in the pipeline, and a tool nobody calls has been
 # dead three times in this kit.
 #
-# Usage:  bash tools/build-path-probe.sh [--case abcdurxplk] [--version 2.1.247]
+# Usage:  bash tools/build-path-probe.sh [--case abcdurxplkm] [--version 2.1.247]
 # Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 119
 #         checks + the interface gate + the bench), so a few minutes each; case
-#         (r), (x), (l) and (k) build nothing and answer in milliseconds.
+#         (r), (x), (l), (k) and (m) build nothing and answer in milliseconds.
 
 set -u
 
@@ -121,11 +136,26 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdurxplk
-# Owner totals across the self-checking cases: K contributes 1/1 and L 4/4;
-# these declarations must move with either case's scenario or mutation table.
-EXPECTED_SCENARIOS=5
-EXPECTED_MUTATIONS=5
+CASES=abcdurxplkm
+# Owner totals across the self-checking cases. Раньше эти два числа стояли
+# ГОЛЫМИ объявлениями: их читал только гейт чисел в прозе, а сам прибор их не
+# сверял ни с чем -- правка таблицы случая без правки числа проходила молча,
+# то есть счётчик владельца сам был незагейчен (ровно тот класс, который кит
+# чинит у соседей). Теперь у каждого случая свой вклад, EXPECTED_* обязаны быть
+# их СУММОЙ, а длина таблицы сверяется со вкладом ВНУТРИ случая: K -- по
+# построению (один сценарий, одна мутация), L и M -- длиной своих списков.
+CASE_K_SCENARIOS=1; CASE_K_MUTATIONS=1
+CASE_L_SCENARIOS=4; CASE_L_MUTATIONS=4
+CASE_M_SCENARIOS=6; CASE_M_MUTATIONS=5
+EXPECTED_SCENARIOS=11
+EXPECTED_MUTATIONS=10
+if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS
+      || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS )); then
+  echo "build-path-probe: ОТКАЗ -- объявленная сумма разошлась со вкладами случаев:" >&2
+  echo "  сценариев $EXPECTED_SCENARIOS против $((CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS))," \
+       "мутаций $EXPECTED_MUTATIONS против $((CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS))" >&2
+  exit 4
+fi
 WANT_VER=
 
 while [[ $# -gt 0 ]]; do
@@ -244,7 +274,7 @@ if [[ "$CASES" == *k* ]]; then
 fi
 
 case_l() {
-  python3 - "$PIPELINE" <<'PY_LSOF'
+  python3 - "$PIPELINE" "$CASE_L_SCENARIOS" "$CASE_L_MUTATIONS" <<'PY_LSOF'
 import os
 import re
 import subprocess
@@ -315,6 +345,11 @@ mutations = [
      '[[ -z "$pids" ]] && return 2', "L3"),
     ("L4-no-and-selector", "lsof -a -p", "lsof -p", "L4"),
 ]
+if len(checks) != int(sys.argv[2]) or len(mutations) != int(sys.argv[3]):
+    print("  FAIL   L: таблица разошлась с объявленным вкладом -- сценариев %d/%s, мутаций %d/%s"
+          % (len(checks), sys.argv[2], len(mutations), sys.argv[3]))
+    raise SystemExit(4)
+
 for mutation, old, new, owner in mutations:
     if function.count(old) != 1:
         failed += 1
@@ -347,6 +382,123 @@ PY_LSOF
 if [[ "$CASES" == *l* ]]; then
   case_l || exit $?
   CASES="${CASES//l/}"
+  if [[ -z "$CASES" ]]; then
+    echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
+    exit 0
+  fi
+fi
+
+# Сверка объявленных непроходов tweakcc. Гоняется САМА функция конвейера над
+# игрушечными файлами: слепая ручка на весь слой (CLAUDE_PATCH_ALLOW_TWEAKCC_
+# FAILURES) вычищается и свипом, и этим зондом намеренно, поэтому единственный
+# способ сказать «эта правка на этой версии» -- запись, а у записи обязаны быть
+# ОБЕ стороны: она пропускает объявленное и не даёт пережить свою причину.
+case_m() {
+  python3 - "$PIPELINE" "$CASE_M_SCENARIOS" "$CASE_M_MUTATIONS" <<'PY_MISSES'
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+declared_s, declared_m = int(sys.argv[2]), int(sys.argv[3])
+match = re.search(r"(?ms)^__tw_reconcile_misses\(\) \{\n.*?^\}\n", source)
+if not match:
+    print("  FAIL   M: __tw_reconcile_misses() не найдена в конвейере")
+    raise SystemExit(2)
+function = match.group(0)
+
+VER = "2.1.257"
+NEIGHBOUR = "2.1.252"
+MISS = "Clear screen command"
+
+
+def run(body, misses, out_text, marker=VER):
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        mf = root / "misses.txt"
+        mf.write_text(misses, encoding="utf-8")
+        of = root / "tweakcc.out"
+        of.write_text(out_text, encoding="utf-8")
+        img = root / "image"
+        # Байты с NUL: версия читается из ОБРАЗА, а grep без LC_ALL=C на таком
+        # файле молчит -- это и есть измеряемое поведение, не декорация.
+        marker_bytes = ("// Version: %s\n" % marker).encode() if marker else b"no version marker\n"
+        img.write_bytes(b"\x00\x01binary\x00noise\x00" + marker_bytes + b"\x00tail\x00")
+        script = ("set -uo pipefail\nTWEAKCC_KNOWN_MISSES=%s\n" % shlex.quote(str(mf))
+                  + body
+                  + "\n__tw_reconcile_misses %s %s\n" % (shlex.quote(str(of)), shlex.quote(str(img))))
+        return subprocess.run(["bash"], input=script, capture_output=True, text=True)
+
+
+out_miss = "patch: 13 applied, 1 failed\n    ✗ %s — upstream description\n" % MISS
+out_clean = "patch: 14 applied, 0 failed\n"
+row_here = "%s\t%s\tапстрим переписал участок\n" % (VER, MISS)
+row_neighbour = "%s\t%s\tчужая версия\n" % (NEIGHBOUR, MISS)
+
+SCEN = {
+    "M1": (row_here, out_miss, VER,
+           lambda r: r.returncode == 0 and "NOTE:" in r.stderr and MISS in r.stderr),
+    "M2": ("", out_miss, VER,
+           lambda r: r.returncode == 1 and ("НЕ объявлена для %s" % VER) in r.stderr),
+    "M3": (row_here, out_clean, VER,
+           lambda r: r.returncode == 1 and "НЕ СЛУЧИЛОСЬ" in r.stderr),
+    "M4": (row_neighbour, out_miss, VER,
+           lambda r: r.returncode == 1 and ("НЕ объявлена для %s" % VER) in r.stderr),
+    "M5": ("", out_clean, None,
+           lambda r: r.returncode == 1 and "не может назвать версию" in r.stderr),
+    "M6": ("", out_clean, VER,
+           lambda r: r.returncode == 0 and "NOTE:" not in r.stderr and "FATAL" not in r.stderr),
+}
+ORDER = ["M1", "M2", "M3", "M4", "M5", "M6"]
+
+mutations = [
+    ("M1-note-dropped", 'if [[ -n "$__declared_rows" ]]; then', "if false; then", "M1"),
+    ("M2-undeclared-ignored", 'if [[ -n "$__only_actual" ]]; then', "if false; then", "M2"),
+    ("M3-stale-ignored", 'if [[ -n "$__only_declared" ]]; then', "if false; then", "M3"),
+    ("M4-version-filter-off", "$1==v { gsub(", "1 { gsub(", "M4"),
+    ("M5-version-guard-off",
+     'if [[ ! "$__ver" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+ ]]; then', "if false; then", "M5"),
+]
+
+if len(ORDER) != declared_s or len(mutations) != declared_m:
+    print("  FAIL   M: таблица разошлась с объявленным вкладом -- сценариев %d/%d, мутаций %d/%d"
+          % (len(ORDER), declared_s, len(mutations), declared_m))
+    raise SystemExit(4)
+
+failed = 0
+for name in ORDER:
+    misses, out_text, marker, predicate = SCEN[name]
+    result = run(function, misses, out_text, marker)
+    if predicate(result):
+        print("  ok     %s" % name)
+    else:
+        failed += 1
+        print("  FAIL   %s rc=%s stderr=%r" % (name, result.returncode, result.stderr))
+
+for mutation, old, new, owner in mutations:
+    if function.count(old) != 1:
+        failed += 1
+        print("  FAIL   mutation %s anchor count=%s" % (mutation, function.count(old)))
+        continue
+    misses, out_text, marker, predicate = SCEN[owner]
+    result = run(function.replace(old, new, 1), misses, out_text, marker)
+    if not predicate(result):
+        print("  RED    mutation %s (%s)" % (mutation, owner))
+    else:
+        failed += 1
+        print("  FAIL   mutation %s did not redden %s" % (mutation, owner))
+
+print("build-path-probe M: case held and its controls showed teeth")
+raise SystemExit(1 if failed else 0)
+PY_MISSES
+}
+
+if [[ "$CASES" == *m* ]]; then
+  case_m || exit $?
+  CASES="${CASES//m/}"
   if [[ -z "$CASES" ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
     exit 0
@@ -1406,10 +1558,10 @@ if [[ $FAILED -eq 0 ]]; then
   # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d), (u) и
   # (x) -- мутационные контроли, и без них зелёная строка обещала бы
   # доказательство, которого прогон не получал (раунд 18, H-2).
-  if [[ "$ALL_CASES" == *c* || "$ALL_CASES" == *d* || "$ALL_CASES" == *u* || "$ALL_CASES" == *x* || "$ALL_CASES" == *r* || "$ALL_CASES" == *p* || "$ALL_CASES" == *l* || "$ALL_CASES" == *k* ]]; then
+  if [[ "$ALL_CASES" == *c* || "$ALL_CASES" == *d* || "$ALL_CASES" == *u* || "$ALL_CASES" == *x* || "$ALL_CASES" == *r* || "$ALL_CASES" == *p* || "$ALL_CASES" == *l* || "$ALL_CASES" == *k* || "$ALL_CASES" == *m* ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
   else
-    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p/l/k) не гонялся -- зубы не доказаны"
+    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p/l/k/m) не гонялся -- зубы не доказаны"
   fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2

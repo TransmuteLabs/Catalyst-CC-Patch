@@ -1075,7 +1075,15 @@ for entry in "${SRC[@]}"; do
   fail=$(num "$(grep -a -c '\[FAIL\]' "$log")")
   tw=$(num "$(grep -a -c '^    ✓ ' "$log")")
   ours=$(num "$(grep -a -c 'Script patch applied' "$log")")
-  twruns=$(num "$(grep -a -c 'Customizations applied successfully' "$log")")
+  # Прогон tweakcc кончается ОДНИМ из двух баннеров: полным («successfully»)
+  # или частичным («with some failures»). Частичный законен только рядом с
+  # NOTE конвейера об объявленных непроходах (tools/tweakcc-known-misses.txt):
+  # без неё конвейер отказал бы сам. Считать прогоном лишь полный баннер --
+  # значит читать законный частичный прогон как «прогонов 0» (257, волна 33).
+  twok=$(num "$(grep -a -c 'Customizations applied successfully' "$log")")
+  twpart=$(num "$(grep -a -c 'Customizations applied with some failures' "$log")")
+  twnote=$(num "$(grep -a -c '^NOTE: объявленные непроходы tweakcc на ' "$log")")
+  twruns=$(( twok + twpart ))
   iface=$(num "$(grep -a -c '^Interface:' "$log")")
   # Поле привязано к НОМЕРУ версии, а не к форме строки. Прежде оно считало
   # строки по шаблону `^Version: .*(Claude Code)`, поэтому сборка, объявившая
@@ -1136,6 +1144,7 @@ for entry in "${SRC[@]}"; do
     [[ "$ok" != "0" ]] || why+=("ни одной прошедшей проверки")
     [[ "$ours" == "1" ]] || why+=("наших применений $ours")
     [[ "$twruns" == "1" ]] || why+=("прогонов tweakcc $twruns")
+    [[ "$twpart" == "0" || "$twnote" == "1" ]] || why+=("частичный прогон tweakcc без объявленных непроходов")
     # Один прогон tweakcc, применивший НОЛЬ патчей, до волны 22 уходил зелёным:
     # поле `tw` печаталось в сводке, но ни одно утверждение его не читало
     # (раунд 19, В-15). Порог -- «хоть один», а не число: у версий 247+ промтов

@@ -887,7 +887,113 @@ echo "Source digest: $SOURCE_SHA  $BIN"
 # <version>.staging.orig, so "$BIN.orig" would name a file that never exists --
 # and the repair would silently degrade to a warning on the one path where
 # stock bytes are guaranteed to be at hand.
-PRISTINE_SRC="${BIN%.staging}.orig"
+# ЕДИНСТВЕННЫЙ ДОМ снятия staging-суффикса. Установщик даёт ДВЕ формы:
+# `<версия>.staging` -- стажирование живого файла (шаг 0b) -- и
+# `<версия>.staging.<pid>`, когда версия уже лежит рядом: номер процесса разводит
+# двух писателей. Суффикс снимали ТРИ места, и все три знали только первую форму.
+# Замер 2026-09-01 на переходе 2.1.257: сборка ушла в `2.1.257.staging.24891`, и
+# разошлось сразу всё -- пристинный близнец получил несуществующее имя (пол
+# проверок ПРОПУЩЕН молча), переименование не сработало (пусковой лёг на
+# промежуточный файл), а уборка приняла имя со staging за имя версии и снесла
+# настоящие `2.1.257` и `2.1.257.orig`. Один дом вместо трёх копий формы.
+__strip_staging() {
+  local __p="$1"
+  if [[ "$__p" =~ \.staging(\.[0-9]+)?$ ]]; then
+    __p="${__p%"${BASH_REMATCH[0]}"}"
+  fi
+  printf '%s' "$__p"
+}
+__has_staging() { [[ "$1" =~ \.staging(\.[0-9]+)?$ ]]; }
+
+# Дом объявленных непроходов tweakcc и их сверка с тем, что случилось.
+# Зачем он нужен и почему слепой ручки мало -- в шапке самого файла.
+TWEAKCC_KNOWN_MISSES="$HERE/tools/tweakcc-known-misses.txt"
+
+# Сверка ДВУСТОРОННЯЯ. Односторонняя («пропускать объявленное») сделала бы из
+# записи вечную индульгенцию: строка пережила бы свою причину и продолжала бы
+# молча ослаблять гейт на всех будущих версиях. Поэтому объявленный, но НЕ
+# случившийся непроход -- тоже отказ.
+__tw_reconcile_misses() {
+  local __out="$1" __bin="$2"
+  local __ver __fa __fd __only_actual __only_declared __declared_rows
+  # Версия берётся из БАЙТОВ образа, а не из переменной, заполняемой выше по
+  # тексту: та присваивается только на одной ветке, и под `set -euo pipefail`
+  # сверка на другой ветке уронила бы прогон по неопределённой переменной.
+  # Байты же есть всегда, и это тот самый образ, о котором идёт речь. Запускать
+  # его ради `--version` тут нельзя: на этой стадии он уже правлен и ещё не
+  # переподписан.
+  __ver="$(LC_ALL=C grep -a -o -m1 '// Version: [0-9][0-9.]*' "$__bin" 2>/dev/null \
+           | head -1 | sed 's|// Version: ||')"
+  if [[ ! "$__ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    echo "FATAL: сверка непроходов tweakcc не может назвать версию образа." >&2
+    echo "  В байтах $__bin нет отметки версии, а запись объявленного непрохода" >&2
+    echo "  привязана к версии -- без неё сверка молча не нашла бы ни одной." >&2
+    return 1
+  fi
+  __fa="$(mktemp)"; __fd="$(mktemp)"
+  # Имя правки -- то, что стоит после «✗ » и ДО тире с описанием. Описание
+  # принадлежит tweakcc и меняется от версии к версии; привязываться к нему
+  # значило бы пинить чужой текст.
+  sed -n 's/^    ✗ //p' "$__out" | sed 's/ — .*//' | sed 's/[[:space:]]*$//' \
+    | sed '/^$/d' | sort -u > "$__fa"
+  if [[ -f "$TWEAKCC_KNOWN_MISSES" ]]; then
+    awk -F'\t' -v v="$__ver" '
+      /^[[:space:]]*#/ { next } NF==0 { next }
+      $1==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); if ($2!="") print $2 }
+    ' "$TWEAKCC_KNOWN_MISSES" | sed '/^$/d' | sort -u > "$__fd"
+  else
+    : > "$__fd"
+  fi
+  __only_actual="$(comm -23 "$__fa" "$__fd")"
+  __only_declared="$(comm -13 "$__fa" "$__fd")"
+  __declared_rows="$(awk -F'\t' -v v="$__ver" '
+      /^[[:space:]]*#/ { next } NF==0 { next }
+      $1==v { printf "  %s -- %s\n", $2, $3 }
+    ' "$TWEAKCC_KNOWN_MISSES" 2>/dev/null)"
+  rm -f "$__fa" "$__fd"
+
+  if [[ -n "$__only_actual" ]]; then
+    echo "FATAL: правка tweakcc не легла, и она НЕ объявлена для $__ver:" >&2
+    printf '%s\n' "$__only_actual" | sed 's/^/  ✗ /' >&2
+    grep -E '^patch: ' "$__out" | sed 's/^/  /' >&2 || true
+    echo "  Если это ожидаемо на этой версии -- впишите строку в" >&2
+    echo "    $TWEAKCC_KNOWN_MISSES" >&2
+    echo "  Слепая дверь на весь слой сразу: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1" >&2
+    return 1
+  fi
+  if [[ -n "$__only_declared" ]]; then
+    echo "FATAL: для $__ver объявлен непроход, которого НЕ СЛУЧИЛОСЬ:" >&2
+    printf '%s\n' "$__only_declared" | sed 's/^/  /' >&2
+    echo "  Правка легла -- значит причина записи ушла, а сама запись осталась" >&2
+    echo "  и молча ослабляла бы гейт дальше. Снимите строку из" >&2
+    echo "    $TWEAKCC_KNOWN_MISSES" >&2
+    return 1
+  fi
+  if [[ -n "$__declared_rows" ]]; then
+    echo "NOTE: объявленные непроходы tweakcc на $__ver (гейт держится на остальных):" >&2
+    printf '%s\n' "$__declared_rows" >&2
+  fi
+  return 0
+}
+
+PRISTINE_SRC="$(__strip_staging "$BIN").orig"
+
+# ГРАНИЦА. Сторожит РОВНО то, что разошлось: форму staging-суффикса в имени,
+# которое эта оболочка получила от установщика. Если `.staging` в имени есть, а
+# опознанной формы нет, снятие суффикса ниже промолчало бы и дало неверное имя --
+# как оно и вышло 2026-09-01. Код 6: ломается не продукт и не запрос человека, а
+# договор между нашими же двумя файлами.
+#
+# Только на пути --update. У --target имя цели принадлежит ВЫЗЫВАЮЩЕМУ по
+# замыслу (README учит этому режиму, и зонд пути сборки строит свои цели именно
+# так), поэтому требовать от него вид версии значило бы сломать документированный
+# режим -- первая редакция этой границы так и сделала, и зонд её покраснил.
+if [[ $DO_UPDATE -eq 1 && "$BIN" == *.staging* ]] && ! __has_staging "$BIN"; then
+  echo "FATAL: staging-суффикс в имени цели не опознан: $(basename "$BIN")" >&2
+  echo "  Ожидается <имя>.staging либо <имя>.staging.<pid>. Установщик сменил" >&2
+  echo "  форму имени, и снятие суффикса ниже дало бы неверное имя молча." >&2
+  exit 6
+fi
 
 # --- 0b2. a --target run must name PRISTINE bytes -----------------------------
 # 0b стажирует путь по умолчанию, чтобы tweakcc никогда не увидел пропатченный
@@ -2671,14 +2777,13 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
       # in the log to say a gate had been turned off.
       echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 — these tweakcc patches did NOT apply:" >&2
       grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
-    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]] \
-         && grep -qE '^    ✗ |applied with some failures' "$TWEAKCC_OUT"; then
-      echo "FATAL: a configured tweakcc patch did not apply:" >&2
-      grep -E '^    ✗ ' "$TWEAKCC_OUT" | sed 's/^ */  /' >&2
-      grep -E '^patch: ' "$TWEAKCC_OUT" | sed 's/^/  /' >&2
-      echo "  Set CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 to build anyway." >&2
-      rm -f "$TWEAKCC_OUT"
-      exit 1
+    elif [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" != "1" ]]; then
+      # Сюда приходят ОБА исхода: и когда ✗ есть, и когда их нет. Второй нужен
+      # не меньше первого -- именно там ловится объявление, пережившее причину.
+      if ! __tw_reconcile_misses "$TWEAKCC_OUT" "$BIN"; then
+        rm -f "$TWEAKCC_OUT"
+        exit 1
+      fi
     fi
     rm -f "$TWEAKCC_OUT"
   else
@@ -3247,15 +3352,22 @@ def _bypass_no_immunity(d):
     # and every consumer imports it under a name of its own, so no single name
     # spans both sides and counting uses across the image proves nothing.
     #
+    # Терминатор здесь -- НЕ ЧАСТЬ ГАРАНТИИ. До 2.1.252 выражение закрывало
+    # цепочку `let` и кончалось `;`, на 2.1.257 апстрим дописал следом ещё одно
+    # объявление, и тот же участок кончается `,`. Шаг 27 воспроизводит символ
+    # образа дословно (иначе цепочка разорвалась бы), а проверка, пинившая
+    # ровно `;`, объявила бы верную правку потерянной. Пунктуация допускается
+    # любая из двух; всё, что проверка утверждает, -- какой предикат стоит на
+    # месте и что стоковая форма ушла.
     # 1. The STOCK two-argument call must be gone in its exact shape.
-    if re.search(rb'\?' + ID + rb'\(' + ID + rb'\.decisionReason,' + ID + rb'\):void 0;', d):
+    if re.search(rb'\?' + ID + rb'\(' + ID + rb'\.decisionReason,' + ID + rb'\):void 0[;,]', d):
         return False
     # 2. The narrowed predicate must stand in its place -- absence of the stock
     #    shape alone cannot tell "narrowed" from "branch deleted outright", and
     #    the second is what this check previously accepted.
     if not re.search(
         rb'\?' + ID + rb'\(' + ID + rb'\.decisionReason,\(__ccbr\)=>'
-        rb'__ccbr\.circuitBreaker!=="dangerousRemoval"&&' + ID + rb'\(__ccbr\)\):void 0;', d):
+        rb'__ccbr\.circuitBreaker!=="dangerousRemoval"&&' + ID + rb'\(__ccbr\)\):void 0[;,]', d):
         return False
     # 3. The breaker the narrowing names must still exist, and the one whose
     #    immunity is deliberately kept must still be marked immune. A rename
@@ -5268,6 +5380,15 @@ if [[ -n "$FLOOR_IMG" ]]; then
          exit 1 ;;
     esac
   }
+elif [[ $DO_UPDATE -eq 1 ]]; then
+  # На пути --update пристинный близнец кладёт САМ установщик, поэтому его
+  # отсутствие -- не «нечего мерить», а пропавший гейт. Прежде эта ветка молча
+  # печатала строку и прогон ехал дальше; ровно так пол не измерился на переходе
+  # 2.1.257, и заметить это можно было только вычитыванием лога.
+  echo "FATAL: пол проверок НЕ ИЗМЕРЕН: пристинного близнеца нет ($PRISTINE_SRC)" >&2
+  echo "  На пути --update его кладёт установщик рядом со сборкой, значит либо" >&2
+  echo "  имя разъехалось с тем, что он пишет, либо файл удалили между шагами." >&2
+  exit 6
 else
   echo "==> Пол проверок ПРОПУЩЕН: пристинного близнеца нет ($PRISTINE_SRC)"
 fi
@@ -5753,8 +5874,8 @@ if [[ $DO_UPDATE -eq 1 || $STAGED_FROM_LIVE -eq 1 ]]; then
   # copy. A default run over an already-patched live binary stages for the same
   # reason (see 0b). Swap it in now, with a rename: atomic, and it takes effect
   # on the next launch rather than under a running process.
-  if [[ "$BIN" == *.staging ]]; then
-    FINAL="${BIN%.staging}"
+  if __has_staging "$BIN"; then
+    FINAL="$(__strip_staging "$BIN")"
     mv "$BIN" "$FINAL"
     echo "Swapped the verified build over the previous one: $FINAL"
     BIN="$FINAL"
@@ -5775,8 +5896,7 @@ if [[ $DO_UPDATE -eq 1 ]]; then
   # "2.1.237.staging", and the cleanup would wipe the live 2.1.237 along with
   # its pristine .orig — everything except the intermediate file. Only the
   # binary a live session was executing at that moment would survive.
-  CURRENT_VER="$(basename "$BIN")"
-  CURRENT_VER="${CURRENT_VER%.staging}"
+  CURRENT_VER="$(basename "$(__strip_staging "$BIN")")"
   CURRENT_VER="${CURRENT_VER%.orig}"
   echo
   echo "==> Cleaning up previous versions"
