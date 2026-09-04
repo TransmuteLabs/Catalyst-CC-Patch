@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=119
-EXPECTED_MUTATIONS=135
+EXPECTED_SCENARIOS=122
+EXPECTED_MUTATIONS=139
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -380,8 +380,14 @@ case "$tweak" in
   *) printf 'Customizations applied successfully\n' ;;
 esac
 [[ "$tweak" != parttw ]] || printf 'NOTE: объявленные непроходы tweakcc на %s (гейт держится на остальных):\n' "$ver"
+# Лог АСИММЕТРИЧЕН намеренно: при раскладе 1/1 перестановка двух грепов свипа
+# ролями оставляет расклад неизменным, и пин сценария 116 теряет зуб.
+__tw_t1="${__TW_PROMPT_TYPES%%|*}"
+__tw_rest="${__TW_PROMPT_TYPES#*|}"
+__tw_t2="${__tw_rest%%|*}"
 unless nopatches  '    ✓ site'
-unless nopatches  "    ✓ ${__TW_PROMPT_TYPES%%|*}: stub"
+unless nopatches  "    ✓ ${__tw_t1}: stub"
+unless nopatches  "    ✓ ${__tw_t2}: stub"
 # Промах слоя накладок печатает сам tweakcc -- с НАЧАЛА строки; перечень
 # конвейера ниже пересказывает тот же промах с отступом. Обе строки здесь,
 # потому что неякоренный счёт свипа считал бы их за два промаха.
@@ -410,13 +416,19 @@ STUB
   # как claude-patch-all.real) и подставляется в заглушку. Отсутствие строки в
   # источнике -- отказ ПРИБОРА (код 2), а не заглушка без списка: свип на такой
   # снимок отказывается стартовать, и вина легла бы на свип.
-  __types_line=$(sed -n "/^__TW_PROMPT_TYPES='/p" "$dir/claude-patch-all.real" | head -1)
+  __types_hits=$(grep -a -c "^__TW_PROMPT_TYPES=" "$dir/claude-patch-all.real")
+  if [[ "$__types_hits" != 1 ]]; then
+    echo "corpus-tools-bench: в ките присваиваний __TW_PROMPT_TYPES $__types_hits, а нужно ровно одно --" >&2
+    echo "  заглушка повторила бы не ту строку, которую исполняет конвейер." >&2
+    exit 2
+  fi
+  __types_line=$(sed -n "/^__TW_PROMPT_TYPES='/p" "$dir/claude-patch-all.real")
   if [[ -z "$__types_line" ]]; then
     echo "corpus-tools-bench: в ките нет присваивания __TW_PROMPT_TYPES --" >&2
     echo "  заглушке нечем повторить список типов накладок, мерить нечем." >&2
     exit 2
   fi
-  python3 - "$dir/claude-patch-all.sh" "$__types_line" <<'INJECT'
+  if ! python3 - "$dir/claude-patch-all.sh" "$__types_line" <<'INJECT'
 import io, sys
 path, line = sys.argv[1], sys.argv[2]
 text = io.open(path, encoding='utf-8').read()
@@ -426,6 +438,11 @@ if text.count(mark) != 1:
     raise SystemExit(2)
 io.open(path, 'w', encoding='utf-8').write(text.replace(mark, line))
 INJECT
+then
+  echo "corpus-tools-bench: подстановка списка типов в заглушку не удалась --" >&2
+  echo "  метка осталась бы на месте, и отказ свипа не сработал бы: вина легла бы на свип." >&2
+  exit 2
+fi
   chmod +x "$dir/claude-patch-all.sh"
   # НАСТОЯЩИЙ зонд остаётся в копии под именем `.real.sh`: сценарий формы имени
   # замка считает ДОМА этой формы по игрушечному дереву, и заглушка, вставшая
@@ -1666,6 +1683,8 @@ run_all() {
   # Волна 34a: частичный прогон tweakcc с объявленными непроходами / без них.
   scenario_114; scenario_115
   scenario_116; scenario_117; scenario_118; scenario_119
+  # Волна 36b: два присваивания типов, нулевой twmiss, неразобранное присваивание.
+  scenario_120; scenario_121; scenario_122
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -3305,9 +3324,10 @@ scenario_115() { expect_red "115 частичный прогон tweakcc БЕЗ 
 
 scenario_116() {   # расклад крестиков по слоям и ЯКОРНЫЙ счёт промахов
   # Волна 34b дала сводке три новых поля (twcode/twprompt/twmiss), и ни одно не
-  # пинилось: сумма крестиков сходится при ЛЮБОМ расколе на слои, а промахи
-  # считались бы вдвое, если снять якорь -- перечень конвейера пересказывает
-  # неразобранный промах вместе с обрезком исходной строки.
+  # пинилось: сумма крестиков сходится при ЛЮБОМ расколе на слои, а неякоренный
+  # счёт промахов удваивается на ЖИВОМ образе (2.1.259: 24 -> 48). На игрушечном
+  # логе он даёт 3 при 2 якорных: образец сидит внутри строки пересказа только
+  # у неразобранной ветки.
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
@@ -3317,8 +3337,8 @@ scenario_116() {   # расклад крестиков по слоям и ЯКО
   fi
   line=$(grep -a 'twcode=' "$summary" 2>/dev/null | head -1)
   LAST_EVID="РАСКЛАД :: $line"
-  if [[ "$line" != *"tweakcc=2 twcode=1 twprompt=1 twmiss=2"* ]]; then
-    bad "116 расклад крестиков: в сводке не «tweakcc=2 twcode=1 twprompt=1 twmiss=2»; было: $line"
+  if [[ "$line" != *"tweakcc=3 twcode=1 twprompt=2 twmiss=2"* ]]; then
+    bad "116 расклад крестиков: в сводке не «tweakcc=3 twcode=1 twprompt=2 twmiss=2»; было: $line"
     return
   fi
   ok "116 крестики разделены по слоям, промахи считаются якорно"
@@ -3363,6 +3383,71 @@ scenario_119() {   # снимок кита без списка типов -- о�
     bad "119 снимок без списка типов: отказ пришёл ПОСЛЕ сборки версии"; return
   fi
   ok "119 снимок без списка типов -- отказ до первой сборки"
+}
+
+scenario_120() {   # два присваивания списка типов -- отказ ДО первой сборки
+  # Читатели берут первое присваивание, bash -- последнее. Расхождение молчит,
+  # пока единственность не проверена, поэтому она проверяется.
+  local dup out rc
+  dup="$C/duptypes-kit"
+  rm -rf "$dup"; cp -R "$K" "$dup"
+  printf "__TW_PROMPT_TYPES='Data'\n" >> "$dup/claude-patch-all.sh"
+  out=$(run_sweep "$dup" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )); then
+    bad "120 два присваивания списка типов: прогон не отказал"; return
+  fi
+  if [[ "$out" != *"присваиваний __TW_PROMPT_TYPES несколько"* ]]; then
+    bad "120 два присваивания списка типов: причина не названа: $(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+    return
+  fi
+  if [[ "$out" == *"SWEEP 900"* ]]; then
+    LAST_EVID="ОТКАЗ_ПОСЛЕ_СБОРКИ :: $out"
+    bad "120 два присваивания списка типов: отказ пришёл ПОСЛЕ сборки версии"; return
+  fi
+  ok "120 два присваивания списка типов -- отказ до первой сборки"
+}
+
+scenario_121() {   # промахов накладок нет -- поле обязано быть НУЛЁМ
+  # Единственное пиненное значение поля переживает подмену счётчика константой
+  # этого же значения. Нулевой случай -- вторая точка, через которую константа
+  # уже не проходит.
+  local out rc line summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(STUB_TWEAK=nomiss run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    bad "121 лог без промахов накладок: зелёный прогон не состоялся (код $rc)"; return
+  fi
+  line=$(grep -a 'twmiss=' "$summary" 2>/dev/null | head -1)
+  LAST_EVID="РАСКЛАД :: $line"
+  if [[ "$line" != *"twmiss=0"* ]]; then
+    bad "121 лог без промахов накладок: в сводке не «twmiss=0»; было: $line"; return
+  fi
+  ok "121 отсутствие промахов накладок читается нулём"
+}
+
+scenario_122() {   # присваивание есть, но не разобрано -- отказ, а не пустой список
+  # Счёт сходится (строка одна), а форма чужая: пустой список молча обнулил бы
+  # слой промтов в каждой строке сводки.
+  local odd out rc
+  odd="$C/oddtypes-kit"
+  rm -rf "$odd"; cp -R "$K" "$odd"
+  perl -0pi -e 's/^__TW_PROMPT_TYPES=.*\n/__TW_PROMPT_TYPES="Agent Prompt"\n/m' "$odd/claude-patch-all.sh"
+  out=$(run_sweep "$odd" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )); then
+    bad "122 неразобранное присваивание: прогон не отказал"; return
+  fi
+  if [[ "$out" != *"не разобрано"* ]]; then
+    bad "122 неразобранное присваивание: причина не названа: $(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+    return
+  fi
+  if [[ "$out" == *"SWEEP 900"* ]]; then
+    LAST_EVID="ОТКАЗ_ПОСЛЕ_СБОРКИ :: $out"
+    bad "122 неразобранное присваивание: отказ пришёл ПОСЛЕ сборки версии"; return
+  fi
+  ok "122 неразобранное присваивание -- отказ до первой сборки"
 }
 
 # --- мутации для --self-check ------------------------------------------------
@@ -3448,7 +3533,9 @@ MUT_FILE=(x
   # Волна 34a: частичный прогон tweakcc (114-115).
   tools/sweep.sh tools/sweep.sh
   # Волна 36: механизмы волны 34b, приехавшие без единого зуба (116-119).
-  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh)
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  # Волна 36b: владелец раскола, единственность якоря, нулевой twmiss (116, 119, 120, 121).
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -3602,7 +3689,12 @@ MUT_PAT=(x
   '\-c \-v \-E "\^    ✓ \(\$\{__tw_types\}\): "'
   '\[\[ "\$twlevel" == "1" \]\] \|\| why\+=\("дверь уровня tweakcc не отработала"\)'
   '\^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 '
-  'if \[\[ -z "\$TW_PROMPT_TYPES" \]\]; then')
+  'if \[\[ -z "\$TW_PROMPT_TYPES" \]\]; then'
+  # Волна 36b: владелец раскола, единственность якоря, нулевой twmiss (116, 119, 120, 121).
+  'grep \-a \-c \-v \-E "\^    ✓ \(\$\{__tw_types\}\): "'
+  '__tw_types_hits != 1'
+  '\(\( __tw_types_hits != 1 \)\); then'
+  '  twmiss=\$\(num ')
 
 MUT_REP=(x
   'if false; then'
@@ -3732,7 +3824,12 @@ MUT_REP=(x
   '-c -v -E "^    ✓ (${__tw_types}):  "'
   ':'
   '^NOTE: НИКОГДА НЕ ВСТРЕТИТСЯ '
-  'if [[ -n "$TW_PROMPT_TYPES" ]]; then')
+  'if [[ -n "$TW_PROMPT_TYPES" ]]; then'
+  # Волна 36b: владелец раскола, единственность якоря, нулевой twmiss (116, 119, 120, 121).
+  'grep -a -c -E "^    ✓ (${__tw_types}): "'
+  '__tw_types_hits > 1'
+  '(( __tw_types_hits < 1 )); then'
+  '  twmiss=2; : $(num ')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -3763,7 +3860,9 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                # Волна 34a
                114 115
                # Волна 36
-               116 116 117 118 119)
+               116 116 117 118 122
+               # Волна 36b: владелец раскола, единственность якоря, нулевой twmiss (116, 119, 120, 121).
+               116 119 120 121)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -3896,10 +3995,15 @@ MUT_CAUSE=(x
   'прогонов tweakcc 0'
   'SWEEP DONE'
   'twmiss=3'
-  'twcode=2'
+  'twcode=3'
   'SWEEP DONE'
   'дверь уровня tweakcc не отработала'
-  'SWEEP DONE')
+  'SWEEP DONE'
+  # Волна 36b: владелец раскола, единственность якоря, нулевой twmiss (116, 119, 120, 121).
+  'twcode=2'
+  'не разобрано'
+  'SWEEP DONE'
+  'twmiss=2')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

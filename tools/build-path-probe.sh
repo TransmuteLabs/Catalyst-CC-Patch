@@ -522,14 +522,15 @@ source = Path(sys.argv[1]).read_text(encoding="utf-8")
 declared_s, declared_m = int(sys.argv[2]), int(sys.argv[3])
 # Перечень типов живёт ВНЕ функций (он общий для трёх счётчиков), и без него
 # счётчики под `set -u` не запустятся -- поэтому он извлекается наравне с ними.
-types = re.search(r"(?m)^__TW_PROMPT_TYPES=.*\n", source)
+types = re.findall(r"(?m)^__TW_PROMPT_TYPES=.*\n", source)
 counters = [re.search(r"(?ms)^%s\(\) \{.*?^\}\n" % name, source)
             for name in ("__tw_applied_code_level", "__tw_applied_prompt_level", "__tw_prompt_notfound")]
 door = re.search(r"(?ms)^__tw_check_applied_level\(\) \{\n.*?^\}\n", source)
-if not types or not door or not all(counters):
-    print("  FAIL   N: функции уровня tweakcc не найдены в конвейере")
+if len(types) != 1 or not door or not all(counters):
+    print("  FAIL   N: механизм уровня tweakcc не извлечён из конвейера "
+          "(присваиваний типов %d, нужно 1)" % len(types))
     raise SystemExit(2)
-function = types.group(0) + "".join(c.group(0) for c in counters) + door.group(0)
+function = types[0] + "".join(c.group(0) for c in counters) + door.group(0)
 
 VER = "2.1.257"
 NEIGHBOUR = "2.1.252"
