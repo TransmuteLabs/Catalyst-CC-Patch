@@ -659,12 +659,36 @@ step('10 per-model context window', () => {
     if (!m) fail('context-window default not found');
     const helper = m[1];
     [, , model, envValue, fallback] = m;
-    const hb = js.match(
-      new RegExp(
-        `function ${rxEsc(helper)}\\((${ID})\\)\\{let (${ID})=(${ID})\\(\\1\\);` +
-          `return!\\2\\.startsWith\\("claude-"\\)&&!(${ID})\\((${ID})\\(\\2\\)\\)\\}`,
-      ),
-    );
+    // ДВЕ ФОРМЫ ТЕЛА помощника; обе обязаны совпасть ЦЕЛИКОМ по той же
+    // причине, что и раньше (частичное совпадение = имя от одной формы,
+    // смысл уже другой). 2.1.251-258:
+    //   function Gw(e){let t=Ot(e);return!t.startsWith("claude-")&&!PMe(Ye(t))}
+    // 2.1.259 переписала помощника: канонизация вынесена в переменную,
+    // добавлены ze-нормализация, тест известности по обеим формам и
+    // сравнение в нижнем регистре:
+    //   function OL(e){let n=Et(e),r=cr(n),o=ze(r);
+    //     if(bge(o)||r!==n&&bge(ze(n)))return!1;
+    //     let p=r.toLowerCase();return!p.startsWith("claude-")||p!==o}
+    // Ключ, который шаг читает из тела, в обеих формах один по устройству:
+    // canonical(parse(model)) -- на 259 это r = cr(Et(e)), группы 3 и 5.
+    // Имя помощника локально для чанка (в образе 259 четыре разных OL),
+    // поэтому форма пинится телом целиком, а не именем.
+    const hb =
+      js.match(
+        new RegExp(
+          `function ${rxEsc(helper)}\\((${ID})\\)\\{let (${ID})=(${ID})\\(\\1\\);` +
+            `return!\\2\\.startsWith\\("claude-"\\)&&!(${ID})\\((${ID})\\(\\2\\)\\)\\}`,
+        ),
+      ) ||
+      js.match(
+        new RegExp(
+          `function ${rxEsc(helper)}\\((${ID})\\)\\{let (${ID})=(${ID})\\(\\1\\),` +
+            `(${ID})=(${ID})\\(\\2\\),(${ID})=(${ID})\\(\\4\\);` +
+            `if\\((${ID})\\(\\6\\)\\|\\|\\4!==\\2&&\\8\\(\\7\\(\\2\\)\\)\\)return!1;` +
+            `let (${ID})=\\4\\.toLowerCase\\(\\);` +
+            `return!\\9\\.startsWith\\("claude-"\\)\\|\\|\\9!==\\6\\}`,
+        ),
+      );
     if (!hb)
       fail(
         `context-window default: '${helper}()' stands where the claude- test was, ` +
