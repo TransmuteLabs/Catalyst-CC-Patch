@@ -148,7 +148,7 @@ DECLARED = {
 }
 
 out = subprocess.run([sys.executable, block, img, patch_src],
-                     capture_output=True, text=True)
+                     capture_output=True, text=True, errors="replace")
 green, red = [], []
 for line in out.stdout.splitlines():
     line = line.strip()

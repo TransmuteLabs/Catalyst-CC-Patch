@@ -230,7 +230,7 @@ def weed_worker_leftovers() -> int:
 
 def reds(image: Path) -> tuple[list[str], str]:
     done = subprocess.run(["bash", str(RUNNER), str(image)],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, errors="replace")
     out = done.stdout
     red = [l.strip()[7:] for l in out.splitlines() if l.strip().startswith("[FAIL] ")]
     green = [l for l in out.splitlines() if l.strip().startswith("[OK] ")]

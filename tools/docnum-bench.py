@@ -85,7 +85,7 @@ PIPELINE = 'claude-patch-all.sh'
 ANCHOR = 'python3 - "$0" <<\'PYDOCS\'\n'
 END = '\nPYDOCS\n'
 # Круг 28, F-12(б): +1 -- мутация D40 на элидированную форму «все N».
-EXPECTED_MUTATIONS = 40
+EXPECTED_MUTATIONS = 44
 
 
 def read(path):
@@ -219,7 +219,7 @@ def main_anchors():
 
 def run_gate(kit, gate):
     done = subprocess.run([sys.executable, gate, os.path.join(kit, PIPELINE)],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, errors="replace")
     return done.returncode, (done.stdout or '') + (done.stderr or '')
 
 

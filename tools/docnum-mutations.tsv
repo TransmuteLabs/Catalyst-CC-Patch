@@ -1,7 +1,8 @@
 # Мутации гейта чисел (0d): id, файл, что заменить, на что, чем гейт обязан
 # ответить. Поля разделены табуляцией.
 #
-# СТРОКИ, НЕСУЩИЕ ЖИВОЙ СЧЁТ (D1, D2, D4, D6, D7), устаревают вместе с ним:
+# СТРОКИ, НЕСУЩИЕ ЖИВОЙ СЧЁТ (D1, D2, D4, D6, D7, D36, D37, D43, D44),
+# устаревают вместе с ним:
 # мутация обязана создать РАСХОЖДЕНИЕ, а для этого держит в себе одно из двух
 # сверяемых чисел. Устаревают они ГРОМКО -- стенд отвечает «вход не найден
 # дословно» и падает, -- поэтому счёт правится в двух местах: у владельца и
@@ -9,8 +10,8 @@
 # расхождения, которое гейт обязан увидеть.
 #
 # Почему таблица лежит ОТДЕЛЬНО от кода стенда: вход каждой мутации -- это
-# нарочно неверное утверждение о счёте, а гейт сканирует прозу в .md и
-# комментарии в .sh, .js, .py. Записанное в коде стенда, оно было бы живым
+# нарочно неверное утверждение о счёте, а гейт сканирует прозу в .md и .txt
+# и комментарии в .sh, .js, .py. Записанное в коде стенда, оно было бы живым
 # утверждением. Данные (как corpus-versions.txt) гейт не читает.
 #
 # Каждая строка обязана и ПРИМЕНИТЬСЯ (вход найден дословно и РОВНО ОДИН раз:
@@ -26,7 +27,7 @@ D2	README.md	corpus-tools-bench's 130 recorded mutations	corpus-tools-bench's 13
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
 D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 82;	const EXPECTED_SCENARIOS = 83;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
-D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 40	EXPECTED_MUTATION_COUNT = 40	не объявляет свою величину
+D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 44	EXPECTED_MUTATION_COUNT = 44	не объявляет свою величину
 D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=130	EXPECTED_MUTATION_COUNT=130	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
@@ -66,3 +67,7 @@ D37	README.md	checks-teeth's 19 recorded mutations	checks-teeth's 20 recorded mu
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
 D40	claude-patch-all.sh	все 119 проверок конвейера сошлись	все 119 сошлись	опущенным существительным
+D41	claude-patch-all.sh	# docnum:synthetic-block -- этот блок ЕСТЬ сам гейт	# этот блок ЕСТЬ сам гейт	the pipeline runs 999 checks
+D42	claude-patch-all.sh	    """Все питоновские heredoc'и одного файла	    """corpus-tools-bench has 12 scenarios. Питоновские heredoc'и одного файла	объявлено «115 scenarios» (владелец corpus-tools-bench)
+D43	README.md	build-path-probe has 26 scenarios	build-path-probe has 27 scenarios	объявлено «26 scenarios» (владелец build-path-probe)
+D44	README.md	26 scenarios and 26 mutations	26 scenarios and 27 mutations	объявлено «26 mutations» (владелец build-path-probe)

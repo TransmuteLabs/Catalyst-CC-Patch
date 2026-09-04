@@ -938,7 +938,7 @@ scenario_33() {   # замок стенда занят -- второй прог�
   holder=$!
   wait_holder_ready "$lock" || exit 2
   out=$(CORPUS_BENCH_LOCK="$lock" CORPUS_BENCH_LOCK_BUDGET=1 \
-        bash "$K/tools/corpus-tools-bench.real.sh" --lock-probe 2>&1); rc=$?
+        bash "$K/tools/corpus-tools-bench.real.sh" --lock-probe 2>&1 9>&-); rc=$?
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   LAST_EVID="rc=$rc :: $out"
   if (( rc == 0 )); then
@@ -1351,7 +1351,7 @@ scenario_70() {   # разборщику нечем узнать платфор�
   lone="$C/lone-kit"; mkdir -p "$lone/tools"
   cp "$K/tools/corpus-list.py" "$lone/tools/corpus-list.py"
   { echo "# platform: x"; echo "900 0.0.900 -"; } > "$lone/list.txt"
-  out=$(python3 "$lone/tools/corpus-list.py" "$lone/list.txt" 2>&1); rc=$?
+  out=$(python3 "$lone/tools/corpus-list.py" "$lone/list.txt" 2>&1 9>&-); rc=$?
   LAST_EVID="rc=$rc :: $out"
   if (( rc != 2 )); then
     LAST_EVID="КЛАСС_НЕ_ТОТ rc=$rc :: $out"
@@ -2104,7 +2104,7 @@ SH87
   chmod +x "$root/bin/bash"
   "${SWEEP_ENV_SCRUB[@]}" \
     SESSION_RECORD="$record" PATH="$root/bin:$PATH" \
-    perl -e 'use POSIX (); POSIX::setpgid(0,0); exec "/bin/bash", $ARGV[0], "999"' "$K/tools/sweep.sh" >/dev/null 2>&1
+    perl -e 'use POSIX (); POSIX::setpgid(0,0); exec "/bin/bash", $ARGV[0], "999"' "$K/tools/sweep.sh" >/dev/null 2>&1 9>&-
   out=$(cat "$record" 2>/dev/null); pid=${out%% *}; sess=${out##* }
   rm -rf "$root"
   # «Не смог измерить» отделено от «измерил и разошлось»: без разделения
@@ -2158,7 +2158,7 @@ scenario_88() {   # S1: --stop не сигналит по записи с чуж
     bash -c 'trap "printf hit >> \"\$MARK\"; exit 143" TERM; while :; do sleep 1; done' 9>&- & decoy=$!
   sleep 1
   printf '%s\t%s\n' "$decoy" 'Thu Jan  1 00:00:00 1970' > "$st/sweep.pgid"
-  out=$(SWEEP_STATE_DIR="$st" bash "$K/tools/sweep.sh" --stop 2>&1); rc=$?
+  out=$(SWEEP_STATE_DIR="$st" bash "$K/tools/sweep.sh" --stop 2>&1 9>&-); rc=$?
   local hit=есть; [[ -e "$mark" ]] || hit=НЕТ
   kill "$decoy" 2>/dev/null; wait "$decoy" 2>/dev/null; rm -f "$mark"
   if (( rc == 0 )); then
@@ -2460,7 +2460,7 @@ scenario_94() {   # S7: обломки checks-teeth.<мёртвый pid> уби�
   printf 'debris' > "$tdir/checks-teeth.$dead.abc.bin"
   printf 'live'   > "$tdir/checks-teeth.$$.def.bin"
   out=$(TMPDIR="$tdir" CLAUDE_PATCH_LOCK="$PLOCK" \
-        python3 "$K/tools/checks-teeth.real.py" --image "$C/corpus/0.0.900.pristine" 2>&1); rc=$?
+        python3 "$K/tools/checks-teeth.real.py" --image "$C/corpus/0.0.900.pristine" 2>&1 9>&-); rc=$?
   local dstat=ОСТАЛСЯ lstat=СНЁСЛИ_ЖИВОЙ
   [[ -e "$tdir/checks-teeth.$dead.abc.bin" ]] || dstat=убран
   [[ -e "$tdir/checks-teeth.$$.def.bin" ]] && lstat=цел
@@ -2712,7 +2712,7 @@ scenario_100() {   # волна 26, D-5: лидер группы мёртв, г�
   pgid=$leader
   printf '%s\t%s\n' "$pgid" 'Thu Jan  1 00:00:00 1970' > "$st/sweep.pgid"
   sleep 0.3
-  out=$(SWEEP_STATE_DIR="$st" bash "$K/tools/sweep.sh" --stop 2>&1); rc=$?
+  out=$(SWEEP_STATE_DIR="$st" bash "$K/tools/sweep.sh" --stop 2>&1 9>&-); rc=$?
   local hit=есть; [[ -e "$mark" ]] || hit=НЕТ
   for kid in $(ps -eo pid,pgid | awk -v g="$pgid" '$2 == g { print $1 }'); do
     kill -9 "$kid" 2>/dev/null

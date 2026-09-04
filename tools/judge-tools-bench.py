@@ -150,7 +150,7 @@ def run_compact(
     ]
     if dry_run:
         command.append("--dry-run")
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, errors="replace")
     output = result.stdout + result.stderr
     require(result.returncode == 0, f"compact.py rc={result.returncode}\n{output}")
     matches = list(SUMMARY_RE.finditer(result.stdout))
@@ -462,7 +462,7 @@ def sync_diff(root: Path, home: Path, tools: Path, agents: Path) -> tuple[int, s
     env["CLAUDE_LAUNCH_AGENTS_DIR"] = str(agents)
     done = subprocess.run(
         ["bash", str(root / "scripts" / "probes-sync.sh"), "--diff"],
-        capture_output=True, text=True, env=env,
+        capture_output=True, text=True, errors="replace", env=env,
     )
     return done.returncode, done.stdout + done.stderr
 
@@ -483,7 +483,7 @@ def scenario_19() -> None:
                    CLAUDE_LAUNCH_AGENTS_DIR=str(agents))
         done = subprocess.run(
             ["bash", str(ROOT / "scripts" / "probes-sync.sh"), "--to-home"],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, errors="replace", env=env,
         )
         require(done.returncode == 0, f"раскатка в игрушечный дом провалилась: {done.stderr}")
 
@@ -595,7 +595,7 @@ def scenario_22() -> None:
         require(module.klass("ask: пора спросить") == "EMPTY",
                 "судейский словарь принял чужой класс")
         helped = subprocess.run([sys.executable, str(ROOT / "judge" / "replay.py"), "--help"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, errors="replace")
         require("--probe" in helped.stdout, "у replay.py нет аргумента --probe")
 
         adj = import_tool("adjudicate")
@@ -619,7 +619,7 @@ def scenario_23() -> None:
     """adjudicate импортируется на машине БЕЗ образа: словарь читается в main."""
     env = dict(os.environ, CLAUDE_JUDGE_IMAGE="/nonexistent/claude-image")
     done = subprocess.run([sys.executable, "-c", "import adjudicate"],
-                          cwd=str(ROOT / "judge"), capture_output=True, text=True, env=env)
+                          cwd=str(ROOT / "judge"), capture_output=True, text=True, errors="replace", env=env)
     require(done.returncode == 0,
             f"импорт adjudicate требует образа: {(done.stderr or '').strip()[:200]}")
 
@@ -738,7 +738,7 @@ def run_sync(kit: Path, mode: str, home: Path, tools: Path, agents: Path,
     if fake_home is not None:
         env["HOME"] = str(fake_home)
     return subprocess.run(["bash", str(kit / "scripts" / "probes-sync.sh"), mode],
-                          capture_output=True, text=True, env=env)
+                          capture_output=True, text=True, errors="replace", env=env)
 
 
 def home_bytes(home: Path, tools: Path) -> dict[Path, bytes]:
@@ -1169,7 +1169,7 @@ def run_validate_run(records: Path, image: Path, out: Path,
     ]
     env = dict(os.environ)
     env.pop("ANTHROPIC_BASE_URL", None)
-    return subprocess.run(command, capture_output=True, text=True, env=env)
+    return subprocess.run(command, capture_output=True, text=True, errors="replace", env=env)
 
 
 def scenario_38() -> None:
@@ -1212,7 +1212,7 @@ def scenario_38() -> None:
                 env.update(env_extra)
             done = subprocess.run(
                 [sys.executable, str(ROOT / "judge" / tool), *args],
-                capture_output=True, text=True, env=env)
+                capture_output=True, text=True, errors="replace", env=env)
             combined = done.stdout + done.stderr
             require(done.returncode == 2,
                     f"{tool}: --limit=-1 не отвергнут кодом 2 (rc={done.returncode})")
@@ -1278,7 +1278,7 @@ def scenario_40() -> None:
             done = subprocess.run(
                 [sys.executable, str(COMPACT), "--dir", str(directory),
                  "--older-than-hours", value],
-                capture_output=True, text=True)
+                capture_output=True, text=True, errors="replace")
             require(done.returncode == 2,
                     f"--older-than-hours {value} не отвергнут кодом 2 "
                     f"(rc={done.returncode})")
@@ -1303,7 +1303,7 @@ def scenario_41() -> None:
         done = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "checks-teeth.py"),
              "--jobs", "0", "--image", str(missing)],
-            capture_output=True, text=True)
+            capture_output=True, text=True, errors="replace")
         require(done.returncode == 2,
                 f"--jobs=0 не отвергнут кодом 2 (rc={done.returncode})")
         require("--jobs" in done.stderr, "отказ не назвал ручку --jobs")
@@ -1594,7 +1594,7 @@ def victim_parses(path: Path) -> None:
         except py_compile.PyCompileError as error:
             raise UnparsableVictim(f"py_compile {path}: {error}") from error
     elif path.suffix == ".sh":
-        done = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        done = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, errors="replace")
         if done.returncode != 0:
             raise UnparsableVictim(f"bash -n {path}: {(done.stderr or '').strip()}")
         for body in shell_python_heredocs(path.read_text(encoding="utf-8")):
@@ -2319,7 +2319,7 @@ def run_copy(root: Path) -> subprocess.CompletedProcess[str]:
         [sys.executable, str(root / "tools" / "judge-tools-bench.py")],
         cwd=root,
         capture_output=True,
-        text=True,
+        text=True, errors="replace",
     )
 
 

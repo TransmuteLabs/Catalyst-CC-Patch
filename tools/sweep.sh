@@ -505,7 +505,7 @@ LIST="${CORPUS_LIST:-$SWEEP_KIT/tools/corpus-versions.txt}"
 # Код разборщика читается ПО КЛАССУ: 2 значит «разбирать нечего» (нет файла,
 # сломан контракт вызова), и это не то же, что «список не проходит разбор»
 # (раунд 19, A-7).
-PARSED=$(python3 "$SWEEP_KIT/tools/corpus-list.py" "$LIST") || {
+PARSED=$(python3 "$SWEEP_KIT/tools/corpus-list.py" "$LIST" 8>&-) || {
   __lrc=$?
   if (( __lrc == 2 )); then
     echo "SWEEP ОТКАЗ: разборщик списка НЕ МЕРИЛ (rc=2): причина строкой выше -- разбирать нечего либо сломан сам прибор" >&2
@@ -705,6 +705,17 @@ trap 'exit 143' TERM
 # коду, а не снимку.
 cp -R "$SRC_KIT"/. "$HERE"/ || {
   echo "SWEEP ОТКАЗ: не снять снимок кита в $HERE" >&2; exit 1; }
+
+# Список типов накладок принадлежит КОНВЕЙЕРУ: там он делит крестики на два
+# слоя, здесь -- считает те же два поля. Второй экземпляр списка тихо
+# разошёлся бы с первым на восьмом типе, и сводка называла бы промт кодом,
+# пока дверь конвейера говорит обратное. Поэтому список читается из снимка,
+# а его отсутствие -- отказ до первой сборки, а не молчаливое «ноль».
+TW_PROMPT_TYPES=$(sed -n "s/^__TW_PROMPT_TYPES='\(.*\)'\$/\1/p" "$HERE/claude-patch-all.sh" | head -1)
+if [[ -z "$TW_PROMPT_TYPES" ]]; then
+  echo "SWEEP ОТКАЗ: в снимке кита не найдено присваивание __TW_PROMPT_TYPES -- расклад крестиков считать нечем" >&2
+  exit 1
+fi
 # Метка происхождения снимка.
 #
 # `git diff --quiet` сравнивает дерево только с ИНДЕКСОМ, то есть видит лишь
@@ -1073,7 +1084,24 @@ for entry in "${SRC[@]}"; do
   export LC_ALL=C
   ok=$(num "$(grep -a -c '\[OK\]' "$log")")
   fail=$(num "$(grep -a -c '\[FAIL\]' "$log")")
+  # Крестики принадлежат ДВУМ слоям с разными владельцами (код -- версия
+  # апстрима и наш форк, промты -- каталог накладок ПОЛЬЗОВАТЕЛЯ), поэтому
+  # сводка несёт расклад, а не только сумму: по одной сумме нельзя отличить
+  # просевший код от разошедшегося каталога. Восьмой тип, если апстрим его
+  # заведёт, уедет в счёт кода -- и двусторонняя дверь конвейера покраснеет.
+  __tw_types="$TW_PROMPT_TYPES"
   tw=$(num "$(grep -a -c '^    ✓ ' "$log")")
+  twcode=$(num "$(grep -a '^    ✓ ' "$log" | grep -a -c -v -E "^    ✓ (${__tw_types}): ")")
+  twprompt=$(num "$(grep -a -c -E "^    ✓ (${__tw_types}): " "$log")")
+  # Промах слоя промтов печатается НЕ крестиком, а отдельной строкой, и сверка
+  # непроходов его не видит -- на 2.1.259 так молчали 24 промаха.
+  #
+  # Образец ЯКОРНЫЙ: строку так печатает сам tweakcc, с начала строки. Без
+  # якоря поле считало вдвое -- перечень конвейера («  не найдена накладка:»)
+  # пересказывает те же промахи, и на 2.1.259 сводка говорила 48 при 24
+  # промахах, противореча NOTE строкой выше. Перечень конвейера с начала
+  # строки не начинается ни в одной своей ветке, включая неразобранную.
+  twmiss=$(num "$(grep -a -c '^Could not find system prompt' "$log")")
   ours=$(num "$(grep -a -c 'Script patch applied' "$log")")
   # Прогон tweakcc кончается ОДНИМ из двух баннеров: полным («successfully»)
   # или частичным («with some failures»). Частичный законен только рядом с
@@ -1104,6 +1132,11 @@ for entry in "${SRC[@]}"; do
   # всегда, а объявление -- это тоже ответ вызова.
   forms=$(num "$(grep -a -c '^ФОРМЫ ОБОЛОЧКИ ЧИСТЫ' "$log")")
   floor=$(num "$(grep -a -c -E '^ПОЛ ПРОВЕРОК СОШЁЛСЯ|^==> Пол проверок ПРОПУЩЕН' "$log")")
+  # Дверь уровня tweakcc -- того же рода вызов: удали из конвейера блок, её
+  # зовущий, и не покраснеет ни один стенд (дверь уедет вместе со своей
+  # проверкой). Засчитывается и объявленное гашение слепой ручкой: это тоже
+  # ответ вызова, а молчаливого пути у двери нет.
+  twlevel=$(num "$(grep -a -c -E '^NOTE: уровень tweakcc на .* сошёлся: |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 ' "$log")")
   # A NUL byte means two writers shared this file: the log is not one run.
   mixed=$(LC_ALL=C tr -d '\000' < "$log" | wc -c | tr -d ' ')
   size=$(wc -c < "$log" | tr -d ' ')
@@ -1156,6 +1189,7 @@ for entry in "${SRC[@]}"; do
     [[ "$bench" == "1" ]] || why+=("стенд зондов не подтверждён")
     [[ "$forms" == "1" ]] || why+=("гейт форм оболочки не отработал")
     [[ "$floor" == "1" ]] || why+=("пол утверждений не отработал")
+    [[ "$twlevel" == "1" ]] || why+=("дверь уровня tweakcc не отработала")
     if (( ${#why[@]} )); then
       RED=$(( RED + 1 ))
       note="$note КРАСНАЯ: $(printf '%s; ' "${why[@]}")"
@@ -1217,9 +1251,9 @@ for entry in "${SRC[@]}"; do
   if [[ "$note" != *КРАСНАЯ* && "$note" != *"НЕ ИЗМЕРЕНО"* ]]; then
     rm -f "$STATE/bin/$v.wave.bin"
   fi
-  sum_line "$(printf '%s exit=%s ok=%s fail=%s tweakcc=%s ours=%s smoke=%s iface=%s bench=%s forms=%s floor=%s%s' \
-    "$v" "$rc" "$ok" "$fail" "$tw" "$ours" "$smoke" "$iface" "$bench" "$forms" "$floor" "$note")"
-  echo "SWEEP $v: exit=$rc ok=$ok fail=$fail tweakcc=$tw bench=$bench$note"
+  sum_line "$(printf '%s exit=%s ok=%s fail=%s tweakcc=%s twcode=%s twprompt=%s twmiss=%s twlevel=%s ours=%s smoke=%s iface=%s bench=%s forms=%s floor=%s%s' \
+    "$v" "$rc" "$ok" "$fail" "$tw" "$twcode" "$twprompt" "$twmiss" "$twlevel" "$ours" "$smoke" "$iface" "$bench" "$forms" "$floor" "$note")"
+  echo "SWEEP $v: exit=$rc ok=$ok fail=$fail tweakcc=$tw (код $twcode, промты $twprompt, не найдено $twmiss, дверь $twlevel) bench=$bench$note"
 done
 # Ни одна версия не собралась -- стадия зубов не исполнялась. Молчание
 # здесь неотличимо от зелёного, поэтому отдельная строка и пометка в сводке.

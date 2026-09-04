@@ -136,7 +136,7 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdurxplkm
+CASES=abcdurxplkmn
 # Owner totals across the self-checking cases. Раньше эти два числа стояли
 # ГОЛЫМИ объявлениями: их читал только гейт чисел в прозе, а сам прибор их не
 # сверял ни с чем -- правка таблицы случая без правки числа проходила молча,
@@ -147,13 +147,14 @@ CASES=abcdurxplkm
 CASE_K_SCENARIOS=1; CASE_K_MUTATIONS=1
 CASE_L_SCENARIOS=4; CASE_L_MUTATIONS=4
 CASE_M_SCENARIOS=6; CASE_M_MUTATIONS=5
-EXPECTED_SCENARIOS=11
-EXPECTED_MUTATIONS=10
-if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS
-      || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS )); then
+CASE_N_SCENARIOS=15; CASE_N_MUTATIONS=16
+EXPECTED_SCENARIOS=26
+EXPECTED_MUTATIONS=26
+if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS
+      || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS )); then
   echo "build-path-probe: ОТКАЗ -- объявленная сумма разошлась со вкладами случаев:" >&2
-  echo "  сценариев $EXPECTED_SCENARIOS против $((CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS))," \
-       "мутаций $EXPECTED_MUTATIONS против $((CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS))" >&2
+  echo "  сценариев $EXPECTED_SCENARIOS против $((CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS))," \
+       "мутаций $EXPECTED_MUTATIONS против $((CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS))" >&2
   exit 4
 fi
 WANT_VER=
@@ -302,7 +303,7 @@ def run(body, pgrep_body, lsof_body):
         script = "set -uo pipefail\n" + body + "\nversions_in_use\n"
         return subprocess.run(["bash"], input=script,
                               env={**os.environ, "PATH": str(bindir) + ":/usr/bin:/bin"},
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, errors="replace")
 
 space_path = "/Users/John Doe/.local/share/claude/versions/2.1.226"
 foreign = "/foreign/process/2.1.999"
@@ -430,7 +431,7 @@ def run(body, misses, out_text, marker=VER):
         script = ("set -uo pipefail\nTWEAKCC_KNOWN_MISSES=%s\n" % shlex.quote(str(mf))
                   + body
                   + "\n__tw_reconcile_misses %s %s\n" % (shlex.quote(str(of)), shlex.quote(str(img))))
-        return subprocess.run(["bash"], input=script, capture_output=True, text=True)
+        return subprocess.run(["bash"], input=script, capture_output=True, text=True, errors="replace")
 
 
 out_miss = "patch: 13 applied, 1 failed\n    ✗ %s — upstream description\n" % MISS
@@ -495,6 +496,218 @@ print("build-path-probe M: case held and its controls showed teeth")
 raise SystemExit(1 if failed else 0)
 PY_MISSES
 }
+
+# Дверь УРОВНЯ tweakcc (сколько правок легло). Предмет соседний со случаем M,
+# но не тот же: M видит поимённые ✗, а проседание слоя случается ИМЕННО без
+# крестиков -- когда данных под версию нет, правки не пробуются вовсе. Так
+# падение 33 -> 14 прошло вердиктом «красных нет». Гоняются САМИ функции
+# конвейера над игрушечными файлами.
+#
+# Уровень РАЗДЕЛЁН на два слоя, потому что у них разные владельцы: код
+# принадлежит версии апстрима и нашему форку (дверь двусторонняя), промты --
+# каталогу накладок ПОЛЬЗОВАТЕЛЯ (дверь ПОЛОМ, одностороння). Пин суммы
+# измеренно неустойчив: 2.1.259 дала 34 и 33 на неизменном образе. Третий
+# счёт -- накладки, которых в образе не нашлось: они печатаются НЕ крестиком,
+# и сверка непроходов их не видит вовсе.
+case_n() {
+  python3 - "$PIPELINE" "$CASE_N_SCENARIOS" "$CASE_N_MUTATIONS" <<'PY_LEVEL'
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+declared_s, declared_m = int(sys.argv[2]), int(sys.argv[3])
+# Перечень типов живёт ВНЕ функций (он общий для трёх счётчиков), и без него
+# счётчики под `set -u` не запустятся -- поэтому он извлекается наравне с ними.
+types = re.search(r"(?m)^__TW_PROMPT_TYPES=.*\n", source)
+counters = [re.search(r"(?ms)^%s\(\) \{.*?^\}\n" % name, source)
+            for name in ("__tw_applied_code_level", "__tw_applied_prompt_level", "__tw_prompt_notfound")]
+door = re.search(r"(?ms)^__tw_check_applied_level\(\) \{\n.*?^\}\n", source)
+if not types or not door or not all(counters):
+    print("  FAIL   N: функции уровня tweakcc не найдены в конвейере")
+    raise SystemExit(2)
+function = types.group(0) + "".join(c.group(0) for c in counters) + door.group(0)
+
+VER = "2.1.257"
+NEIGHBOUR = "2.1.252"
+# Имя типизированной накладки: ровно та форма, которой tweakcc метит слой
+# промтов. Код печатается видом «Имя -- описание» и двоеточия после типа не
+# имеет -- на этом и держится разделение.
+PROMPT_KINDS = ["Skill", "System Prompt", "Tool Description", "Data",
+                "System Reminder", "Agent Prompt", "Tool Parameter"]
+
+
+def out_rows(code, prompts=0, failed=0, notfound=0):
+    rows = "".join("    ✓ patch %d — ok\n" % i for i in range(code))
+    rows += "".join("    ✓ %s: overlay %d — ok\n" % (PROMPT_KINDS[i % len(PROMPT_KINDS)], i)
+                    for i in range(prompts))
+    rows += "".join("    ✗ patch f%d — upstream rewrote it\n" % i for i in range(failed))
+    rows += "".join('Could not find system prompt "overlay m%d" in cli.js (using regex /x/)\n' % i
+                    for i in range(notfound))
+    return "patch: %d applied, %d failed\n%s" % (code + prompts, failed, rows)
+
+
+def run(body, table, out_text, marker=VER, blind=False):
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        tf = root / "expected.txt"
+        tf.write_text(table, encoding="utf-8")
+        of = root / "tweakcc.out"
+        of.write_text(out_text, encoding="utf-8")
+        img = root / "image"
+        marker_bytes = ("// Version: %s\n" % marker).encode() if marker else b"no version marker\n"
+        img.write_bytes(b"\x00\x01binary\x00noise\x00" + marker_bytes + b"\x00tail\x00")
+        env = "CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1\n" if blind else ""
+        script = ("set -uo pipefail\n" + env
+                  + "TWEAKCC_EXPECTED_APPLIED=%s\n" % shlex.quote(str(tf))
+                  + body
+                  + "\n__tw_check_applied_level %s %s\n" % (shlex.quote(str(of)), shlex.quote(str(img))))
+        # errors="replace": оснастка обязана пережить байты МУТАНТА. Мутация
+        # N12 снимает проверку пола, и bash уходит в арифметику над кириллицей,
+        # печатая диагностику, обрезанную посреди символа. Падение декодера
+        # здесь неотличимо от «прибор сломался», а покраснеть обязана мутация.
+        return subprocess.run(["bash"], input=script, capture_output=True, text=True, errors="replace")
+
+
+row_here = "%s\t14\t21\tизмерено\n" % VER
+row_neighbour = "%s\t14\t21\tчужая версия\n" % NEIGHBOUR
+row_nolayer = "%s\t14\tнет-слоя\tапстрим под версию данных не даёт\n" % VER
+row_bad_floor = "%s\t14\tмного\tпол испорчен\n" % VER
+row_indented = "  %s\t14\t21\tвписана с отступом\n" % VER
+row_empty_code = "%s\t\t21\tполе кода не заполнено\n" % VER
+
+SCEN = {
+    # Сошлись оба слоя: 14 кода и 21 промт при одном непроходе -- крестик в
+    # счёт входить НЕ должен, а типизированные строки не должны попасть в код.
+    "N1": (row_here, out_rows(14, 21, 1), VER, False,
+           lambda r: r.returncode == 0 and "сошёлся" in r.stderr
+                     and "кода 14, промтов 21" in r.stderr),
+    "N2": (row_here, out_rows(9, 21), VER, False,
+           lambda r: r.returncode == 1 and "слой кода tweakcc просел" in r.stderr and "легло 9" in r.stderr),
+    "N3": (row_here, out_rows(20, 21), VER, False,
+           lambda r: r.returncode == 1 and "кода легло БОЛЬШЕ объявленного" in r.stderr),
+    "N4": ("", out_rows(14, 21), VER, False,
+           lambda r: r.returncode == 1 and "не объявлен" in r.stderr
+                     and ("%s\t14\t21" % VER) in r.stderr),
+    "N5": (row_neighbour, out_rows(14, 21), VER, False,
+           lambda r: r.returncode == 1 and "не объявлен" in r.stderr),
+    "N6": ("", out_rows(3, 4), VER, True,
+           lambda r: r.returncode == 0 and "погашена" in r.stderr),
+    # Пол промтов пробит: слой перестал ложиться -- это ровно тот регресс,
+    # которым кит владеет.
+    "N7": (row_here, out_rows(14, 19), VER, False,
+           lambda r: r.returncode == 1 and "слой промтов tweakcc просел" in r.stderr
+                     and "пол 21" in r.stderr),
+    # Рост промтов -- НЕ красный: пользователь добавил накладки, дефекта нет.
+    # Это и есть причина односторонности, и она обязана иметь свой сценарий.
+    "N8": (row_here, out_rows(14, 30), VER, False,
+           lambda r: r.returncode == 0 and "сошёлся" in r.stderr and "промты 30" in r.stderr),
+    # «нет-слоя» -- не пол 0, а требование ДВУСТОРОННЕГО нуля: оживший слой
+    # обязан покраснеть, иначе запись переживает свою причину.
+    "N9": (row_nolayer, out_rows(14, 2), VER, False,
+           lambda r: r.returncode == 1 and "объявлен отсутствующим, но он ожил" in r.stderr),
+    "N10": (row_nolayer, out_rows(14, 0), VER, False,
+            lambda r: r.returncode == 0 and "сошёлся" in r.stderr),
+    # Накладки, которых в образе не нашлось: не гейтятся (владелец -- каталог
+    # пользователя), но обязаны быть НАЗВАНЫ. Молчание здесь и было дырой.
+    "N11": (row_here, out_rows(14, 21, 0, 3), VER, False,
+            lambda r: r.returncode == 0 and "не нашлось в образе: 3" in r.stderr
+                      and "не найдена накладка: overlay m0" in r.stderr
+                      and "не найдена накладка: overlay m2" in r.stderr),
+    "N12": (row_bad_floor, out_rows(14, 21), VER, False,
+            lambda r: r.returncode == 1 and "пол промтов" in r.stderr and "не число" in r.stderr),
+    # Ключ сверяется ТРИМЛЕННЫМ: строка, вписанная с отступом, принадлежит этой
+    # версии, а не «чужой». Без трима дверь отвечала бы «не объявлен» на
+    # объявление, которое человек уже сделал.
+    "N13": (row_indented, out_rows(14, 21), VER, False,
+            lambda r: r.returncode == 0 and "сошёлся" in r.stderr),
+    # Две строки на версию: читатель берёт первую и выходит, вторая (та, которую
+    # правил человек) молча не действует -- отказ обязан назвать дубль.
+    "N14": (row_here + row_here, out_rows(14, 21), VER, False,
+            lambda r: r.returncode == 1 and "приходится строк: 2" in r.stderr),
+    # Строка ЕСТЬ, поле кода пусто: совет «впишите строку» дал бы вторую строку
+    # на версию, то есть отправил бы чинить в отказ по дублю.
+    "N15": (row_empty_code, out_rows(14, 21), VER, False,
+            lambda r: r.returncode == 1 and "поле кода в ней пусто" in r.stderr
+                      and "Строка ниже" not in r.stderr),
+}
+ORDER = ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12",
+         "N13", "N14", "N15"]
+
+mutations = [
+    ("N1-cross-counted", "grep -a '^    ✓ ' \"$1\" 2>/dev/null", "grep -a '^    [✓✗] ' \"$1\" 2>/dev/null", "N1"),
+    ("N1-code-swallows-prompts", "| LC_ALL=C grep -a -c -v -E", "| LC_ALL=C grep -a -c -E", "N1"),
+    ("N1-agreement-silent", 'echo "NOTE: уровень tweakcc на $__ver сошёлся:', 'true "', "N1"),
+    ("N2-low-door-off", "if (( __code < __want_code )); then", "if false; then", "N2"),
+    ("N3-high-door-off", "if (( __code > __want_code )); then", "if false; then", "N3"),
+    ("N4-missing-row-ok", 'if [[ -z "$__want_code" ]]; then', "if false; then", "N4"),
+    ("N5-version-filter-off",
+     'k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit }', '1 { print $2; exit }', "N5"),
+    ("N6-blind-knob-silent",
+     'echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь уровня tweakcc погашена', 'true "', "N6"),
+    ("N7-prompt-floor-off", "elif (( __prompts < __want_prompts )); then", "elif false; then", "N7"),
+    # Пол обязан быть ОДНОСТОРОННИМ: равенство вернуло бы ровно тот дефект,
+    # ради которого слои разделены -- красное на добавлении накладки.
+    ("N8-floor-made-two-sided", "elif (( __prompts < __want_prompts )); then",
+     "elif (( __prompts != __want_prompts )); then", "N8"),
+    ("N9-nolayer-door-off", "if (( __prompts > 0 || __nf > 0 )); then", "if false; then", "N9"),
+    ("N11-notfound-silent", 'echo "NOTE: накладок промтов не нашлось в образе:', 'true "', "N11"),
+    ("N12-floor-validation-off", 'elif [[ ! "$__want_prompts" =~ ^[0-9]+$ ]]; then', "elif false; then", "N12"),
+    # Якорь берётся ДВУМЯ строками: тримом ключа заняты оба читателя, и одной
+    # строки не хватило бы на единственное совпадение.
+    ("N13-key-trim-off",
+     '{ k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k) }\n'
+     '      k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit }',
+     '{ k=$1 }\n'
+     '      k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit }', "N13"),
+    ("N14-duplicate-door-off", "if (( __rows > 1 )); then", "if false; then", "N14"),
+    ("N15-empty-field-misadvised", "if (( __rows == 0 )); then", "if true; then", "N15"),
+]
+
+if len(ORDER) != declared_s or len(mutations) != declared_m:
+    print("  FAIL   N: таблица разошлась с объявленным вкладом -- сценариев %d/%d, мутаций %d/%d"
+          % (len(ORDER), declared_s, len(mutations), declared_m))
+    raise SystemExit(4)
+
+failed = 0
+for name in ORDER:
+    table, out_text, marker, blind, predicate = SCEN[name]
+    result = run(function, table, out_text, marker, blind)
+    if predicate(result):
+        print("  ok     %s" % name)
+    else:
+        failed += 1
+        print("  FAIL   %s rc=%s stderr=%r" % (name, result.returncode, result.stderr))
+
+for mutation, old, new, owner in mutations:
+    if function.count(old) != 1:
+        failed += 1
+        print("  FAIL   mutation %s anchor count=%s" % (mutation, function.count(old)))
+        continue
+    table, out_text, marker, blind, predicate = SCEN[owner]
+    result = run(function.replace(old, new, 1), table, out_text, marker, blind)
+    if not predicate(result):
+        print("  RED    mutation %s (%s)" % (mutation, owner))
+    else:
+        failed += 1
+        print("  FAIL   mutation %s did not redden %s" % (mutation, owner))
+
+print("build-path-probe N: case held and its controls showed teeth")
+raise SystemExit(1 if failed else 0)
+PY_LEVEL
+}
+
+if [[ "$CASES" == *n* ]]; then
+  case_n || exit $?
+  CASES="${CASES//n/}"
+  if [[ -z "$CASES" ]]; then
+    echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
+    exit 0
+  fi
+fi
 
 if [[ "$CASES" == *m* ]]; then
   case_m || exit $?

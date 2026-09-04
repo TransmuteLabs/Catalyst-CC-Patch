@@ -278,7 +278,7 @@ def scenario_c9() -> None:
         path.write_text(f"# platform: {patcher.npm_platform_pkg()}\n"
                         "foo:bar 2.1.1 -\n", encoding="utf-8")
         result = subprocess.run([sys.executable, str(CORPUS), str(path)], cwd=ROOT,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, errors="replace")
         require(result.returncode == 1,
                 f"colon label returned rc={result.returncode}\n{result.stdout}{result.stderr}")
         require("строка 2" in result.stderr and ":" in result.stderr,
@@ -310,7 +310,7 @@ def scenario_c10() -> None:
         foreign.write_text("foreign", encoding="utf-8")
         script = f"set -euo pipefail\n{function}\nprune_config_backups\n"
         result = subprocess.run(["bash"], input=script, env={**os.environ, "HOME": str(home)},
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, errors="replace")
         require(result.returncode == 0, f"backup pruning rc={result.returncode}\n{result.stdout}{result.stderr}")
         remaining = {p.name for p in home.iterdir()}
         expected = {p.name for p in own[1:]} | {foreign.name}
@@ -331,7 +331,7 @@ def scenario_c11() -> None:
             ("-1", 2, ""), ("abc", 2, ""),
             ("99999999999999999999", 2, "")):
         script = f"set -u\n{function}\nvalidated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET {raw!r}\n"
-        result = subprocess.run(["bash"], input=script, capture_output=True, text=True)
+        result = subprocess.run(["bash"], input=script, capture_output=True, text=True, errors="replace")
         require(result.returncode == expected_rc,
                 f"budget {raw!r}: rc={result.returncode}, expected {expected_rc}\n"
                 f"{result.stdout}{result.stderr}")
@@ -450,7 +450,7 @@ def victim_parses(path: Path) -> None:
         except py_compile.PyCompileError as error:
             raise UnparsableVictim(f"py_compile {path}: {error}") from error
     elif path.suffix == ".sh":
-        done = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        done = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, errors="replace")
         if done.returncode != 0:
             raise UnparsableVictim(f"bash -n {path}: {(done.stderr or '').strip()}")
         for body in shell_python_heredocs(path.read_text(encoding="utf-8")):
@@ -615,7 +615,7 @@ def copy_tree(root: Path) -> None:
 
 def run_copy(root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, str(root / "tools" / "costs-bench.py")],
-                          cwd=root, capture_output=True, text=True)
+                          cwd=root, capture_output=True, text=True, errors="replace")
 
 
 def fail_segment(output: str, scenario: str) -> str | None:
