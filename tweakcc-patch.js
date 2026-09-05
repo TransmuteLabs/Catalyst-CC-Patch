@@ -131,9 +131,28 @@ const step = (name, fn) => {
 // --------------------------------------------------------------------------
 step('1 routing', () => {
   const ID = '[A-Za-z_$][\\w$]*';
-  const rx = /(accessToken\?\?null:null,)(\.\.\.!1,\.\.\.)([A-Za-z_$][\w$]*)(,)/;
+  // The spread that follows the auth fields is upstream's OWN baseURL branch.
+  // Where ANTHROPIC_BASE_URL was statically absent the minifier collapsed it to
+  // a dead `...!1` (2.1.251-2.1.259); 2.1.261 carries it live as
+  // `...<env>.ANTHROPIC_BASE_URL?{baseURL:<env>.ANTHROPIC_BASE_URL}:!1`. Both
+  // forms are accepted here, and the injection lands AFTER it — never before.
+  // Order is the mechanism, not a detail: later keys win in an object literal,
+  // so an injection placed ahead of a LIVE env spread would hand every
+  // `claude-*` model to ANTHROPIC_BASE_URL — that is, to the proxy — precisely
+  // when that variable is set, which is the ordinary configuration. The
+  // caller's own `...<options>` still follows ours, exactly as before, so the
+  // caller keeps the last word.
+  const rx = new RegExp(
+    `(accessToken\\?\\?null:null,)` +
+      `(\\.\\.\\.(?:!1|${ID}\\.ANTHROPIC_BASE_URL\\?\\{baseURL:${ID}\\.ANTHROPIC_BASE_URL\\}:!1),)` +
+      `(\\.\\.\\.${ID},)`,
+  );
   const m = js.match(rx);
   if (!m) fail('routing site not found');
+  const rxAll = js.match(new RegExp(rx.source, 'g'));
+  if (rxAll.length !== 1) {
+    fail(`routing site is not unique (${rxAll.length} matches)`);
+  }
 
   // The model identifier is captured from the vertex branch `region:<fn>(<model>)`
   // that sits just above the firstParty object inside the SAME function.
@@ -146,7 +165,7 @@ step('1 routing', () => {
   const inject = `baseURL:/^claude/i.test(${model})?${JSON.stringify(SUBSCRIPTION_URL)}:void 0,`;
   js =
     js.slice(0, m.index) +
-    m[1] + inject + m[2] + m[3] + m[4] +
+    m[1] + m[2] + inject + m[3] +
     js.slice(m.index + m[0].length);
 
   // The destination is only half of the decision. The same options bag carries
@@ -957,10 +976,18 @@ step('12 dispatch may choose model and effort (forks included)', () => {
     // станет безусловным, а якорь будет удалён «за ненадобностью», патч
     // промолчит и образ уедет с погашенной моделью. Поэтому здесь -- утверждение
     // присутствия: участок обязан существовать в одной из двух форм.
+    // Two spellings of one site. Through 2.1.259 the timestamp opened its own
+    // declaration (`let U=Date.now();`) and exactly one binding stood between
+    // the suppression and the depth read. On 2.1.261 the handler destructures
+    // in the BODY, so the timestamp joined that declaration as a later clause
+    // (`,U=Date.now();`) and the aliases the old signature used to bind now sit
+    // in the chain too. Neither is a semantic change, and neither may be
+    // pinned: the assertion is about the suppression EXISTING, so it must not
+    // fail on the punctuation around it.
     const coord248 = new RegExp(
-      `let ${ID}=Date\\.now\\(\\);if\\(${ID}\\(\\)&&${ID}\\.` +
+      `(?:let |,)${ID}=Date\\.now\\(\\);if\\(${ID}\\(\\)&&${ID}\\.` +
         `CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL\\)(${ID})=void 0;` +
-        `let ${ID}=\\1,${ID}=${ID}\\(${ID}\\.agentContext\\)`,
+        `let ${ID}=\\1,(?:${ID}=${ID},)*${ID}=${ID}\\(${ID}\\.agentContext\\)`,
     );
     if (!coord248.test(js)) fail('coordinator-mode model suppression site not found');
     // Ветка ничего не вырезала -- и строка журнала обязана это сказать. Прежде
@@ -1053,12 +1080,27 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   }
   let body = js.slice(lo, hi);
   const droppedAll = [...body.matchAll(new RegExp(droppedRx.source, 'g'))];
-  // 2..3, not 2..6. Measured: 2 on 233/240, 3 on 242..247. The old upper bound
-  // left three free slots inside a 20 KB window, so a new same-letter site that
-  // was not a fork drop would be rewritten and counted as one -- which is how
-  // Vertex resolution was altered on 233 with 79/79 green.
-  if (droppedAll.length < 2 || droppedAll.length > 3)
-    fail(`fork value-drop sites: expected 2..3, found ${droppedAll.length}`);
+  // 2..4, not 2..6. Measured: 2 on 233/240, 3 on 242..259, 4 from 2.1.260 (the
+  // boundary is 260, not 261 -- counted on both platforms over the whole
+  // corpus). The upper bound is raised by ONE and only after reading all four:
+  // 2.1.259 carries a single spawn descriptor
+  //
+  //   In={tool_use_id:…,subagentType:<a>.agentType,model:<fork>?void 0:<m>,
+  //       parentModel:<p>,permissionMode:<pm>,background:<bg>,fork:<fork>,…}
+  //
+  // and 2.1.260 SPLIT it in two -- one object keeping parentModel/permissionMode,
+  // the other built inside a thunk (`let <C>=()=>…({…,subagentType:<a>.agentType,
+  // model:<fork>?void 0:<m>,background:<bg>,cwd:<cwd>})`). One site became two of
+  // the same class; no new class appeared. Leaving the bound at 3 would have been
+  // right only if the fourth were foreign -- it is not, and leaving that site
+  // unswept would have kept the fork's model discarded on that path while the
+  // patch reported the drop removed.
+  //
+  // The bound still has to stay TIGHT: free slots inside a 20 KB window are how
+  // a same-letter site that is not a fork drop gets rewritten and counted as one,
+  // which is how Vertex resolution was altered on 233 with 79/79 green.
+  if (droppedAll.length < 2 || droppedAll.length > 4)
+    fail(`fork value-drop sites: expected 2..4, found ${droppedAll.length}`);
   // The one that matters by name. A build where `model:` is no longer among the
   // dropped fields has stopped doing the thing this sweep exists for, and a
   // count alone cannot notice that.
@@ -1129,15 +1171,33 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   js = js.replace(bgField, `${repEsc(newFields)}$1$2`);
 
   // (c) destructure effort in the tool's call handler, alongside the rest
-  const callRx = new RegExp(`(async call\\(\\{prompt:${ID},subagent_type:${ID},[^}]{0,400}?)(\\},${ID},)`);
-  const callMatch = js.match(callRx);
-  if (!callMatch) fail('agent tool call handler not found');
+  // The handler binds its input in one of two shapes, and `effort` is in
+  // neither, so it is added wherever that build actually reads the input.
+  // Through 2.1.259 the binding lived in the PARAMETER LIST
+  // (`async call({prompt:e,subagent_type:n,…},C,I,F,B){`); 2.1.261 takes the
+  // object whole and destructures in the body
+  // (`async call(e,t,r,o,d){let{subagent_type:p,…}=e,…`). Pinning the first
+  // shape made this locator miss the very method it stands on. Both forms end
+  // with `__ccEffort` bound at the top of the handler, which is the entire
+  // contract the rest of this patch — and patch 22 — depends on.
+  const callRxA = new RegExp(`(async call\\(\\{prompt:${ID},subagent_type:${ID},[^}]{0,400}?)(\\},${ID},)`);
+  const callRxB = new RegExp(`(async call\\((${ID})(?:,${ID})*\\)\\{)(let\\{subagent_type:${ID},)`);
+  const callA = js.match(callRxA);
+  const callB = callA ? null : js.match(callRxB);
+  if (!callA && !callB) fail('agent tool call handler not found');
   // Both names are checked here, before EITHER is written: `__ccEffort` is
   // inserted a few lines below, and a later `includes('__ccE…')` test would
   // then match its own prefix and refuse on a clean build.
   if (js.includes('__ccEffort')) fail('__ccEffort already present — refusing to shadow it');
   if (js.includes('__ccLvl')) fail('__ccLvl already present — refusing to shadow it');
-  js = js.replace(callRx, `$1,effort:__ccEffort$2`);
+  if (callA) {
+    js = js.replace(callRxA, `$1,effort:__ccEffort$2`);
+  } else {
+    // A statement, not a pattern field: the input object is already bound, so
+    // the read is plain property access and cannot throw where the handler's
+    // own destructuring of the same object would not have thrown first.
+    js = js.replace(callRxB, `$1let __ccEffort=$2.effort;$3`);
+  }
 
   // (c) attach it to the definition handed to the launch — the field the
   //     runtime turns into an effort permission layer.
@@ -2209,12 +2269,28 @@ step('22 judge consulted before a subagent dispatch', () => {
   // parameter pattern has to move in with it. `[^{}]*` in the pattern is not
   // decoration -- a nested destructuring or a default value would need
   // different handling, and this refuses instead of mangling one.
-  const rxTool = new RegExp(
+  //
+  // TWO SHAPES, ONE METHOD. Through 2.1.259 the handler destructured its input
+  // in the parameter list; 2.1.261 takes the object whole and destructures in
+  // the body. Shape A therefore identifies the method by its parameter pattern;
+  // shape B has no pattern to read, so it is identified by the binding patch 12
+  // just installed at the top of the body — which is the same proof of a shared
+  // landing the effort-marker assertion gives shape A, only earlier.
+  const rxToolA = new RegExp(
     `async call\\((\\{prompt:${ID},subagent_type:${ID},description:${ID},` +
       `model:${ID},[^{}]*\\}),(${ID})((?:,${ID})*)\\)\\{`,
   );
-  const mTool = js.match(rxTool);
+  const rxToolB = new RegExp(
+    `async call\\((${ID}),(${ID})((?:,${ID})*)\\)\\{let __ccEffort=\\1\\.effort;`,
+  );
+  let toolShape = 'pattern';
+  let mTool = js.match(rxToolA);
+  if (!mTool) {
+    toolShape = 'whole-object';
+    mTool = js.match(rxToolB);
+  }
   if (!mTool) fail('dispatch tool call implementation not found');
+  const rxTool = toolShape === 'pattern' ? rxToolA : rxToolB;
   const allTool = js.match(new RegExp(rxTool.source, 'g'));
   if (allTool.length !== 1) {
     fail(`dispatch tool call implementation is not unique (${allTool.length} matches)`);
@@ -2244,7 +2320,11 @@ step('22 judge consulted before a subagent dispatch', () => {
   // longer the one it was written against. That failure would be loud but
   // would name the wrong thing. Asserting the marker also proves the two
   // locators, written independently, landed on the SAME method.
-  if (!mTool[1].includes('effort:__ccEffort')) {
+  // Shape B carries that proof inside its own locator (`let __ccEffort=<in>.
+  // effort;` is part of the match), so asserting it again here would only
+  // restate the match. Shape A must still be checked: its locator would match
+  // an unpatched signature just as well.
+  if (toolShape === 'pattern' && !mTool[1].includes('effort:__ccEffort')) {
     fail(
       'the dispatch tool signature carries no effort binding from patch 12 ' +
         '(run patch 12 first — it destructures effort in the pattern this step rewrites)',
@@ -2255,7 +2335,11 @@ step('22 judge consulted before a subagent dispatch', () => {
   // that the original signature performed still happens, in the same order and
   // with the same failure on a null input; the judge runs after it, on the
   // whole object under a name of our own.
-  const TOOL_IN = '__ccIn';
+  // Shape A renames the parameter, because the pattern that used to occupy the
+  // slot has to move into the body under a name. Shape B already HAS a name for
+  // the whole input — introducing a second one would only add an alias whose
+  // only purpose is to look like shape A.
+  const TOOL_IN = toolShape === 'pattern' ? '__ccIn' : mTool[1];
   const SLOT_TOOL = {
     // `this` is the tool. Every route into this method binds it -- `e.call(…)`
     // at the main dispatcher, `s.call(…)` in serve mode, and the adapter's
@@ -4273,10 +4357,20 @@ step('22 judge consulted before a subagent dispatch', () => {
     {
       at: mTool.index,
       len: mTool[0].length,
+      // Shape A rebuilds the signature and re-performs the parameter
+      // destructuring as the handler's first statement, so the judge runs after
+      // it. Shape B has nothing to move, so the block is appended to the match
+      // verbatim and the handler's own destructuring runs AFTER the judge —
+      // a different order, and safe for the one reason that matters: the judge
+      // reads the whole input object, never the destructured locals, and a null
+      // input still throws before it, on the `<in>.effort` read patch 12 put
+      // one statement earlier. Same polarity as shape A, different statement.
       text:
-        `async call(${TOOL_IN},${mTool[2]}${mTool[3]}){` +
-        `let ${mTool[1]}=${TOOL_IN};` +
-        judgeBlock,
+        toolShape === 'pattern'
+          ? `async call(${TOOL_IN},${mTool[2]}${mTool[3]}){` +
+            `let ${mTool[1]}=${TOOL_IN};` +
+            judgeBlock
+          : mTool[0] + judgeBlock,
     },
   ];
   for (const e of [...edits].sort((x, y) => y.at - x.at)) {
@@ -4285,7 +4379,9 @@ step('22 judge consulted before a subagent dispatch', () => {
 
   applied.push(
     `judge: consulted inside the dispatch tool's own call (context ` +
-      `'${mTool[2]}', input pattern re-bound as '${TOOL_IN}'); watcher on the ` +
+      `'${mTool[2]}', ${toolShape === 'pattern'
+        ? `input pattern re-bound as '${TOOL_IN}'`
+        : `input taken whole as '${TOOL_IN}'`}); watcher on the ` +
       `main dispatcher (tool '${TOOL}', input '${m[4]}', context '${m[5]}')`,
   );
 });

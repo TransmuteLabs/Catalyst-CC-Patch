@@ -1591,6 +1591,15 @@ if bad:
 print(f"ФОРМЫ ОБОЛОЧКИ ЧИСТЫ: разобрано файлов {scanned}")
 SHVARS
 
+# Стенды кита проверяют ЕГО СОБСТВЕННЫЕ инструменты, а не собираемую версию:
+# между сборками одной волны они мерят один и тот же неизменившийся предмет и
+# стоят при этом минуты на КАЖДУЮ сборку. Ручка существовала, но гасила ровно
+# один стенд из пяти -- имя обещало батарею, а гасило пробный стенд, и оператор,
+# выставивший её ради скорости, платил полную цену молча. Пропуск ОБЪЯВЛЯЕТСЯ
+# поимённо: escape hatch без следа неотличим от гейта, который отработал.
+if [[ "${CLAUDE_PATCH_SKIP_BENCH:-0}" == "1" ]]; then
+  echo "Стенды кита: ПРОПУЩЕНЫ -- CLAUDE_PATCH_SKIP_BENCH=1. НЕ проверены: стенд инструментов судьи, стенд моделей и цен, стенд синхронизации проб" >&2
+else
 echo "==> Стенд инструментов судьи"
 python3 "$(dirname "$0")/tools/judge-tools-bench.py" 9>&- || {
   __rc=$?
@@ -1682,6 +1691,7 @@ bash "$(dirname "$0")/tools/probes-sync-bench.sh" --self-check 9>&- || {
        exit 1 ;;
   esac
 }
+fi
 
 # --- раскатка судейских инструментов: исполняются ТЕ ЖЕ байты, что заверены ----
 # Стенд выше сертифицирует КАНОН: tools/judge-tools-bench.py читает judge/*.py
@@ -2685,6 +2695,15 @@ python3 "$(dirname "$0")/tools/lockfd-check.py" 9>&- || {
   esac
 }
 
+# Стенды кита проверяют ЕГО СОБСТВЕННЫЕ инструменты, а не собираемую версию:
+# между сборками одной волны они мерят один и тот же неизменившийся предмет и
+# стоят при этом минуты на КАЖДУЮ сборку. Ручка существовала, но гасила ровно
+# один стенд из пяти -- имя обещало батарею, а гасило пробный стенд, и оператор,
+# выставивший её ради скорости, платил полную цену молча. Пропуск ОБЪЯВЛЯЕТСЯ
+# поимённо: escape hatch без следа неотличим от гейта, который отработал.
+if [[ "${CLAUDE_PATCH_SKIP_BENCH:-0}" == "1" ]]; then
+  echo "Стенды кита: ПРОПУЩЕНЫ -- CLAUDE_PATCH_SKIP_BENCH=1. НЕ проверены: перепись якорей таблицы гейта чисел, зубы гейта чисел" >&2
+else
 echo "==> Перепись якорей таблицы гейта чисел"
 python3 "$(dirname "$0")/tools/docnum-bench.py" --anchors 9>&- || {
   __rc=$?
@@ -2714,6 +2733,7 @@ python3 "$(dirname "$0")/tools/docnum-bench.py" 9>&- || {
        exit 1 ;;
   esac
 }
+fi
 
 # --- which tweakcc unpacks the image -----------------------------------------
 # Claude Code 2.1.242 split the bundle from one 28 MB module into an ESM entry
@@ -2737,12 +2757,12 @@ python3 "$(dirname "$0")/tools/docnum-bench.py" 9>&- || {
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-a89c9dae9bbd35979f66afd18908a4c9bffa82b0}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-78a7308ee5f460044a299041cadfa9315b592321}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "a89c9dae9bbd35979f66afd18908a4c9bffa82b0" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "78a7308ee5f460044a299041cadfa9315b592321" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -3403,9 +3423,18 @@ def _effort_binding_reaches_the_launch(d):
     Measured, not argued: string literals are blanked first, so a brace inside
     a message cannot close a function that is still open.
     """
-    if d.count(b'async call(__ccIn') != 1:
+    # Начало области -- голова обработчика в той форме, которую несёт образ:
+    # переименованный параметр (<=2.1.259) либо привязка усилия отдельным
+    # оператором в теле (2.1.260+). Ровно одна форма, иначе неизвестно, чью
+    # область мерим.
+    heads = [mm.start() for mm in re.finditer(rb'async call\(__ccIn', d)]
+    if not heads:
+        heads = [mm.start() for mm in
+                 re.finditer(rb'async call\(' + ID + rb'[^)]*\)\{let __ccEffort=' + ID
+                             + rb'\.effort;', d)]
+    if len(heads) != 1:
         return False
-    start = d.find(b'async call(__ccIn')
+    start = heads[0]
     use = d.find(b'__ccRaw=typeof __ccEffort')
     if use < 0 or use < start:
         return False
@@ -3830,8 +3859,22 @@ def _fork_sweep_stayed_near_its_anchor(d):
     altered. The construct exists once on every payload in range, so its stock
     shape is a cheap, exact tripwire for the same class returning.
     """
-    return len(re.findall(
-        rb'\|\|' + ID + rb'\?void 0:process\.env\.ANTHROPIC_VERTEX_PROJECT_ID', d)) == 1
+    # Предмет ловушки апстрим переписал на 2.1.261: конструкции `<x>||<y>?void
+    # 0:process.env.ANTHROPIC_VERTEX_PROJECT_ID` там нет ни одной (измерено на
+    # пристинных образах: форма A -- ровно одна на 251..260, ноль на 261; форма
+    # B -- ноль на 251..260, ровно одна на 261). Разрешение проекта стало
+    # обычной функцией с цепочкой `||`, в которой нет `?void 0:` вовсе, так что
+    # исходная опасность на этой форме не воспроизводима -- но ловушка обязана
+    # ЗНАТЬ свой предмет, а не молчать. Отсутствие ОБЕИХ форм -- отказ: зуб,
+    # переживший свою причину, зеленеет на чём угодно.
+    forms = (len(re.findall(
+                 rb'\|\|' + ID + rb'\?void 0:process\.env\.ANTHROPIC_VERTEX_PROJECT_ID', d)),
+             len(re.findall(
+                 rb'function ' + ID + rb'\(\)\{return ' + ID + rb'\.GCLOUD_PROJECT\|\|'
+                 + ID + rb'\.GOOGLE_CLOUD_PROJECT\|\|' + ID + rb'\.gcloud_project\|\|'
+                 + ID + rb'\.google_cloud_project\|\|' + ID
+                 + rb'\.ANTHROPIC_VERTEX_PROJECT_ID\}', d)))
+    return sorted(forms) == [0, 1]
 
 def _routing_agrees_with_connection(d):
     """The destination and the connection options must name the same host.
@@ -3925,14 +3968,24 @@ def _judge_rides_the_tool(d):
     # body and `this` as the tool.
     ji = judge_sites[0]
     head = d[max(0, starts[ji] - 400):starts[ji]]
-    if not re.search(rb'async call\(__ccIn,' + ID + rb'[^)]*\)\{let \{prompt:' + ID
-                     + rb',subagent_type:' + ID + rb',description:' + ID + rb',model:'
-                     + ID + rb',[^{}]*\}=__ccIn;$', head):
+    # Дом судьи -- собственный `call` инструмента, в той форме, которую несёт
+    # образ. <=2.1.259: параметр переименован, а образец деструктуризации
+    # перенесён в тело первым оператором. 2.1.260+: вход и так приходит целым,
+    # переносить нечего, и домом опознаётся привязка усилия, поставленная
+    # шагом 12 ровно перед блоком. Имя входа берётся из совпавшей формы, а не
+    # предполагается: ниже им проверяется `input:` в самом блоке.
+    hA = re.search(rb'async call\(__ccIn,' + ID + rb'[^)]*\)\{let \{prompt:' + ID
+                   + rb',subagent_type:' + ID + rb',description:' + ID + rb',model:'
+                   + ID + rb',[^{}]*\}=__ccIn;$', head)
+    hB = re.search(rb'async call\((' + ID + rb'),' + ID + rb'[^)]*\)\{let __ccEffort=\1'
+                   + rb'\.effort;$', head)
+    if not hA and not hB:
         return False
+    tool_in = b'__ccIn' if hA else hB.group(1)
     body = d[core_end[ji]:ends[ji]]
     if body.count(b'this.name==="Agent"||this.name==="Task"') != 1:
         return False
-    if b'tool:this,input:__ccIn,ctx:' not in body:
+    if b'tool:this,input:' + tool_in + b',ctx:' not in body:
         return False
 
     # The watcher's home: in front of the main dispatch call, every name bound
@@ -4333,7 +4386,8 @@ def _dispatch_keeps_its_model(d):
         # форма даёт ту же пару «имя переменной + её появление как model:<v>».
         m = re.search(rb'Date\.now\(\);if\(' + ID + rb'\(\)&&' + ID
                       + rb'\.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL\)(' + ID
-                      + rb')=void 0;let (' + ID + rb')=\1,' + ID + rb'=' + ID
+                      + rb')=void 0;let (' + ID + rb')=\1,(?:' + ID + rb'=' + ID
+                      + rb',)*' + ID + rb'=' + ID
                       + rb'\(' + ID + rb'\.agentContext\)', d)
         if not m:
             return False
@@ -4582,7 +4636,11 @@ checks = {
     # and drop anything outside its vocabulary. The trim/case-fold is pinned
     # too: without it the check went green on a normaliser stricter than every
     # other surface of the product, where a dropped effort is silent.
-    'dispatch carries effort':            len(re.findall(rb'effort:__ccEffort', d)) == 1
+    # ДВЕ формы привязки, по форме подписи обработчика: поле в образце
+    # параметров (<=2.1.259) либо отдельный оператор в теле (2.1.260+).
+    # Ровно одна из них обязана встретиться ровно один раз.
+    'dispatch carries effort':            (len(re.findall(rb'effort:__ccEffort', d))
+                                           + len(re.findall(rb'let __ccEffort=' + ID + rb'\.effort;', d))) == 1
                                           and bool(re.search(
                                               rb'=\{agentDefinition:\(\(\(\)=>\{let __ccRaw=typeof __ccEffort==="string"'
                                               rb'\?__ccEffort\.trim\(\)\.toLowerCase\(\):__ccEffort;'
