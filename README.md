@@ -365,6 +365,7 @@ indistinguishable from a gate that ran.
 |---|---|---|
 | `CLAUDE_PATCH_SIGN_ID` | ad-hoc signature | the codesign identity for the rebuilt image; without a valid one the keychain re-prompts |
 | `CLAUDE_PATCH_SKIP_BENCH` | unset | skips the probe bench — the only gate that EXECUTES the judge and the watcher; announced, and the announcement says their behaviour is unverified |
+| `CLAUDE_PATCH_SKIP_KIT_BENCH` | unset | skips the benches whose subject is the KIT itself — judge tools, models and prices, probes-sync, the docnum anchor census, the docnum teeth. They measure a subject that does not change between the builds of one wave, which is why `tools/sweep.sh` sets this one after the battery has run once and names the version it ran on. It does NOT touch the probe bench: that one's subject is the built image of each version, and covering both with a single knob has already been a defect in both directions |
 | `CLAUDE_PATCH_SKIP_MODELS` | unset | skips the cost/context-window sync into `~/.claude.json`; the sweep sets it for every build it makes and says so |
 | `CLAUDE_PATCH_GATE_BUDGET` | 150 | seconds the interface gate waits for a first paint before calling it a timeout; announced when it is not the default |
 | `CLAUDE_PATCH_FLOOR_IMAGE` | unset | the pristine twin for the floor gate when there is no `.orig` beside the target (the sweep points it at its corpus image) |

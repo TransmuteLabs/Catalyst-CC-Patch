@@ -1178,6 +1178,7 @@ run_pipeline() {  # <script> <bindir> <logfile> [аргументы конвей
   # оператора. Тот же список и то же основание, что у свипа (раунд 19, В-5).
   ( PATH="$2:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES= CLAUDE_PATCH_SKIP_BENCH= \
+    CLAUDE_PATCH_SKIP_KIT_BENCH= \
     CLAUDE_PATCH_GATE_BUDGET= CLAUDE_PATCH_SIGN_ID= TWEAKCC_LOCAL= \
     CATALYST_TWEAKCC_REPO= CATALYST_TWEAKCC_SHA= \
     # Объявленный заём: ccVersion с probe-marker записал ЭТОТ зонд, а не
