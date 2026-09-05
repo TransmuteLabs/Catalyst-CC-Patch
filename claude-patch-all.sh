@@ -467,6 +467,48 @@ INSTALLER="$HERE/claude_patch.py"
 COSTS_SYNC="$HERE/set-model-costs.py"
 BUNDLE_ID="com.anthropic.claude-code"
 
+resolve_signing_identity() {
+  local identities line
+  local identity_pattern='^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+"[^"]+"[[:space:]]*$'
+  if ! identities="$(security find-identity -v -p codesigning)"; then
+    echo "FATAL: security find-identity failed; cannot resolve a signing identity." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    if [[ "$line" =~ $identity_pattern ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done <<< "$identities"
+  echo "FATAL: no code-signing identity found; a stable identity is required for Keychain OAuth." >&2
+  return 1
+}
+
+sign_macos_binary() {
+  local bin="$1" id="${CLAUDE_PATCH_SIGN_ID:-}"
+  if [[ -z "$id" ]]; then
+    id="$(resolve_signing_identity)" || return 1
+  fi
+  if [[ "$id" == "-" ]]; then
+    echo "FATAL: CLAUDE_PATCH_SIGN_ID must name a stable signing identity." >&2
+    return 1
+  fi
+  if ! codesign -f -i "$BUNDLE_ID" -s "$id" "$bin"; then
+    echo "FATAL: code signing failed for $bin." >&2
+    return 1
+  fi
+  if ! codesign -v --strict "$bin"; then
+    echo "FATAL: strict signature verification failed for $bin." >&2
+    return 1
+  fi
+  # The embedded runtime must start before the staging image can be published.
+  if ! "$bin" --version >/dev/null 2>&1; then
+    echo "FATAL: signed binary --version failed for $bin." >&2
+    return 1
+  fi
+  echo "Re-signed with $id (bundle id $BUNDLE_ID); signature and launch verified"
+}
+
 # ~/.claude.json is rewritten by the model sync (and by Claude Code itself), so
 # every run leaves a timestamped backup. Keep the three most recent.
 prune_config_backups() {
@@ -3222,13 +3264,7 @@ echo "==> Applying our multi-provider patches"
 
 # --- 4. signature (must be last: both steps above sign ad-hoc) ---------------
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  SIGN_ID="${CLAUDE_PATCH_SIGN_ID:-$(security find-identity -v -p codesigning 2>/dev/null | awk 'NR==1{print $2}')}"
-  if [[ -n "$SIGN_ID" && "$SIGN_ID" != "valid" ]]; then
-    codesign -f -i "$BUNDLE_ID" -s "$SIGN_ID" "$BIN"
-    echo "Re-signed with $SIGN_ID (bundle id $BUNDLE_ID)"
-  else
-    echo "WARNING: no code-signing identity found — keychain OAuth will NOT work."
-  fi
+  sign_macos_binary "$BIN" || exit 1
 fi
 
 # --- 5. verify ---------------------------------------------------------------
@@ -3311,7 +3347,7 @@ def _probe_uses_the_images_own_names(full):
     a name cannot be confirmed by the very text under test.
     """
     blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', full)
-    if len(blocks) != 2:
+    if len(blocks) != 3:
         return False
     rest = full
     for b in blocks:
@@ -3322,9 +3358,12 @@ def _probe_uses_the_images_own_names(full):
                        rb',systemPrompt:' + ID + rb',thinkingConfig:', rest)
     if not pool or not engine or pool.group(1) != engine.group(1):
         return False
-    # Both copies of the core ask for the same engine, or they are not one core.
-    if re.search(rb'let __pool=typeof (' + ID + rb')==="function"', blocks[1]).group(1) != pool.group(1):
-        return False
+    # Every copy of the core asks for the same engine, or they are not one
+    # core. Three consumers now carry it: judge, form, watcher.
+    for b in blocks[1:]:
+        m = re.search(rb'let __pool=typeof (' + ID + rb')==="function"', b)
+        if not m or m.group(1) != pool.group(1):
+            return False
 
     watch = [b for b in blocks if b'tag:"[Watch]"' in b]
     if len(watch) != 1:
@@ -3336,6 +3375,16 @@ def _probe_uses_the_images_own_names(full):
     upstream = re.search(rb'(?:^|[^.\w$])(' + ID + rb')\(\{mode:"task-notification",agentId:(' +
                          ID + rb')\(\)', rest)
     if not (queue and session and upstream):
+        return False
+    # The form probe notifies through the same queue the watcher does, and
+    # addresses it by the same session id -- anything else would be a second
+    # channel invented beside the one the image defines.
+    form = [b for b in blocks if b'tag:"[Form]"' in b]
+    if len(form) != 1:
+        return False
+    fqueue = set(re.findall(rb'(' + ID + rb')\(\{value:"\[form\] "', form[0]))
+    fsession = set(re.findall(rb'agentId:(' + ID + rb')\(\),priority:"next"', form[0]))
+    if fqueue != {upstream.group(1)} or fsession != {upstream.group(2)}:
         return False
     return queue.group(1) == upstream.group(1) and session.group(1) == upstream.group(2)
 
@@ -3831,13 +3880,14 @@ def _judge_rides_the_tool(d):
       * `$2` at that site is `this` -- the tool, not a literal we made up;
       * the watcher block is in front of the main dispatch call, with all four
         of its names bound to that call's own;
+      * the form probe sits directly in front of the watcher at the same
+        site, with the watcher's four names; three cores byte-identical;
       * neither consumer appears at the other's site (one judgement per
         dispatch, one heartbeat per tool call);
-      * the two cores are byte-identical.
     """
     ends = [mm.end() for mm in re.finditer(rb'/\*__ccProbe1\*/', d)]
     starts = [mm.start() for mm in re.finditer(rb'/\*__ccProbe0\*/', d)]
-    if len(ends) != 2 or len(starts) != 2:
+    if len(ends) != 3 or len(starts) != 3:
         return False
     # `.index` would RAISE on a block whose core marker is gone, and an
     # exception in this dict aborts the whole verify stage -- no verdicts at
@@ -3857,11 +3907,18 @@ def _judge_rides_the_tool(d):
     JUDGE = (rb'String\(process\.env\.CLAUDE_JUDGE\?\?""\)\.trim\(\)\.toLowerCase\(\);'
              rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}\)\(\)')
     WATCH = rb'globalThis\.__ccFleet\?\?=\[\];'
+    # The form probe's switch INVERTS the empty case (unset means ON), so its
+    # reader lacks the `__s===""||` disjunct and cannot match the judge's.
+    FORM = (rb'String\(process\.env\.CLAUDE_FORM\?\?""\)\.trim\(\)\.toLowerCase\(\);'
+            rb'return !\(__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}\)\(\)')
     judge_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
                    if re.search(JUDGE, d[c:e])]
     watch_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
                    if re.search(WATCH, d[c:e])]
-    if len(judge_sites) != 1 or len(watch_sites) != 1 or judge_sites == watch_sites:
+    form_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
+                  if re.search(FORM, d[c:e])]
+    if len(judge_sites) != 1 or len(watch_sites) != 1 or len(form_sites) != 1 \
+            or len({judge_sites[0], watch_sites[0], form_sites[0]}) != 3:
         return False
 
     # The judge's home: the tool's own call, with the pattern re-bound in the
@@ -3895,6 +3952,17 @@ def _judge_rides_the_tool(d):
                     + rb',toolUseId:' + key + rb',userModified:' + ID
                     + rb'\.userModified\?\?!1\},', tail):
         return False
+
+    # The form probe's home: the same statement site as the watcher, directly
+    # in front of it, bound to the watcher's own four names -- it evaluates
+    # the call the watcher then reports on.
+    fi = form_sites[0]
+    if ends[fi] != starts[wi]:
+        return False
+    fb4 = re.search(rb'tool:(' + ID + rb'),input:(' + ID + rb'),ctx:(' + ID
+                    + rb'),key:(' + ID + rb'),', d[core_end[fi]:ends[fi]])
+    if not fb4 or fb4.groups() != b4.groups():
+        return False
     return True
 
 
@@ -3902,7 +3970,8 @@ def _judge_rides_the_tool(d):
 # numbers were measured when the injected text existed once, and they say
 # something about the SHAPE of the probe, not about how many places carry it.
 # The judge and the watcher live at different sites now and each appears once,
-# so their numbers stand as calibrated; what is emitted twice is the CORE they
+# so their numbers stand as calibrated; the form probe shares the watcher's
+# site and appears once as well. What is emitted more than once is the CORE they
 # share, because neither site can rely on the other having run first. `??=`
 # makes the second copy inert at runtime, and the collapse below makes it
 # absent from the text the counts are taken over. Removal only takes text away,
@@ -3929,7 +3998,7 @@ def _turn_belongs_to_the_judge(d):
     """
     starts = [mm.start() for mm in re.finditer(rb'/\*__ccProbe0\*/', d)]
     ends = [mm.end() for mm in re.finditer(rb'/\*__ccProbe1\*/', d)]
-    if len(starts) != 2 or len(ends) != 2:
+    if len(starts) != 3 or len(ends) != 3:
         return False
     core_end = [d.find(b'/*__ccCore1*/', st) for st in starts]
     if any(c < 0 for c in core_end) or any(c > e for c, e in zip(core_end, ends)):
@@ -4071,13 +4140,13 @@ def _consumer_uses_no_core_privates(full):
     exactly; this is its counterpart on the FINISHED image, where the text is
     the only evidence left.
 
-    Checked on the pre-collapse payload, so both blocks are seen. What the core
-    owns crosses the boundary as an argument -- hence the positive half: the
-    watcher's queueing failure must reach the journal through the handed-over
-    services, not by a name it cannot see.
+    Checked on the pre-collapse payload, so all three blocks (judge, form,
+    watcher) are seen. What the core owns crosses the boundary as an argument
+    -- hence the positive half: the watcher's queueing failure must reach the
+    journal through the handed-over services, not by a name it cannot see.
     """
     blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', full)
-    if len(blocks) != 2:
+    if len(blocks) != 3:
         return False
     for b in blocks:
         i = b.find(b'/*__ccCore1*/')
@@ -4091,7 +4160,8 @@ def _consumer_uses_no_core_privates(full):
                           rb'outcome:"nudge_undelivered",reason:__svc\.clip\(', full))
 
 def _bom_stripped_in_our_blocks(d):
-    """Our four BOM strips, counted INSIDE our blocks -- not in the whole image.
+    """Our six BOM strips (two per block), counted INSIDE our blocks -- not in
+    the whole image.
 
     The old form counted `^\\uFEFF/,""` across the file and asked for `>= 2`.
     Stock images carry the same idiom on their own: 3 occurrences in 2.1.233 and
@@ -4101,9 +4171,9 @@ def _bom_stripped_in_our_blocks(d):
     whole registry green -- including the check named for exactly that property.
 
     A count is only ours if it is scoped to our blocks, the way the neighbouring
-    checks do it. Two blocks (judge and observer), two strips each: the judge's
-    verdict text and the observer's, both of which arrive as provider answers
-    that may start with a BOM.
+    checks do it. Three blocks (judge, form, watcher) share the core, two strips
+    each: the verdict texts of all three arrive as provider answers that may
+    start with a BOM.
 
     Reads `_probe_full`, NOT `d`: `d` has every duplicate of the shared core
     removed, and the strips live in that core -- so on `d` the second block is
@@ -4111,7 +4181,7 @@ def _bom_stripped_in_our_blocks(d):
     build.
     """
     blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', d)
-    if len(blocks) != 2:
+    if len(blocks) != 3:
         return False
     return all(len(re.findall(rb'\^\\uFEFF/,""', b)) == 2 for b in blocks)
 
@@ -4279,9 +4349,11 @@ def _every_cut_is_named(d):
 
     Round 8 replaced a list of known-bad truncations with a CENSUS, and the
     census immediately found four more the list did not name. This is that
-    census as a check, and widened: it counts every `.slice(` in both probe
-    blocks, not only the `.slice(0,N)` head-cut shape, because a tail cut and a
-    two-ended cut lose text just as quietly.
+    census as a check, and widened: it counts every `.slice(` in every probe
+    block, not only the `.slice(0,N)` head-cut shape, because a tail cut and a
+    two-ended cut lose text just as quietly. The form block carries no cut of
+    its own: its quotes and windows are whole lines, regex windows or filter
+    tails, and the census below stays exactly as calibrated for two consumers.
 
     The set below is the whole inventory. Two entries cut TEXT and both append
     a notice as they do it -- `__dcut` (the list) and `__clip` (the string),
@@ -4303,7 +4375,7 @@ def _every_cut_is_named(d):
     goes RED, which is the safe direction.
     """
     blocks = re.findall(rb'/\*__ccProbe0\*/[\s\S]*?/\*__ccProbe1\*/', d)
-    if len(blocks) != 2:
+    if len(blocks) != 3:
         return False
     def _closes(b, start):
         i, depth = start, 1
@@ -5413,9 +5485,10 @@ checks = {
                                           and bool(re.search(
                                               rb'__jdir=__phome\+"/"\+__o\.dirName;', d))
                                           # ONE environment variable for all probes
-                                          and len(re.findall(rb'dirEnv:process\.env\.CLAUDE_PROBES_DIR', d)) == 2
+                                          and len(re.findall(rb'dirEnv:process\.env\.CLAUDE_PROBES_DIR', d)) == 3
                                           and len(re.findall(rb'CLAUDE_JUDGE_DIR', d)) == 0
-                                          and len(re.findall(rb'CLAUDE_IDLE_DIR', d)) == 0,
+                                          and len(re.findall(rb'CLAUDE_IDLE_DIR', d)) == 0
+                                          and len(re.findall(rb'CLAUDE_FORM_DIR', d)) == 0,
     # [defaults] under the probe table; a probe not named in the file gets
     # bare defaults — that is the absence of its own edits, not an error
     'probe settings merge defaults under the probe table': bool(re.search(
@@ -6084,7 +6157,7 @@ esac
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 82 scenarios through a throwaway probes home —
+# and drives probe-bench's 124 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #

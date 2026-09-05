@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from types import ModuleType
 from typing import Callable
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
@@ -42,8 +43,8 @@ COSTS = ROOT / "set-model-costs.py"
 PATCHER = ROOT / "claude_patch.py"
 CORPUS = ROOT / "tools" / "corpus-list.py"
 PIPELINE = ROOT / "claude-patch-all.sh"
-EXPECTED_SCENARIOS = 12
-EXPECTED_MUTATIONS = 16
+EXPECTED_SCENARIOS = 13
+EXPECTED_MUTATIONS = 20
 
 
 class BenchFailure(AssertionError):
@@ -378,11 +379,203 @@ def scenario_c12() -> None:
             f"input below the route was cut to {smaller}")
 
 
+def signing_call(action: Callable[[], None], label: str, expected_rc: int,
+                 reason: str = "") -> None:
+    output = io.StringIO()
+    rc = 0
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        try:
+            action()
+        except SystemExit as error:
+            rc = error.code
+    require(rc == expected_rc,
+            f"{label}: returned rc={rc}, expected {expected_rc}\n{output.getvalue()}")
+    if expected_rc:
+        require("ERROR:" in output.getvalue() and reason in output.getvalue(),
+                f"{label}: refusal omitted its reason\n{output.getvalue()}")
+
+
+def signing_shell_cases(identity: str, valid: str) -> None:
+    source = PIPELINE.read_text(encoding="utf-8")
+    functions = (shell_function(source, "resolve_signing_identity")
+                 + shell_function(source, "sign_macos_binary"))
+    stage = re.search(r"(?ms)^# --- 4\. signature[^\n]*\n(.*?)^# --- 5\. verify", source)
+    require(stage is not None, "signature stage not found")
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        trace = home / "calls"
+        binary = home / "signed image"
+        stubs = {
+            "security": 'printf "%s\\n" "$C13_IDENTITIES"\nexit "$C13_SECURITY_RC"\n',
+            "codesign": 'if [[ "$1" == "-v" ]]; then exit "$C13_VERIFY_RC"; fi\n'
+                        'exit "$C13_SIGN_RC"\n',
+            binary.name: 'printf "%s\\n" "fixture-version"\nexit "$C13_LAUNCH_RC"\n',
+        }
+        for name, body in stubs.items():
+            path = home / name
+            label = "binary" if path == binary else name
+            path.write_text('#!/bin/bash\n'
+                            f'printf "%s\\t" {label} "$@" >> "$C13_TRACE"\n'
+                            'printf "\\n" >> "$C13_TRACE"\n' + body, encoding="utf-8")
+            path.chmod(0o755)
+        env = {"HOME": str(home), "PATH": f"{home}:/usr/bin:/bin", "LC_ALL": "C",
+               "TMPDIR": str(home),
+               "BUNDLE_ID": "com.anthropic.claude-code", "BIN": str(binary),
+               "CLAUDE_PATCH_SIGN_ID": "", "C13_TRACE": str(trace),
+               "C13_IDENTITIES": valid, "C13_SECURITY_RC": "0", "C13_SIGN_RC": "0",
+               "C13_VERIFY_RC": "0", "C13_LAUNCH_RC": "0"}
+        security = ["security", "find-identity", "-v", "-p", "codesigning"]
+        sign = ["codesign", "-f", "-i", "com.anthropic.claude-code", "-s", identity, str(binary)]
+        strict = ["codesign", "-v", "--strict", str(binary)]
+        launch = ["binary", "--version"]
+        published = ["publish"]
+        cases = [
+            ("missing identity", {"C13_IDENTITIES": "0 valid identities found"}, 1, [security]),
+            ("security failure", {"C13_SECURITY_RC": "9"}, 1, [security]),
+            ("invalid hash", {"C13_IDENTITIES": f'1) {"Z" * 40} "Identity"'}, 1, [security]),
+            ("short hash", {"C13_IDENTITIES": f'1) {identity[:-1]} "Identity"'}, 1, [security]),
+            ("unnumbered identity", {"C13_IDENTITIES": f'{identity} "Identity"'}, 1, [security]),
+            ("unquoted identity", {"C13_IDENTITIES": f'1) {identity} Identity'}, 1, [security]),
+            ("valid identity", {}, 0, [security, sign, strict, launch, published]),
+            ("explicit identity", {"CLAUDE_PATCH_SIGN_ID": identity, "C13_SECURITY_RC": "9"},
+             0, [sign, strict, launch, published]),
+            ("explicit dash", {"CLAUDE_PATCH_SIGN_ID": "-"}, 1, []),
+            ("sign failure", {"C13_SIGN_RC": "7"}, 1, [security, sign]),
+            ("strict failure", {"C13_VERIFY_RC": "7"}, 1, [security, sign, strict]),
+            ("launch failure", {"C13_LAUNCH_RC": "7"}, 1, [security, sign, strict, launch]),
+        ]
+        # Execute the shipping stage, including its refusal before the next stage.
+        script = (f"set -euo pipefail\n{functions}\n"
+                  "uname() { printf 'Darwin\\n'; }\n" + stage.group(1)
+                  + 'printf "publish\\t\\n" >> "$C13_TRACE"\n')
+        for label, overrides, expected_rc, expected_calls in cases:
+            trace.write_text("", encoding="utf-8")
+            result = subprocess.run(["bash"], input=script, env={**env, **overrides},
+                                    capture_output=True, text=True, timeout=10)
+            require(result.returncode == expected_rc,
+                    f"shell {label}: rc={result.returncode}, expected {expected_rc}\n"
+                    f"{result.stdout}{result.stderr}")
+            calls = [line.split("\t")[:-1] for line in trace.read_text().splitlines()]
+            require(calls == expected_calls,
+                    f"shell {label}: calls {calls!r} != {expected_calls!r}")
+            if expected_rc:
+                require("FATAL:" in result.stderr,
+                        f"shell {label}: refusal omitted FATAL\n{result.stderr}")
+
+
+def signing_python_cases(identity: str, valid: str) -> None:
+    module = import_file(PATCHER, "signing")
+    path = Path("signed image")
+    security = ["security", "find-identity", "-v", "-p", "codesigning"]
+    sign = ["codesign", "-f", "-i", "com.anthropic.claude-code", "-s", identity, str(path)]
+    strict = ["codesign", "-v", "--strict", str(path)]
+    cases = [
+        ("missing identity", {"identities": "0 valid identities found"}, 1, [security], "no code-signing identity"),
+        ("security failure", {"security_rc": 9}, 1, [security], "security find-identity failed"),
+        ("invalid hash", {"identities": f'1) {"Z" * 40} "Identity"'}, 1, [security], "no code-signing identity"),
+        ("short hash", {"identities": f'1) {identity[:-1]} "Identity"'}, 1, [security], "no code-signing identity"),
+        ("unnumbered identity", {"identities": f'{identity} "Identity"'}, 1, [security], "no code-signing identity"),
+        ("unquoted identity", {"identities": f'1) {identity} Identity'}, 1, [security], "no code-signing identity"),
+        ("valid identity", {}, 0, [security, sign, strict], ""),
+        ("explicit identity", {"override": identity, "security_rc": 9}, 0, [sign, strict], ""),
+        ("explicit dash", {"override": "-"}, 1, [], "must name a stable signing identity"),
+        ("sign failure", {"sign_rc": 7}, 1, [security, sign], "code signing failed"),
+        ("strict failure", {"verify_rc": 7}, 1, [security, sign, strict], "strict signature verification failed"),
+        ("security unavailable", {"raises": "security"}, 1, [security], "security find-identity could not run"),
+        ("sign unavailable", {"raises": "sign"}, 1, [security, sign], "code signing could not run"),
+        ("verify unavailable", {"raises": "verify"}, 1, [security, sign, strict], "strict signature verification could not run"),
+    ]
+    for label, settings, expected_rc, expected_calls, reason in cases:
+        calls = []
+
+        def fake_run(command, **options):
+            calls.append(command)
+            require(options.get("capture_output") and options.get("text"),
+                    f"python {label}: signing output is not captured as text")
+            step = "security" if command[0] == "security" else "verify" if command[1] == "-v" else "sign"
+            if settings.get("raises") == step:
+                raise OSError("fixture tool unavailable")
+            stdout = settings.get("identities", valid) if step == "security" else ""
+            return subprocess.CompletedProcess(command, settings.get(f"{step}_rc", 0),
+                                               stdout=stdout, stderr="fixture diagnostic")
+
+        with patch.dict(os.environ, {"CLAUDE_PATCH_SIGN_ID": settings.get("override", "")}), \
+                patch.object(module.subprocess, "run", side_effect=fake_run):
+            signing_call(lambda: module.sign_macos(path), f"python {label}", expected_rc, reason)
+        require(calls == expected_calls,
+                f"python {label}: calls {calls!r} != {expected_calls!r}")
+
+
+def signing_launch_cases() -> None:
+    module = import_file(PATCHER, "launch")
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        binary = home / "signed image"
+        cases = [
+            ("success", "printf 'fixture-version\\n'\n", 0, ""),
+            ("stderr success", "printf 'fixture-version\\n' >&2\n", 0, ""),
+            ("nonzero", "printf 'fixture-version\\n'\nexit 7\n", 1, "--version failed"),
+            ("empty", "exit 0\n", 1, "--version produced no output"),
+            ("whitespace", "printf ' \\n\\t'\n", 1, "--version produced no output"),
+        ]
+        for label, body, expected_rc, reason in cases:
+            binary.write_text('#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = "--version" ] || exit 9\n'
+                              + body, encoding="utf-8")
+            binary.chmod(0o755)
+            signing_call(lambda: module.verify_binary_launch(binary),
+                         f"python launch {label}", expected_rc, reason)
+        binary.chmod(0o600)
+        signing_call(lambda: module.verify_binary_launch(binary),
+                     "python launch permission error", 1, "--version could not run")
+        signing_call(lambda: module.verify_binary_launch(home / "absent"),
+                     "python launch missing executable", 1, "--version could not run")
+        with patch.object(module.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired([str(binary), "--version"], 120)) as run:
+            signing_call(lambda: module.verify_binary_launch(binary),
+                         "python launch timeout", 1, "--version could not run")
+            run.assert_called_once_with([str(binary), "--version"], capture_output=True,
+                                        text=True, errors="replace", timeout=120)
+
+        # Only the byte patcher and signer are substituted; chmod, exec and publication are real.
+        original_run = subprocess.run
+        target, backup = home / "installed", home / "installed.orig"
+        for exit_code in (7, 0):
+            image = (b"#!/bin/sh\n# " + module.ROUTING_MARKER + b"\n# " + module.ENUM_MARKER
+                     + b"\nprintf 'fixture-version\\n'\nexit " + str(exit_code).encode() + b"\n")
+            target.write_bytes(b"live installation")
+            backup.write_bytes(b" " * len(image))
+
+            def patch_or_run(command, **options):
+                if command[:2] == [sys.executable, str(module.PATCHER)]:
+                    Path(command[3]).write_bytes(image)
+                    return subprocess.CompletedProcess(command, 0)
+                return original_run(command, **options)
+
+            with patch.object(module, "sign"), \
+                    patch.object(module.subprocess, "run", side_effect=patch_or_run):
+                signing_call(lambda: module.patch_binary(target, backup),
+                             f"python staged launch exit {exit_code}", 1 if exit_code else 0,
+                             "--version failed")
+            require(target.read_bytes() == (b"live installation" if exit_code else image),
+                    f"python staged launch exit {exit_code}: wrong bytes published")
+            require(backup.read_bytes() == b" " * len(image), "launch check changed the pristine backup")
+            require(not list(home.glob(".claude-patched-*")), "launch check left staging files behind")
+
+
+def scenario_c13() -> None:
+    identity = "a1B2" * 10
+    valid = f'  1) {identity} "Apple Development: Fixture"\n     1 valid identities found\n'
+    signing_shell_cases(identity, valid)
+    signing_python_cases(identity, valid)
+    signing_launch_cases()
+
+
 SCENARIOS: list[tuple[str, Callable[[], None]]] = [
     ("C1", scenario_c1), ("C2", scenario_c2), ("C3", scenario_c3),
     ("C4", scenario_c4), ("C5", scenario_c5), ("C6", scenario_c6),
     ("C7", scenario_c7), ("C8", scenario_c8), ("C9", scenario_c9),
     ("C10", scenario_c10), ("C11", scenario_c11), ("C12", scenario_c12),
+    ("C13", scenario_c13),
 ]
 
 
@@ -561,6 +754,31 @@ def m15(root: Path) -> None:
                  "if false; then", "M15")
 
 
+def m16(root: Path) -> None:
+    replace_once(root / "claude-patch-all.sh",
+                 'id="$(resolve_signing_identity)" || return 1',
+                 'id="$(resolve_signing_identity)" || return 0', "M16")
+
+
+def m17(root: Path) -> None:
+    replace_once(root / "claude-patch-all.sh",
+                 'if ! codesign -v --strict "$bin"; then',
+                 'if false; then', "M17")
+
+
+def m18(root: Path) -> None:
+    replace_once(root / "claude_patch.py",
+                 'die("no code-signing identity found; a stable identity is required for Keychain OAuth",\n'
+                 '                code=1)',
+                 'return', "M18")
+
+
+def m19(root: Path) -> None:
+    replace_once(root / "claude_patch.py",
+                 'if out.returncode != 0:\n        die(f"post-check: --version failed',
+                 'if False and out.returncode != 0:\n        die(f"post-check: --version failed', "M19")
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M1", m1, "C1", "empty replacement"),
     ("M2", m2, "C2", "empty replacement"),
@@ -578,6 +796,10 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M13", m13, "C12", "limit.input fallback declared"),
     ("M14", m14, "C12", "limit.context fallback declared"),
     ("M15", m15, "C11", "budget '99999999999999999999': rc=0"),
+    ("M16", m16, "C13", "shell missing identity: rc=0"),
+    ("M17", m17, "C13", "shell valid identity: calls"),
+    ("M18", m18, "C13", "python missing identity: returned rc=0"),
+    ("M19", m19, "C13", "python launch nonzero: returned rc=0"),
 ]
 
 # Circle 25, E-4: a scenario with no mutation of its own proves nothing --

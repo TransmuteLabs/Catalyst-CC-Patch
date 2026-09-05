@@ -3187,6 +3187,26 @@ step('22 judge consulted before a subagent dispatch', () => {
       // его к 60, а фаза маркера гналась за настроенным числом -- бюджет
       // врал человеку молчанием. Теперь отказ ИМЕНОВАН (need 60..inf) и
       // применён дефолт; 60 внутри __cut охраняет только прямые вызовы.
+      'let __raw=null,__v="",__errs=[];' +
+      // Вердикт правил минует сборку контекста и лестницу: механически
+      // решённое условие модели не отдаётся (спека реестра, №7). __degb
+      // проверяется ДО правил -- сломанные настройки идут в деградацию,
+      // а не в оценку по обломку конфига.
+      'let __rl=null;' +
+      'if(__ask&&__o.rules&&!__degb.length){' +
+        'try{__rl=await __o.rules(__cfg,__svc)}' +
+        'catch(__re){__rl={broken:"rules-failed:"+__clip(String(__re?.message??__re),160)}}' +
+        'if(__rl&&__rl.skip)return;' +
+        'if(__rl&&__rl.broken){__deg.push(String(__rl.broken));__degb.push(String(__rl.broken))}' +
+        'else if(__rl&&typeof __rl.verdict==="string"&&__rl.verdict){' +
+          '__v=__rl.verdict;__jtry=0;__jm="rules";__jst=null;' +
+          '__jreq=JSON.stringify(__rl.snapshot??null);__jres=__v;' +
+          'if(__rl.record===!1)__jrec=!1}}' +
+      // Everything the ladder declares stays INSIDE this wrap: the tail below
+      // the closing brace reads only the head `let` and __v, so a rules
+      // verdict that already set __v skips the ladder without changing what
+      // the tail sees.
+      'if(!__v){' +
       'let __max=__num("context_chars",__cfg.context_chars,60000,60);' +
       'let __ctx=__cut(__max);' +
       // Dispatch trimming is declared by the same convention as transcript
@@ -3595,7 +3615,6 @@ step('22 judge consulted before a subagent dispatch', () => {
           // missing prompt and an endless series of paid, unparsable
           // consultations — and it stands only while enforce is on.)
           'return}' +
-      'let __raw=null,__v="",__errs=[];' +
       'for(let __i=0;__i<__mdls.length;__i++){let __e=__mdls[__i];' +
         'try{__jtry=__i+1;__jm=__e.model;' +
           '__raw=await __call(__e.context_chars?' +
@@ -3645,6 +3664,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           'if(!__v)__errs.push(__jm+": empty verdict")}' +
         'catch(__ce){__raw=null;__errs.push(__jm+": "+String(__ce?.name||"Error")+": "+' +
           '__clip(__ce?.message??__ce,80))}}' +
+      '}' +
       '__jerr1=__errs.join(" | ")||null;' +
       'if(__o.dbg){console.error(__o.tag+" "+__clip(__v,300));' +
         'try{await __fs.writeFile(' +
@@ -3683,7 +3703,12 @@ step('22 judge consulted before a subagent dispatch', () => {
         '...(__uw.length?{uw:__dcut(__uw,5)}:{}),' +
         '...(__deg.length?{deg:__dcut(__deg,5)}:{}),' +
         'tries:__jtry,jm:__jm,err1:__jerr1,' +
+        // Позиция спреда -- ДО verdict: байты `verdict:__clip(__v,400)||null})}catch{}`
+        // запинены проверкой 'judge cancels when it cannot decide'
+        // (claude-patch-all.sh:5135), extra не может перебивать verdict.
+        '...(__rl&&__rl.extra&&typeof __rl.extra==="object"?__rl.extra:{}),' +
         'verdict:__clip(__v,400)||null})}catch{}' +
+      'if(__v&&__o.onVerdict)try{await __o.onVerdict(__v,__svc)}catch{}' +
       // The user's principle (2026-08-20): "a false cancellation is better
       // than a silent pass". A failure of the WHOLE ladder is precisely a
       // silent pass: the judge said nothing and the call went through. Under
@@ -3768,6 +3793,255 @@ step('22 judge consulted before a subagent dispatch', () => {
       'onNoVerdict:(__r)=>{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u043f\\u043e\\u043b\\u0443\\u0447\\u0438\\u043b \\u0432\\u0435\\u0440\\u0434\\u0438\\u043a\\u0442 \\u043d\\u0438 \\u043d\\u0430 \\u043e\\u0434\\u043d\\u043e\\u0439 \\u0441\\u0442\\u0443\\u043f\\u0435\\u043d\\u0438 (' + '"+__r+"' + '). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435, \\u043a\\u043e\\u0433\\u0434\\u0430 \\u043a\\u0430\\u043d\\u0430\\u043b \\u043e\\u0436\\u0438\\u0432\\u0451\\u0442.");__e.__ccJudgeBlock=!0;throw __e},' +
       'onBroken:(__r)=>{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u043d\\u0430\\u0441\\u0442\\u0440\\u043e\\u0439\\u043a\\u0438 \\u0441\\u0443\\u0434\\u044c\\u0438 \\u0441\\u043b\\u043e\\u043c\\u0430\\u043d\\u044b ("+__r+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443: \\u043f\\u043e\\u043a\\u0430 \\u0444\\u0430\\u0439\\u043b \\u043d\\u0435 \\u043f\\u043e\\u0447\\u0438\\u043d\\u0435\\u043d, \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0437\\u043d\\u0430\\u0435\\u0442, \\u043f\\u043e \\u043a\\u0430\\u043a\\u0438\\u043c \\u043f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430\\u043c \\u0441\\u0443\\u0434\\u0438\\u0442\\u044c.");__e.__ccJudgeBlock=!0;throw __e},' +
       'onFail:(__r)=>{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d: \\u0441\\u0443\\u0434\\u044c\\u044f \\u043d\\u0435 \\u0441\\u043c\\u043e\\u0433 \\u0432\\u044b\\u043d\\u0435\\u0441\\u0442\\u0438 \\u0440\\u0435\\u0448\\u0435\\u043d\\u0438\\u0435 ("+__r+"). \\u042d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438. \\u0421\\u043a\\u0430\\u0436\\u0438 \\u043e\\u0431 \\u044d\\u0442\\u043e\\u043c \\u0447\\u0435\\u043b\\u043e\\u0432\\u0435\\u043a\\u0443 \\u0438 \\u0441\\u0434\\u0435\\u043b\\u0430\\u0439 \\u0440\\u0430\\u0431\\u043e\\u0442\\u0443 \\u0431\\u0435\\u0437 \\u0441\\u0443\\u0431\\u0430\\u0433\\u0435\\u043d\\u0442\\u0430 \\u043b\\u0438\\u0431\\u043e \\u043f\\u043e\\u0432\\u0442\\u043e\\u0440\\u0438 \\u043f\\u043e\\u0437\\u0436\\u0435.");__e.__ccJudgeBlock=!0;throw __e}' +
+    '});';
+
+
+
+  // The form probe is the core's third consumer and its first DETERMINISTIC
+  // one: the verdict is computed from the rule table in probes.toml, so the
+  // context build and the model ladder are skipped whole -- a mechanically
+  // decidable condition is never handed to a model (registry spec, no. 7).
+  // The rules are DATA: this text names keys and machinery, not one class
+  // regexp and not one word from the word lists. Two pipeline censors hold
+  // that shape in place: 'every cut in the probe is named' (quotes are whole
+  // lines and clip calls, the ring is a filter -- never a cut) and
+  // 'consumers do not reach into the core' (the private-name census, hence
+  // the short local names below).
+  //
+  // The three pure declarations sit BEFORE the switch on purpose: the bench
+  // and --form-replay execute this block under a foreign agentType and read
+  // them off globalThis without consulting anything.
+  const formCall =
+    // One compiled shape per (source, flags), cached globally. The table is
+    // merged per call -- project layer, bench override -- and the cache key
+    // IS the source string, so two different strings never share an entry
+    // and one string never recompiles.
+    'globalThis.__ccFormC??=(s,f)=>{let key=f+"|"+s,m=globalThis.__ccFormRx??={},r=m[key];' +
+      'if(r)return r;r=new RegExp(s,f);m[key]=r;return r};' +
+    // A1-A4 judge a BRIEF, C1/C2 a REPORT or MESSAGE, F a COMMAND. A4 and C2
+    // are the warn classes; every other fire refuses.
+    'globalThis.__ccFormEval??=(ev,c,__cl)=>{' +
+      'let __K=globalThis.__ccFormC;' +
+      'let __W={A4:1,C2:1};' +
+      'let __Rf=[],__Wr=[];' +
+      'let __F=(cl,n,q)=>(__W[cl]?__Wr:__Rf).push({c:cl,n:n,q:__cl(q,160)});' +
+      'let __t=String(ev.text??"");' +
+      'let __ls=__t.split("\\n");' +
+      // Fence lines toggle the state and are themselves never evaluated.
+      'let __in=!1;' +
+      'let __op=__ls.map((__l)=>{if(__K(c.fence,"u").test(__l)){__in=!__in;return !1}return !__in});' +
+      'if(ev.kind==="brief"){' +
+        // The marker must be the LAST non-empty line: a torn brief always
+        // looks self-consistent, only the tail tells.
+        'let __ln=-1,__ll="";' +
+        'for(let __i=0;__i<__ls.length;__i++){let __e=__ls[__i].trimEnd();if(__e){__ln=__i+1;__ll=__e}}' +
+        'if(__ln<0)__F("A1",0,"");' +
+        'else if(__ll!==c.brief_tail)__F("A1",__ln,__ll);' +
+        // Arms: whole lines inside fences, inline spans in list lines outside
+        // them. An ellipsis prefix means the arm shown is not the whole
+        // command -- exactly the form this class exists to catch.
+        'let __ac=0;' +
+        'for(let __i=0;__i<__ls.length;__i++){' +
+          'let __cs2=[];' +
+          'if(!__op[__i])__cs2=[__ls[__i]];' +
+          'else if(__K(c.arm_line,"u").test(__ls[__i]))' +
+            '__cs2=[...__ls[__i].matchAll(/`([^`]*)`/g)].map((__m)=>__m[1]);' +
+          'for(let __s0 of __cs2){' +
+            'let __b=__s0,__el=!1;' +
+            'if(__K(c.arm_ellipsis,"u").test(__b))' +
+              '{__el=!0;__b=__b.replace(__K(c.arm_ellipsis,"u"),"")}' +
+            'if(!__K(c.arm_cmd,"u").test(__b))continue;' +
+            '__ac++;' +
+            'if(__el||!__K(c.arm_remote,"u").test(__b)||!__K(c.arm_log,"u").test(__b))' +
+              '__F("A2",__i+1,__s0)}}' +
+        // An arm ran somewhere in the text -- the yard must be named beside
+        // it, by its own line, never by the worker's.
+        'if(__ac&&!__K(c.witness_remote,"iu").test(__t))' +
+          '__F("A2",0,"\\u0430\\u0440\\u043c\\u0430 \\u0435\\u0441\\u0442\\u044c, \\u0441\\u0432\\u0438\\u0434\\u0435\\u0442\\u0435\\u043b\\u044c [RCH] remote \\u043d\\u0435 \\u043d\\u0430\\u0437\\u0432\\u0430\\u043d");' +
+        'if(__K(c.witness_worker,"u").test(__t))' +
+          '{for(let __i=0;__i<__ls.length;__i++)if(__K(c.witness_worker,"u").test(__ls[__i])){__F("A2",__i+1,__ls[__i]);break}}' +
+        // The negation window is a lookbehind in the pattern itself: the text
+        // before a match is never cut out of the line to inspect it.
+        'let __a3=new RegExp("(?<!(?:"+c.negation+")\\\\s{0,16})(?:"+c.open_door+")","iu");' +
+        'for(let __i=0;__i<__ls.length;__i++){' +
+          'if(__op[__i]&&__a3.test(__ls[__i]))__F("A3",__i+1,__ls[__i])}' +
+        // A path census without a rule line (warn).
+        'let __pc=0,__rl=!1;' +
+        'for(let __i=0;__i<__ls.length;__i++){if(__K(c.path_line,"u").test(__ls[__i]))__pc++;' +
+          'if(__K(c.rule_line,"iu").test(__ls[__i]))__rl=!0}' +
+        'if(__pc>=c.path_lines_min&&!__rl)' +
+          '__F("A4",0,"\\u0441\\u0442\\u0440\\u043e\\u043a-\\u043f\\u0443\\u0442\\u0435\\u0439 "+__pc+", \\u0441\\u0442\\u0440\\u043e\\u043a\\u0438 \\u043f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430 \\u043d\\u0435\\u0442")}' +
+      'if(ev.kind==="report"||ev.kind==="message"){' +
+        'for(let __i=0;__i<__ls.length;__i++){' +
+          'if(__op[__i]&&__K(c.legalize,"iu").test(__ls[__i])){__F("C1",__i+1,__ls[__i]);break}}' +
+        'if(__K(c.witness_worker,"u").test(__t)&&!__K(c.witness_remote,"iu").test(__t))' +
+          '{for(let __i=0;__i<__ls.length;__i++)if(__K(c.witness_worker,"u").test(__ls[__i])){__F("C2",__i+1,__ls[__i]);break}}}' +
+      'if(ev.kind==="message"){' +
+        // A decision must carry a basis and a referent: the head is the first
+        // non-empty line, the halves are searched over the whole message.
+        'let __h=-1;for(let __i=0;__i<__ls.length;__i++)if(__ls[__i].trim()){__h=__i;break}' +
+        'if(__h>=0&&__K(c.decision_head,"u").test(__ls[__h])&&' +
+          '(!__K(c.decision_basis,"iu").test(__t)||!__K(c.decision_referent,"iu").test(__t)))' +
+          '__F("B",__h+1,__ls[__h])}' +
+      'if(ev.kind==="command"){' +
+        'if(__K(c.git_commit,"u").test(__t)){' +
+          // The ok-forms are quoted FROM the table in the refusal: the code
+          // does not repeat them.
+          'if(!__K(c.git_commit_ok,"u").test(__t))' +
+            '__F("F",1,"git commit: \\u043d\\u0435\\u0442 "+c.git_commit_ok);' +
+          // Commit text: every -m payload as a paragraph, a heredoc body in
+          // its place.
+          'let __ms=[...__t.matchAll(__K(c.git_msg,"gu"))].map((__m)=>__m[1]??__m[2]??__m[3]??"");' +
+          'let __hd=__K(c.heredoc,"u").exec(__t);' +
+          'let __ct=__hd?__hd[2]:__ms.join("\\n\\n");' +
+          'if(__ct){let __cm=__ct.split("\\n");let __ia=-1,__ib=-1;' +
+            'for(let __i=0;__i<__cm.length;__i++){' +
+              'if(__ia<0&&__K(c.trailer_a,"mu").test(__cm[__i]))__ia=__i;' +
+              'if(__ib<0&&__K(c.trailer_b,"mu").test(__cm[__i]))__ib=__i}' +
+            'if(__ia>=0&&__ib>=0&&Math.abs(__ia-__ib)!==1)' +
+              '__F("F",__ia+1,"\\u0442\\u0440\\u0435\\u0439\\u043b\\u0435\\u0440\\u044b Session: \\u0438 Co-Authored-By: \\u043d\\u0435 \\u0441\\u043e\\u0441\\u0435\\u0434\\u043d\\u0438\\u0435")}}' +
+        'if(__K(c.git_push,"u").test(__t)){' +
+          'if(!__K(c.git_push_ok,"u").test(__t))__F("F",1,"git push: \\u043d\\u0435\\u0442 "+c.git_push_ok);' +
+          'if(__K(c.git_force,"u").test(__t))__F("F",1,__t)}}' +
+      'return {refuse:__Rf,warn:__Wr}};' +
+    'globalThis.__ccFormKind??=(p,t,c)=>{' +
+      'let __K=globalThis.__ccFormC;' +
+      'if(__K(c.brief_path,"u").test(String(p??""))&&' +
+          '__K(c.brief_head,"iu").test(String(t??"").split("\\n")[0]))return "brief";' +
+      'if(__K(c.report_path,"u").test(String(p??"")))return "report";' +
+      'return null};' +
+    'if((()=>{let __s=String(process.env.CLAUDE_FORM??"").trim().toLowerCase();return !(__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&$4?.agentContext?.agentType==="main")' +
+    'await globalThis.__ccProbe({' +
+      'tag:"[Form]",dirName:"form",arm:!0,label:"FORM",' +
+      'rx:"PASS|WARN|REFUSE",act:"REFUSE|WARN",' +
+      'fb:"Deterministic form probe: no model is consulted; the verdicts PASS, WARN and REFUSE come from configured rules.",' +
+      'sw:process.env.CLAUDE_FORM,dirEnv:process.env.CLAUDE_PROBES_DIR,' +
+      'dbg:process.env.CLAUDE_FORM_DEBUG,' +
+      'tool:$2,input:$3,ctx:$4,key:$5,' +
+      // The cheap filter names the SUBJECTS, not the forms: five tool names
+      // and the substrings a subject cannot exist without. Everything that
+      // says what a defect looks like is data in probes.toml.
+      'pre:()=>{let __n=$2.name;' +
+        'if(__n!=="Agent"&&__n!=="Task"&&__n!=="SendMessage"&&__n!=="Write"&&__n!=="Edit"&&__n!=="Bash")return "not-subject";' +
+        'let __s=globalThis.__ccForm??={seen:0,evals:0,evalsAt:0,fired:[],cursor:0,cursorIso:null,broken:0,brokenAt:0};' +
+        '__s.seen++;' +
+        // Broken settings are not re-checked on every call: the memo holds
+        // ten minutes, so a fixed file takes effect within ten minutes.
+        'if(__s.brokenAt&&globalThis.__ccMono()-__s.brokenAt<600000)return "broken-memo";' +
+        'if(__n==="SendMessage")return null;' +
+        'if(__n==="Bash"){let __b=String($3?.command??"");' +
+          'return /git\\s+(?:commit|push)\\b/.test(__b)||(/brief|report/i.test(__b)&&/\\.md\\b/.test(__b))?null:"not-subject"}' +
+        'if(__n==="Write"||__n==="Edit")' +
+          'return /brief|report/i.test(String($3?.file_path??""))?null:"not-subject";' +
+        'return /brief/i.test(String($3?.prompt??""))&&/\\.md\\b/.test(String($3?.prompt??""))?null:"not-subject"},' +
+      'rules:async(__cfg,__svc)=>{' +
+        'let __fs=await import("node:fs/promises");' +
+        'let __st=globalThis.__ccForm??={seen:0,evals:0,evalsAt:0,fired:[],cursor:0,cursorIso:null,broken:0,brokenAt:0};' +
+        // The table must be whole before anything is judged: a missing key is
+        // broken settings, not a quieter rule set.
+        'let __c=__cfg;' +
+        'let __rq=["brief_path","brief_ref","brief_head","brief_tail","report_path","fence","arm_line","arm_ellipsis","arm_cmd","arm_remote","arm_log","witness_remote","witness_worker","open_door","negation","rule_line","path_line","decision_head","decision_basis","decision_referent","legalize","git_commit","git_commit_ok","git_msg","git_push","git_push_ok","git_force","trailer_a","trailer_b","write_redirect","heredoc"];' +
+        'for(let __k of __rq){if(typeof __c[__k]!=="string"||!__c[__k])' +
+          '{__st.broken++;__st.brokenAt=globalThis.__ccMono();return {broken:"form-rule-missing:"+__k}}}' +
+        'if(typeof __c.path_lines_min!=="number"||!Number.isFinite(__c.path_lines_min))' +
+          '{__st.broken++;__st.brokenAt=globalThis.__ccMono();return {broken:"form-rule-missing:path_lines_min"}}' +
+        'let __K=globalThis.__ccFormC,__nm=$2.name;' +
+        'let __evs=[],__sk=[],__dg=[];' +
+        // A named path resolves the way the shell would: ~ against HOME, a
+        // relative name against the cwd of THIS process.
+        'let __rs=(p)=>{let s=String(p).replace(/^~(?=\\/|$)/,process.env.HOME||".");' +
+          'return /^\\//.test(s)?s:process.cwd()+"/"+s};' +
+        'let __rd=async(p)=>{try{return await __fs.readFile(p,"utf8")}catch(e){__dg.push("brief-unreadable:"+p);return null}};' +
+        'let __byPath=async(p)=>{let t=await __rd(p);if(t===null)return;' +
+          'let k=globalThis.__ccFormKind(p,t,__c);' +
+          'if(k)__evs.push({kind:k,text:t,label:__nm+":"+p});else __sk.push(p)};' +
+        // Every event is judged on the state the tool is about to produce:
+        // named briefs are read from disk, Write/Edit content becomes the
+        // post-state, a heredoc body becomes the file it writes.
+        'if(__nm==="Agent"||__nm==="Task"||__nm==="SendMessage"){' +
+          'let __tx=String($3?.prompt??$3?.message??""),__pu=new Set();' +
+          'for(let __m of __tx.matchAll(__K(__c.brief_ref,"gu"))){' +
+            '__pu.add(__rs(__m[0]));if(__pu.size>=4)break}' +
+          'for(let __p2 of __pu)await __byPath(__p2);' +
+          'if(__nm==="SendMessage")__evs.push({kind:"message",text:__tx,label:"SendMessage:message"})}' +
+        'else if(__nm==="Write"){let __fp=String($3?.file_path??""),__ct2=String($3?.content??"");' +
+          'let k=globalThis.__ccFormKind(__fp,__ct2,__c);' +
+          'if(k)__evs.push({kind:k,text:__ct2,label:"Write:"+__fp});else __sk.push(__fp)}' +
+        'else if(__nm==="Edit"){let __fp=String($3?.file_path??""),__cur=await __rd(__fp);' +
+          'if(__cur!==null){let __post=$3?.replace_all?' +
+              '__cur.split(String($3?.old_string??"")).join(String($3?.new_string??"")):' +
+              '__cur.replace(String($3?.old_string??""),String($3?.new_string??""));' +
+            'let k=globalThis.__ccFormKind(__fp,__post,__c);' +
+            'if(k)__evs.push({kind:k,text:__post,label:"Edit:"+__fp});else __sk.push(__fp)}}' +
+        'else{let __cmd=String($3?.command??"");' +
+          'let __wr=__K(__c.write_redirect,"u").exec(__cmd);' +
+          'if(__wr){let __fp=__rs(__wr[1]);' +
+            'let __hd=__K(__c.heredoc,"u").exec(__cmd),__body=__hd?__hd[2]:"";' +
+            'let __post=__body;' +
+            // Append shapes add to the file that is already there; a plain
+            // redirect replaces it.
+            'if(/>>|tee/.test(__wr[0])){let __cur=await __rd(__fp);' +
+              '__post=(__cur===null?"":__cur)+((__cur&&__cur.length&&!__cur.endsWith("\\n"))?"\\n":"")+__body}' +
+            'let k=globalThis.__ccFormKind(__fp,__post,__c);' +
+            'if(k)__evs.push({kind:k,text:__post,label:"Bash:"+__fp});else __sk.push(__fp)}' +
+          'if(/git\\s+(?:commit|push)\\b/.test(__cmd))' +
+            '__evs.push({kind:"command",text:__cmd,label:"Bash:command"});' +
+          'if(!__evs.length)return {skip:"not-subject"}}' +
+        // Fold: entries keep the source they came from, the state ring keeps
+        // one entry per fire (a filter, never a cut).
+        'let __rf=[],__wn=[],__cls=[];' +
+        'for(let __ev of __evs){let __r2=globalThis.__ccFormEval(__ev,__c,__svc.clip);' +
+          'for(let __x of __r2.refuse)__rf.push({...__x,src:__ev.label});' +
+          'for(let __x of __r2.warn)__wn.push({...__x,src:__ev.label})}' +
+        'let __rec=(__l2,__o2)=>{for(let __x of __l2){if(!__cls.includes(__x.c))__cls.push(__x.c);' +
+          '__st.fired.push({t:globalThis.__ccMono(),iso:new Date().toISOString(),cls:__x.c,tool:__nm,out:__o2,q:__x.q})}};' +
+        '__rec(__rf,"refuse");__rec(__wn,"warn");' +
+        'if(__st.fired.length>64)__st.fired=__st.fired.filter((__x,__i,__a)=>__i>=__a.length-64);' +
+        'let __vk=__rf.length?"refuse":(__wn.length?"warn":"pass");' +
+        'let __src3=__rf[0]||__wn[0];' +
+        'let __lbl=__src3?__src3.src:(__evs[0]?__evs[0].label:__nm);' +
+        'let __cnts=__cls.map((__c3)=>__c3+"\\u00d7"+(__rf.concat(__wn).filter((__x)=>__x.c===__c3).length)).join(", ");' +
+        'let __vd=(__vk==="pass"?"PASS":__vk==="warn"?"WARN":"REFUSE")+": "+' +
+          '(__vk==="pass"?__lbl:__cnts+" \\u2014 "+__lbl+" \\u2014 "+__src3.c+" :"+__src3.n+": "+__src3.q);' +
+        '__st.evals++;' +
+        'let __ac2=(__c.act&&typeof __c.act==="object")?__c.act:{};' +
+        'let __tx3=(__c.text&&typeof __c.text==="object")?__c.text:{};' +
+        '__st.last={cls:__cls,act:__ac2,text:__tx3,verdictKind:__vk};' +
+        'let __ex={ev:__nm};' +
+        'if(__cls.length)__ex.cls=__cls;' +
+        'if(__rf.length||__wn.length)' +
+          '__ex.fired=__rf.concat(__wn).map((__x)=>({c:__x.c,n:__x.n,q:__x.q,src:__x.src}));' +
+        'if(__sk.length)__ex.skipped=__sk;' +
+        'if(__dg.length)__ex.deg=__dg;' +
+        // A record only when something fired: PASS is the denominator's
+        // business, not the corpus's.
+        'let __sn=null,__rc=!0;' +
+        'if(__vk!=="pass")__sn={ev:__nm,tool:__nm,' +
+          'sources:__evs.map((__e3)=>({src:__e3.label,kind:__e3.kind,size:__e3.text.length})),' +
+          'refuse:__rf,warn:__wn,' +
+          'text:__svc.clip(__evs[0]?__evs[0].text:"",40000)};' +
+        'else __rc=!1;' +
+        'return {verdict:__vd,snapshot:__sn,record:__rc,extra:__ex}},' +
+      // The reaction picks the STRICTEST mode among the classes that fired;
+      // a warning never cancels -- even under cancel.
+      'onAct:async(__r,__svc)=>{let __s=globalThis.__ccForm;if(!__s||!__s.last)return;' +
+        'let __l=__s.last,__rk={log_only:0,warn:1,cancel:2},__m=0;' +
+        'for(let __c4 of __l.cls)__m=Math.max(__m,__rk[__l.act[__c4]]??0);' +
+        'let __tx4=String((__l.text&&__l.text[__l.cls[0]])??"");' +
+        'if(__l.verdictKind==="refuse"&&__m===2)' +
+          '{let __e=new Error("\\u0412\\u044b\\u0437\\u043e\\u0432 \\u0438\\u043d\\u0441\\u0442\\u0440\\u0443\\u043c\\u0435\\u043d\\u0442\\u0430 \\u043e\\u0442\\u043c\\u0435\\u043d\\u0451\\u043d \\u043f\\u0440\\u043e\\u0431\\u043e\\u0439 \\u0444\\u043e\\u0440\\u043c\\u044b (\\u044d\\u0442\\u043e \\u041d\\u0415 \\u0433\\u0435\\u0439\\u0442 \\u043c\\u0430\\u0440\\u0448\\u0440\\u0443\\u0442\\u0438\\u0437\\u0430\\u0446\\u0438\\u0438 hooks/routing-table.toml). "+__r+" \\u041f\\u0440\\u0430\\u0432\\u0438\\u043b\\u043e: "+__tx4);' +
+            '__e.__ccJudgeBlock=!0;throw __e}' +
+        'if(__m>=1){try{await ' + TV + '({value:"[form] "+__r+"\\n(\\u041f\\u0440\\u043e\\u0431\\u0430 \\u0444\\u043e\\u0440\\u043c\\u044b, \\u043d\\u0435 \\u0433\\u0435\\u0439\\u0442: \\u0440\\u0435\\u0448\\u0430\\u0435\\u0448\\u044c \\u0442\\u044b. \\u041f\\u0440\\u0430\\u0432\\u0438\\u043b\\u043e: "+__tx4+")",' +
+            'mode:"task-notification",agentId:' + DI + '(),priority:"next"})}' +
+          'catch(__ne){try{await __svc.log({outcome:"warn_undelivered",' +
+            'reason:__svc.clip(String(__ne?.message??__ne),200)})}catch{}}}},' +
+      // Broken settings silence the probe for ten minutes (the memo sits in
+      // pre) and say so once, through the same channel.
+      'onBroken:async(__r,__svc)=>{let __s=globalThis.__ccForm;' +
+        'if(__s){__s.broken++;__s.brokenAt=globalThis.__ccMono()}' +
+        'try{await ' + TV + '({value:"[form] \\u043f\\u0440\\u043e\\u0431\\u0430 \\u0444\\u043e\\u0440\\u043c\\u044b \\u0432\\u044b\\u043a\\u043b\\u044e\\u0447\\u0435\\u043d\\u0430 \\u043d\\u0430 10 \\u043c\\u0438\\u043d\\u0443\\u0442: \\u043d\\u0430\\u0441\\u0442\\u0440\\u043e\\u0439\\u043a\\u0438 \\u0441\\u043b\\u043e\\u043c\\u0430\\u043d\\u044b ("+__r+")",' +
+          'mode:"task-notification",agentId:' + DI + '(),priority:"next"})}catch{}},' +
+      'onNoVerdict:()=>{},onFail:()=>{}' +
     '});';
 
 
@@ -3875,7 +4149,18 @@ step('22 judge consulted before a subagent dispatch', () => {
         'window_min:Math.round((globalThis.__ccWatch?.w??0)/60000),' +
         'live_works:globalThis.__ccWatch?.lv??0,' +
         'task_registry_readable:globalThis.__ccWatch?.reg??!1,' +
-        'current_tool:$2.name}),' +
+        'current_tool:$2.name,' +
+        // Курсор окна двигает только разобранный вердикт (onVerdict ниже):
+        // показываются срабатывания С прошлого тика, без повторов и без
+        // проглатывания. `.slice(` здесь запрещён цензом срезов
+        // ('every cut in the probe is named') -- хвост кольца берётся фильтром.
+        'form:(()=>{let __s=globalThis.__ccForm;if(!__s)return {enabled:!1};' +
+          'let __r=__s.fired.filter((__x)=>__x.t>__s.cursor);' +
+          'let __bc={};for(let __x of __r)__bc[__x.cls]=(__bc[__x.cls]||0)+1;' +
+          'return {enabled:!0,seen:__s.seen,evals_since:__s.evals-__s.evalsAt,' +
+            'since:__s.cursorIso??"session-start",by_class:__bc,' +
+            'last:__r.filter((__x,__i)=>__i>=__r.length-8)' +
+              '.map((__x)=>({cls:__x.cls,tool:__x.tool,out:__x.out,q:__x.q})),broken:__s.broken}})()}),' +
       // The reaction: queueing. A queueing error is swallowed — a reminder
       // that crashed a working call would be worse than a missed reminder.
       // Both fields were MEASURED against the installed image, not taken from
@@ -3898,6 +4183,10 @@ step('22 judge consulted before a subagent dispatch', () => {
           'reason:__svc.clip(String(__ne?.message??__ne),200)})}catch{}}},' +
       // The watcher is fail-open: no verdict, broken settings, a channel
       // failure — all of it stays in the journal and stops NOTHING.
+      // onVerdict идёт ДО тройки onNoVerdict/onBroken/onFail: её хвостовые
+      // байты запинены проверкой 'watcher nudges through the notification
+      // queue' (claude-patch-all.sh:4719).
+      'onVerdict:()=>{let __s=globalThis.__ccForm;if(__s){__s.cursor=globalThis.__ccMono();__s.cursorIso=new Date().toISOString();__s.evalsAt=__s.evals}},' +
       'onNoVerdict:()=>{},onBroken:()=>{},onFail:()=>{}' +
     '});';
 
@@ -3923,7 +4212,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     return out;
   };
 
-  // Two homes, one core.
+  // Three homes, one core.
   //
   // The WATCHER belongs to the main dispatcher: it is a heartbeat over every
   // tool call the main loop makes, and the dispatch count it keeps is a
@@ -3934,22 +4223,30 @@ step('22 judge consulted before a subagent dispatch', () => {
   // The JUDGE belongs to the tool: it has exactly one subject, and the tool is
   // the one place every dispatcher must pass through. That is what makes the
   // count of dispatchers stop mattering.
+  //
+  // The FORM PROBE sits in front of the watcher at the dispatcher: it
+  // evaluates the call the watcher then reports on, so its state is filled
+  // before the watcher's payload reads it. Same site, same four names.
   const watchBlock =
     '/*__ccProbe0*/' + resolveFor(core + watchCall, SLOT, 'watcher') + '/*__ccProbe1*/';
   const judgeBlock =
     '/*__ccProbe0*/' + resolveFor(core + judgeCall, SLOT_TOOL, 'judge') + '/*__ccProbe1*/';
+  const formBlock =
+    '/*__ccProbe0*/' + resolveFor(core + formCall, SLOT, 'form') + '/*__ccProbe1*/';
 
   // The names went in as text; assert they came out as themselves. A future
   // escaping mistake would otherwise produce a plausible-looking identifier
   // that is bound to nothing, and every shape check would still pass.
-  for (const [what, name, where] of [
-    ['single-shot query engine', qm[1], `typeof ${qm[1]}===`],
-    ['notification queue', nm[1], `${nm[1]}({value:`],
-    ['session id', nm[2], `agentId:${nm[2]}()`],
-    ['session title accessor', tm[1], `let __v=${tm[1]}(__i)`],
-  ]) {
-    if (!watchBlock.includes(where)) {
-      fail(`the ${what} name '${name}' did not survive into the watcher block verbatim`);
+  for (const [holder, block] of [['watcher', watchBlock], ['form', formBlock]]) {
+    for (const [what, name, where] of [
+      ['single-shot query engine', qm[1], `typeof ${qm[1]}===`],
+      ['notification queue', nm[1], `${nm[1]}({value:`],
+      ['session id', nm[2], `agentId:${nm[2]}()`],
+      ['session title accessor', tm[1], `let __v=${tm[1]}(__i)`],
+    ]) {
+      if (!block.includes(where)) {
+        fail(`the ${what} name '${name}' did not survive into the ${holder} block verbatim`);
+      }
     }
   }
   if (!judgeBlock.includes(`typeof ${qm[1]}===`)) {
@@ -3972,7 +4269,7 @@ step('22 judge consulted before a subagent dispatch', () => {
   // Later offset first: splicing the earlier one would move every index after
   // it, and both match indices were taken from the same string.
   const edits = [
-    { at: m.index, len: 0, text: watchBlock },
+    { at: m.index, len: 0, text: formBlock + watchBlock },
     {
       at: mTool.index,
       len: mTool[0].length,

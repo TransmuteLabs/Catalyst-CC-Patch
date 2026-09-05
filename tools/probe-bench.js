@@ -36,6 +36,8 @@ const ENV_KEYS = [
   'CLAUDE_IDLE_TIMEOUT_MS',
   'CLAUDE_IDLE_DEBUG',
   'CLAUDE_JUDGE_TIMEOUT_MS',
+  'CLAUDE_FORM',
+  'CLAUDE_FORM_DEBUG',
   'ANTHROPIC_BASE_URL',
 ];
 
@@ -48,11 +50,24 @@ function parseArgs(argv) {
   let binary = null;
   let json = null;
   let selfCheck = false;
+  const formReplayPaths = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--self-check') {
       selfCheck = true;
+    } else if (argument === '--form-replay') {
+      // Variadic: every following non-flag argument is a corpus path, so the
+      // acceptance run names both corpora after one flag.
+      index += 1;
+      while (index < argv.length && !argv[index].startsWith('--')) {
+        formReplayPaths.push(argv[index]);
+        index += 1;
+      }
+      if (formReplayPaths.length === 0) {
+        throw new Error('--form-replay requires a path');
+      }
+      index -= 1;
     } else if (argument === '--binary' || argument === '--json') {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) {
@@ -67,9 +82,11 @@ function parseArgs(argv) {
   }
 
   if (!binary) {
-    throw new Error('usage: bun tools/probe-bench.js [--self-check] --binary <path> [--json <file>]');
+    throw new Error(
+      'usage: bun tools/probe-bench.js [--self-check] --binary <path> '
+      + '[--json <file>] [--form-replay <path>...]');
   }
-  return { binary, json, selfCheck };
+  return { binary, json, selfCheck, formReplayPaths };
 }
 
 // The image is a single-file executable bun, and the carved-out block runs on
@@ -138,19 +155,24 @@ function carveBlocks(source) {
 }
 
 const WATCH_MARK = '[fleet-idle] ';
+const FORM_MARK = 'tag:"[Form]"';
 
 function classifyBlocks(blocks) {
-  const found = { judge: [], watch: [] };
-  for (const block of blocks) found[block.includes(WATCH_MARK) ? 'watch' : 'judge'].push(block);
-  for (const kind of ['judge', 'watch']) {
+  const found = { judge: [], watch: [], form: [] };
+  for (const block of blocks) {
+    if (block.includes(FORM_MARK)) found.form.push(block);
+    else if (block.includes(WATCH_MARK)) found.watch.push(block);
+    else found.judge.push(block);
+  }
+  for (const kind of ['judge', 'watch', 'form']) {
     if (found[kind].length !== 1) {
       throw new Error(
         `expected exactly one ${kind} block, found ${found[kind].length} ` +
-        `(carved ${blocks.length} in total)`,
+       `(carved ${blocks.length} in total)`,
       );
     }
   }
-  return { judge: found.judge[0], watch: found.watch[0] };
+  return { judge: found.judge[0], watch: found.watch[0], form: found.form[0] };
 }
 
 // A slot is not always a plain name. On the dispatch tool the judge names the
@@ -212,6 +234,15 @@ function locateNames(carved, kind) {
     throw new Error(`tool slot is neither a name nor \`this\`: ${slots[1].trim()}`);
   }
   if (kind === 'judge') return spec;
+  // The form block's queue call sits behind verdict-kind dispatch (its own
+  // mode table), so the onAct head is NOT the anchor there -- the nudge
+  // literal itself is.
+  if (kind === 'form') {
+    const notify = /([A-Za-z_$][\w$]*)\(\{value:"\[form\] "/.exec(carved);
+    if (!notify) throw new Error('free name not found: notify');
+    spec.bindings.push({ name: notify[1], source: 'notify' });
+    return spec;
+  }
   const notify = /onAct:(?:async)?\(__r(?:,__svc)?\)=>\{try\{([A-Za-z_$][\w$]*)\(\{value:"\[fleet-idle\] "/.exec(carved);
   if (!notify) throw new Error('free name not found: notify');
   spec.bindings.push({ name: notify[1], source: 'notify' });
@@ -248,6 +279,28 @@ function compileProbe(carved, spec) {
   return (bag) => fn.apply(spec.usesThis ? bag.tool : undefined, params.map((entry) => bag[entry.source]));
 }
 
+// The form probe's rule table comes from the kit's OWN probes.toml: one data
+// source for the image and the bench. A copy of this script (the self-check
+// writes one per mutation into a throwaway dir) cannot find the kit by
+// __dirname, so the path resolves by walking up here and is handed to copies
+// explicitly through the environment.
+function resolveKitToml() {
+  let d = __dirname;
+  for (let i = 0; i < 6; i += 1) {
+    const p = path.join(d, 'probes', 'probes.toml');
+    if (fs.existsSync(p)) return p;
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  const fromEnv = process.env.PROBE_BENCH_KIT_TOML;
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  throw new Error(
+    'probes.toml кита не найден ни подъёмом от ' + __dirname + ', ни через PROBE_BENCH_KIT_TOML');
+}
+const KIT_TOML = resolveKitToml();
+const FORM_RULES = Bun.TOML.parse(fs.readFileSync(KIT_TOML, 'utf8')).probe.form;
+
 function baseConfig(scenario) {
   if (scenario.probe === 'watch') {
     return {
@@ -260,7 +313,26 @@ function baseConfig(scenario) {
       cooldown_min: 30,
     };
   }
+  if (scenario.probe === 'form') {
+    return { enforce: true, fail_closed: false, ...FORM_RULES };
+  }
   return { enforce: true, fail_closed: true, models: [{ model: 'stub-model' }], max_tokens: 8000 };
+}
+
+// Scenario overrides DEEP-merge over the table: `config:{act:{A1:'cancel'}}`
+// must not erase the other classes' modes, and `config:{arm_cmd:undefined}`
+// must DELETE the key (that is how the broken-table scenario is expressed).
+function mergeConfig(base, over) {
+  const out = { ...base };
+  for (const [key, value] of Object.entries(over || {})) {
+    if (value === undefined) delete out[key];
+    else if (
+      value && typeof value === 'object' && !Array.isArray(value)
+      && out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])
+    ) out[key] = mergeConfig(out[key], value);
+    else out[key] = value;
+  }
+  return out;
 }
 
 function tomlScalar(value) {
@@ -332,6 +404,10 @@ const OLD = () => ({ last: null, start: mono() - 3600000 });
 // degradation entry, naming the file, carrying SOME reason after it.
 const BROKEN_TOML_DEG_PREFIX = ['unparsed:<temp>/probes.toml: '];
 const MISSING_PROMPT_DEG = ['prompt-missing:<temp>/judge/prompt.md'];
+
+// Ten path-shaped lines for the A4 pair: the fixture generator lives here so
+// the two fixtures cannot drift apart in shape.
+const tenPathLines = (prefix) => Array.from({ length: 10 }, (_, i) => `- ${prefix}${i + 1}.rs`).join('\n');
 
 const scenarios = [
   {
@@ -1040,6 +1116,212 @@ const scenarios = [
     config: { filter: { classes_skip: ['1c'], classes_judge: ['1c'] } },
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'filtered', poolCalls: 0, by: 'not_in_judge_list' } },
+  // ---- The form probe: a deterministic third consumer. Its scenarios never
+  // touch the pool -- the verdict comes from the rule table, and a pool call
+  // here would mean the ladder ran anyway (that is what poolCalls:0 pins).
+  { name: 'form-not-subject', probe: 'form', toolName: 'Read',
+    expected: { passed: true, journalLines: 0, poolCalls: 0 } },
+  { name: 'form-a1-refuse-logonly', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A1'], nudges: 0, poolCalls: 0,
+                recordCount: 1 } },
+  { name: 'form-a1-cancel', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    config: { act: { A1: 'cancel' } },
+    expected: { passed: false, errorIncludes: ['A1', 'пробой формы'], poolCalls: 0 } },
+  { name: 'form-a1-warnmode', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    config: { act: { A1: 'warn' } },
+    expected: { passed: true, nudges: 1, nudgeIncludes: 'A1', poolCalls: 0 } },
+  { name: 'form-a1-pass', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1b-brief.md',
+    files: { '.briefs/1b-brief.md': '# Бриф 1b\n\nтело\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', recordCount: 0, poolCalls: 0 } },
+  { name: 'form-kind-head-not-brief', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/2-brief.md',
+    files: { '.briefs/2-brief.md': '# Отчёт\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', skippedCount: 1, poolCalls: 0 } },
+  { name: 'form-a2-bare-arm', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/7-brief.md',
+    files: { '.briefs/7-brief.md': '# Бриф 7\n\n- арма `cargo test -p x`\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A2'], poolCalls: 0,
+                firedIncludes: 'cargo test -p x' } },
+  { name: 'form-a2-ellipsis', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/8-brief.md',
+    files: { '.briefs/8-brief.md': '# Бриф 8\n\n- `… cargo test -p x > a.log 2>&1`\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A2'], poolCalls: 0 } },
+  { name: 'form-a2-prose-pass', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/9-brief.md',
+    files: { '.briefs/9-brief.md':
+      '# Бриф 9\n\nпри чужом `cargo test --workspace` на воркере.\n\n```\n'
+      + 'RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p x > a.log 2>&1\n```\n\n'
+      + '[RCH] remote primary\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-a2-fenced-ok', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/10-brief.md',
+    files: { '.briefs/10-brief.md':
+      '# Бриф 10\n\n```\nRCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p x > a.log 2>&1\n'
+      + 'cargo fmt --check\n```\n\n[RCH] remote primary\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-a2-no-log', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/11-brief.md',
+    files: { '.briefs/11-brief.md':
+      '# Бриф 11\n\n```\nRCH_REQUIRE_REMOTE=1 rch exec -- cargo check -p x\n```\n\n'
+      + '<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A2'], poolCalls: 0 } },
+  { name: 'form-a2-witness-worker', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/12-brief.md',
+    files: { '.briefs/12-brief.md':
+      '# Бриф 12\n\n```\nRCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p x > a.log 2>&1\n```\n\n'
+      + '[RCH] remote primary\n\nSelected worker: w1\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A2'], poolCalls: 0,
+                firedIncludes: 'Selected worker' } },
+  { name: 'form-a2-witness-missing', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/13-brief.md',
+    files: { '.briefs/13-brief.md':
+      '# Бриф 13\n\n```\nRCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p x > a.log 2>&1\n```\n\n'
+      + '<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A2'], poolCalls: 0,
+                firedIncludes: 'свидетель' } },
+  { name: 'form-a3-open-door', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/14-brief.md',
+    files: { '.briefs/14-brief.md': '# Бриф 14\n\nформу выбери одну\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A3'], poolCalls: 0 } },
+  { name: 'form-a3-negation-pass', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/15-brief.md',
+    files: { '.briefs/15-brief.md':
+      '# Бриф 15\n\nnothing to choose\n\nне выбирай ничего\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-a3-fenced-pass', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/16-brief.md',
+    files: { '.briefs/16-brief.md': '# Бриф 16\n\n```\nвыбери сам\n```\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-a4-warn', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/17-brief.md',
+    files: { '.briefs/17-brief.md':
+      '# Бриф 17\n\n' + tenPathLines('typescript-src/src/a') + '\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'warn', cls: ['A4'], poolCalls: 0 } },
+  { name: 'form-a4-rule-pass', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/18-brief.md',
+    files: { '.briefs/18-brief.md':
+      '# Бриф 18\n\n' + tenPathLines('typescript-src/src/b')
+        + '\n\n- перечисление: grep -r "x" .\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-multi-class', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/19-brief.md',
+    files: { '.briefs/19-brief.md': '# Бриф 19\n\nформу выбери одну\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A1', 'A3'], poolCalls: 0,
+                verdictIncludes: 'A1×1' } },
+  { name: 'form-b-refuse', probe: 'form', toolName: 'SendMessage',
+    message: 'РЕШЕНИЕ: делаем так',
+    expected: { passed: true, outcome: 'refuse', cls: ['B'], poolCalls: 0 } },
+  { name: 'form-b-pass', probe: 'form', toolName: 'SendMessage',
+    message: 'РЕШЕНИЕ: делаем так\n\nоснование: src/a.rs:12',
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-c1-message-refuse', probe: 'form', toolName: 'SendMessage',
+    message: 'оставляем как есть',
+    expected: { passed: true, outcome: 'refuse', cls: ['C1'], poolCalls: 0 } },
+  { name: 'form-c1-report-write-refuse', probe: 'form', toolName: 'Write',
+    filePath: '{{DIR}}/.briefs/3-report.md',
+    content: '# Отчёт 3\n\nworkaround в тексте\n',
+    expected: { passed: true, outcome: 'refuse', cls: ['C1'], poolCalls: 0 } },
+  { name: 'form-c1-fenced-pass', probe: 'form', toolName: 'Write',
+    filePath: '{{DIR}}/.briefs/4-report.md',
+    content: '# Отчёт 4\n\n```\nworkaround\n```\n',
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-c2-warn', probe: 'form', toolName: 'Write',
+    filePath: '{{DIR}}/.briefs/5-report.md',
+    content: '# Отчёт 5\n\nSelected worker: w1\n',
+    expected: { passed: true, outcome: 'warn', cls: ['C2'], poolCalls: 0 } },
+  { name: 'form-edit-poststate', probe: 'form', toolName: 'Edit',
+    filePath: '{{DIR}}/.briefs/5-brief.md',
+    oldString: '<!-- BRIEF COMPLETE -->',
+    newString: '<!-- BRIEF COMPLETE -->\nхвост',
+    files: { '.briefs/5-brief.md': '# Бриф 5\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A1'], poolCalls: 0 } },
+  { name: 'form-bash-heredoc', probe: 'form', toolName: 'Bash',
+    command: "cat > {{DIR}}/.briefs/4-brief.md <<'EOF'\n# Бриф 4\nтело\nEOF",
+    expected: { passed: true, outcome: 'refuse', cls: ['A1'], poolCalls: 0 } },
+  { name: 'form-bash-heredoc-append', probe: 'form', toolName: 'Bash',
+    command: "cat >> {{DIR}}/.briefs/6-brief.md <<'EOF2'\nхвост\nEOF2",
+    files: { '.briefs/6-brief.md': '# Бриф 6\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A1'], poolCalls: 0 } },
+  { name: 'form-f-commit-refuse', probe: 'form', toolName: 'Bash',
+    command: 'git commit -m x',
+    expected: { passed: true, outcome: 'refuse', cls: ['F'], poolCalls: 0,
+                firedIncludes: '--only' } },
+  { name: 'form-f-commit-pass', probe: 'form', toolName: 'Bash',
+    command: 'git commit --only -m "x\n\nSession: s\nCo-Authored-By: a" -- a.rs',
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-f-trailers-refuse', probe: 'form', toolName: 'Bash',
+    command: 'git commit --only -m "x" -m "Session: s" -m "Co-Authored-By: a"',
+    expected: { passed: true, outcome: 'refuse', cls: ['F'], poolCalls: 0,
+                firedIncludes: 'соседние' } },
+  { name: 'form-f-push-force', probe: 'form', toolName: 'Bash',
+    command: 'git push --force origin main',
+    expected: { passed: true, outcome: 'refuse', cls: ['F'], poolCalls: 0 } },
+  { name: 'form-f-push-bare', probe: 'form', toolName: 'Bash',
+    command: 'git push',
+    expected: { passed: true, outcome: 'refuse', cls: ['F'], poolCalls: 0 } },
+  { name: 'form-f-push-pass', probe: 'form', toolName: 'Bash',
+    command: 'git push origin main:main',
+    expected: { passed: true, outcome: 'pass', poolCalls: 0 } },
+  { name: 'form-unreadable-brief', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/nope-brief.md и {{DIR}}/.briefs/exists-brief.md',
+    files: { '.briefs/exists-brief.md': '# Бриф E\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', degStartsWith: 'brief-unreadable:', poolCalls: 0 } },
+  // The watcher's payload reads the form probe's process state: two form
+  // evaluations BEFORE the consultation, then the cursor moves only on a
+  // PARSED verdict -- tick 2 sees an empty window.
+  { name: 'form-watch-table', probe: 'watch', toolName: 'Read', watchState: OLD,
+    response: 'SILENT: ok',
+    formBefore: ['form-a1-refuse-logonly', 'form-a1-refuse-logonly'],
+    ticks: 2,
+    expected: { passed: true, outcome: 'silent', poolCalls: 2, nudges: 0,
+                dispatchIncludesAt: [['"by_class":{"A1":2}', '"evals_since":2'], ['"evals_since":0']] } },
+  // The channel fails on the first tick: no parsed verdict, no cursor move --
+  // the second tick must still see the SAME window.
+  { name: 'form-watch-cursor-holds', probe: 'watch', toolName: 'Read', watchState: OLD,
+    response: 'SILENT: ok',
+    formBefore: ['form-a1-refuse-logonly', 'form-a1-refuse-logonly'],
+    ticks: 2, poolErrorTicks: 1,
+    expected: { passed: true, outcome: 'silent',
+                dispatchIncludesAt: [['"evals_since":2'], ['"evals_since":2']] } },
+  { name: 'form-config-missing-key', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    config: { arm_cmd: undefined },
+    expected: { passed: true, outcome: 'block_degraded', nudges: 1, poolCalls: 0,
+                nudgeIncludes: 'form-rule-missing:arm_cmd' } },
+  // Positive data control: the rule string from the kit's TOML, single
+  // backslashes intact, is what the block actually compiled.
+  { name: 'form-rx-literal-from-toml', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/10-brief.md',
+    files: { '.briefs/10-brief.md':
+      '# Бриф 10\n\n```\nRCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p x > a.log 2>&1\n'
+      + 'cargo fmt --check\n```\n\n[RCH] remote primary\n\n<!-- BRIEF COMPLETE -->\n' },
+    expected: { passed: true, outcome: 'pass', poolCalls: 0,
+                rulesKeyIncludes: { arm_remote: '\\s' } } },
+  { name: 'form-records-snapshot', probe: 'form',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    expected: { passed: true, outcome: 'refuse', cls: ['A1'], poolCalls: 0,
+                recordCount: 1, recordRequestIncludes: '"refuse"' } },
+  { name: 'form-switch-off', probe: 'form', switchValue: 'off',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    expected: { passed: true, journalLines: 0, poolCalls: 0 } },
+  { name: 'form-replay-counter', probe: 'form', toolName: 'Read', replayOverWork: true,
+    files: {
+      '.briefs/r1-brief.md': '# Бриф R1\n\nчисто\n\n<!-- BRIEF COMPLETE -->\n',
+      '.briefs/r2-brief.md': '# Бриф R2\n\nбез маркера\n',
+      'r3-report.md': 'Отчёт: workaround в тексте\n',
+    },
+    expected: { passed: true, journalLines: 0, poolCalls: 0,
+                replaySummary: 'files=3 briefs=2 reports=1 other=0 fired=2 refuse=2 warn=0' } },
 ];
 
 // The same invariant the check registry carries, for the same reason it was
@@ -1049,7 +1331,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 82;
+const EXPECTED_SCENARIOS = 124;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1057,7 +1339,7 @@ if (scenarios.length !== EXPECTED_SCENARIOS) {
 }
 // Режим --self-check сверяет длину таблицы мутаций с этим числом на каждом
 // своём запуске: правка таблицы без числа молча урезала бы перечень.
-const EXPECTED_MUTATIONS = 5;
+const EXPECTED_MUTATIONS = 7;
 // A scenario without `expected` used to run and be counted as conforming --
 // the comparator treated a missing specification as agreement (mismatchDetails
 // now returns one). The count above catches a hole in the ARRAY; this catches a
@@ -1102,7 +1384,9 @@ function restoreEnvironment(saved) {
 }
 
 function homeName(scenario) {
-  return scenario.probe === 'watch' ? 'idle-watch' : 'judge';
+  if (scenario.probe === 'watch') return 'idle-watch';
+  if (scenario.probe === 'form') return 'form';
+  return 'judge';
 }
 
 // An explicit CLAUDE_PROBES_DIR turns the project layering off. Layered
@@ -1128,6 +1412,7 @@ function setScenarioEnvironment(tempDir, scenario) {
   // the probe through it alone, which is the whole point of the no-config case.
   const sw = scenario.switchValue ?? '1';
   if (scenario.probe === 'watch') process.env.CLAUDE_IDLE = sw;
+  else if (scenario.probe === 'form') process.env.CLAUDE_FORM = sw;
   else process.env.CLAUDE_JUDGE = sw;
 }
 
@@ -1166,14 +1451,14 @@ function homeSnapshot(realHome) {
   return { dir, files };
 }
 
-// Штампы, на которых стоит атрибуция, обязаны быть в самом образе, и в ОБОИХ
+// Штампы, на которых стоит атрибуция, обязаны быть в самом образе, и в КАЖДОМ
 // блоках. Проверка смотрит вырезанные блоки, а не наш исходник: разошлись бы
 // они -- верен образ, а стенд обязан это заметить и отказаться.
 //
-// Блоков два, и то, что сегодня они несут ОДИН И ТОТ ЖЕ текст ядра, есть
-// совпадение, а не гарантия: резка выдаёт два независимых продукта, и
+// Блоков три (судья, форма, наблюдатель), и то, что сегодня они несут ОДИН И ТОТ ЖЕ текст ядра, есть
+// совпадение, а не гарантия: резка выдаёт независимые продукты, и
 // собственный урок кита -- «правка настройкой ядром НЕ переносится,
-// потребителей перечислять поимённо». Поэтому перечисляем оба и все три марки,
+// потребителей перечислять поимённо». Поэтому перечисляем все три и все три марки,
 // а не одну по умолчанию.
 function assertAttributionBasis(blocks) {
   const need = [
@@ -1183,7 +1468,7 @@ function assertAttributionBasis(blocks) {
     ['строка журнала', 'sid:__sid(),pid:process.pid'],
     ['отладочные файлы', 'process.pid+"."'],
   ];
-  for (const kind of ['judge', 'watch']) {
+  for (const kind of ['judge', 'watch', 'form']) {
     const src = blocks[kind];
     const missing = need.filter(([, mark]) => src.indexOf(mark) < 0).map(([what]) => what);
     if (missing.length) {
@@ -1312,6 +1597,14 @@ function expectationText(expected) {
   if (expected.partIsRecord !== undefined) parts.push(`обломок -- полная запись=${expected.partIsRecord}`);
   if (expected.firstLineBroken !== undefined) parts.push(`первая строка не разбирается=${expected.firstLineBroken}`);
   if (expected.journalRec !== undefined) parts.push(`указатель на запись=${expected.journalRec === null ? 'нет' : 'есть'}`);
+  if (expected.cls !== undefined) parts.push(`классы=${JSON.stringify(expected.cls)}`);
+  if (expected.firedIncludes !== undefined) parts.push(`срабатывание содержит «${expected.firedIncludes}»`);
+  if (expected.verdictIncludes !== undefined) parts.push(`вердикт содержит «${expected.verdictIncludes}»`);
+  if (expected.skippedCount !== undefined) parts.push(`пропущенных=${expected.skippedCount}`);
+  if (expected.rulesKeyIncludes !== undefined) parts.push(`правила содержат ${JSON.stringify(expected.rulesKeyIncludes)}`);
+  if (expected.recordRequestIncludes !== undefined) parts.push(`запись содержит «${expected.recordRequestIncludes}»`);
+  if (expected.dispatchIncludesAt !== undefined) parts.push(`нагрузка по тикам=${JSON.stringify(expected.dispatchIncludesAt)}`);
+  if (expected.replaySummary !== undefined) parts.push(`сводка реплея=${expected.replaySummary}`);
   return parts.join(', ');
 }
 
@@ -1338,7 +1631,8 @@ const CHECKS = [
   { key: 'by',            ok: (r, e) => r.by === e.by,                 got: (r) => String(r.by) },
   { key: 'nudges',        ok: (r, e) => r.nudges === e.nudges,         got: (r) => String(r.nudges) },
   { key: 'nudgeIncludes', ok: (r, e) => r.nudgeText.includes(e.nudgeIncludes), got: (r) => r.nudgeText },
-  { key: 'errorIncludes', ok: (r, e) => r.error.includes(e.errorIncludes),     got: (r) => r.error },
+  { key: 'errorIncludes', ok: (r, e) => [].concat(e.errorIncludes).every((s) => r.error.includes(s)),
+    got: (r) => r.error },
   // Заголовок пишем мы, полезную нагрузку -- вызывающий: проверяются обе
   // стороны, иначе подделка со стороны нагрузки прошла бы зелёной.
   { key: 'headerIncludes', ok: (r, e) => r.sentHeader.includes(e.headerIncludes), got: (r) => r.sentHeader },
@@ -1388,6 +1682,41 @@ const CHECKS = [
   // вызова __jlog, ДО __jsave, поэтому rec-write: в строку не попадает).
   { key: 'journalRec', ok: (r, e) => r.journalRec === e.journalRec,
     got: (r) => String(r.journalRec) },
+  // ---- Форма: классы, срабатывания, пропуски, вердикт, правила, записи,
+  // тики наблюдателя и сводка реплея. Каждый ключ несёт ok и got, как
+  // остальные.
+  { key: 'cls', ok: (r, e) => JSON.stringify(r.cls ?? null) === JSON.stringify(e.cls),
+    got: (r) => JSON.stringify(r.cls ?? null) },
+  { key: 'firedIncludes',
+    // The journal bounds array elements by JSON-stringifying non-strings
+    // (__dcut), so an entry arrives either as an object (sanitizeValue) or
+    // as the journal's string form -- both must be readable.
+    ok: (r, e) => (r.fired ?? []).some((f) => {
+      let ent = f;
+      if (typeof f === 'string') { try { ent = JSON.parse(f); } catch { ent = null; } }
+      return String(ent?.q ?? '').includes(e.firedIncludes) || String(f).includes(e.firedIncludes);
+    }),
+    got: (r) => JSON.stringify(r.fired ?? []) },
+  { key: 'verdictIncludes', ok: (r, e) => String(r.verdict ?? '').includes(e.verdictIncludes),
+    got: (r) => String(r.verdict ?? '') },
+  { key: 'skippedCount', ok: (r, e) => (r.skipped ?? []).length === e.skippedCount,
+    got: (r) => JSON.stringify(r.skipped ?? []) },
+  // Положительный контроль данных: правило из TOML кита, с одиночными
+  // бэкслешами, обязано быть среди ТОГО, что блок реально компилировал
+  // (кэш компиляции), -- иначе стенд мерил бы свою копию, а не пробу.
+  { key: 'rulesKeyIncludes',
+    ok: (r, e) => Object.values(e.rulesKeyIncludes)
+      .every((sub) => (r.rulesKeys ?? []).some((k) => k.includes(sub))),
+    got: (r) => JSON.stringify(r.rulesKeys ?? []) },
+  { key: 'recordRequestIncludes', ok: (r, e) => String(r.recordBlob ?? '').includes(e.recordRequestIncludes),
+    got: (r) => clipCell(r.recordBlob) },
+  // По тикам: подстроки в НАГРУЗКЕ каждой консультации наблюдателя.
+  { key: 'dispatchIncludesAt',
+    ok: (r, e) => e.dispatchIncludesAt.every((subs, i) => subs.every((s) =>
+      String((r.dispatchAt ?? [])[i] ?? '').includes(s))),
+    got: (r) => JSON.stringify(r.dispatchAt ?? []) },
+  { key: 'replaySummary', ok: (r, e) => r.replaySummary === e.replaySummary,
+    got: (r) => String(r.replaySummary ?? '') },
 ];
 
 // Дверь загрузки на опечатку в ключе expected: сравнивающий читает только
@@ -1427,13 +1756,120 @@ function mismatchDetails(result, expected) {
   return out;
 }
 
-async function runScenario(probe, scenario) {
+// The form probe's five subjects carry five input shapes. One builder for the
+// scenario table and for the formBefore sub-runs, so the shapes cannot drift
+// apart; {{DIR}} is substituted in every path-bearing field.
+function formInputFor(scenario, subst) {
+  const tn = scenario.toolName || 'Agent';
+  if (tn === 'SendMessage') return { to: 'x', message: subst(scenario.message ?? '') };
+  if (tn === 'Write') return { file_path: subst(scenario.filePath), content: scenario.content ?? '' };
+  if (tn === 'Edit') {
+    return {
+      file_path: subst(scenario.filePath),
+      old_string: subst(scenario.oldString ?? ''),
+      new_string: subst(scenario.newString ?? ''),
+      ...(scenario.replaceAll ? { replace_all: true } : {}),
+    };
+  }
+  if (tn === 'Bash') return { command: subst(scenario.command) };
+  return {
+    subagent_type: scenario.subagentType ?? 'form-exec',
+    ...(scenario.omitModel ? {} : { model: 'glm-5.3' }),
+    prompt: subst(scenario.dispatchPrompt ?? 'x'),
+  };
+}
+
+// The dispatch body of one captured user message: the same header walk the
+// result table uses, factored out so the per-tick captures and the
+// last-consultation value cannot drift apart.
+function dispatchTextOf(userText) {
+  if (!userText) return '';
+  let cutAt = -1;
+  for (let i = userText.indexOf('\n\n=== '); i >= 0; i = userText.indexOf('\n\n=== ', i + 1)) {
+    const lineEnd = userText.indexOf('\n', i + 2);
+    if (lineEnd < 0) break;
+    if (userText.slice(i + 2, lineEnd).startsWith('=== ФАЙЛ ')) continue;
+    cutAt = i;
+  }
+  const headEnd = cutAt < 0 ? -1 : userText.indexOf('\n', cutAt + 2);
+  return headEnd < 0 ? '' : userText.slice(headEnd + 1);
+}
+
+function walkMarkdown(dir) {
+  const out = [];
+  const walk = (d) => {
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries.sort((x, y) => x.name.localeCompare(y.name))) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.name.endsWith('.md')) out.push(full);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+// The replay drives the SAME pure functions the image block declared: kind by
+// __ccFormKind, verdicts by __ccFormEval, rules by the kit's own table. The
+// clip here is the bench's own -- slices are legal in the bench, the censor
+// lives in the image block.
+function replayCounters(files, print) {
+  const clip = (s, n) => { const t = String(s ?? ''); return t.length > n ? t.slice(0, n) + '…' : t; };
+  const c = { files: files.length, briefs: 0, reports: 0, other: 0, fired: 0, refuse: 0, warn: 0 };
+  for (const f of files) {
+    let text;
+    try { text = fs.readFileSync(f, 'utf8'); } catch { c.other += 1; continue; }
+    const kind = globalThis.__ccFormKind(f, text, FORM_RULES);
+    if (kind === 'brief') c.briefs += 1;
+    else if (kind === 'report') c.reports += 1;
+    else { c.other += 1; continue; }
+    const r = globalThis.__ccFormEval({ kind, text, path: f }, FORM_RULES, clip);
+    for (const x of r.refuse) {
+      c.fired += 1; c.refuse += 1;
+      if (print) console.log(`FORM ${f}:${x.n} ${x.c} refuse :: ${clip(x.q, 160)}`);
+    }
+    for (const x of r.warn) {
+      c.fired += 1; c.warn += 1;
+      if (print) console.log(`FORM ${f}:${x.n} ${x.c} warn :: ${clip(x.q, 160)}`);
+    }
+  }
+  return c;
+}
+
+const countersLine = (c) =>
+  `files=${c.files} briefs=${c.briefs} reports=${c.reports} other=${c.other}`
+  + ` fired=${c.fired} refuse=${c.refuse} warn=${c.warn}`;
+
+// The block's pure declarations sit behind the switch: run the compiled block
+// once under a foreign agentType and they are on globalThis, with the probe
+// itself never consulted.
+function ensureFormDeclarations(probes) {
+  if (typeof globalThis.__ccFormEval === 'function' && typeof globalThis.__ccFormKind === 'function'
+    && typeof globalThis.__ccFormC === 'function') return Promise.resolve();
+  const noop = async () => {};
+  return probes.form({
+    tool: { name: 'Read' },
+    input: {},
+    context: { agentContext: { agentType: 'stand' }, toolUseId: 'stand' },
+    key: 'stand', pool: noop, notify: noop,
+    agentId: () => 'stand', sessionTitle: () => 'stand',
+  });
+}
+
+async function runScenario(probes, scenario) {
+  const probe = probes[scenario.probe === 'watch' ? 'watch' : scenario.probe === 'form' ? 'form' : 'judge'];
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-'));
   let prevCwd = null;
   const savedEnvironment = saveEnvironment();
   const savedProbe = Object.getOwnPropertyDescriptor(globalThis, '__ccProbe');
   const savedFleet = Object.getOwnPropertyDescriptor(globalThis, '__ccFleet');
   const savedWatch = Object.getOwnPropertyDescriptor(globalThis, '__ccWatch');
+  // The form probe's PROCESS state and its compilation cache are per-scenario:
+  // seen/evals/fired must not leak between scenarios, and a cached rule must
+  // never outlive the string it was built from.
+  const savedForm = Object.getOwnPropertyDescriptor(globalThis, '__ccForm');
+  const savedFormRx = Object.getOwnPropertyDescriptor(globalThis, '__ccFormRx');
   const savedToml = globalThis.Bun.TOML;
   // Волна 31: приёмник и часы объявлены ВНЕ try -- их убирает finally, а let
   // из try для finally невидим; step() глотает ReferenceError, и сервер
@@ -1446,6 +1882,8 @@ async function runScenario(probe, scenario) {
   delete globalThis.__ccProbe;
   delete globalThis.__ccFleet;
   delete globalThis.__ccWatch;
+  delete globalThis.__ccForm;
+  delete globalThis.__ccFormRx;
   let poolCalls = 0;
   let passed = true;
   let errorText = '';
@@ -1503,7 +1941,7 @@ async function runScenario(probe, scenario) {
       process.chdir(proj);
     }
 
-    const config = { ...baseConfig(scenario), ...(scenario.config || {}) };
+    const config = mergeConfig(baseConfig(scenario), scenario.config);
     // Приёмник сценария: шаблонная полоса уходит по raw-http, и бюджет
     // читается из ОТПРАВЛЕННОГО тела -- заглушка пула его не видит.
     // Порт 0 -- свободный, имя подставляется в настройки до их записи.
@@ -1543,7 +1981,16 @@ async function runScenario(probe, scenario) {
     // in prose and never measured -- and the prose said the opposite of the
     // code.
     if (!scenario.omitConfig) {
-      fs.writeFileSync(path.join(root, 'probes.toml'), probeConfigToml(scenario, config));
+      let tomlText = probeConfigToml(scenario, config);
+      if (scenario.formBefore) {
+        // The watcher consults, the form probe judges: ONE settings file with
+        // both tables -- the same one-home shape the image check pins.
+        const formLines = [];
+        appendTomlTable(formLines, 'probe.form',
+          mergeConfig({ enforce: true, fail_closed: false, ...FORM_RULES }, scenario.formConfig || {}));
+        tomlText += '\n' + formLines.join('\n') + '\n';
+      }
+      fs.writeFileSync(path.join(root, 'probes.toml'), tomlText);
     }
     if (!scenario.omitPrompt && !scenario.omitProbeDir) {
       const body = scenario.probe === 'watch'
@@ -1578,23 +2025,58 @@ async function runScenario(probe, scenario) {
         fs.writeFileSync(path.join(attachDir, name), body);
       }
     }
+    // Form scenarios bring their own WORK TREE: the briefs and reports the
+    // probe is about to read, written under the scenario root. The same
+    // {{DIR}} token points here. The dir is created for EVERY form scenario
+    // that names the token: Write/Bash scenarios legitimately point it at a
+    // file the call is about to CREATE, which must not exist beforehand --
+    // so `files` cannot be the door for them. The door's real guarantee --
+    // the token never reaches the probe literally -- is kept by always
+    // having a basis to substitute with.
+    const formDirFields = ['dispatchPrompt', 'message', 'command', 'filePath', 'oldString', 'newString'];
+    // formBefore sub-runs bring their own files and their own {{DIR}} fields,
+    // so the work dir is theirs too.
+    const formUsesDir = (scenario.probe === 'form'
+      && formDirFields.some((k) => String(scenario[k] ?? '').includes('{{DIR}}')))
+      || Array.isArray(scenario.formBefore);
+    let workDir = null;
+    if (scenario.files || formUsesDir) {
+      workDir = path.join(tempDir, 'work');
+      fs.mkdirSync(workDir, { recursive: true });
+    }
+    if (scenario.files) {
+      for (const [rel, body] of Object.entries(scenario.files)) {
+        const fp = path.join(workDir, rel);
+        fs.mkdirSync(path.dirname(fp), { recursive: true });
+        fs.writeFileSync(fp, body);
+      }
+    }
+    const subst = (value) => {
+      if (typeof value !== 'string' || !value.includes('{{DIR}}')) return value;
+      if (!attachDir && !workDir) {
+        throw new Error(
+          `сценарий ${scenario.name}: {{DIR}} без ${scenario.files ? 'files' : 'attachFiles'}`);
+      }
+      return value.split('{{DIR}}').join(attachDir || workDir);
+    };
     let stubPrompt = scenario.dispatchPrompt
       ?? ('[' + 'dispatch-class' + ':1e]' + ' сделай X');
-    if (stubPrompt.includes('{{DIR}}')) {
-      // Подстановка обязана состояться: сценарий с {{DIR}} и без attachFiles
-      // отправил бы модели буквальную скобку и «прошёл» бы, ничего не измерив.
-      if (!attachDir) throw new Error(`сценарий ${scenario.name}: {{DIR}} без attachFiles`);
-      stubPrompt = stubPrompt.split('{{DIR}}').join(attachDir);
-    }
+    // Подстановка обязана состояться: сценарий с {{DIR}} без каталога-носителя
+    // отправил бы модели буквальную скобку и «прошёл» бы, ничего не измерив.
+    stubPrompt = subst(stubPrompt);
     const tool = { name: scenario.toolName || 'Agent' };
-    const input = {
-      subagent_type: scenario.subagentType ?? 'glm-executor',
-      // A call without a model is not a rarity but a third of dispatches: the
-      // scenario must be able to omit it, otherwise resolution through the
-      // definition goes untested.
-      ...(scenario.omitModel ? {} : { model: 'glm-5.3' }),
-      prompt: stubPrompt,
-    };
+    // The form probe judges five different tool shapes: the input is built
+    // per toolName, with the token substituted in every path-bearing field.
+    const input = scenario.probe === 'form'
+      ? formInputFor(scenario, subst)
+      : {
+        subagent_type: scenario.subagentType ?? 'glm-executor',
+        // A call without a model is not a rarity but a third of dispatches: the
+        // scenario must be able to omit it, otherwise resolution through the
+        // definition goes untested.
+        ...(scenario.omitModel ? {} : { model: 'glm-5.3' }),
+        prompt: stubPrompt,
+      };
     const context = {
       messages: [{ type: 'user', message: { role: 'user', content: 'сделай X' } }],
       agentId: 'a1',
@@ -1622,12 +2104,19 @@ async function runScenario(probe, scenario) {
     let sentUser = '';
     let sentSystem = '';
     let requestMaxTokens = null;
+    let currentTick = 0;
     const pool = async (args) => {
       poolCalls += 1;
       sentUser = args?.messages?.[0]?.message?.content ?? '';
       sentSystem = args?.systemPrompt?.[0] ?? '';
       requestMaxTokens = args?.options?.maxOutputTokensOverride ?? null;
       if (scenario.poolError) throw scenario.poolError;
+      // Whole-tick channel failure: every pool call of the named ticks
+      // throws, so the ladder's retry rung cannot accidentally rescue the
+      // very consultation the scenario wants to fail.
+      if (scenario.poolErrorTicks && currentTick < scenario.poolErrorTicks) {
+        throw new Error('канал недоступен');
+      }
       // A scenario may hand back a whole reply object instead of a verdict
       // string: the shapes a real gateway produces (the OpenAI envelope, a
       // content ARRAY where a string was expected, a finish_reason) cannot be
@@ -1655,16 +2144,54 @@ async function runScenario(probe, scenario) {
     // прочее, что живёт между вызовами в одном процессе, на одном вызове не
     // проверяются вовсе. `configOnRerun` переписывает настройки перед вторым
     // прогоном -- так измеряется, что правка настроек отменяет памятку.
-    const runs = scenario.runs ?? 1;
+    // `formBefore` прогоняет названные form-сценарии ТЕМ ЖЕ процессом и тем же
+    // tempDir ДО консультаций: состояние пробы формы накапливается, и таблица
+    // наблюдателя читает его из процесса, а не из файла.
+    if (scenario.formBefore) {
+      process.env.CLAUDE_FORM = '1';
+      for (const name of scenario.formBefore) {
+        const sub = scenarios.find((s) => s.name === name);
+        if (!sub) throw new Error(`сценарий ${scenario.name}: formBefore «${name}» нет в таблице`);
+        if (sub.files && workDir) {
+          for (const [rel, body] of Object.entries(sub.files)) {
+            const fp = path.join(workDir, rel);
+            fs.mkdirSync(path.dirname(fp), { recursive: true });
+            fs.writeFileSync(fp, body);
+          }
+        }
+        await probes.form({
+          tool: { name: sub.toolName || 'Agent' },
+          input: formInputFor(sub, subst),
+          context: {
+            messages: [],
+            agentId: 'a1',
+            agentContext: { agentType: 'main' },
+            getAppState: () => ({ toolPermissionContext: {} }),
+            toolUseId: 'form-before',
+          },
+          key: 'form-before', pool, notify, agentId, sessionTitle,
+        });
+      }
+    }
+    const runs = scenario.runs ?? scenario.ticks ?? 1;
+    const sentUserAt = [];
     try {
       for (let pass = 0; pass < runs; pass += 1) {
+        currentTick = pass;
         if (pass > 0 && scenario.configOnRerun !== undefined) {
           fs.writeFileSync(
             path.join(root, 'probes.toml'),
-            probeConfigToml(scenario, { ...baseConfig(scenario), ...scenario.configOnRerun }),
+            probeConfigToml(scenario, mergeConfig(baseConfig(scenario), scenario.configOnRerun)),
           );
         }
+        // A ticks re-run is a NEW consultation, not a memo probe: the
+        // watcher's own bookkeeping (last/nextAt) must not eat the second
+        // tick, so the state the scenario seeds is re-seeded per tick.
+        if (pass > 0 && scenario.ticks && scenario.watchState) {
+          globalThis.__ccWatch = scenario.watchState();
+        }
         await probe({ tool, input, context, key: 'tool-use-1', pool, notify, agentId, sessionTitle });
+        if (scenario.ticks) sentUserAt.push(sentUser);
       }
     } catch (error) {
       passed = false;
@@ -1691,6 +2218,25 @@ async function runScenario(probe, scenario) {
     const journal = readLastJournal(probeDir);
     const entry = journal.entry ? sanitizeValue(journal.entry, tempDir) : null;
     if (!errorText && journal.error) errorText = sanitizeText(journal.error, tempDir);
+
+    // The form probe's compilation cache, read AFTER the run: this is the
+    // positive control that the rule strings came from the settings file, not
+    // from a copy inside the block.
+    const rulesKeys = Object.keys(globalThis.__ccFormRx ?? {});
+    let recordBlob = '';
+    {
+      const dir = path.join(probeDir, 'records');
+      if (fs.existsSync(dir)) {
+        for (const name of fs.readdirSync(dir).sort()) {
+          const fp2 = path.join(dir, name);
+          try { if (fs.statSync(fp2).isFile()) recordBlob += fs.readFileSync(fp2, 'utf8'); } catch { }
+        }
+      }
+    }
+    let replaySummary = null;
+    if (scenario.replayOverWork) {
+      replaySummary = countersLine(replayCounters(walkMarkdown(workDir), false));
+    }
 
     // carveBlock reads the image as latin1, so the carve's own literals that
     // are non-ASCII by letter arrive as raw UTF-8 bytes. The inverse
@@ -1778,6 +2324,14 @@ async function runScenario(probe, scenario) {
       by: entry?.by ?? null,
       journalRec: entry?.rec ?? null,
       deg: entry?.deg ?? null,
+      cls: entry?.cls ?? null,
+      fired: entry?.fired ?? null,
+      skipped: entry?.skipped ?? null,
+      verdict: entry?.verdict ?? null,
+      rulesKeys,
+      recordBlob,
+      dispatchAt: sentUserAt.length ? sentUserAt.map(dispatchTextOf) : null,
+      replaySummary,
       poolCalls,
       nudges: nudges.length,
       nudgeText: sanitizeText(nudges.map((n) => n && n.value).join(' | '), tempDir),
@@ -1799,6 +2353,7 @@ async function runScenario(probe, scenario) {
       for (const [name, saved] of [
         ['__ccProbe', savedProbe], ['__ccFleet', savedFleet],
         ['__ccWatch', savedWatch], ['__ccRecSeq', savedRecSeq],
+        ['__ccForm', savedForm], ['__ccFormRx', savedFormRx],
       ]) {
         if (saved) Object.defineProperty(globalThis, name, saved);
         else delete globalThis[name];
@@ -1899,7 +2454,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 82;', to: 'EXPECTED_SCENARIOS = 81;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 124;', to: 'EXPECTED_SCENARIOS = 123;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },
@@ -1912,6 +2467,28 @@ const SELF_CHECK_MUTATIONS = [
     controlRc: 2,
     controlCause: 'неизвестные ключи expected',
     mutation: { from: 'if (unknownExpectedKeys.length > 0) {', to: 'if (false) {' },
+  },
+  {
+    name: 'form-cls-comparator',
+    // Классы срабатываний — точный массив: контроль подменяет класс в
+    // ожидании, мутация обязана ослепить компаратор целиком.
+    poison: { from: "outcome: 'refuse', cls: ['A1'], nudges: 0, poolCalls: 0,\n                recordCount: 1 }",
+              to: "outcome: 'refuse', cls: ['A9'], nudges: 0, poolCalls: 0,\n                recordCount: 1 }" },
+    controlRc: 1,
+    controlCause: 'cls',
+    mutation: { from: "{ key: 'cls', ok: (r, e) => JSON.stringify(r.cls ?? null) === JSON.stringify(e.cls),",
+                to: "{ key: 'cls', ok: () => true," },
+  },
+  {
+    name: 'form-replay-summary',
+    // Сводка реплея — точная строка: контроль подменяет счётчик в ней,
+    // мутация обязана ослепить компаратор.
+    poison: { from: "replaySummary: 'files=3 briefs=2 reports=1 other=0 fired=2 refuse=2 warn=0'",
+              to: "replaySummary: 'files=3 briefs=2 reports=1 other=0 fired=3 refuse=2 warn=0'" },
+    controlRc: 1,
+    controlCause: 'replaySummary',
+    mutation: { from: "{ key: 'replaySummary', ok: (r, e) => r.replaySummary === e.replaySummary,",
+                to: "{ key: 'replaySummary', ok: () => true," },
   },
 ];
 /* __selfCheckTableEnd__ */
@@ -1944,11 +2521,14 @@ function replaceExactlyOnce(text, from, to, label) {
 }
 
 // Вывод копии глотается целиком и наружу не проходит: строки копии (ИТОГ,
-// ВНИМАНИЕ) не должны смешиваться с строками самого self-check.
+// ВНИМАНИЕ) не должны смешиваться с строками самого self-check. Копии живёт
+// во временном каталоге и НЕ может найти probes.toml кита от своего
+// __dirname -- путь передаётся явно, тем же файлом, что читает оригинал.
 function runBenchCopy(scriptPath, binaryPath) {
   const run = spawnSync('bun', [scriptPath, '--binary', binaryPath], {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
+    env: { ...process.env, PROBE_BENCH_KIT_TOML: KIT_TOML },
   });
   return {
     rc: run.status,
@@ -2030,22 +2610,49 @@ async function main() {
       runSelfCheck(options);
       return;
     }
+    // --form-replay: the pure evaluator from the IMAGE, rules from the KIT,
+    // over corpus paths. No scenarios, no self-check -- this mode is a
+    // measurement, its output goes to the report verbatim.
+    if (options.formReplayPaths.length > 0) {
+      const source = readImage(options.binary);
+      warnRuntimeSkew(source, benchVersion);
+      const carved = classifyBlocks(carveBlocks(source));
+      assertAttributionBasis(carved);
+      const probes = {
+        form: compileProbe(carved.form, locateNames(carved.form, 'form')),
+      };
+      await ensureFormDeclarations(probes);
+      const files = [];
+      for (const p of options.formReplayPaths) {
+        let st;
+        try { st = fs.statSync(p); } catch { throw new Error(`--form-replay: путь недоступен: ${p}`); }
+        if (st.isDirectory()) files.push(...walkMarkdown(p));
+        else if (p.endsWith('.md')) files.push(p);
+      }
+      const c = replayCounters(files, true);
+      console.log(`FORM REPLAY ${countersLine(c)}`);
+      // Nothing to measure is a broken invocation, not an empty success.
+      process.exitCode = (c.briefs + c.reports) >= 1 ? 0 : 5;
+      return;
+    }
     const realHome = process.env.HOME || os.homedir();
     const homeBefore = homeSnapshot(realHome);
     const source = readImage(options.binary);
     warnRuntimeSkew(source, benchVersion);
     const carved = classifyBlocks(carveBlocks(source));
     assertAttributionBasis(carved);
-    // Both blocks are compiled up front, so a block that is broken on the image
+    // Every block is compiled up front, so a block that is broken on the image
     // fails setup even when no scenario happens to exercise it.
     const probes = {
       judge: compileProbe(carved.judge, locateNames(carved.judge, 'judge')),
       watch: compileProbe(carved.watch, locateNames(carved.watch, 'watch')),
+      form: compileProbe(carved.form, locateNames(carved.form, 'form')),
     };
+    await ensureFormDeclarations(probes);
     const results = [];
 
     for (const scenario of scenarios) {
-      results.push(await runScenario(probes[scenario.probe === 'watch' ? 'watch' : 'judge'], scenario));
+      results.push(await runScenario(probes, scenario));
     }
 
     printTable(results);

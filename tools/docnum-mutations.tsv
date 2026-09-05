@@ -25,7 +25,7 @@
 D1	README.md	122 scenarios on a toy corpus	120 scenarios on a toy corpus	объявлено «122 scenarios» (владелец corpus-tools-bench)
 D2	README.md	corpus-tools-bench's 139 recorded mutations	corpus-tools-bench's 136 recorded mutations	объявлено «139 mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
-D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 82;	const EXPECTED_SCENARIOS = 83;	владелец probe-bench
+D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 124;	const EXPECTED_SCENARIOS = 125;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
 D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 44	EXPECTED_MUTATION_COUNT = 44	не объявляет свою величину
 D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=139	EXPECTED_MUTATION_COUNT=139	не объявляет свою величину
@@ -62,7 +62,7 @@ D32	claude-patch-all.sh	        return blocks(FENCE_LINE.sub(BREAK, text), BLOCK
 D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABLE_SEP.match(line):	        if False:	ячейка таблицы ловит расхождение по шапке
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
-D36	README.md	probe-bench's 5 recorded mutations	probe-bench's 6 recorded mutations	объявлено «5 mutations» (владелец probe-bench)
+D36	README.md	probe-bench's 7 recorded mutations	probe-bench's 8 recorded mutations	объявлено «7 mutations» (владелец probe-bench)
 D37	README.md	checks-teeth's 19 recorded mutations	checks-teeth's 20 recorded mutations	объявлено «19 mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден

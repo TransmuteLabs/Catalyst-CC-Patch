@@ -406,22 +406,52 @@ def sign_macos(path: Path) -> None:
     """Stable identity + pinned bundle id, or the keychain OAuth grant breaks."""
     sign_id = os.environ.get("CLAUDE_PATCH_SIGN_ID")
     if not sign_id:
-        out = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"],
-                             capture_output=True, text=True).stdout
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and len(parts[1]) == 40:
-                sign_id = parts[1]
+        try:
+            out = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"],
+                                 capture_output=True, text=True)
+        except OSError as error:
+            die(f"security find-identity could not run: {error}", code=1)
+        if out.returncode != 0:
+            die(f"security find-identity failed (exit {out.returncode}): "
+                f"{out.stderr.strip()}", code=1)
+        for line in out.stdout.splitlines():
+            match = re.fullmatch(r'\s*[0-9]+\)\s+([0-9A-Fa-f]{40})\s+"[^"]+"\s*', line)
+            if match:
+                sign_id = match.group(1)
                 break
-    if sign_id:
-        subprocess.run(["codesign", "-f", "-i", BUNDLE_ID, "-s", sign_id, str(path)],
-                       check=True)
-        info(f"Re-signed with identity {sign_id} (bundle id {BUNDLE_ID})")
-    else:
-        subprocess.run(["codesign", "-f", "-i", BUNDLE_ID, "-s", "-", str(path)],
-                       check=True)
-        info("WARNING: no code-signing identity found -> ad-hoc signed; "
-             "keychain OAuth (subscription login) will NOT work")
+        if not sign_id:
+            die("no code-signing identity found; a stable identity is required for Keychain OAuth",
+                code=1)
+    if sign_id == "-":
+        die("CLAUDE_PATCH_SIGN_ID must name a stable signing identity", code=1)
+    for label, command in (
+        ("code signing", ["codesign", "-f", "-i", BUNDLE_ID, "-s", sign_id, str(path)]),
+        ("strict signature verification", ["codesign", "-v", "--strict", str(path)]),
+    ):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True)
+        except OSError as error:
+            die(f"{label} could not run for {path}: {error}", code=1)
+        if result.returncode != 0:
+            die(f"{label} failed for {path} (exit {result.returncode}): "
+                f"{result.stderr.strip()}", code=1)
+    info(f"Re-signed with identity {sign_id} (bundle id {BUNDLE_ID}); signature verified")
+
+
+def verify_binary_launch(path: Path) -> None:
+    """The staged image must execute successfully before os.replace publishes it."""
+    try:
+        out = subprocess.run([str(path), "--version"], capture_output=True,
+                             text=True, errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        die(f"post-check: --version could not run for {path}: {error}", code=1)
+    if out.returncode != 0:
+        die(f"post-check: --version failed for {path} (exit {out.returncode}): "
+            f"{out.stderr.strip()}", code=1)
+    version = out.stdout.strip() or out.stderr.strip()
+    if not version:
+        die(f"post-check: --version produced no output for {path}", code=1)
+    info(f"Patched --version: {version.splitlines()[0]}")
 
 
 def sign_windows(path: Path) -> None:
@@ -555,12 +585,7 @@ def patch_binary(target: Path, backup: Path | None = None) -> None:
         sign(tmp)
         os.chmod(tmp, 0o755)   # mkstemp creates 0600; needed before we exec it
 
-        try:
-            out = subprocess.run([str(tmp), "--version"], capture_output=True,
-                                 text=True, timeout=120)
-            info(f"Patched --version: {(out.stdout or out.stderr).strip().splitlines()[0]}")
-        except Exception as e:
-            info(f"NOTE: could not run --version on the patched binary ({e})")
+        verify_binary_launch(tmp)
 
         try:
             os.replace(tmp, target)

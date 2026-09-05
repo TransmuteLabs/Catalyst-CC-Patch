@@ -26,7 +26,8 @@ const src = fs.readFileSync(
 // nothing to do with this file.
 const parts = [
   ['core', '  const core =', '  const judgeCall ='],
-  ['judgeCall', '  const judgeCall =', '  const watchCall ='],
+  ['judgeCall', '  const judgeCall =', '  const formCall ='],
+  ['formCall', '  const formCall =', '  const watchCall ='],
   ['watchCall', '  const watchCall =', '  const resolveFor ='],
 ];
 

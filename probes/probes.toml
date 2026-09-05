@@ -91,3 +91,66 @@ context_chars = 24000
 model = "glm-5.3"
 effort = "max"
 context_chars = 24000
+
+[probe.form]
+fail_closed = false
+records_keep = 300
+# Список голов покрывает конвенции обоих потребителей: `# Бриф`, `# BRIEF #633`,
+# `# #470 —`, `# TASK-684 —`.
+brief_path = '(?:^|/)(?:\.r17-briefs|\.briefs|docs/review)/[^/]*brief[^/]*\.md$'
+brief_ref = '[\w@.~/+-]*brief[\w@.+-]*\.md'
+brief_head = '^#\s*(?:бриф|brief|#\d+(?![\w-])|task-\d+(?![\w-]))'
+brief_tail = '<!-- BRIEF COMPLETE -->'
+report_path = '(?:^|/)[^/]*report[^/]*\.md$'
+fence = '^\s*(?:```|~~~)'
+arm_line = '^\s*(?:[-*+]|\d+[.)]|\|)\s'
+arm_ellipsis = '^\s*(?:…|\.\.\.)\s*'
+arm_cmd = '^(?:[A-Z_][A-Z0-9_]*=\S+\s+)*(?:rch\s+exec\s+(?:--\s+)?)?(?:[A-Z_][A-Z0-9_]*=\S+\s+)*cargo\s+(build|test|check|clippy|doc|bench)(?=\s|$)'
+arm_remote = 'RCH_REQUIRE_REMOTE=1\s+rch\s+exec'
+arm_log = '>\s*\S+\s+2>&1'
+witness_remote = '\[RCH\] remote'
+witness_worker = 'Selected worker:'
+# Границы слов -- лукараунды по \p{L}: \b в JS не знает кириллицы.
+open_door = '(?<![\p{L}\p{N}_])(?:выбери|реши|на (?:твоё|ваше) усмотрение|если нужно|при необходимости|выясни|определи сам|проверь, (?:что|нужно ли)|verify|investigate|choose|decide|if needed|as appropriate|as you see fit)(?![\p{L}\p{N}_])'
+# Голая альтернация: код оборачивает её в лукбехинд `(?<!(?:…)\s{0,16})` перед
+# `open_door` — окно отрицания без среза строки.
+negation = 'nothing to|no|not|never|нечего|ничего не|не'
+rule_line = 'правил|rule|перечислител|enumerat|cargo check --all-targets|grep -r|(?<!\S)rg\s'
+path_line = '^\s*(?:[-*]\s*)?`?[\w@.+-]+(?:/[\w@.+-]+)+\.\w+`?\s*(?:[—–-].*)?$'
+path_lines_min = 10
+decision_head = '^\s*РЕШЕНИЕ(?![\p{L}\p{N}_])'
+decision_basis = 'основани'
+decision_referent = '(?:\S+:\d+|\S+\.(?:log|md|diff)(?![\w-])|(?<![\w/])[0-9a-f]{7,40}(?![\w/]))'
+# Границы слов -- лукараунды по \p{L}: \b в JS не знает кириллицы.
+legalize = 'принять ограничение|accept(?:ed)? (?:the )?limitation|известное ограничение|оставляем как есть|deferred|отложено до|workaround|не чиним|(?<![\w-])as-is(?![\w-])'
+git_commit = '(?<![\w.-])git\s+commit(?![\w-])'
+git_commit_ok = '(?<!\S)--only(?!\S)'
+git_msg = '''(?<!\S)-m\s*(?:"([^"]*)"|'([^']*)'|(\S+))'''
+git_push = '(?<![\w.-])git\s+push(?![\w-])'
+git_push_ok = '(?<!\S)origin\s+[\w./-]+:[\w./-]+(?!\S)'
+git_force = '(?<!\S)(?:--force(?:-with-lease)?|-f)(?!\S)'
+trailer_a = '^Session:'
+trailer_b = '^Co-Authored-By:'
+write_redirect = '''(?:>>?|tee(?:\s+-a)?)\s*["']?([^\s"'<>|;&]+\.md)'''
+heredoc = '''<<-?\s*["']?(\w+)["']?[^\n]*\n([\s\S]*?)\n\1(?:\n|$)'''
+
+# log_only -- инкубация на живом трафике; cancel включается здесь, без пересборки образа.
+[probe.form.act]
+A1 = "log_only"
+A2 = "log_only"
+A3 = "log_only"
+A4 = "log_only"
+B = "log_only"
+C1 = "log_only"
+C2 = "log_only"
+F = "log_only"
+
+[probe.form.text]
+A1 = "бриф без хвостового маркера <!-- BRIEF COMPLETE --> последней непустой строкой — обрыв всегда выглядит самосогласованным"
+A2 = "каждая арма cargo — только RCH_REQUIRE_REMOTE=1 rch exec -- … > <лог> 2>&1, свидетель площадки — строка [RCH] remote; Selected worker: свидетелем не является"
+A3 = "исполнительский бриф не несёт открытых дверей: решения принимаются до диспатча"
+A4 = "перечень путей без строки правила или перечислителя — перечень окажется неполным"
+B = "решение без основания и референта (файл:строка, лог, диф, sha) не принимается"
+C1 = "найденную проблему чинить всегда и полно; частичный фикс — только по ЯВНОМУ слову юзера"
+C2 = "свидетель удалённой сборки — строка [RCH] remote, а не Selected worker:"
+F = "коммит только --only по явным путям; push только origin <ветка>:<ветка> без принудительных форм; трейлеры Session: и Co-Authored-By: соседними строками"
