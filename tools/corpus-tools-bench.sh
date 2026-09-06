@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=134
-EXPECTED_MUTATIONS=153
+EXPECTED_SCENARIOS=144
+EXPECTED_MUTATIONS=168
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -342,6 +342,9 @@ set -u
 TW_RESULTS_ANCHOR='@@TW_RESULTS_ANCHOR@@'
 __TW_CODE_SECTIONS='@@TW_CODE_SECTIONS@@'
 __TW_PROMPT_SECTIONS='@@TW_PROMPT_SECTIONS@@'
+# Имя отметки происхождения дома tweakcc: свип достаёт его из конвейера тем же
+# якорем, что и перечисления, и без строки здесь отказался бы стартовать.
+TWEAKCC_HOME_ORIGIN_NAME='@@TWEAKCC_HOME_ORIGIN_NAME@@'
 tweak="${STUB_TWEAK:-none}"
 # Цель читается ИЗ АРГУМЕНТОВ: два поля вердикта -- версия и дайджест --
 # привязаны к тому, что конвейеру передали, и заглушка обязана отвечать про
@@ -453,6 +456,7 @@ case "$tweak" in
   notwoff) ;;
   blindtwboth) printf 'NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь выключенных правок tweakcc погашена (выключено 0)\n' ;;
   emptyoff) printf 'NOTE: объявления выключенных правок tweakcc для дома /toy/tweakcc нет, и выключенных правок не измерено (0) -- сходится\n' ;;
+  originoff) printf 'NOTE: дом tweakcc /toy/tweakcc создан прогоном, а не оператором (sweep-created 2026-01-01T00:00:00Z abc1234): объявления выключенных правок у него нет, выключено конфигурацией 30 -- это дефолты форка, дрейфовать в таком доме нечему\n' ;;
   *) printf 'NOTE: выключенные конфигурацией правки tweakcc на %s сошлись с объявлением дома: 0\n' "$ver" ;;
 esac
 # Дверь ИНЕРТНЫХ правок -- ТРЕТЬЯ соседка, и у неё тоже три терминальных
@@ -465,6 +469,29 @@ case "$tweak" in
   emptyinert) printf 'NOTE: инертных правок tweakcc на %s не объявлено и не измерено -- сходится.\n' "$ver" ;;
   *) printf 'NOTE: инертные правки tweakcc на %s сошлись с объявлением: пропущено по версии 0, вхолостую 0 (из /toy/kit/tools/tweakcc-expected-inert.txt)\n' "$ver" ;;
 esac
+# Часовой ФОРМЫ вывода -- ЧЕТВЁРТАЯ соседка, и с волны 39d его голос безусловен:
+# на здоровом прогоне он называет измеренное число нарушителей (ноль). Условный
+# голос делал бы поле свипа нулём на законном прогоне, то есть неотличимым от
+# снятого часового.
+case "$tweak" in
+  notwform) ;;
+  blindtwboth) printf 'NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- часовой формы вывода tweakcc погашен (строк вне известных секций либо с незнакомым знаком: 0)\n' ;;
+  *) printf 'NOTE: часовой формы строк tweakcc на %s: строк вне известных секций 0\n' "$ver" ;;
+esac
+# Дверь НЕПРОШЕДШИХ НАКЛАДОК -- ПЯТАЯ, и её голос безусловен по той же причине.
+# Слепой ответ начинается с того же имени ручки, что у трёх «дверей» и у
+# «часового»: режим blindtwboth печатает все пять, и ими проверяется, что каждое
+# поле свипа сужено по имени СВОЕЙ двери.
+case "$tweak" in
+  notwpfail) ;;
+  blindtwboth) printf 'NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь непрошедших накладок tweakcc погашена (не легло накладок 0)\n' ;;
+  *) printf 'NOTE: накладки промтов tweakcc на %s: объявленных не легшими 0\n' "$ver" ;;
+esac
+# Строки формы правки ПОСЛЕ блока результатов: область, которую читает только
+# свип -- захват конвейера кончается на выводе форка. Секция незнакомая, значит
+# строка не попадает ни в один счёт и обязана быть названа часовым СВИПА, а не
+# растворяться в тишине.
+[[ "$tweak" != postform ]] || { printf '  Post Block Group:\n'; printf '    ✓ post-block edit\n'; }
 [[ "$tweak" != nul ]] || printf 'второй писатель\000\n'
 exit "${STUB_RC:-0}"
 STUB
@@ -499,7 +526,11 @@ INJECT
     echo "corpus-tools-bench: подстановка якоря в заглушку не удалась." >&2
     exit 2
   fi
-  for __sec_name in __TW_CODE_SECTIONS __TW_PROMPT_SECTIONS; do
+  # Константы кита, которые заглушка обязана повторить ДОСЛОВНО: перечисления
+  # секций и имя отметки происхождения дома. Все три свип читает из снимка
+  # ЯКОРЕМ, поэтому лестница у них одна -- разные требования развели бы
+  # строгость стенда со строгостью свипа.
+  for __sec_name in __TW_CODE_SECTIONS __TW_PROMPT_SECTIONS TWEAKCC_HOME_ORIGIN_NAME; do
     __sec_hits=$(grep -a -c "^${__sec_name}=" "$dir/claude-patch-all.real")
     if [[ "$__sec_hits" != 1 ]]; then
       echo "corpus-tools-bench: в ките присваиваний $__sec_name $__sec_hits, а нужно ровно одно --" >&2
@@ -509,21 +540,26 @@ INJECT
     __sec_line=$(sed -n "/^${__sec_name}='/p" "$dir/claude-patch-all.real")
     if [[ -z "$__sec_line" ]]; then
       echo "corpus-tools-bench: в ките нет присваивания $__sec_name --" >&2
-      echo "  заглушке нечем повторить перечисление секций, мерить нечем." >&2
+      echo "  заглушке нечем повторить константу кита, мерить нечем." >&2
       exit 2
     fi
     if ! python3 - "$dir/claude-patch-all.sh" "$__sec_name" "$__sec_line" <<'INJECT'
 import io, sys
 path, name, line = sys.argv[1], sys.argv[2], sys.argv[3]
 text = io.open(path, encoding='utf-8').read()
-mark = "%s='@@%s@@'" % (name, name[2:])
+# Метка -- имя БЕЗ ведущих подчёркиваний: внутренние константы конвейера
+# зовутся `__TW_...`, а место под них в заглушке помечено `@@TW_...@@`.
+# Правило записано ОДНО на все константы: прежняя редакция резала ровно два
+# первых символа, и константа без такой приставки получала метку из середины
+# собственного имени -- подстановка не находила места и винила заглушку.
+mark = "%s='@@%s@@'" % (name, name.lstrip('_'))
 if text.count(mark) != 1:
-    sys.stderr.write('corpus-tools-bench: место под перечисление секций в заглушке не одно\n')
+    sys.stderr.write('corpus-tools-bench: место под константу %s в заглушке не одно\n' % name)
     raise SystemExit(2)
 io.open(path, 'w', encoding='utf-8').write(text.replace(mark, line))
 INJECT
     then
-      echo "corpus-tools-bench: подстановка перечисления секций в заглушку не удалась --" >&2
+      echo "corpus-tools-bench: подстановка константы $__sec_name в заглушку не удалась --" >&2
       echo "  метка осталась бы на месте, и отказ свипа не сработал бы: вина легла бы на свип." >&2
       exit 2
     fi
@@ -671,7 +707,7 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
-    TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
+    TWEAKCC_CONFIG_DIR="${BENCH_TW_HOME:-$TW_FIXTURE}" \
     bash "$kit/tools/sweep.sh" "$@" 2>&1 9>&-
 }
 
@@ -1666,7 +1702,7 @@ scenario_79() {   # свип не трогает ЖИВОЙ дом tweakcc
   # распаковщика и переписывала бэкап живой установки байтами корпусной версии.
   # Проверяется то, что можно измерить: дом-семя остаётся байт-в-байт, свой дом
   # создан, и выбор объявлен в потоке и в сводке.
-  local d out rc sum before after
+  local d out rc sum before after clone
   d="$C/lastn"; mk_lastn_corpus "$d"
   before=$(cd "$TW_FIXTURE" && find . -type f -exec shasum {} + | sort)
   out=$(run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
@@ -1683,6 +1719,15 @@ scenario_79() {   # свип не трогает ЖИВОЙ дом tweakcc
   if [[ ! -d "$d/corpus/state/tweakcc-home" ]]; then
     LAST_EVID="СВОЕГО_ДОМА_НЕТ :: $(ls "$d/corpus/state" 2>&1 | tr '\n' '|')"
     bad "79 дом tweakcc: свой дом не создан"; return
+  fi
+  # ГРАНИЦА отметки происхождения. Её кладут ТОЛЬКО в дом, созданный с нуля:
+  # у клона живого дома оператор ЕСТЬ, и дверь множества выключенных правок
+  # обязана держаться для него двусторонне. Сверяются СОСТАВЫ клона и семени,
+  # а не имя файла: лишний файл ловится, как бы он ни назывался.
+  clone=$(cd "$d/corpus/state/tweakcc-home" && find . -type f -exec shasum {} + | sort)
+  if [[ "$clone" != "$before" ]]; then
+    LAST_EVID="КЛОН_НЕ_РАВЕН_СЕМЕНИ :: клон=$clone :: семя=$before"
+    bad "79 дом tweakcc: в клоне живого дома появилось своё содержимое"; return
   fi
   if [[ "$out" != *"SWEEP дом tweakcc:"* ]]; then
     LAST_EVID="ВЫБОР_НЕ_ОБЪЯВЛЕН :: $out"
@@ -1780,6 +1825,13 @@ run_all() {
   # Волна 39c, довесок 2: свидетель двери инертных правок -- три её ответа и
   # красный вердикт, когда ответа нет.
   scenario_131; scenario_132; scenario_133; scenario_134
+  # Волна 39d: свидетели собственного счёта якорей, часового формы и двери
+  # непрошедших накладок; свой часовой формы у свипа.
+  scenario_135; scenario_136; scenario_137; scenario_138
+  scenario_139; scenario_140; scenario_141
+  # Волна 39d, довесок: четвёртый ответ двери выключенных правок, отметка
+  # происхождения дома и один набор дверей на обе сводки.
+  scenario_142; scenario_143; scenario_144
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -2296,7 +2348,7 @@ launch_sweep() {   # логфайл, аргументы свипа...
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
-    TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
+    TWEAKCC_CONFIG_DIR="${BENCH_TW_HOME:-$TW_FIXTURE}" \
     bash "$K/tools/sweep.sh" "$@" > "$log" 2>&1 9>&- &
 }
 
@@ -2767,7 +2819,7 @@ scenario_98() {   # волна 26, D-2: ребёнок форк-запаски, 
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
-    TWEAKCC_CONFIG_DIR="$TW_FIXTURE" \
+    TWEAKCC_CONFIG_DIR="${BENCH_TW_HOME:-$TW_FIXTURE}" \
     perl -e 'use POSIX (); my $sid = POSIX::setsid();
              defined($sid) && $sid >= 0 or do { print STDERR "s98: обёртке не стать лидером группы\n"; exit 9 };
              exec @ARGV' \
@@ -3776,6 +3828,211 @@ scenario_133() {   # слепая ручка: ТРИ двери, три поля
 
 scenario_134() { expect_red "134 дверь инертных правок tweakcc не отработала -- КРАСНАЯ" notwinert "дверь инертных правок tweakcc не отработала"; }
 
+# Волна 39d. Свидетелей в вердикте не было у трёх величин сразу: собственный
+# счёт якорей читался только в ветке «почему» (на здоровом прогоне его удаление
+# не меняло вердикт ни на байт), а у часового формы и у двери непрошедших
+# накладок поля не было вовсе. Плюс у свипа не было СВОЕГО часового формы, хотя
+# он читает не тот вход, что конвейер.
+#
+# Поле снимается ОДНОЙ строкой сборки группы -- потому и группа отдельная: в
+# общей строке формата снятие поля сдвинуло бы разбор соседних, и мутация
+# доказывала бы сдвиг вместо пропажи.
+scenario_135() {   # собственный счёт якорей назван в сводке
+  local out rc line summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
+  if [[ "$line" != *"twanchor="* ]]; then
+    LAST_EVID="ПОЛЕ_TWANCHOR_НЕТ :: $line"
+    bad "135 счёт якорей: в сводке нет поля twanchor; было: $line"; return
+  fi
+  if [[ "$line" != *"twanchor=1"* ]]; then
+    bad "135 счёт якорей: в сводке не «twanchor=1»; было: $line"; return
+  fi
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    LAST_EVID="rc=$rc :: $out"
+    bad "135 счёт якорей: зелёный прогон не состоялся (код $rc)"; return
+  fi
+  ok "135 собственный счёт якорей засчитан полем twanchor"
+}
+
+scenario_136() {   # ответ часового формы засчитан полем twform
+  local out rc line summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
+  if [[ "$line" != *"twform="* ]]; then
+    LAST_EVID="ПОЛЕ_TWFORM_НЕТ :: $line"
+    bad "136 часовой формы: в сводке нет поля twform; было: $line"; return
+  fi
+  if [[ "$line" != *"twform=1"* ]]; then
+    bad "136 часовой формы: в сводке не «twform=1»; было: $line"; return
+  fi
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    LAST_EVID="rc=$rc :: $out"
+    bad "136 часовой формы: зелёный прогон не состоялся (код $rc)"; return
+  fi
+  ok "136 безусловный ответ часового формы засчитан полем twform"
+}
+
+scenario_137() {   # ответ двери непрошедших накладок засчитан полем twpfail
+  local out rc line summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
+  if [[ "$line" != *"twpfail="* ]]; then
+    LAST_EVID="ПОЛЕ_TWPFAIL_НЕТ :: $line"
+    bad "137 дверь непрошедших накладок: в сводке нет поля twpfail; было: $line"; return
+  fi
+  if [[ "$line" != *"twpfail=1"* ]]; then
+    bad "137 дверь непрошедших накладок: в сводке не «twpfail=1»; было: $line"; return
+  fi
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    LAST_EVID="rc=$rc :: $out"
+    bad "137 дверь непрошедших накладок: зелёный прогон не состоялся (код $rc)"; return
+  fi
+  ok "137 безусловный ответ двери непрошедших накладок засчитан полем twpfail"
+}
+
+scenario_138() {   # слепая ручка: каждой двери -- своё поле, ни одного двойного счёта
+  # Ручка гасит ВСЕ двери слоя разом; в этом прогоне СТЕНД печатает пять
+  # объявлений, и все они начинаются одинаково
+  # («CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- »). Образец, суженный по имени
+  # РУЧКИ, дал бы пятёрку в каждом поле, а вердикт сравнивает каждое с единицей.
+  local out rc line summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(STUB_TWEAK=blindtwboth run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
+  if [[ "$line" != *"twlevel=1 twoff=1 twinert=1 twanchor=1 twform=1 twpfail=1"* ]]; then
+    bad "138 слепая ручка: в сводке не «twlevel=1 twoff=1 twinert=1 twanchor=1 twform=1 twpfail=1»; было: $line"; return
+  fi
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    LAST_EVID="rc=$rc :: $out"
+    bad "138 слепая ручка: объявленное гашение пяти дверей объявлено красным (код $rc)"; return
+  fi
+  ok "138 слепая ручка: каждая из пяти дверей засчитана своим полем"
+}
+
+scenario_139() {   # СВОЙ часовой формы у свипа: строка правки ПОСЛЕ блока
+  # Конвейер спрашивает часового о своём захвате, свип читает весь лог сборки:
+  # область от якоря до конца включает то, что печатается после блока. Свидетель
+  # чужой двери (twform) этот вход не покрывает по построению.
+  local out rc line summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(STUB_TWEAK=postform run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )); then
+    LAST_EVID="ЛОГ_С_НАРУШИТЕЛЕМ_ПРИНЯТ :: $out"
+    bad "139 строка правки под незнакомой секцией после блока принята зелёной"; return
+  fi
+  if [[ "$out" != *"КРАСНАЯ: "*"часовой формы свипа"* ]]; then
+    LAST_EVID="БЕЗ_ЧАСОВОГО_СВИПА :: $out"
+    bad "139 нарушитель формы: в вердикте нет причины часового свипа; было: $(printf '%s' "$out" | grep -a 'SWEEP 900' | head -1)"
+    return
+  fi
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  if [[ "$line" != *"twunsect=1"* ]]; then
+    LAST_EVID="ПОЛЕ_TWUNSECT_НЕТ :: $line"
+    bad "139 нарушитель формы: в сводке не «twunsect=1»; было: $line"; return
+  fi
+  ok "139 нарушитель формы после блока -- КРАСНАЯ своим часовым, число в сводке"
+}
+
+scenario_140() { expect_red "140 часовой формы вывода tweakcc не отработал -- КРАСНАЯ" notwform "часовой формы вывода tweakcc не отработал"; }
+scenario_141() { expect_red "141 дверь непрошедших накладок tweakcc не отработала -- КРАСНАЯ" notwpfail "дверь непрошедших накладок tweakcc не отработала"; }
+
+# Волна 39d, довесок: дом, созданный САМИМ свипом, и один набор дверей на обе
+# сводки.
+scenario_142() {   # ЧЕТВЁРТЫЙ терминальный ответ двери выключенных правок
+  # Живого дома tweakcc на машине может не быть вовсе -- тогда свип создаёт
+  # пустой дом сам. Объявления выключенных правок у такого дома нет, а дефолты
+  # форка гасят три десятка правок кода, и дверь отвечает «дом создан прогоном,
+  # а не оператором». Не засчитать этот ответ -- значит красить свежую машину
+  # вердиктом «дверь не отработала» при исправной двери.
+  local out rc line summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(STUB_TWEAK=originoff run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1)
+  LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
+  if [[ "$line" != *"twoff=1"* ]]; then
+    bad "142 дом создан прогоном: в сводке не «twoff=1»; было: $line"; return
+  fi
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    LAST_EVID="rc=$rc :: $out"
+    bad "142 дом создан прогоном: зелёный прогон не состоялся (код $rc)"; return
+  fi
+  ok "142 ответ «дом создан прогоном, а не оператором» засчитан полем twoff"
+}
+
+scenario_143() {   # третья ветка выбора дома: свип КЛАДЁТ отметку происхождения
+  # Ветка «живого дома нет, создаём пустой» до этой волны оставляла дом без
+  # единого свидетельства о происхождении, и конвейер требовал от него
+  # объявления, которого никто не делал. Имя отметки берётся ИЗ КОНВЕЙЕРА --
+  # он её единственный читатель; вписанное сюда третьей копией, оно скрыло бы
+  # расхождение писателя с читателем ровно на той машине, ради которой отметка
+  # и заведена.
+  local out rc name origin home
+  name=$(LC_ALL=C sed -n "s/^TWEAKCC_HOME_ORIGIN_NAME='\(.*\)'\$/\1/p" "$K/claude-patch-all.real")
+  if [[ -z "$name" ]]; then
+    LAST_EVID="ИМЯ_ОТМЕТКИ_НЕ_ПРОЧИТАНО :: $K/claude-patch-all.real"
+    bad "143 отметка происхождения: имя не прочитано из конвейера"; return
+  fi
+  out=$(BENCH_TW_HOME="$C/no-such-tweakcc-home" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  home="$S/tweakcc-home"
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    bad "143 отметка происхождения: прогон отказал ($rc)"; return
+  fi
+  if [[ "$out" != *"живого дома нет, создан пустой"* ]]; then
+    LAST_EVID="НЕ_ТА_ВЕТКА :: $out"
+    bad "143 отметка происхождения: свип пошёл не третьей веткой выбора дома"; return
+  fi
+  if [[ ! -f "$home/$name" ]]; then
+    LAST_EVID="ОТМЕТКИ_НЕТ :: $(ls -a "$home" 2>&1 | tr '\n' '|')"
+    bad "143 отметка происхождения: файла «${name}» в созданном доме нет"; return
+  fi
+  origin=$(head -1 "$home/$name")
+  if [[ "$origin" != "sweep-created "* ]]; then
+    LAST_EVID="ОТМЕТКА_БЕЗ_ФОРМЫ :: $origin"
+    bad "143 отметка происхождения: первая строка не называет происхождение: $origin"; return
+  fi
+  if [[ "$out" != *"отметка происхождения"* ]]; then
+    LAST_EVID="ОТМЕТКА_НЕ_ОБЪЯВЛЕНА :: $out"
+    bad "143 отметка происхождения: запись отметки не объявлена в потоке"; return
+  fi
+  ok "143 свип кладёт отметку происхождения в дом, который создал сам"
+}
+
+scenario_144() {   # обе сводки называют ОДИН набор дверей
+  # Человек читал три двери, машина несла семь полей. Две редакции одного
+  # набора расходятся на первой же новой двери -- и уже расходились. Группа
+  # вырезается из машинной строки СОСЕДЯМИ ПО ФОРМАТУ, а не перечнем имён:
+  # перечень здесь стал бы третьим домом набора.
+  local out rc human machine group summary
+  summary="$S/log/sweep-summary.txt"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    bad "144 две сводки: зелёный прогон не состоялся (код $rc)"; return
+  fi
+  machine=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  human=$(printf '%s\n' "$out" | grep -a '^SWEEP 900: ' | head -1)
+  group=$(printf '%s\n' "$machine" | LC_ALL=C sed -n 's/.* twmiss=[0-9]* \(.*\) ours=.*/\1/p')
+  if [[ -z "$group" || "$group" != *"="* ]]; then
+    LAST_EVID="ГРУППА_НЕ_ВЫРЕЗАНА :: $machine"
+    bad "144 две сводки: группа дверей не вырезана из машинной строки"; return
+  fi
+  if [[ "$human" != *"$group"* ]]; then
+    LAST_EVID="СТРОКА_БЕЗ_ГРУППЫ :: человек «${human}» :: группа «${group}»"
+    bad "144 две сводки: человеческая строка называет не те двери, что машинная"; return
+  fi
+  ok "144 обе сводки называют один и тот же набор дверей слоя tweakcc"
+}
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -3871,6 +4128,16 @@ MUT_FILE=(x
   # сумма крестиков (130).
   tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
   # Волна 39c, довесок 2: свидетель двери инертных правок (131-134).
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  # Волна 39d: свидетели собственного счёта якорей, часового формы и двери
+  # непрошедших накладок в сводке; сужение каждого поля по имени СВОЕЙ двери;
+  # свой часовой формы у свипа (135-141).
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
+  tools/sweep.sh
+  # Волна 39d, довесок: четвёртый ответ двери выключенных правок, отметка
+  # происхождения дома в обе стороны её границы, один набор дверей на обе
+  # сводки (142, 143, 79, 144).
   tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh)
 
 MUT_PAT=(x
@@ -4057,7 +4324,34 @@ MUT_PAT=(x
   '\^NOTE: инертные правки tweakcc на '
   '\^NOTE: инертных правок tweakcc на .\* не объявлено и не измерено'
   '\^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь инертных правок tweakcc погашена'
-  '\[\[ "\$twinert" == "1" \]\] \|\| why\+=\("дверь инертных правок tweakcc не отработала"\)')
+  '\[\[ "\$twinert" == "1" \]\] \|\| why\+=\("дверь инертных правок tweakcc не отработала"\)'
+  # Волна 39d: снятие поля из группы свидетелей -- ОДНА строка сборки, поэтому
+  # поле уходит вместе со своим значением, а не сдвигает разбор соседних.
+  '  __tw_doors="\$__tw_doors twanchor=\$twanchor"'
+  '  __tw_doors="\$__tw_doors twform=\$twform"'
+  '\^NOTE: часовой формы строк tweakcc на '
+  '  __tw_doors="\$__tw_doors twpfail=\$twpfail"'
+  '\^NOTE: накладки промтов tweakcc на '
+  # Расширение слепой ветви с имени ДВЕРИ до имени РУЧКИ: одна ручка гасит пять
+  # дверей, и образец по ручке съел бы все пять объявлений разом.
+  '\^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- часовой формы вывода tweakcc погашен'
+  '\^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь непрошедших накладок tweakcc погашена'
+  '\[\[ "\$twunsect" == "0" \]\] \|\| why\+=\("строк правок tweakcc вне известной пары «секция\+знак» в логе \$twunsect -- часовой формы свипа"\)'
+  '  __tw_doors="\$__tw_doors twunsect=\$twunsect"'
+  '\[\[ "\$twform" == "1" \]\] \|\| why\+=\("часовой формы вывода tweakcc не отработал"\)'
+  '\[\[ "\$twpfail" == "1" \]\] \|\| why\+=\("дверь непрошедших накладок tweakcc не отработала"\)'
+  # Волна 39d, довесок.
+  # Четвёртый терминальный ответ уходит из образца поля: дом, созданный самим
+  # свипом, снова читается как «дверь не отработала».
+  '\^NOTE: дом tweakcc \.\* создан прогоном, а не оператором '
+  # Отметка происхождения не пишется: дом создан, а сказать о нём нечего.
+  '> "\$SWEEP_TW_HOME/\$TW_HOME_ORIGIN_NAME"; then'
+  # Обратная сторона границы: отметку получает и КЛОН живого дома, у которого
+  # оператор есть, -- послабление двери утекает на дом, которому не полагается.
+  'echo "SWEEP дом tweakcc: клон живого \(\$__live_tw\) -> \$SWEEP_TW_HOME"'
+  # Человеческая строка возвращается к своей прежней ТРОЙКЕ дверей при семи в
+  # машинной: ровно то расхождение двух редакций одного набора.
+  'не найдено \$twmiss,\$__tw_doors\)')
 
 MUT_REP=(x
   'if false; then'
@@ -4210,7 +4504,24 @@ MUT_REP=(x
   '^NOTE: НИКОГДА-3 НЕ ВСТРЕТИТСЯ '
   '^NOTE: НИКОГДА-4 НЕ ВСТРЕТИТСЯ '
   '^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь '
-  ':')
+  ':'
+  # Волна 39d.
+  '  :'
+  '  :'
+  '^NOTE: НИКОГДА-5 НЕ ВСТРЕТИТСЯ '
+  '  :'
+  '^NOTE: НИКОГДА-6 НЕ ВСТРЕТИТСЯ '
+  '^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- '
+  '^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь '
+  ':'
+  '  :'
+  ':'
+  ':'
+  # Волна 39d, довесок.
+  '^NOTE: НИКОГДА-7 НЕ ВСТРЕТИТСЯ '
+  '> /dev/null; then'
+  ': > "$SWEEP_TW_HOME/$TW_HOME_ORIGIN_NAME"; echo "SWEEP дом tweakcc: клон живого ($__live_tw) -> $SWEEP_TW_HOME"'
+  'не найдено $twmiss, дверь уровня $twlevel, дверь выключенных $twoff, дверь инертных $twinert)')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -4251,7 +4562,11 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                # Волна 39c, довесок: дверь якоря свипа и производная сумма
                128 128 129 129 130
                # Волна 39c, довесок 2: свидетель двери инертных правок
-               131 132 133 134)
+               131 132 133 134
+               # Волна 39d: три свидетеля в сводке и свой часовой формы у свипа
+               135 136 136 137 137 138 138 139 139 140 141
+               # Волна 39d, довесок
+               142 143 79 144)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -4395,10 +4710,11 @@ MUT_CAUSE=(x
   'twmiss=2'
   # Волна 39b: свидетель двери выключенных правок tweakcc (123-126).
   'twoff=0'
-  # Ручка гасит уже ТРИ двери, и образец, расширенный с имени двери до имени
-  # ручки, съедает все три объявления сразу: след двойки принадлежал прогону,
-  # где дверей было две.
-  'twoff=3'
+  # Образец, расширенный с имени двери до имени РУЧКИ, съедает объявления
+  # разом: в слепом прогоне СТЕНДА их пять, а под «-- дверь » -- четыре (часовой
+  # формы зовётся часовым, а не дверью). След тройки принадлежал прогону, где
+  # под этим именем было три двери, след двойки -- где их было две.
+  'twoff=4'
   'twoff=0'
   'SWEEP DONE'
   # Волна 39c: без отказа свип доходит до сборки -- вот её и видно.
@@ -4410,12 +4726,32 @@ MUT_CAUSE=(x
   'ДВА_ЯКОРЯ_ПРИНЯТЫ'
   'ТЕКСТЫ_НЕ_РАЗЛИЧЕНЫ'
   'tweakcc=5'
-  # Волна 39c, довесок 2: ноль -- ветвь пропала, тройка -- образец расширился
+  # Волна 39c, довесок 2: ноль -- ветвь пропала, четвёрка -- образец расширился
   # с имени ДВЕРИ до имени РУЧКИ и съел соседние объявления.
   'twinert=0'
   'twinert=0'
-  'twinert=3'
-  'SWEEP DONE')
+  'twinert=4'
+  'SWEEP DONE'
+  # Волна 39d: пропажа поля из сводки; ноль на здоровом прогоне (ветвь ответа
+  # двери пропала); пятёрка и четвёрка (образец расширился до имени РУЧКИ);
+  # принятый нарушитель формы; снятые утверждения вердикта.
+  'ПОЛЕ_TWANCHOR_НЕТ'
+  'ПОЛЕ_TWFORM_НЕТ'
+  'twform=0'
+  'ПОЛЕ_TWPFAIL_НЕТ'
+  'twpfail=0'
+  'twform=5'
+  'twpfail=4'
+  'ЛОГ_С_НАРУШИТЕЛЕМ_ПРИНЯТ'
+  'ПОЛЕ_TWUNSECT_НЕТ'
+  'SWEEP DONE'
+  'SWEEP DONE'
+  # Волна 39d, довесок: поле двери, обе стороны границы отметки, набор дверей
+  # в человеческой сводке.
+  'twoff=0'
+  'ОТМЕТКИ_НЕТ'
+  'КЛОН_НЕ_РАВЕН_СЕМЕНИ'
+  'СТРОКА_БЕЗ_ГРУППЫ')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

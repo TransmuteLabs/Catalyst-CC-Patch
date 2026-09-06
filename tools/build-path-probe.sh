@@ -147,10 +147,10 @@ CASES=abcdurxplkmn
 # построению (один сценарий, одна мутация), L и M -- длиной своих списков.
 CASE_K_SCENARIOS=1; CASE_K_MUTATIONS=1
 CASE_L_SCENARIOS=4; CASE_L_MUTATIONS=4
-CASE_M_SCENARIOS=7; CASE_M_MUTATIONS=7
-CASE_N_SCENARIOS=60; CASE_N_MUTATIONS=65
-EXPECTED_SCENARIOS=72
-EXPECTED_MUTATIONS=77
+CASE_M_SCENARIOS=9; CASE_M_MUTATIONS=11
+CASE_N_SCENARIOS=77; CASE_N_MUTATIONS=84
+EXPECTED_SCENARIOS=91
+EXPECTED_MUTATIONS=100
 if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS
       || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS )); then
   echo "build-path-probe: ОТКАЗ -- объявленная сумма разошлась со вкладами случаев:" >&2
@@ -396,7 +396,7 @@ fi
 # способ сказать «эта правка на этой версии» -- запись, а у записи обязаны быть
 # ОБЕ стороны: она пропускает объявленное и не даёт пережить свою причину.
 case_m() {
-  python3 - "$PIPELINE" "$CASE_M_SCENARIOS" "$CASE_M_MUTATIONS" "$HERE/tools/tw-layer.sh" <<'PY_MISSES'
+  python3 - "$PIPELINE" "$CASE_M_SCENARIOS" "$CASE_M_MUTATIONS" "$HERE/tools/tw-layer.sh" "${BASH_SOURCE[0]}" <<'PY_MISSES'
 import re
 import shlex
 import subprocess
@@ -414,22 +414,43 @@ declared_s, declared_m = int(sys.argv[2]), int(sys.argv[3])
 sections = re.findall(r"(?m)^__TW_(?:CODE|PROMPT)_SECTIONS=.*\n", source)
 carrier = re.search(r"(?ms)^__tw_layer_names\(\) \{\n.*?^\}\n", source)
 match = re.search(r"(?ms)^__tw_reconcile_misses\(\) \{\n.*?^\}\n", source)
+# Предбанник якоря едет СЮДА же: он стоит в конвейере ПЕРЕД сверкой непроходов,
+# и оснастка без него мерила бы порядок дверей, которого у конвейера нет.
+vestibule = re.search(r"(?ms)^__tw_check_anchor\(\) \{.*?^\}\n", source)
 # Носитель разбора -- ОБЁРТКА над общим домом (tools/tw-layer.sh): сам разбор
 # живёт там, и оснастка без него звала бы неопределённую функцию, то есть мерила
 # бы собственную усечённость вместо механизма.
 layer = Path(sys.argv[4]).read_text(encoding="utf-8")
 layer_consts = re.findall(r"(?m)^(?:TW_MARKS|__TW_LINE_RE|TW_RESULTS_ANCHOR)=.*\n", layer)
 layer_fns = [m.group(0) for m in
-             re.finditer(r"(?ms)^(?:tw_layer_names|tw_unsectioned_lines)\(\) \{.*?^\}\n", layer)]
-if (len(sections) != 2 or not carrier or not match
-        or len(layer_consts) != 3 or len(layer_fns) != 2):
+             re.finditer(r"(?ms)^(?:tw_layer_names|tw_unsectioned_lines"
+                         r"|tw_results_anchor_count)\(\) \{.*?^\}\n", layer)]
+if (len(sections) != 2 or not carrier or not match or not vestibule
+        or len(layer_consts) != 3 or len(layer_fns) != 3):
     print("  FAIL   M: механизм сверки непроходов не извлечён (присваиваний секций %d, "
-          "нужно 2; носитель разбора %s; сверка %s; констант разбора %d, нужно 3, и "
-          "функций разбора %d, нужно 2)"
-          % (len(sections), bool(carrier), bool(match), len(layer_consts), len(layer_fns)))
+          "нужно 2; носитель разбора %s; сверка %s; предбанник якоря %s; констант "
+          "разбора %d, нужно 3, и функций разбора %d, нужно 3)"
+          % (len(sections), bool(carrier), bool(match), bool(vestibule),
+             len(layer_consts), len(layer_fns)))
     raise SystemExit(2)
 function = ("".join(sections) + "".join(layer_consts) + "".join(layer_fns)
-            + carrier.group(0) + match.group(0))
+            + carrier.group(0) + vestibule.group(0) + match.group(0))
+
+# Проверка ПРИЧИН покраснения берётся из ЕДИНСТВЕННОГО дома -- случая (n)
+# ниже по этому же файлу, между метками CAUSE-HOME. Вторая редакция этих
+# двенадцати строк разошлась бы с первой на первой же правке и разошлась бы
+# МОЛЧА: сломанная проверка причин выглядит ровно как проверка, которая прошла.
+# Путь берётся из BASH_SOURCE, а не из имени: в снимке кита корпусного стенда
+# зонд лежит под другим именем, и пин по имени вырезал бы из чужого файла.
+# Блоков обязан быть РОВНО один: ноль -- метки уехали, два -- дом раздвоился, и
+# обе поломки тихие.
+probe_src = Path(sys.argv[5]).read_text(encoding="utf-8")
+cause_home = re.findall(r"(?ms)^# CAUSE-HOME-BEGIN\n(.*?)^# CAUSE-HOME-END\n", probe_src)
+if len(cause_home) != 1:
+    print("  FAIL   M: дом проверки причин не вырезан из %s (блоков %d, нужно 1)"
+          % (sys.argv[5], len(cause_home)))
+    raise SystemExit(2)
+exec(cause_home[0], globals())
 
 VER = "2.1.257"
 NEIGHBOUR = "2.1.252"
@@ -444,7 +465,7 @@ def sec(title, lines):
     return "\n  %s:\n" % title + "".join("    %s\n" % ln for ln in lines)
 
 
-def run(body, misses, out_text, marker=VER):
+def run(body, misses, out_text, marker=VER, blind=False):
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         mf = root / "misses.txt"
@@ -456,9 +477,15 @@ def run(body, misses, out_text, marker=VER):
         # файле молчит -- это и есть измеряемое поведение, не декорация.
         marker_bytes = ("// Version: %s\n" % marker).encode() if marker else b"no version marker\n"
         img.write_bytes(b"\x00\x01binary\x00noise\x00" + marker_bytes + b"\x00tail\x00")
-        script = ("set -uo pipefail\nTWEAKCC_KNOWN_MISSES=%s\n" % shlex.quote(str(mf))
+        env = "CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1\n" if blind else ""
+        script = ("set -uo pipefail\n" + env
+                  + "TWEAKCC_KNOWN_MISSES=%s\n" % shlex.quote(str(mf))
                   + body
-                  + "\n__tw_reconcile_misses %s %s\n" % (shlex.quote(str(of)), shlex.quote(str(img))))
+                  # Порядок конвейерный: предбанник якоря ПЕРВЫМ, сверка второй.
+                  # Область чтения задаёт якорь, и сверка, посчитавшая ✗ по
+                  # пустой области, объявляет чистой любую версию.
+                  + "\n__tw_check_anchor %s || exit $?\n" % shlex.quote(str(of))
+                  + "__tw_reconcile_misses %s %s\n" % (shlex.quote(str(of)), shlex.quote(str(img))))
         return subprocess.run(["bash"], input=script, capture_output=True, text=True, errors="replace")
 
 
@@ -473,27 +500,48 @@ out_clean = ("patch: 14 applied, 0 failed\n" + ANCHOR + "\n"
 row_here = "%s\t%s\tапстрим переписал участок\n" % (VER, MISS)
 row_neighbour = "%s\t%s\tчужая версия\n" % (NEIGHBOUR, MISS)
 
+# Вывод БЕЗ ЯКОРЯ: форк сменил строку, открывающую блок результатов. Область
+# чтения тогда пуста, крестиков не видно, и сверка непроходов объявила бы
+# версию чистой, а объявленный непроход -- «не случившимся».
+out_no_anchor = "patch: 13 applied, 1 failed\n" + sec(
+    CODE_SECTION, ["✗ %s — upstream description" % MISS])
+
 SCEN = {
-    "M1": (row_here, out_miss, VER,
+    "M1": (row_here, out_miss, VER, False,
            lambda r: r.returncode == 0 and "NOTE:" in r.stderr and MISS in r.stderr),
-    "M2": ("", out_miss, VER,
+    "M2": ("", out_miss, VER, False,
            lambda r: r.returncode == 1 and ("НЕ объявлена для %s" % VER) in r.stderr),
-    "M3": (row_here, out_clean, VER,
+    "M3": (row_here, out_clean, VER, False,
            lambda r: r.returncode == 1 and "НЕ СЛУЧИЛОСЬ" in r.stderr),
-    "M4": (row_neighbour, out_miss, VER,
+    "M4": (row_neighbour, out_miss, VER, False,
            lambda r: r.returncode == 1 and ("НЕ объявлена для %s" % VER) in r.stderr),
-    "M5": ("", out_clean, None,
+    "M5": ("", out_clean, None, False,
            lambda r: r.returncode == 1 and "не может назвать версию" in r.stderr),
-    "M6": ("", out_clean, VER,
+    "M6": ("", out_clean, VER, False,
            lambda r: r.returncode == 0 and "NOTE:" not in r.stderr and "FATAL" not in r.stderr),
     # BOM первой строки объявления: `[[:space:]]` его не берёт, и файл,
     # сохранённый редактором с меткой порядка байтов, терял бы первую строку --
     # объявленный непроход читался бы как необъявленный, и сборка отказывала бы
     # по чужой причине. Приём тот же, что у всех прочих читателей объявлений.
-    "M7": ("\ufeff" + row_here, out_miss, VER,
+    "M7": ("\ufeff" + row_here, out_miss, VER, False,
            lambda r: r.returncode == 0 and "NOTE:" in r.stderr and MISS in r.stderr),
+    # ПОРЯДОК ДВЕРЕЙ. Якорь сменился, а строка непрохода на эту версию есть:
+    # первой обязана сказать дверь ЯКОРЯ. Прежде якорь проверялся внутри двери
+    # уровня, то есть ПОСЛЕ сверки, и оператора посылали снять ДЕЙСТВУЮЩЕЕ
+    # объявление -- следствие впереди причины.
+    "M8": (row_here, out_no_anchor, VER, False,
+           lambda r: r.returncode == 1
+                     and "якорь блока результатов tweakcc встречается 0 раз" in r.stderr
+                     and "НЕ СЛУЧИЛОСЬ" not in r.stderr),
+    # Слепая ручка ГАСИТ сверку, а не отменяет её. Вход: ручка=1, крестиков нет,
+    # объявленный непроход НЕ случился. Прежде вызов стоял только на ветке с
+    # выключенной ручкой, и здесь не печаталось ничего.
+    "M9": (row_here, out_clean, VER, True,
+           lambda r: r.returncode == 0 and "НЕ СЛУЧИЛОСЬ" in r.stderr
+                     and "FATAL" not in r.stderr
+                     and "дверь сверки непроходов tweakcc погашена" in r.stderr),
 }
-ORDER = ["M1", "M2", "M3", "M4", "M5", "M6", "M7"]
+ORDER = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9"]
 
 mutations = [
     ("M1-note-dropped", 'if [[ -n "$__declared_rows" ]]; then', "if false; then", "M1"),
@@ -510,7 +558,66 @@ mutations = [
     ("M7-misses-bom-kept",
      'LC_ALL=C sed $\'1s/^\\xef\\xbb\\xbf//\' "$TWEAKCC_KNOWN_MISSES" \\\n    | awk',
      'LC_ALL=C cat "$TWEAKCC_KNOWN_MISSES" \\\n    | awk', "M7"),
+    # Предбанник якоря СНЯТ: сверка идёт по пустой области, крестиков не видит и
+    # объявляет действующее объявление «непроходом, которого не случилось» --
+    # ровно то следствие впереди причины, ради снятия которого предбанник и
+    # вынесен из двери уровня.
+    ("M8-anchor-vestibule-off",
+     'if (( __n != 1 )); then\n    echo "FATAL: якорь блока',
+     'if false; then\n    echo "FATAL: якорь блока', "M8"),
+    # Второй читатель того же объявления -- перечень строк для совета. Метку
+    # порядка байтов снимают ОБА, и мутация у каждого своя: пропажа зуба у
+    # второго читателя не видна первому.
+    ("M7-declared-rows-bom-kept",
+     '__declared_rows="$(LC_ALL=C sed $\'1s/^\\xef\\xbb\\xbf//\' "$TWEAKCC_KNOWN_MISSES" 2>/dev/null',
+     '__declared_rows="$(LC_ALL=C cat "$TWEAKCC_KNOWN_MISSES" 2>/dev/null', "M7"),
+    # Гашение сверки обязано быть ОБЪЯВЛЕННЫМ: молча снятая дверь неотличима от
+    # двери, которая держится.
+    ("M9-blind-extinguish-silent",
+     'echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь сверки непроходов tweakcc погашена (не объявлено',
+     'true "', "M9"),
+    # ...и ручка обязана ГАСИТЬ, а не отказывать: со взведённой ручкой сверка
+    # печатает найденное и возвращает ноль.
+    ("M9-blind-still-refuses",
+     '__say="NOTE"; __blind_rc=0',
+     '__say="FATAL"; __blind_rc=1', "M9"),
 ]
+
+# ПРИЧИНА покраснения -- по одной на мутацию, тем же приёмом и тем же кодом,
+# что у случая (n): проверка живёт в одном доме и вырезана выше. Без причины
+# зуб доказывает чужое правило -- сценарий краснеет и от отказа СОСЕДНЕЙ двери,
+# и от упавшего прибора, и беззубость от исправности не отличить.
+#
+# Ключ -- ИМЯ мутации, а не позиция: параллельная таблица разъезжается на
+# первой же вставке в середину, и мутация тихо получает чужую причину.
+CAUSE = {
+    "M1-note-dropped": "нет: NOTE: объявленные непроходы tweakcc на",
+    "M2-undeclared-ignored": "нет: НЕ объявлена для %s" % VER,
+    "M2-misses-read-wrong-layer": "нет: НЕ объявлена для %s" % VER,
+    "M3-stale-ignored": "нет: объявлен непроход, которого НЕ СЛУЧИЛОСЬ",
+    "M4-version-filter-off": "нет: НЕ объявлена для %s" % VER,
+    "M5-version-guard-off": "нет: не может назвать версию образа",
+    # Мутант краснеет соседней ВЕТКОЙ своей двери умышленно: непрочитанная
+    # метка порядка байтов делает объявленный непроход необъявленным.
+    "M7-misses-bom-kept": "НЕ объявлена для %s" % VER,
+    # Метку снимают ДВА читателя одного файла, и у каждого своя мутация: у
+    # значения (выше) и у перечня строк совета (здесь). Одна мутация на двоих
+    # оставляла бы второго читателя без зуба -- ровно тот раскол, который у
+    # файла кита уже пришлось развести на N50 и N51.
+    "M7-declared-rows-bom-kept": "нет: NOTE: объявленные непроходы tweakcc на",
+    # Снятый предбанник якоря пускает сверку считать ПУСТУЮ область: действующее
+    # объявление читается как непроход, которого не случилось, -- следствие
+    # впереди причины, ради снятия которого предбанник и вынесен из двери уровня.
+    "M8-anchor-vestibule-off": ("объявлен непроход, которого НЕ СЛУЧИЛОСЬ",
+                                "нет: якорь блока результатов tweakcc встречается"),
+    "M9-blind-extinguish-silent": "нет: дверь сверки непроходов tweakcc погашена",
+    "M9-blind-still-refuses": "FATAL: для %s объявлен непроход" % VER,
+}
+missing_cause = [m[0] for m in mutations if m[0] not in CAUSE]
+if missing_cause:
+    print("  FAIL   M: мутации без объявленной причины покраснения: %s"
+          % ", ".join(missing_cause))
+    raise SystemExit(4)
 
 if len(ORDER) != declared_s or len(mutations) != declared_m:
     print("  FAIL   M: таблица разошлась с объявленным вкладом -- сценариев %d/%d, мутаций %d/%d"
@@ -518,9 +625,13 @@ if len(ORDER) != declared_s or len(mutations) != declared_m:
     raise SystemExit(4)
 
 failed = 0
+# След здорового прогона нужен объявлениям отсутствия, и берётся он ОТСЮДА:
+# второй прогон того же сценария ради причины удвоил бы стенд.
+base_evidence = {}
 for name in ORDER:
-    misses, out_text, marker, predicate = SCEN[name]
-    result = run(function, misses, out_text, marker)
+    misses, out_text, marker, blind, predicate = SCEN[name]
+    result = run(function, misses, out_text, marker, blind)
+    base_evidence[name] = cause_evidence(result)
     if predicate(result):
         print("  ok     %s" % name)
     else:
@@ -532,13 +643,20 @@ for mutation, old, new, owner in mutations:
         failed += 1
         print("  FAIL   mutation %s anchor count=%s" % (mutation, function.count(old)))
         continue
-    misses, out_text, marker, predicate = SCEN[owner]
-    result = run(function.replace(old, new, 1), misses, out_text, marker)
-    if not predicate(result):
-        print("  RED    mutation %s (%s)" % (mutation, owner))
-    else:
+    misses, out_text, marker, blind, predicate = SCEN[owner]
+    result = run(function.replace(old, new, 1), misses, out_text, marker, blind)
+    evidence = cause_evidence(result)
+    why = cause_verdict(CAUSE[mutation], evidence, base_evidence[owner])
+    if predicate(result):
         failed += 1
         print("  FAIL   mutation %s did not redden %s" % (mutation, owner))
+    elif why:
+        failed += 1
+        print("  FAIL   mutation %s покраснила %s ЧУЖОЙ причиной: %s" % (mutation, owner, why))
+        print("         объявлено: %r, было: %s"
+              % (CAUSE[mutation], evidence.replace("\n", "|")[:300]))
+    else:
+        print("  RED    mutation %s (%s)" % (mutation, owner))
 
 print("build-path-probe M: case held and its controls showed teeth")
 raise SystemExit(1 if failed else 0)
@@ -788,12 +906,36 @@ inert_v0_as_noop = "%s\t≡\tpatch v0\tзнак перепутан\n" % VER
 inert_row_nowhy = "%s\t⊘\tpatch v0\t\n" % VER
 inert_row_placeholder = "%s\t⊘\tpatch v0\t<причина>\n" % VER
 inert_row_other = "%s\t⊘\tpatch v0\tчужая версия\n" % NEIGHBOUR
+# Строка без ИМЕНИ: набор имён её отбрасывает, а объявление на версию делает
+# непустым -- дверь уходила в сверку наборов и на пустом измерении отвечала
+# «сошлись с объявлением: 0, 0».
+inert_row_noname = "%s\t⊘\t\tимя не вписано\n" % VER
+# ≡, объявленный на имени, которое ЭТА машина измеряет кружком: оператор
+# выключил тумблер в интерфейсе форка. Владельцев у ≡ трое, и эта сторона
+# ослаблена ровно на такой исход.
+inert_noop_on_off = "%s\t≡\tpatch o0\tтумблер выключен оператором\n" % VER
+# ≡ на имени, измеренном галочкой: правка вернулась к жизни.
+inert_noop_alive = "%s\t≡\tpatch 1\tбыло вхолостую на прошлой версии\n" % VER
+# ≡ на имени, которого в выводе нет ни под одним знаком: правка ушла из реестра.
+inert_noop_gone = "%s\t≡\tpatch zzz\tбыло вхолостую до переезда пина\n" % VER
+# ⊘ на имени, измеренном кружком: у ⊘ послабления НЕТ -- его решает пара
+# «версия + реестр форка», и конфиг машины ему не владелец.
+inert_vskip_on_off = "%s\t⊘\tpatch o0\tверсия правку не несёт\n" % VER
+# Уровень, объявленный НУЛЁМ: не уровень, а след сломанного прибора.
+row_zero = "%s\t0\tизмерено\n" % VER
+# Версия, на которой ничего не легло и ничего не упало: весь слой кода в
+# ○/⊘/≡. Строк результата пять, и вывод разобран полностью.
+row_five = "%s\t5\tизмерено\n" % VER
 
 
 def run(body, table, out_text, marker=VER, blind=False, off_decl=None, floor=None,
-        inert=None):
+        inert=None, origin=None):
     """off_decl/floor/inert: None -- сходящееся объявление, False -- файла нет
-    вовсе, строка -- тело файла как есть."""
+    вовсе, строка -- тело файла как есть.
+
+    origin -- отметка происхождения дома: None означает, что файла НЕТ (дом с
+    оператором: живой, клон живого, одолженный зондом), строка -- его тело.
+    Пустая строка -- отдельный вход: файл есть, а утверждения в нём нет."""
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         tf = root / "expected.txt"
@@ -817,6 +959,12 @@ def run(body, table, out_text, marker=VER, blind=False, off_decl=None, floor=Non
         floor_file = home / "catalyst-prompt-floor.txt"
         if floor is not False:
             floor_file.write_text(floor_here if floor is None else floor, encoding="utf-8")
+        # Отметка происхождения дома. Имя -- то же, что кладёт свип; переменная
+        # объявляется ВСЕГДА, потому что дверь читает её под `set -u`, а файл
+        # создаётся только там, где сценарий его требует.
+        origin_file = home / "catalyst-home-origin.txt"
+        if origin is not None:
+            origin_file.write_text(origin, encoding="utf-8")
         img = root / "image"
         marker_bytes = ("// Version: %s\n" % marker).encode() if marker else b"no version marker\n"
         img.write_bytes(b"\x00\x01binary\x00noise\x00" + marker_bytes + b"\x00tail\x00")
@@ -827,11 +975,14 @@ def run(body, table, out_text, marker=VER, blind=False, off_decl=None, floor=Non
                   + "TWEAKCC_HOME=%s\n" % shlex.quote(str(home))
                   + "TWEAKCC_EXPECTED_OFF=%s\n" % shlex.quote(str(off_file))
                   + "TWEAKCC_EXPECTED_PROMPT_FLOOR=%s\n" % shlex.quote(str(floor_file))
+                  + "TWEAKCC_HOME_ORIGIN=%s\n" % shlex.quote(str(origin_file))
                   + body
-                  # Порядок дверей -- конвейерный: уровень первым, множество
-                  # вторым, и отказ первой до второй не пускает (иначе пропажа
-                  # данных под версию кричала бы всеми именами разом).
-                  + "\n__tw_check_applied_level %s %s || exit $?\n"
+                  # Порядок дверей -- конвейерный: предбанник якоря (он задаёт
+                  # ОБЛАСТЬ всем счётам), дверь читаемости вывода, уровень,
+                  # множество выключенных. Отказ каждой до следующей не пускает.
+                  + "\n__tw_check_anchor %s || exit $?\n" % shlex.quote(str(of))
+                  + "__tw_check_result_rows %s || exit $?\n" % shlex.quote(str(of))
+                  + "__tw_check_applied_level %s %s || exit $?\n"
                     % (shlex.quote(str(of)), shlex.quote(str(img)))
                   + "__tw_check_off_set %s %s\n"
                     % (shlex.quote(str(of)), shlex.quote(str(img))))
@@ -865,12 +1016,18 @@ SCEN = {
     "N2": (row_here, out_rows(9, 21), VER, False, None, None,
            lambda r: r.returncode == 1 and "слой кода tweakcc просел" in r.stderr
                      and "объявлено попыток 15, пробовалось 9" in r.stderr),
+    # Число в предикате -- НЕ украшение: слияние секций даёт ту же дверь и то
+    # же сообщение при другом счёте, и без числа зуб слияния красил бы зелёным.
     "N3": (row_here, out_rows(20, 21), VER, False, None, None,
-           lambda r: r.returncode == 1 and "кода пробовалось БОЛЬШЕ объявленного" in r.stderr),
+           lambda r: r.returncode == 1 and "кода пробовалось БОЛЬШЕ объявленного" in r.stderr
+                     and "объявлено 15, пробовалось 20" in r.stderr),
     "N4": ("", out_rows(14, 21), VER, False, None, None,
            lambda r: r.returncode == 1 and "не объявлен" in r.stderr
                      and ("%s\t14\t" % VER) in r.stderr),
-    "N5": (row_neighbour, out_rows(14, 21), VER, False, None, None,
+    # Измерение даёт РОВНО те 15 попыток, что объявлены у соседней версии:
+    # мутант, снявший версионный фильтр, обязан уйти зелёным (чужая строка
+    # принята за свою), а не покраснеть просадкой уровня по чужой причине.
+    "N5": (row_neighbour, out_rows(14, 21, 1), VER, False, None, None,
            lambda r: r.returncode == 1 and "не объявлен" in r.stderr),
     "N6": ("", out_rows(3, 4), VER, True, None, None,
            lambda r: r.returncode == 0 and "дверь уровня tweakcc погашена" in r.stderr),
@@ -904,7 +1061,9 @@ SCEN = {
             lambda r: r.returncode == 0 and "сошёлся" in r.stderr),
     # Две строки на версию: читатель берёт первую и выходит, вторая (та, которую
     # правил человек) молча не действует -- отказ обязан назвать дубль.
-    "N14": (row_here + row_here, out_rows(14, 21), VER, False, None, None,
+    # Измерение сходится с ПЕРВОЙ строкой: мутант, снявший дверь дубля, обязан
+    # уйти зелёным (вторая строка молча не действует), а не покраснеть уровнем.
+    "N14": (row_here + row_here, out_rows(14, 21, 1), VER, False, None, None,
             lambda r: r.returncode == 1 and "приходится строк: 2" in r.stderr),
     # Строка ЕСТЬ, поле кода пусто: совет «впишите строку» дал бы вторую строку
     # на версию, то есть отправил бы чинить в отказ по дублю.
@@ -1004,7 +1163,10 @@ SCEN = {
     # --- крестики слоя НАКЛАДОК (волна 39c) ---------------------------------
     # Их не читал никто: сверка непроходов разбирает слой КОДА, и полный обвал
     # слоя накладок -- всё легло, всё объявлено непрошедшим -- проходил молча.
-    "N33": (row_here, out_rows(14, 19, 1, pfail=2), VER, False, None, None,
+    # Пол промтов удовлетворён (легло 21 при поле 21): мутант, снявший ЭТУ
+    # дверь, обязан уйти зелёным, а не покраснеть просевшим полом -- иначе зуб
+    # доказывает соседнее правило.
+    "N33": (row_here, out_rows(14, 21, 1, pfail=2), VER, False, None, None,
             lambda r: r.returncode == 1
                       and "накладки промтов tweakcc объявлены НЕ ЛЕГШИМИ: 2" in r.stderr
                       and "overlay p0" in r.stderr),
@@ -1046,7 +1208,7 @@ SCEN = {
     "N38": (row_here, out_rows(12, 21, 1, vskip=1, noop=1), VER, False, None, None,
             inert_v0 + inert_v1 + inert_n0,
             lambda r: r.returncode == 1
-                      and "«пропущено по версии», которых больше нет" in r.stderr
+                      and "«пропущено по версии», которых нет в реестре форка" in r.stderr
                       and "patch v1" in r.stderr),
     # ≡ измерено, но НЕ объявлено: у своего знака своя сверка. Одна сверка на
     # оба знака приняла бы ⊘, ушедшее в ≡, за сходимость.
@@ -1059,7 +1221,7 @@ SCEN = {
     "N40": (row_here, out_rows(12, 21, 1, vskip=2), VER, False, None, None,
             inert_v0 + inert_v1 + inert_n0,
             lambda r: r.returncode == 1
-                      and "«отработало вхолостую», которых больше нет" in r.stderr
+                      and "«отработало вхолостую», которых нет в реестре форка" in r.stderr
                       and "patch n0" in r.stderr),
     # Имя объявлено НЕ ПОД ТЕМ знаком: инертных по-прежнему двое, состав другой.
     # Дверь на ЧИСЛЕ такую подмену пропустила бы молча -- ровно поэтому
@@ -1193,30 +1355,164 @@ SCEN = {
     "N60": (row_here, out_rows(14, 21, 1), VER, True, None, None, None,
             lambda r: r.returncode == 0
                       and "дверь инертных правок tweakcc погашена (пропущено по версии 0, вхолостую 0)" in r.stderr),
+    # --- ВЛАДЕЛЕЦ ЗНАКА ≡: конфиг машины, а не только версия и реестр --------
+    # В цикле применения форка проверка конфига (○) стоит ПЕРЕД исполнением,
+    # поэтому ≡ достижим только там, где оператор оставил правку включённой.
+    # Выключил тумблер -- имя измерено кружком, и сторона «объявлено, но не
+    # измерено» МОЛЧИТ: исход гейтится дверью множества выключенных, чей дом --
+    # машина. Прежде здесь был ложный отказ, и лечение он советовал такое,
+    # которое ломает машину с включённым тумблером.
+    "N61": (row_here, out_with_off, VER, False, None, None, inert_noop_on_off,
+            lambda r: r.returncode == 0
+                      and "инертные правки tweakcc на %s сошлись с объявлением" % VER in r.stderr),
+    # Та же сторона, но имя измерено ГАЛОЧКОЙ: отказ СВОЕЙ причиной.
+    "N62": (row_here, out_rows(14, 21, 1), VER, False, None, None, inert_noop_alive,
+            lambda r: r.returncode == 1 and "а они снова работают" in r.stderr
+                      and "patch 1" in r.stderr),
+    # ...и имя, которого в выводе нет вовсе: другая причина, другое лечение.
+    "N63": (row_here, out_rows(14, 21, 1), VER, False, None, None, inert_noop_gone,
+            lambda r: r.returncode == 1 and "которых нет в реестре форка" in r.stderr
+                      and "patch zzz" in r.stderr),
+    # --- голоса часового формы и двери накладок (безусловные) ---------------
+    # Дверь, молчащая на здоровом прогоне, побайтово неотличима от снятой, и
+    # поля вердикта свипа читают именно эти две строки.
+    "N64": (row_here, out_rows(14, 21, 1), VER, False, None, None, None,
+            lambda r: r.returncode == 0
+                      and ("NOTE: часовой формы строк tweakcc на %s: строк вне известных секций 0" % VER) in r.stderr
+                      and ("NOTE: накладки промтов tweakcc на %s: объявленных не легшими 0" % VER) in r.stderr),
+    # Слепая ручка гасит обе, и обе объявляют гашение БЕЗ УСЛОВИЯ: строка,
+    # замолкающая там, где гасить было нечего, от снятой двери неотличима.
+    "N65": (row_here, out_rows(14, 21, 1), VER, True, None, None, None,
+            lambda r: r.returncode == 0
+                      and "часовой формы вывода tweakcc погашен (строк вне известных секций либо с незнакомым знаком: 0)" in r.stderr
+                      and "дверь непрошедших накладок tweakcc погашена (не легло накладок 0)" in r.stderr),
+    # --- знак ИЗ ASCII под известной секцией ---------------------------------
+    # Форма строки правки требовала байта вне ASCII, и такая строка не
+    # доставалась НИКОМУ: ни счётам, ни часовому. Первой говорила дверь уровня,
+    # обвиняя реестр форка вместо формы вывода.
+    "N66": (row_here,
+            out_rows(14, 21, 1, unknown=[("Always Applied", ["- Thinking block styling"])]),
+            VER, False, None, None, None,
+            lambda r: r.returncode == 1
+                      and "не принадлежащие ни одному счёту" in r.stderr
+                      and "Thinking block styling" in r.stderr),
+    # --- обвал слоя накладок на машине БЕЗ объявленного пола ------------------
+    # Дом пола -- машина, и на свежей его нет вовсе. Дверь непрошедших накладок
+    # стоит ВЫШЕ пола и отвечает первой: полный обвал слоя (всё легло, всё
+    # объявлено непрошедшим) даёт легло 0 и не найдено 0, то есть выглядит как
+    # «слоя нет».
+    "N67": (row_here, out_rows(14, 0, 1, pfail=2), VER, False, None, False, None,
+            lambda r: r.returncode == 1
+                      and "накладки промтов tweakcc объявлены НЕ ЛЕГШИМИ: 2" in r.stderr
+                      and "overlay p0" in r.stderr),
+    # --- область блока результатов у СЧИТАЮЩЕГО читателя ---------------------
+    # Считаемый знак ДО якоря: предапплайный список плана печатается под теми же
+    # заголовками секций, и читатель без границы области посчитал бы его в
+    # попытки. Мутация области у часового этого не ловит -- у него другой счёт.
+    "N68": (row_here,
+            out_rows(14, 21, 1, plan=sec("Always Applied", ["✓ patch plan1 — ok"])),
+            VER, False, None, None, None,
+            lambda r: r.returncode == 0 and "сошёлся" in r.stderr
+                      and "попыток по слою кода 15" in r.stderr),
+    # --- объявленный уровень НОЛЬ --------------------------------------------
+    # Ноль не уровень: слой кода из десятков правок не может иметь ноль
+    # попыток. Без этой двери объявление «0» сходилось бы с исчезнувшим слоем
+    # обеими сторонами, а инертные и множество сходились бы пустотой -- прогон
+    # с пропавшим слоем кода уходил бы зелёным.
+    "N69": (row_zero, out_rows(0, 21), VER, False, None, None, None,
+            lambda r: r.returncode == 1
+                      and ("объявленный уровень кода для %s -- ноль" % VER) in r.stderr),
+    # Совет двери на измеренном нуле не печатает готовую строку: вклеенная, она
+    # закрыла бы дверь на нуле навсегда.
+    "N70": ("", out_rows(0, 21), VER, False, None, None, None,
+            lambda r: r.returncode == 1 and "Измерено НОЛЬ попыток" in r.stderr
+                      and ("%s\t0\t" % VER) not in r.stderr),
+    # --- строка объявления инертных с пустым ИМЕНЕМ --------------------------
+    "N71": (row_here, out_rows(14, 21, 1), VER, False, None, None, inert_row_noname,
+            lambda r: r.returncode == 1 and "без ИМЕНИ правки" in r.stderr),
+    # --- версия, где ничего не легло и ничего не упало ------------------------
+    # Весь слой кода в ○/⊘/≡: строк результата пять, вывод разобран полностью, и
+    # объявлять его непрочитанным -- ложный отказ. Сырой образец `^    [✓✗] `
+    # именно это и делал.
+    "N72": (row_five, out_rows(0, 0, off=2, vskip=2, noop=1), VER, False, None,
+            floor_nolayer, None,
+            lambda r: r.returncode == 0 and "сошёлся" in r.stderr
+                      and "попыток по слою кода 5" in r.stderr),
+    # Ни одной строки результата и ВЗВЕДЁННАЯ ручка: дверь читаемости гасится, и
+    # гашение объявляется. Прежде здесь не исполнялась ни одна ветка и не
+    # печаталось ничего.
+    "N73": (row_here, out_rows(0, 0), VER, True, None, None, None,
+            lambda r: r.returncode == 0
+                      and "дверь читаемости вывода tweakcc погашена (строк результата 0)" in r.stderr),
+    # --- у ⊘ послабления НЕТ --------------------------------------------------
+    # Имя, объявленное ⊘ и измеренное кружком: знак ⊘ решает пара «версия +
+    # реестр форка», конфиг машины ему не владелец, и обе стороны отказывают.
+    "N74": (row_here, out_with_off, VER, False, None, None, inert_vskip_on_off,
+            lambda r: r.returncode == 1 and "измерены под другим знаком" in r.stderr
+                      and "patch o0" in r.stderr),
+    # --- дом, созданный ПРОГОНОМ, а не оператором ----------------------------
+    # Предмет двери множества -- ДРЕЙФ конфига во времени. У дома, который свип
+    # создаёт заново каждый прогон (живого дома на машине нет), оси времени
+    # нет: выключено в нём то, что гасят дефолты форка. Отметка есть,
+    # объявления нет, выключенных двое -- проход с NOTE, а не отказ; иначе
+    # свежая машина краснеет без единого дефекта.
+    "N75": (row_here, out_with_off, VER, False, False, None, None,
+            "sweep-created 2026-09-06T00:00:00Z abc1234\n",
+            lambda r: r.returncode == 0
+                      and "создан прогоном, а не оператором" in r.stderr
+                      and "sweep-created 2026-09-06T00:00:00Z abc1234" in r.stderr
+                      and "выключено конфигурацией 2" in r.stderr
+                      and "дефолты форка" in r.stderr),
+    # ГРАНИЦА послабления. Тот же вход БЕЗ отметки -- прежний отказ без единого
+    # изменения: дом с оператором обязан объявлять своё множество, и послабление
+    # к нему не относится. Без этого пина «отметка» тихо стала бы «всегда».
+    "N76": (row_here, out_with_off, VER, False, False, None, None, None,
+            lambda r: r.returncode == 1
+                      and "объявление выключенных правок tweakcc для дома" in r.stderr
+                      and "не найдено" in r.stderr
+                      and "создан прогоном" not in r.stderr),
+    # Отметка ЕСТЬ, а утверждения в ней нет: пустой файл не говорит ничего, и
+    # ключом к послаблению он быть не может.
+    "N77": (row_here, out_with_off, VER, False, False, None, None, "",
+            lambda r: r.returncode == 1
+                      and "объявление выключенных правок tweakcc для дома" in r.stderr
+                      and "не найдено" in r.stderr
+                      and "создан прогоном" not in r.stderr),
 }
 ORDER = ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12",
          "N13", "N14", "N15", "N16", "N17", "N18", "N19", "N20", "N21", "N22",
          "N23", "N24", "N25", "N26", "N27", "N28", "N29", "N30", "N31", "N32",
          "N33", "N34", "N35", "N36", "N37", "N38", "N39", "N40", "N41", "N42",
          "N43", "N44", "N45", "N46", "N47", "N48", "N49", "N50", "N51", "N52",
-         "N53", "N54", "N55", "N56", "N57", "N58", "N59", "N60"]
+         "N53", "N54", "N55", "N56", "N57", "N58", "N59", "N60", "N61", "N62",
+         "N63", "N64", "N65", "N66", "N67", "N68", "N69", "N70", "N71", "N72",
+         "N73", "N74", "N75", "N76", "N77"]
 
 mutations = [
     ("N1-cross-counted",
      "__tw_layer_names \"$1\" code '✓'", "__tw_layer_names \"$1\" code '✓✗'", "N1"),
-    # Слой обязан различаться СЕКЦИЕЙ: отдай слою кода ещё и секцию накладок --
-    # и вернётся ровно тот счёт, который принадлежит каталогу оператора.
-    ("N1-code-swallows-prompts",
-     'if [[ "$__layer" == "code" ]]; then __secs="$__TW_CODE_SECTIONS"; else __secs="$__TW_PROMPT_SECTIONS"; fi',
-     '__secs="$__TW_CODE_SECTIONS|$__TW_PROMPT_SECTIONS"', "N1"),
     # Счётчик попыток обязан считать ВСЕ три исхода: оставь ему одни галочки --
     # и число попыток снова станет числом удач, то есть свойством машины.
+    # Якорь с ХВОСТОМ счётчика: тот же вызов стоит и у читателя строк
+    # результата (оба слоя), и голое имя брало бы два места разом.
     ("N1-tried-counts-only-ticks",
-     '__tw_layer_names "$1" code "$TW_MARKS"', "__tw_layer_names \"$1\" code '✓'", "N1"),
+     '__tw_layer_names "$1" code "$TW_MARKS" | LC_ALL=C grep',
+     "__tw_layer_names \"$1\" code '✓' | LC_ALL=C grep", "N1"),
     ("N1-agreement-silent", 'echo "NOTE: уровень tweakcc на $__ver сошёлся:', 'true "', "N1"),
     ("N2-low-door-off", "if (( __tried < __want_tried )); then", "if false; then", "N2"),
     ("N3-high-door-off", "if (( __tried > __want_tried )); then", "if false; then", "N3"),
-    ("N4-missing-row-ok", 'if [[ -z "$__want_tried" ]]; then', "if false; then", "N4"),
+    # Слой обязан различаться СЕКЦИЕЙ: отдай слою кода ещё и секцию накладок --
+    # и счёт кода вырастет до полного объединения секций (20 + 21). Владелец --
+    # сценарий БЕЗ крестиков: там, где крестик кода есть, слитый слой первой
+    # видит дверь накладок, и зуб пинил бы её вместо счёта кода.
+    ("N3-code-swallows-prompts",
+     'if [[ "$__layer" == "code" ]]; then __secs="$__TW_CODE_SECTIONS"; else __secs="$__TW_PROMPT_SECTIONS"; fi',
+     '__secs="$__TW_CODE_SECTIONS\t$__TW_PROMPT_SECTIONS"', "N3"),
+    # Снятая ветка не делает прогон зелёным: пустое значение падает в соседний
+    # числовой страж той же двери, и оператор получает жалобу на «не число»
+    # вместо готовой строки. Предмет ветки -- СОВЕТ, и её отсутствие видно
+    # именно по подмене сообщения, а не по коду выхода.
+    ("N4-missing-row-unadvised", 'if [[ -z "$__want_tried" ]]; then', "if false; then", "N4"),
     # Якорь берётся С ОТСТУПОМ: тот же разбор строки стоит и у читателя пола, и
     # без отступа совпадений было бы два.
     ("N5-version-filter-off",
@@ -1249,7 +1545,10 @@ mutations = [
     # --- дверь множества выключенных правок ---------------------------------
     ("N16-off-agreement-silent",
      'echo "NOTE: выключенные конфигурацией правки tweakcc на $__ver сошлись', 'true "', "N16"),
-    ("N17-missing-decl-ok", 'if [[ ! -f "$TWEAKCC_EXPECTED_OFF" ]]; then', "if false; then", "N17"),
+    # Та же подмена ветки внутри ОДНОЙ двери: без проверки на отсутствие файла
+    # сверка идёт с пустым объявлением, и человека посылают объявлять
+    # выключенные вместо того, чтобы назвать пропавшее объявление.
+    ("N17-missing-decl-unnamed", 'if [[ ! -f "$TWEAKCC_EXPECTED_OFF" ]]; then', "if false; then", "N17"),
     ("N18-undeclared-off-ok", 'if [[ -n "$__undeclared" ]]; then', "if false; then", "N18"),
     ("N19-stale-decl-ok", 'if [[ -n "$__stale" ]]; then', "if false; then", "N19"),
     # Отказ ПОСЛЕ обоих блоков: ранний возврат назвал бы человеку одну половину
@@ -1311,7 +1610,8 @@ mutations = [
     # Считать обязан слой НАКЛАДОК: спутанный слой нашёл бы крестики кода, и
     # обвал слоя накладок остался бы неназванным при том же ненулевом счёте.
     ("N33-prompt-cross-reads-code-layer",
-     '__tw_layer_names "$1" prompt \'✗\'', '__tw_layer_names "$1" code \'✗\'', "N33"),
+     '__tw_layer_names "$1" prompt \'✗\' | LC_ALL=C grep',
+     '__tw_layer_names "$1" code \'✗\' | LC_ALL=C grep', "N33"),
     ("N34-prompt-cross-extinguish-silent",
      'echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь непрошедших накладок tweakcc погашена',
      'true "', "N34"),
@@ -1329,8 +1629,13 @@ mutations = [
      'if [[ -n "$__miss" ]]; then', "if false; then", "N37"),
     # Сторона «объявлено, но не измерено» -- та самая бессрочная индульгенция:
     # вернувшаяся поддержка апстрима оставила бы запись жить дальше.
+    # Сторона «объявлено, но не измерено» снимается ЦЕЛИКОМ -- вместе со всеми
+    # тремя причинами: ранний возврат до их разбора и есть её отсутствие.
+    # Якорь берётся С КОММЕНТАРИЕМ следом: то же условие стоит и внутри
+    # ослабления знака ≡, и голое условие совпало бы дважды.
     ("N38-inert-extra-side-off",
-     'if [[ -n "$__extra" ]]; then', "if false; then", "N38"),
+     '[[ -n "$__extra" ]] || return 0\n  # ВЛАДЕЛЕЦ ЗНАКА РЕШАЕТ',
+     "return 0\n  # ВЛАДЕЛЕЦ ЗНАКА РЕШАЕТ", "N38"),
     # Класс знака и есть предмет: отдай сверке ≡ измерение ⊘ -- и холостой ход
     # снова станет неотличим от пропуска по версии.
     ("N39-inert-noop-reads-vskip",
@@ -1393,12 +1698,12 @@ mutations = [
     # Без двери ноль якорей даёт ПУСТУЮ область: все счёта врут нулём, и отказ
     # приходит от чужой двери, обвиняя реестр форка.
     ("N53-anchor-door-off",
-     'if (( __anchor_n != 1 )); then\n    echo "FATAL: якорь блока',
+     'if (( __n != 1 )); then\n    echo "FATAL: якорь блока',
      'if false; then\n    echo "FATAL: якорь блока', "N53"),
     # Односторонняя дверь: два прогона в одном выводе прошли бы молча.
     ("N54-anchor-made-one-sided",
-     'if (( __anchor_n != 1 )); then\n    echo "FATAL: якорь блока',
-     'if (( __anchor_n < 1 )); then\n    echo "FATAL: якорь блока', "N54"),
+     'if (( __n != 1 )); then\n    echo "FATAL: якорь блока',
+     'if (( __n < 1 )); then\n    echo "FATAL: якорь блока', "N54"),
     ("N55-anchor-extinguish-silent",
      'echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь якоря блока результатов tweakcc погашена',
      'true "', "N55"),
@@ -1423,28 +1728,269 @@ mutations = [
      '    echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь инертных правок tweakcc погашена',
      '    [[ -z "${__noop}${__vskip}" ]] || echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь инертных правок tweakcc погашена',
      "N60"),
+    # --- владелец знака ≡ -----------------------------------------------------
+    # Послабление на исход ○ -- ПИН: сними его, и штатное действие оператора
+    # (выключенный тумблер) снова станет отказом сборки, а лечение, которое
+    # отказ советует, сломает машину с включённым тумблером.
+    ("N61-noop-extra-unconditional",
+     '    __extra="$(__tw_names_minus "$__extra" "$(__tw_off_code_names "$__out")")"',
+     '    :', "N61"),
+    # Причина «вернулась к жизни» -- своя ветка: без неё измеренная галочка
+    # уходит в тишину, и объявление инертности переживает свою причину.
+    ("N62-inert-alive-side-off", 'if [[ -n "$__alive" ]]; then', "if false; then", "N62"),
+    # Причина «ушла из реестра форка» -- своя ветка, и лечение у неё другое.
+    ("N63-inert-gone-side-off", 'if [[ -n "$__gone" ]]; then', "if false; then", "N63"),
+    # --- голоса часового формы и двери накладок ------------------------------
+    ("N64-form-voice-silent",
+     'echo "NOTE: часовой формы строк tweakcc на $__ver: строк вне известных секций',
+     'true "', "N64"),
+    ("N64-pfail-voice-silent",
+     'echo "NOTE: накладки промтов tweakcc на $__ver: объявленных не легшими',
+     'true "', "N64"),
+    # Вернуть условность слепым NOTE: на прогоне, где гасить было нечего, дверь
+    # снова замолчит -- и поле вердикта свипа станет нулём на законном прогоне.
+    ("N65-form-extinguish-conditional",
+     '    echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- часовой формы вывода tweakcc погашен',
+     '    [[ -z "$__unsect" ]] || echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- часовой формы вывода tweakcc погашен',
+     "N65"),
+    ("N65-pfail-extinguish-conditional",
+     '    echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь непрошедших накладок tweakcc погашена',
+     '    (( __pfail == 0 )) || echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь непрошедших накладок tweakcc погашена',
+     "N65"),
+    # --- форма строки правки --------------------------------------------------
+    # Верни требование байта вне ASCII -- и знак ИЗ ASCII снова не увидит никто:
+    # ни счёта, ни часовой, а первой скажет дверь уровня о чужом предмете.
+    ("N66-line-re-nonascii-only",
+     "__TW_LINE_RE='^    [^ ][\\200-\\277]* '",
+     "__TW_LINE_RE='^    [\\200-\\377][\\200-\\377]* '", "N66"),
+    # --- дверь непрошедших накладок ------------------------------------------
+    # Отказ обязан НАЗВАТЬ накладки: без перечня оператор узнаёт число и не
+    # узнаёт, что именно форк объявил непрошедшим.
+    ("N67-prompt-cross-names-dropped",
+     '__tw_layer_names "$__out" prompt \'✗\' | LC_ALL=C sed -n \'1,10s/^/  ✗ /p\' >&2 || true',
+     'true >&2 || true', "N67"),
+    # --- область блока результатов у считающего читателя ---------------------
+    ("N68-scope-unbounded-in-names",
+     '    !inres { next }\n    # Заголовок секции',
+     '    # Заголовок секции', "N68"),
+    # --- объявленный уровень ноль --------------------------------------------
+    ("N69-zero-level-accepted", 'if (( __want_tried == 0 )); then', "if false; then", "N69"),
+    ("N70-zero-advice-ready-row",
+     'if (( __rows == 0 && __tried == 0 )); then', "if false; then", "N70"),
+    # --- строка объявления инертных без имени --------------------------------
+    ("N71-inert-empty-name-ok",
+     'if [[ -n "$__inert_noname" ]]; then', "if false; then", "N71"),
+    # --- дверь читаемости вывода ---------------------------------------------
+    # Верни сырой набор знаков -- и версия, где всё ○/⊘/≡, снова объявляется
+    # непрочитанной, хотя разобрана полностью.
+    ("N72-result-rows-ticks-only",
+     '{ __tw_layer_names "$1" code "$TW_MARKS"; __tw_layer_names "$1" prompt "$TW_MARKS"; }',
+     '{ __tw_layer_names "$1" code \'✓✗\'; __tw_layer_names "$1" prompt \'✓✗\'; }', "N72"),
+    ("N73-result-rows-extinguish-silent",
+     'echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь читаемости вывода tweakcc погашена',
+     'true "', "N73"),
+    # --- послабление принадлежит ТОЛЬКО знаку ≡ -------------------------------
+    # Раздай его обоим знакам -- и ⊘, объявленный на выключенной конфигом
+    # правке, замолчит: знак, которым владеет пара «версия + реестр форка»,
+    # начнёт зависеть от конфига чужой машины.
+    ("N74-vskip-weakened-too",
+     'if [[ "$__s" == \'≡\' ]]; then', "if true; then", "N74"),
+    # --- отметка происхождения дома ------------------------------------------
+    # Снять ЧТЕНИЕ отметки -- и дом, созданный прогоном, снова получает прежний
+    # отказ: свежая машина краснеет без единого дефекта.
+    ("N75-origin-not-read",
+     'if [[ -s "$TWEAKCC_HOME_ORIGIN" ]]; then', "if false; then", "N75"),
+    # Сделать послабление БЕЗУСЛОВНЫМ -- и дом с оператором перестаёт объявлять
+    # своё множество: дверь остаётся односторонней навсегда.
+    ("N76-origin-relaxation-unconditional",
+     'if [[ -s "$TWEAKCC_HOME_ORIGIN" ]]; then', "if true; then", "N76"),
+    # Спросить о СУЩЕСТВОВАНИИ вместо непустоты -- и ключом к послаблению
+    # становится пустой файл, который ничего не утверждает.
+    ("N77-origin-emptiness-ignored",
+     'if [[ -s "$TWEAKCC_HOME_ORIGIN" ]]; then',
+     'if [[ -f "$TWEAKCC_HOME_ORIGIN" ]]; then', "N77"),
 ]
+
+# ПРИЧИНА покраснения -- по одной на мутацию, приём корпусного стенда
+# (tools/corpus-tools-bench.sh, MUT_CAUSE). Без неё зуб доказывает чужое
+# правило: сценарий краснеет и от отказа СОСЕДНЕЙ двери, и от упавшего прибора,
+# и беззубость от исправности не отличить -- измерено до этой волны: 3 мутации
+# из 65 краснели не своей дверью (docnum:historical).
+#
+# Где мутант краснеет соседней ВЕТКОЙ своей двери умышленно (снятая ветка
+# совета роняет значение в числовой страж; снятая дверь якоря пускает считать
+# пустую область), причина называет обе стороны подмены -- что появилось и что
+# исчезло, -- и умысел записан, а не подразумевается.
+#
+# Ключ -- ИМЯ мутации, а не позиция: параллельная таблица разъезжается на
+# первой же вставке в середину, и мутация тихо получает чужую причину.
+CAUSE = {
+    "N1-cross-counted": "кода 15, промтов 21",
+    "N1-tried-counts-only-ticks": "объявлено попыток 15, пробовалось 14",
+    "N1-agreement-silent": "нет: NOTE: уровень tweakcc на",
+    "N2-low-door-off": "нет: слой кода tweakcc просел",
+    "N3-high-door-off": "нет: кода пробовалось БОЛЬШЕ объявленного",
+    "N3-code-swallows-prompts": "объявлено 15, пробовалось 41",
+    "N4-missing-row-unadvised": ("не число: «»", "нет: уровень tweakcc не объявлен"),
+    "N5-version-filter-off": ("нет: уровень tweakcc не объявлен", "сошёлся: код 15 попыток"),
+    "N6-blind-knob-silent": "нет: дверь уровня tweakcc погашена",
+    "N7-prompt-floor-off": "нет: слой промтов tweakcc просел",
+    "N8-floor-made-two-sided": "пол 21, легло 30",
+    "N9-nolayer-door-off": "нет: слой промтов объявлен отсутствующим, но он ожил",
+    "N10-nolayer-refuses-zero": "но он ожил: легло 0, не найдено 0, не легло 0",
+    "N11-notfound-silent": "нет: NOTE: накладок промтов не нашлось в образе",
+    "N12-floor-validation-off": "нет: не число и не «нет-слоя»",
+    "N13-key-trim-off": ("уровень tweakcc не объявлен", "в файле ЕСТЬ, но поле кода в ней пусто"),
+    "N14-duplicate-door-off": "нет: приходится строк: 2",
+    "N15-empty-field-misadvised": "Строка ниже -- ровно в том виде",
+    "N16-off-agreement-silent": "нет: NOTE: выключенные конфигурацией правки tweakcc на",
+    "N17-missing-decl-unnamed": ("выключились правки tweakcc, не объявленные выключенными",
+                                 "нет: FATAL: объявление выключенных правок tweakcc для дома"),
+    "N18-undeclared-off-ok": "нет: выключились правки tweakcc, не объявленные выключенными",
+    "N19-stale-decl-ok": "нет: а пробуются:",
+    "N20-refuses-after-first-block": ("выключились правки tweakcc, не объявленные выключенными",
+                                      "нет: а пробуются:"),
+    "N21-decl-not-trimmed": "выключились правки tweakcc, не объявленные выключенными",
+    "N22-off-blind-silent": "нет: дверь выключенных правок tweakcc погашена",
+    "N23-off-swallows-overlays": "○ patch o9",
+    "N24-sentinel-not-consulted": ("нет: не принадлежащие ни одному счёту",
+                                   "строк вне известных секций 1"),
+    "N25-sentinel-blind": ("нет: не принадлежащие ни одному счёту",
+                           "строк вне известных секций 0"),
+    "N27-empty-set-refuses": "FATAL: объявление выключенных правок tweakcc для дома",
+    "N28-off-bom-kept": "выключились правки tweakcc, не объявленные выключенными",
+    "N29-floor-zero-refuses": "FATAL: пол слоя промтов tweakcc для дома",
+    "N30-floor-missing-unnamed": "нет: FATAL: пол слоя промтов tweakcc для дома",
+    "N31-floor-duplicate-ok": "нет: приходится строк: 2",
+    "N32-floor-bom-kept": "пол слоя промтов не объявлен, а измерено",
+    "N26-blind-knob-falls-through": "FATAL: строки правок tweakcc, не принадлежащие ни одному счёту",
+    "N26-sentinel-extinguish-silent": "нет: часовой формы вывода tweakcc погашен",
+    "N33-prompt-cross-door-off": ("нет: накладки промтов tweakcc объявлены НЕ ЛЕГШИМИ",
+                                  "объявленных не легшими 2"),
+    "N33-prompt-cross-reads-code-layer": "накладки промтов tweakcc объявлены НЕ ЛЕГШИМИ: 1",
+    "N34-prompt-cross-extinguish-silent": "нет: дверь непрошедших накладок tweakcc погашена",
+    "N35-inert-counts-not-reported": "выключено конфигурацией 0, пропущено по версии 0, вхолостую 1",
+    "N36-inert-extinguish-silent": "нет: дверь инертных правок tweakcc погашена",
+    "N37-inert-missing-side-off": "нет: которых нет в объявлении",
+    "N38-inert-extra-side-off": "нет: которых нет в реестре форка",
+    "N39-inert-noop-reads-vskip": "≡ patch v0",
+    "N40-inert-second-sign-unchecked": "нет: «отработало вхолостую», которых нет в реестре форка",
+    "N41-inert-sign-ignored": "«пропущено по версии», а измерены под другим знаком",
+    "N42-inert-duplicate-ok": "нет: пара «знак + имя» объявлена дважды",
+    "N43-inert-why-not-required": "нет: есть строки без названной причины",
+    "N44-inert-placeholder-accepted": "нет: есть строки без названной причины",
+    "N45-sentinel-blind-to-signs": ("нет: не принадлежащие ни одному счёту",
+                                    "строк вне известных секций 0"),
+    "N46-floor-advice-swapped": "поле пола в ней пусто",
+    "N47-floor-empty-field-misadvised": "Взгляните на число один раз",
+    "N48-floor-why-not-required": "нет: не называет ПРОИСХОЖДЕНИЕ числа",
+    "N49-floor-placeholder-accepted": "нет: не называет ПРОИСХОЖДЕНИЕ числа",
+    "N50-kit-rows-bom-kept": "нет: приходится строк: 2",
+    "N51-kit-value-bom-kept": "уровень tweakcc не объявлен, а измерено: попыток 15",
+    "N52-scope-unbounded": ("не принадлежащие ни одному счёту", "• Verbose property"),
+    "N53-anchor-door-off": ("could not read tweakcc's apply output",
+                            "нет: якорь блока результатов tweakcc встречается"),
+    "N54-anchor-made-one-sided": "нет: якорь блока результатов tweakcc встречается",
+    "N55-anchor-extinguish-silent": "нет: дверь якоря блока результатов tweakcc погашена",
+    "N56-inert-empty-declaration-refuses": "инертные правки tweakcc не объявлены, а измерены: ⊘ 0, ≡ 0",
+    "N57-inert-measured-without-rows-ok": "нет: инертные правки tweakcc не объявлены, а измерены",
+    "N58-inert-bom-kept": "«пропущено по версии», которых нет в объявлении",
+    "N59-inert-agreement-silent": "нет: NOTE: инертные правки tweakcc на",
+    "N60-inert-extinguish-conditional": "нет: дверь инертных правок tweakcc погашена",
+    "N61-noop-extra-unconditional": "«отработало вхолостую», а измерены под другим знаком",
+    "N62-inert-alive-side-off": "нет: а они снова работают",
+    "N63-inert-gone-side-off": "нет: «отработало вхолостую», которых нет в реестре форка",
+    "N64-form-voice-silent": "нет: NOTE: часовой формы строк tweakcc на",
+    "N64-pfail-voice-silent": "нет: NOTE: накладки промтов tweakcc на",
+    "N65-form-extinguish-conditional": "нет: часовой формы вывода tweakcc погашен",
+    "N65-pfail-extinguish-conditional": "нет: дверь непрошедших накладок tweakcc погашена",
+    "N66-line-re-nonascii-only": ("нет: не принадлежащие ни одному счёту",
+                                  "строк вне известных секций 0"),
+    "N67-prompt-cross-names-dropped": "нет: overlay p0",
+    "N68-scope-unbounded-in-names": "объявлено 15, пробовалось 16",
+    "N69-zero-level-accepted": ("нет: объявленный уровень кода для", "сошёлся: код 0 попыток"),
+    "N70-zero-advice-ready-row": "%s\t0\t" % VER,
+    "N71-inert-empty-name-ok": "нет: есть строки без ИМЕНИ правки",
+    "N72-result-rows-ticks-only": "could not read tweakcc's apply output",
+    "N73-result-rows-extinguish-silent": "нет: дверь читаемости вывода tweakcc погашена",
+    "N74-vskip-weakened-too": "нет: «пропущено по версии», а измерены под другим знаком",
+    "N75-origin-not-read": "FATAL: объявление выключенных правок tweakcc для дома",
+    "N76-origin-relaxation-unconditional":
+        ("создан прогоном, а не оператором",
+         "нет: FATAL: объявление выключенных правок tweakcc для дома"),
+    "N77-origin-emptiness-ignored":
+        ("создан прогоном, а не оператором",
+         "нет: FATAL: объявление выключенных правок tweakcc для дома"),
+}
+missing_cause = [m[0] for m in mutations if m[0] not in CAUSE]
+if missing_cause:
+    print("  FAIL   N: мутации без объявленной причины покраснения: %s"
+          % ", ".join(missing_cause))
+    raise SystemExit(4)
 
 if len(ORDER) != declared_s or len(mutations) != declared_m:
     print("  FAIL   N: таблица разошлась с объявленным вкладом -- сценариев %d/%d, мутаций %d/%d"
           % (len(ORDER), declared_s, len(mutations), declared_m))
     raise SystemExit(4)
 
+# ДОМ ПРОВЕРКИ ПРИЧИН -- ОДИН на оба случая, объявляющих причины. Случай (m)
+# берёт этот текст ОТСЮДА по меткам ниже и исполняет его у себя: вторая
+# редакция этих двенадцати строк разошлась бы с первой на первой же правке, и
+# разошлась бы МОЛЧА -- сломанная проверка причин выглядит ровно как проверка,
+# которая прошла. Метки -- границы вырезки, и они обязаны стоять в столбце 0.
+#
+# След -- это «rc=<код> :: <stderr>», и причина ищется в нём подстрокой. У
+# мутации, снимающей ГОЛОС, присутствием след не записать: её след -- молчание,
+# а «rc=0» сошлось бы с любым зелёным мутантом, то есть не назвало бы ничего.
+# Потому вторая форма: приставка «нет: » требует ОТСУТСТВИЯ строки у мутанта И
+# её присутствия в следе ЗДОРОВОГО прогона того же сценария. Вторая половина
+# обязательна: переименованная строка двери сделала бы отсутствие вечно
+# истинным, и зуб перестал бы что-либо доказывать молча.
+# CAUSE-HOME-BEGIN
+ABSENT = "нет: "
+
+
+def cause_evidence(result):
+    return "rc=%s :: %s" % (result.returncode, result.stderr)
+
+
+def cause_verdict(cause, evidence, base_evidence):
+    """Пусто -- след совпал с объявленной причиной; иначе объяснение."""
+    for item in (cause if isinstance(cause, tuple) else (cause,)):
+        if item.startswith(ABSENT):
+            gone = item[len(ABSENT):]
+            if gone not in base_evidence:
+                return ("объявлено отсутствие «%s», но этой строки нет и в следе"
+                        " ЗДОРОВОГО прогона -- объявление устарело" % gone)
+            if gone in evidence:
+                return "строка «%s» осталась в следе мутанта" % gone
+        elif item not in evidence:
+            return "нет следа «%s»" % item
+    return ""
+# CAUSE-HOME-END
+
+
 def unpack(name):
     """Сценарий -- кортеж переменной длины: столбец объявления пропущенных по
-    версии добавлен волной 39c, и запись без него означает сходящееся
-    объявление. Разбор ОДИН на прогон и на мутации: два места распаковки
-    разошлись бы на первой же новой колонке."""
+    версии добавлен волной 39c, отметка происхождения дома -- волной 39d, и
+    запись без них означает сходящееся объявление и дом без отметки. Разбор
+    ОДИН на прогон и на мутации: два места распаковки разошлись бы на первой же
+    новой колонке."""
     row = SCEN[name]
     table, out_text, marker, blind, off_decl, floor = row[:6]
     vskip = row[6] if len(row) > 7 else None
-    return table, out_text, marker, blind, off_decl, floor, vskip, row[-1]
+    origin = row[7] if len(row) > 8 else None
+    return table, out_text, marker, blind, off_decl, floor, vskip, origin, row[-1]
 
 
 failed = 0
+# След здорового прогона нужен объявлениям отсутствия ниже, и берётся он
+# ОТСЮДА: второй прогон того же сценария ради причины удвоил бы стенд.
+base_evidence = {}
 for name in ORDER:
-    table, out_text, marker, blind, off_decl, floor, vskip, predicate = unpack(name)
-    result = run(function, table, out_text, marker, blind, off_decl, floor, vskip)
+    table, out_text, marker, blind, off_decl, floor, vskip, origin, predicate = unpack(name)
+    result = run(function, table, out_text, marker, blind, off_decl, floor, vskip, origin)
+    base_evidence[name] = cause_evidence(result)
     if predicate(result):
         print("  ok     %s" % name)
     else:
@@ -1456,14 +2002,21 @@ for mutation, old, new, owner in mutations:
         failed += 1
         print("  FAIL   mutation %s anchor count=%s" % (mutation, function.count(old)))
         continue
-    table, out_text, marker, blind, off_decl, floor, vskip, predicate = unpack(owner)
+    table, out_text, marker, blind, off_decl, floor, vskip, origin, predicate = unpack(owner)
     result = run(function.replace(old, new, 1), table, out_text, marker, blind, off_decl,
-                 floor, vskip)
-    if not predicate(result):
-        print("  RED    mutation %s (%s)" % (mutation, owner))
-    else:
+                 floor, vskip, origin)
+    evidence = cause_evidence(result)
+    why = cause_verdict(CAUSE[mutation], evidence, base_evidence[owner])
+    if predicate(result):
         failed += 1
         print("  FAIL   mutation %s did not redden %s" % (mutation, owner))
+    elif why:
+        failed += 1
+        print("  FAIL   mutation %s покраснила %s ЧУЖОЙ причиной: %s" % (mutation, owner, why))
+        print("         объявлено: %r, было: %s"
+              % (CAUSE[mutation], evidence.replace("\n", "|")[:300]))
+    else:
+        print("  RED    mutation %s (%s)" % (mutation, owner))
 
 print("build-path-probe N: case held and its controls showed teeth")
 raise SystemExit(1 if failed else 0)
