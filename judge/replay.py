@@ -3,7 +3,9 @@
 
 Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
   0  разметка завершена
-  2  прибор не может мерить: не прочитан ДОМ словарей (tweakcc-patch.js),
+  2  прибор не может мерить: ДОМ словарей (tweakcc-patch.js) не найден ни в
+     одной из ДВУХ раскладок -- корень дерева кита и дом раскатанных
+     инструментов (см. DEFAULT_SOURCES) -- либо найден и не прочитан,
      словарь пробы в нём не объявлен, либо дом РАЗОШЁЛСЯ с поставленным
      образом (зашитый словарь не подставляется: расхождение с тем, что
      исполняется, даёт неверную разметку). Круг 28, F-10: прежде эти выходы
@@ -26,10 +28,18 @@ import sys
 # производного, называет домом копию: прибор отказывал кодом 2 на машине без
 # пропатченной установки, хотя предмет замера лежал в дереве рядом (волна 40b).
 # Путь считается от __file__, а не от cwd: инструменты зовут из любого каталога.
-KIT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_SOURCE = os.path.join(KIT_ROOT, 'tweakcc-patch.js')
-# Раскатка (scripts/probes-sync.sh) кладёт judge/*.py в ~/.claude/judge, а
-# исходник патча рядом НЕ кладёт: в таком доме путь называется этой ручкой.
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+KIT_ROOT = os.path.dirname(TOOLS_DIR)
+# Один файл живёт в ДВУХ раскладках: в дереве кита он лежит в корне
+# (judge/ -- подкаталог), а раскатанный дом инструментов несёт его СОСЕДОМ
+# (scripts/probes-sync.sh кладёт его в $TOOLS_HOME). Раскладка измеряется
+# по наличию файла, а не выводится из имени дома: раскатанный контур обязан
+# работать без дерева кита. В ~/.claude (стоковый каталог пользователя)
+# исходник не кладётся.
+DEFAULT_SOURCES = (
+    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),
+    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),
+)
 SOURCE_ENV = 'CLAUDE_JUDGE_PATCH_SRC'
 # Единственный дом умолчания образа на весь контур: у validate.py и
 # adjudicate.py своей копии этой строки быть не должно -- три копии одной
@@ -43,6 +53,19 @@ CARRIER_MARK = b'globalThis.__ccProbe'
 # Ключ кэша -- ТРОЙКА (дом, образ, проба): под ключом без дома два разных дома
 # отдавали бы один словарь.
 _VOCAB_CACHE = {}
+
+
+def default_source():
+    """Первый СУЩЕСТВУЮЩИЙ кандидат раскладки; None, когда нет ни одного.
+
+    None, а не первый кандидат: звонящий обязан назвать в отказе ВСЕ
+    кандидаты -- иначе починка выглядит как «не тот путь» вместо «файла
+    нет ни в одной раскладке».
+    """
+    for cand in DEFAULT_SOURCES:
+        if os.path.exists(os.path.expanduser(cand)):
+            return cand
+    return None
 
 
 # Общие argparse-типы числовых ручек судейских инструментов. Дом -- replay.py:
@@ -208,8 +231,17 @@ def verdict_vocabulary(image_path=None, probe='judge', source_path=None):
     что исполняется, даёт неверную разметку корпуса, на которую потом
     опирается выбор модели.
     """
-    source = os.path.realpath(os.path.expanduser(
-        source_path or os.environ.get(SOURCE_ENV) or DEFAULT_SOURCE))
+    chosen = source_path or os.environ.get(SOURCE_ENV) or default_source()
+    if chosen is None:
+        # Код 2 -- прибор не может мерить. Названы ВСЕ кандидаты: раскладок
+        # две, и «не тот путь» -- неверный диагноз.
+        print('дом словарей вердиктов не найден ни в одной раскладке: '
+              + ', '.join(DEFAULT_SOURCES)
+              + '; положите tweakcc-patch.js рядом с китом или в дом '
+                f'инструментов либо назовите его путь в {SOURCE_ENV}',
+              file=sys.stderr)
+        raise SystemExit(2)
+    source = os.path.realpath(os.path.expanduser(chosen))
     image = os.path.realpath(os.path.expanduser(
         image_path or os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE))
     key = (source, image, probe)
@@ -220,11 +252,15 @@ def verdict_vocabulary(image_path=None, probe='judge', source_path=None):
             body = fh.read()
     except OSError as err:
         # Код 2, а не строка-в-SystemExit (она даёт 1): прибор не может
-        # мерить -- круг 28, F-10. Починка называется прямо: дом читается
-        # рядом с китом, а раскатанный ~/.claude/judge его не несёт.
+        # мерить -- круг 28, F-10. Ветка достижима ДВУМЯ путями: путь назван
+        # явно (аргументом или ручкой) и нечитаем, ЛИБО кандидат раскладки
+        # существовал на замере default_source() и исчез до открытия. В обоих
+        # случаях дом НАЗВАН, поэтому совет «положите рядом» здесь неверен --
+        # называть надо сам путь. Отсутствие обеих раскладок -- другая дверь,
+        # выше по функции.
         print(f'дом словарей вердиктов не прочитан: {source} '
-              f'({err.__class__.__name__}); положите tweakcc-patch.js рядом с '
-              f'китом либо назовите его путь в {SOURCE_ENV}', file=sys.stderr)
+              f'({err.__class__.__name__}); проверьте этот путь либо назовите '
+              f'другой в {SOURCE_ENV}', file=sys.stderr)
         raise SystemExit(2)
     home = _scan_source(body, probe)
     if home is None:

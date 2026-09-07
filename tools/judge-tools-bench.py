@@ -46,11 +46,11 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 48
+EXPECTED_SCENARIOS = 49
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 56
+EXPECTED_MUTATIONS = 58
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -563,10 +563,15 @@ def seeded_replay(vocab: dict[str, tuple[list[str], list[str]]]) -> tuple[Module
     файлов.
     """
     module = import_tool("replay")
+    # Дом разрешается ДО mkstemp: отказ ниже уронил бы уже созданный файл
+    # образа, и стенд копил бы мусор ровно на тех мутациях, которые он ловит.
+    src = module.default_source()
+    require(src is not None,
+            "дом словарей не найден ни в одной раскладке: посев ушёл бы мимо ключа")
+    home = os.path.realpath(os.path.expanduser(src))
     handle, path = tempfile.mkstemp(prefix="judge-bench-image.")
     os.close(handle)
     real = os.path.realpath(path)
-    home = os.path.realpath(os.path.expanduser(module.DEFAULT_SOURCE))
     for probe, values in vocab.items():
         module._VOCAB_CACHE[(home, real, probe)] = values
     os.environ["CLAUDE_JUDGE_IMAGE"] = real
@@ -1677,6 +1682,91 @@ def scenario_48() -> None:
                 f"{done.stdout.strip()[:200]}")
 
 
+def scenario_49() -> None:
+    """Раскатанный дом инструментов резолвится САМ: исходник лежит СОСЕДОМ.
+
+    Раскатка (scripts/probes-sync.sh) кладёт judge/*.py и tweakcc-patch.js в
+    ОДИН каталог, а резолвер знал только раскладку дерева кита -- 2026-09-07
+    любой вызов словаря в раскатанном доме отказывал кодом 2 (волна 42).
+    Половина Б -- положительный контроль половины А: без отказа, называющего
+    ОБА кандидата, «словарь нашёлся» неотличимо от «резолвер вернул что
+    попало».
+    """
+    saved = {name: os.environ.get(name)
+             for name in ("CLAUDE_JUDGE_PATCH_SRC", "CLAUDE_JUDGE_IMAGE")}
+    spec_name = "judge_tools_bench_deployed_replay"
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        tools = base / "judge"
+        tools.mkdir()
+        shutil.copy2(ROOT / "judge" / "replay.py", tools / "replay.py")
+        neighbour = tools / "tweakcc-patch.js"
+        shutil.copy2(ROOT / "tweakcc-patch.js", neighbour)
+        # Фикстура обязана быть ИМЕННО раскатанной раскладкой: исходник на
+        # уровне кита вернул бы сценарий к СТАРОЙ ступени, и соседняя не
+        # измерялась бы вовсе.
+        require(not (base / "tweakcc-patch.js").exists(),
+                "фикстура несёт исходник на уровне кита -- измеряется старая ступень")
+
+        for name in saved:
+            os.environ.pop(name, None)
+        try:
+            # Копия грузится ПО СВОЕМУ ПУТИ: import_tool берёт replay из дерева
+            # кита, а предмет здесь -- раскладка, которую модуль считает от
+            # собственного __file__.
+            spec = importlib.util.spec_from_file_location(
+                spec_name, tools / "replay.py")
+            require(spec is not None and spec.loader is not None,
+                    f"не удалось создать spec для {tools / 'replay.py'}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec_name] = module
+            spec.loader.exec_module(module)
+
+            # Образа нет по пути -- это ОБЪЯВЛЕННЫЙ пропуск сверки (волна 40b),
+            # а не отказ: предмет сценария -- дом, а не сверка.
+            image = str(base / "nonexistent-claude-image")
+
+            def vocabulary(probe="judge"):
+                """Словарь В ПРОЦЕССЕ с перехватом stderr: отказ разбирается текстом.
+
+                Кэш чистится перед каждым вызовом: половины меряют РАЗНЫЕ
+                состояния одного дома, и ответ первой не должен отвечать за
+                вторую.
+                """
+                noise = io.StringIO()
+                keep = sys.stderr
+                sys.stderr = noise
+                module._VOCAB_CACHE.clear()
+                try:
+                    return module.verdict_vocabulary(image_path=image,
+                                                     probe=probe), None, noise.getvalue()
+                except SystemExit as error:
+                    return None, error.code, noise.getvalue()
+                finally:
+                    sys.stderr = keep
+
+            home, code, said = vocabulary()
+            require(code is None,
+                    "раскатанная раскладка не резолвится: соседний исходник не взят "
+                    f"(код {code}): {said.strip()[:300]}")
+            require(bool(home) and all(home),
+                    f"словарь раскатанного дома пуст: {home}")
+
+            neighbour.unlink()
+            home, code, said = vocabulary()
+            require(code == 2,
+                    f"дом без единой раскладки не отвергнут кодом 2 (код {code}): {home}")
+            require(all(cand in said for cand in module.DEFAULT_SOURCES),
+                    f"отказ назвал не оба кандидата раскладки: {said.strip()[:300]!r}")
+        finally:
+            sys.modules.pop(spec_name, None)
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -1729,6 +1819,7 @@ def run_scenarios() -> int:
         (46, scenario_46),
         (47, scenario_47),
         (48, scenario_48),
+        (49, scenario_49),
     ]
     mismatches = 0
     for number, case in cases:
@@ -2412,12 +2503,13 @@ def mutation_m52(root: Path) -> None:
 
 
 def mutation_m53(root: Path) -> None:
-    # Дом уезжает мимо кита: прибор снова отказывает там, где предмет замера
-    # лежит рядом в дереве.
+    # Ступень КОРНЯ кита снята: в дереве кита исходник лежит в корне, и без
+    # неё прибор отказывает там, где предмет замера лежит рядом.
     replace_once(
         root / "judge" / "replay.py",
-        "DEFAULT_SOURCE = os.path.join(KIT_ROOT, 'tweakcc-patch.js')",
-        "DEFAULT_SOURCE = os.path.join(KIT_ROOT, 'judge', 'tweakcc-patch.js')",
+        "    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),\n"
+        "    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),\n",
+        "    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),\n",
         "M53",
     )
 
@@ -2457,6 +2549,29 @@ def mutation_m56(root: Path) -> None:
         "    if False:\n"
         "        # Код 2, а не строка-в-SystemExit (она даёт 1) -- круг 28, F-10.\n",
         "M56",
+    )
+
+
+def mutation_m57(root: Path) -> None:
+    # Ступень СОСЕДА снята (обратная к M53): раскатанный дом инструментов
+    # снова не резолвится, хотя исходник лежит в нём рядом с judge/*.py.
+    replace_once(
+        root / "judge" / "replay.py",
+        "    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),\n"
+        "    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),\n",
+        "    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),\n",
+        "M57",
+    )
+
+
+def mutation_m58(root: Path) -> None:
+    # Отказ называет ОДНУ раскладку из двух: починка снова выглядит как «не
+    # тот путь» вместо «файла нет ни в одной раскладке».
+    replace_once(
+        root / "judge" / "replay.py",
+        "', '.join(DEFAULT_SOURCES)",
+        "DEFAULT_SOURCES[0]",
+        "M58",
     )
 
 
@@ -2517,6 +2632,8 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M54", mutation_m54, 46, "пропуск сверки не объявлен при отсутствии образа"),
     ("M55", mutation_m55, 47, "расхождение дома и образа не отвергнуто кодом 2"),
     ("M56", mutation_m56, 48, "проба вне дома не отвергнута кодом 2"),
+    ("M57", mutation_m57, 49, "раскатанная раскладка не резолвится"),
+    ("M58", mutation_m58, 49, "отказ назвал не оба кандидата раскладки"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно

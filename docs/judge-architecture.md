@@ -232,7 +232,12 @@ The dictionary's home is `tweakcc-patch.js`, the authored patch source:
 it writes the bytes that later stand in the image, so the image is a
 derived artifact. Reading the dictionary out of the derived copy made the
 tool refuse (code 2) on any machine without a patched installation, while
-the subject of the measurement lay in the tree beside it.
+the subject of the measurement lay in the tree beside it. That home has
+TWO layouts — the kit tree root (where `judge/` is a subdirectory) and the
+deployed tools home, which carries the source as a NEIGHBOUR of
+`judge/*.py` — and the layout is chosen by which candidate EXISTS rather
+than derived from the home's name; when neither exists, the tool refuses
+with code 2 and names both candidate paths.
 
 The dictionary is NOT baked into any tool. When the image is readable and
 carries our probes, its dictionary is compared with the home's and a
