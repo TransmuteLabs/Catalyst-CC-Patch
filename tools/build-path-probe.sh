@@ -132,6 +132,22 @@ __envon KEEP_ROOT || __keep_root_rc=$?
 (( __keep_root_rc != 2 )) || exit 2
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Инод читается ОБЩИМ ДОМОМ (tools/fs-meta.sh) -- тем же, из которого метку
+# времени берут конвейер и свип. Здесь форма была безопасной (`-f%i` без
+# пробела: недопустимая опция, пустой stdout, честный переход на запаску), но
+# она всё равно опиралась на КОД ВОЗВРАТА отравляющей команды, а у соседей
+# ровно эта опора и оказалась дырой. Третья копия одной идиомы -- третий шанс
+# разойтись; дом убирает и его.
+if [[ ! -f "$HERE/tools/fs-meta.sh" ]]; then
+  echo "build-path-probe: ОТКАЗ -- не найден $HERE/tools/fs-meta.sh: инод читать нечем." >&2
+  echo "  Центральное утверждение зонда -- «инод сменился»; без дома оно" >&2
+  echo "  неизмеримо, и это класс «прибор не может мерить», а не вердикт." >&2
+  exit 2
+fi
+# shellcheck source=fs-meta.sh
+source "$HERE/tools/fs-meta.sh"
+
 PIPELINE="$HERE/claude-patch-all.sh"
 OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
@@ -2185,7 +2201,7 @@ self_test_marks
 # because it asked in the wrong dialect -- that reads as "the file is gone".
 inode() {
   [[ -f "$1" ]] || { echo "absent"; return 0; }
-  stat -f%i "$1" 2>/dev/null || stat -c%i "$1" 2>/dev/null || echo "none"
+  fs_inode "$1" || echo "none"
 }
 # Отсутствие и «оба диалекта промолчали» -- РАЗНЫЕ ответы, и ни один из них не
 # является инодом. Потребитель сравнивает ДО с ПОСЛЕ, поэтому обязан отвергать
