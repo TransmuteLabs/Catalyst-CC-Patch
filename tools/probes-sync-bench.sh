@@ -79,6 +79,10 @@ mk_kit() {
     printf 'canon %s\n' "$f" > "$dst/judge/$f"
   done
   printf '/Users/YOUR-USER\n' > "$dst/judge/com.transmutelabs.judge-compact.plist"
+  # Дом словарей вердиктов лежит в КОРНЕ кита, а не в judge/: раскатка
+  # везёт его отдельной парой, и без него игрушечный канон неполон --
+  # сторона канона отсутствует, и раскатка отказывает названно.
+  printf 'canon tweakcc-patch.js\n' > "$dst/tweakcc-patch.js"
 }
 
 make_env() {

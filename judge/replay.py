@@ -3,11 +3,14 @@
 
 Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
   0  разметка завершена
-  2  прибор не может мерить: образ не прочитан либо словарь вердиктов не
-     извлечён из него (зашитый словарь не подставляется: расхождение с
-     образом даёт неверную разметку). Круг 28, F-10: прежде эти выходы
+  2  прибор не может мерить: не прочитан ДОМ словарей (tweakcc-patch.js),
+     словарь пробы в нём не объявлен, либо дом РАЗОШЁЛСЯ с поставленным
+     образом (зашитый словарь не подставляется: расхождение с тем, что
+     исполняется, даёт неверную разметку). Круг 28, F-10: прежде эти выходы
      отдавались кодом 1 через sys.exit('строка') -- «отказ по существу»,
      хотя по существу здесь отказываться не о чем, чинить надо вход.
+     Волна 40b: ОТСУТСТВИЕ образа кодом 2 больше не является -- сверка с
+     ним объявляется пропущенной в stderr, а словарь берётся из дома.
 """
 import argparse
 import glob
@@ -18,10 +21,27 @@ import os
 import re
 import sys
 
-# The home of the verdict dictionary is the image: that is where it is applied.
-# A literal copy drifts from the image silently, and a wrong dictionary gives a
-# wrong corpus annotation, which model selection then relies on.
+# Дом словаря вердиктов -- АВТОРСКИЙ ИСХОДНИК патча: он пишет те байты, которые
+# потом стоят в образе, а образ -- производное от него. Словарь, вычитанный из
+# производного, называет домом копию: прибор отказывал кодом 2 на машине без
+# пропатченной установки, хотя предмет замера лежал в дереве рядом (волна 40b).
+# Путь считается от __file__, а не от cwd: инструменты зовут из любого каталога.
+KIT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_SOURCE = os.path.join(KIT_ROOT, 'tweakcc-patch.js')
+# Раскатка (scripts/probes-sync.sh) кладёт judge/*.py в ~/.claude/judge, а
+# исходник патча рядом НЕ кладёт: в таком доме путь называется этой ручкой.
+SOURCE_ENV = 'CLAUDE_JUDGE_PATCH_SRC'
+# Единственный дом умолчания образа на весь контур: у validate.py и
+# adjudicate.py своей копии этой строки быть не должно -- три копии одной
+# константы расходятся молча.
 DEFAULT_IMAGE = '~/.local/bin/claude'
+# Признак НОСИТЕЛЯ наших проб. Образ без метки -- не наша сборка (сток либо
+# чужая), и сверять с ним нечего; образ С меткой, но без словаря пробы --
+# расхождение, а не «нечего сверять». Замерено 2026-09-07 (`grep -a -c -F`):
+# метка стоит в собранном 2.1.263 и отсутствует в его пристинном близнеце.
+CARRIER_MARK = b'globalThis.__ccProbe'
+# Ключ кэша -- ТРОЙКА (дом, образ, проба): под ключом без дома два разных дома
+# отдавали бы один словарь.
 _VOCAB_CACHE = {}
 
 
@@ -102,44 +122,126 @@ def append_jsonl(path, payload):
         fh.write(prefix + payload)
 
 
-def verdict_vocabulary(image_path=None, probe='judge'):
-    path = os.path.realpath(os.path.expanduser(
-        image_path or os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE))
-    key = (path, probe)
-    if key in _VOCAB_CACHE:
-        return _VOCAB_CACHE[key]
-    try:
-        with open(path, 'rb') as fh:
-            data = fh.read()
-    except OSError as err:
-        # Код 2, а не строка-в-SystemExit (она даёт 1): прибор не может
-        # мерить -- круг 28, F-10.
-        print(f'образ не прочитан: {path} ({err.__class__.__name__})', file=sys.stderr)
-        raise SystemExit(2)
-    # От дескриптора пробы до её словаря — сколько угодно полей, но НЕ через
-    # соседнюю пробу: `(?!dirName:")` запрещает пересечь границу, поэтому окно
-    # не приходится подгонять числом. Прежняя форма стояла на `{0,160}` и
-    # молча перестала находить словарь, когда в дескриптор добавили turn/
-    # selfId/turnLost (2026-08-29: расстояние стало ~250 знаков, инструмент
-    # отказал на ЖИВОМ образе — «прибор не может мерить» вместо разметки).
+def _scan_image(data, probe):
+    """(rx, act) из БАЙТОВ собранного образа либо None, если словаря там нет.
+
+    От дескриптора пробы до её словаря -- сколько угодно полей, но НЕ через
+    соседнюю пробу: `(?!dirName:")` запрещает пересечь границу, поэтому окно
+    не приходится подгонять числом. Прежняя форма стояла на `{0,160}` и
+    молча перестала находить словарь, когда в дескриптор добавили turn/
+    selfId/turnLost (2026-08-29: расстояние стало ~250 знаков, инструмент
+    отказал на ЖИВОМ образе -- «прибор не может мерить» вместо разметки).
+    Запрет границы -- свойство ИМЕННО этого скана: в образе пробы стоят
+    подряд одной строкой, и проба без своего словаря взяла бы соседний.
+    `[^\n]` тоже свойство образа: он одна строка. У авторского исходника
+    класс другой -- см. _scan_source.
+    """
     pattern = (rb'dirName:"' + re.escape(probe.encode()) +
                rb'"(?:(?!dirName:")[^\n]){0,4000}?rx:"([^"]+)",act:"([^"]+)"')
     found = re.search(pattern, data)
     if not found:
-        # Код 2, а не строка-в-SystemExit (она даёт 1) -- круг 28, F-10.
-        print(f'словарь вердиктов не извлечён из образа {path} для пробы "{probe}"; '
-              'зашитый словарь не подставляется — расхождение с образом даёт неверную разметку',
-              file=sys.stderr)
+        return None
+    return (found.group(1).decode().split('|'), found.group(2).decode().split('|'))
+
+
+def vocabulary_from_image(image_path, probe='judge'):
+    """Словарь пробы из ПРОПАТЧЕННОГО образа либо None. OSError не ловится:
+    решение о пропуске сверки принимает вызывающий, а не читатель байтов."""
+    with open(image_path, 'rb') as fh:
+        return _scan_image(fh.read(), probe)
+
+
+def _scan_source(data, probe):
+    """(rx, act) из АВТОРСКОГО ИСХОДНИКА патча либо None.
+
+    Форма извлечения та же, что у образа, и отличается ровно классом «любой
+    знак»: образ -- одна строка, а исходник склеивает JS-литералы через
+    переводы строк и комментарии между полями. Запрет на пересечение границы
+    соседней пробы сохранён -- он и здесь единственное, что держит окно.
+    """
+    pattern = (rb'dirName:"' + re.escape(probe.encode()) +
+               rb'"(?:(?!dirName:")[\s\S]){0,4000}?rx:"([^"]+)",act:"([^"]+)"')
+    found = re.search(pattern, data)
+    if not found:
+        return None
+    return (found.group(1).decode().split('|'), found.group(2).decode().split('|'))
+
+
+def _cross_check_image(home, image, probe, source):
+    """Сверка дома с образом. Расхождение -- код 2; пропуск -- ОБЪЯВЛЕН.
+
+    Пропуск без следа неотличим от сверки, которая прошла, поэтому у каждого
+    исхода «сверять нечем» есть своя строка в stderr с названной причиной.
+    """
+    try:
+        with open(image, 'rb') as fh:
+            data = fh.read()
+    except OSError as err:
+        print(f'сверка с образом ПРОПУЩЕНА: образа нет по пути {image} '
+              f'({err.__class__.__name__})', file=sys.stderr)
+        return
+    if CARRIER_MARK not in data:
+        print(f'сверка с образом ПРОПУЩЕНА: образ {image} не несёт наших проб '
+              f'(нет метки {CARRIER_MARK.decode()})', file=sys.stderr)
+        return
+    shipped = _scan_image(data, probe)
+    if shipped is None:
+        # Носитель БЕЗ словаря пробы -- расхождение, а не «нечего сверять»:
+        # метка говорит, что пробы в образе есть, значит эта пропала.
+        print(f'дом и образ РАСХОДЯТСЯ по пробе "{probe}": дом {source} объявляет '
+              f'rx="{"|".join(home[0])}",act="{"|".join(home[1])}"; образ {image} '
+              'несёт наши пробы, но словаря этой пробы в нём нет -- поставленный '
+              'образ собран не из этого дерева', file=sys.stderr)
         raise SystemExit(2)
-    result = (found.group(1).decode().split('|'), found.group(2).decode().split('|'))
-    _VOCAB_CACHE[key] = result
-    return result
+    if shipped != home:
+        print(f'дом и образ РАСХОДЯТСЯ по пробе "{probe}": дом {source} -- '
+              f'rx="{"|".join(home[0])}",act="{"|".join(home[1])}"; образ {image} -- '
+              f'rx="{"|".join(shipped[0])}",act="{"|".join(shipped[1])}" -- '
+              'поставленный образ собран не из этого дерева', file=sys.stderr)
+        raise SystemExit(2)
+
+
+def verdict_vocabulary(image_path=None, probe='judge', source_path=None):
+    """Словарь пробы из ДОМА, сверенный с образом, когда образ есть.
+
+    Зашитый словарь не подставляется ни при каком исходе: расхождение с тем,
+    что исполняется, даёт неверную разметку корпуса, на которую потом
+    опирается выбор модели.
+    """
+    source = os.path.realpath(os.path.expanduser(
+        source_path or os.environ.get(SOURCE_ENV) or DEFAULT_SOURCE))
+    image = os.path.realpath(os.path.expanduser(
+        image_path or os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE))
+    key = (source, image, probe)
+    if key in _VOCAB_CACHE:
+        return _VOCAB_CACHE[key]
+    try:
+        with open(source, 'rb') as fh:
+            body = fh.read()
+    except OSError as err:
+        # Код 2, а не строка-в-SystemExit (она даёт 1): прибор не может
+        # мерить -- круг 28, F-10. Починка называется прямо: дом читается
+        # рядом с китом, а раскатанный ~/.claude/judge его не несёт.
+        print(f'дом словарей вердиктов не прочитан: {source} '
+              f'({err.__class__.__name__}); положите tweakcc-patch.js рядом с '
+              f'китом либо назовите его путь в {SOURCE_ENV}', file=sys.stderr)
+        raise SystemExit(2)
+    home = _scan_source(body, probe)
+    if home is None:
+        # Код 2, а не строка-в-SystemExit (она даёт 1) -- круг 28, F-10.
+        print(f'словарь вердиктов не объявлен в доме {source} для пробы "{probe}"; '
+              'зашитый словарь не подставляется — расхождение с тем, что '
+              'исполняется, даёт неверную разметку', file=sys.stderr)
+        raise SystemExit(2)
+    _cross_check_image(home, image, probe, source)
+    _VOCAB_CACHE[key] = home
+    return home
 
 
 class _VerdictPattern:
-    # Lazy construction: the dictionary is taken from the image on the very
+    # Lazy construction: the dictionary is taken from its home on the very
     # first lookup, not at import time — otherwise any import of replay would
-    # require the image to be present.
+    # require the home (and, with it, the cross-check) to be reachable.
     def findall(self, text):
         return verdict_pattern().findall(text)
 

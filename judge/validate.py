@@ -36,7 +36,10 @@ import replay
 DEFAULT_HOME = (os.environ.get('CLAUDE_PROBES_DIR')
                 or os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude', 'probes'))
 DEFAULT_PROBE = 'judge'
-DEFAULT_IMAGE = '~/.local/bin/claude'
+# Умолчания образа здесь НЕТ намеренно: его единственный дом -- replay.py
+# (волна 40b свела туда три разошедшиеся бы копии). Заодно уходит и вторая
+# лестница: своя копия умолчания подставлялась ДО $CLAUDE_JUDGE_IMAGE, и
+# переменная, которую соседний adjudicate.py читает, здесь не действовала.
 
 
 def configure_paths(home, probe):
@@ -791,8 +794,10 @@ def main():
                     getattr(args, 'probe', None) or DEFAULT_PROBE)
     if getattr(args, 'records', None) is None and hasattr(args, 'records'):
         args.records = DEFAULT_RECORDS
+    # None, а не своя подстановка: лестницу «ручка -> переменная -> умолчание»
+    # разрешает сам replay.
     RX_VALUES, ACT_VALUES = verdict_vocabulary(
-        getattr(args, 'image', None) or DEFAULT_IMAGE, PROBE_ID)
+        getattr(args, 'image', None), PROBE_ID)
     truth = getattr(args, 'truth', None)
     if truth is not None and truth not in RX_VALUES:
         # Код 2 «контракт вызова» (круг 28, F-10).

@@ -63,7 +63,7 @@ D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABL
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
 D36	README.md	probe-bench's 7 recorded mutations	probe-bench's 8 recorded mutations	объявлено «7 mutations» (владелец probe-bench)
-D37	README.md	checks-teeth's 19 recorded mutations	checks-teeth's 20 recorded mutations	объявлено «19 mutations» (владелец checks-teeth)
+D37	README.md	checks-teeth's 20 recorded mutations	checks-teeth's 21 recorded mutations	объявлено «20 mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
 D40	claude-patch-all.sh	все 119 проверок конвейера сошлись	все 119 сошлись	опущенным существительным

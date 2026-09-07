@@ -5678,10 +5678,19 @@ checks = {
                                           and bool(re.search(
                                               rb'act:"NUDGE",fb:"You watch'
                                               rb'[\s\S]{0,500}SILENT:<[\s\S]{0,160}NUDGE:<', d)),
+    # Дверь есть у КАЖДОГО потребителя ядра, иначе словарь одного из них можно
+    # поменять и не покраснеет ничто: у судьи она ниже, у наблюдателя -- в его
+    # же проверке места («watcher rides the same core»), а у пробы формы её не
+    # было вовсе (волна 40b). Словарь формы пинится ВМЕСТЕ с её дескриптором:
+    # `PASS|WARN|REFUSE` -- слова общего вида, и голый пин нашёлся бы у любой
+    # другой пробы, приехавшей с тем же словарём.
     'probe verdict vocabulary comes from the caller': bool(re.search(
                                               rb'let __rx=new RegExp\("\^\\\\s\*\(\?:"\+__o\.rx\+"\):\.\*\$","gmi"\)', d))
                                           and bool(re.search(
-                                              rb'rx:"OK\|BLOCK\|STOP\|DENY\|WARN",act:"BLOCK\|STOP\|DENY"', d)),
+                                              rb'rx:"OK\|BLOCK\|STOP\|DENY\|WARN",act:"BLOCK\|STOP\|DENY"', d))
+                                          and bool(re.search(
+                                              rb'tag:"\[Form\]",dirName:"form",arm:!0,label:"FORM",'
+                                              rb'rx:"PASS\|WARN\|REFUSE",act:"REFUSE\|WARN",', d)),
     # A regex built from a STRING needs a double backslash: a single one
     # quietly degenerates the class (`"\s"` in a JS string is the letter s,
     # `"[\s\S]"` is [sS]), and the verdict vocabulary stops matching while

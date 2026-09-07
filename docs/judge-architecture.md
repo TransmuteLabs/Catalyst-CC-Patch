@@ -225,11 +225,24 @@ Files:
 
 All four accept the common `--home <probes home>`, `--probe <id>`, and
 `--image <path>`: the home says where to look for `probes.toml` and the
-probe directory, the id selects the settings table, the image is the
-source of the verdict dictionary. The dictionary is NOT baked into any
-tool: it is read from the image, and if the read fails the tool refuses
-rather than substituting a baked-in one — a divergence from the image
-would mislabel the entire corpus.
+probe directory, the id selects the settings table, and the image is the
+CROSS-CHECK for the verdict dictionary — not its source.
+
+The dictionary's home is `tweakcc-patch.js`, the authored patch source:
+it writes the bytes that later stand in the image, so the image is a
+derived artifact. Reading the dictionary out of the derived copy made the
+tool refuse (code 2) on any machine without a patched installation, while
+the subject of the measurement lay in the tree beside it.
+
+The dictionary is NOT baked into any tool. When the image is readable and
+carries our probes, its dictionary is compared with the home's and a
+divergence refuses with code 2 — the installed image was built from a
+different tree, and silently preferring either side would mislabel the
+whole corpus. When there is nothing to compare against — no image at that
+path, or an image that carries none of our probes (a stock build) — the
+skip is ANNOUNCED on stderr with its own reason: a silent skip is
+indistinguishable from a check that passed. A carrier that has our probes
+but not this probe's dictionary is a divergence, not a missing subject.
 
 Substitution into the template goes through `JSON.stringify` without
 outer quotes, so a quote or a newline inside the transcript cannot break

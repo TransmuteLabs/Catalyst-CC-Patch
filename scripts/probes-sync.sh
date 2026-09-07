@@ -185,6 +185,12 @@ stage_one() {  # $1 canon, $2 home, $3 display name
 for f in "${PROBE_FILES[@]}";  do add_pair "$ROOT/probes/$f" "$PROBES_HOME/$f" "probes/$f"; done
 for f in "${TOOL_FILES[@]}";   do add_pair "$ROOT/judge/$f"  "$TOOLS_HOME/$f"  "judge/$f";  done
 
+# Дом словарей вердиктов едет ОТДЕЛЬНОЙ парой, а не строкой TOOL_FILES:
+# тот список задан относительно $ROOT/judge, а этот файл лежит в корне
+# кита. Без него раскатанный replay.py читать нечего -- он отказывает
+# кодом 2, и раскатанный судья остаётся без словаря (волна 40b).
+add_pair "$ROOT/tweakcc-patch.js" "$TOOLS_HOME/tweakcc-patch.js" "tweakcc-patch.js"
+
 # Замок лежит при том доме, который инструмент РЕАЛЬНО пишет, а не при доме,
 # вычисленном из CLAUDE_CONFIG_DIR (круг 25, замер контроллера). Стенд
 # подменяет все три каталога записи (CLAUDE_PROBES_DIR, CLAUDE_JUDGE_TOOLS_DIR,
@@ -424,7 +430,13 @@ fi
 # мерить нечего) -- это не то же самое, что раскатка есть и отличается (1).
 if [[ "$MODE" == "--diff" ]]; then
   if [[ "$DIFFERS" -ne 0 ]]; then
-    echo "ИТОГ: расходится файлов: $DIFFERS (раскатать: bash $0 --to-home)" >&2
+    # Обе беды называются В ОДНОЙ строке: ветка расхождения выходит раньше
+    # ветки неполноты, и итог сообщал только про расхождение, тогда как
+    # выше по потоку стояло ещё и «не раскатан». Класс ответа при этом
+    # прежний -- 1, «раскатка есть и отличается».
+    __also=""
+    [[ "$ABSENT" -ne 0 ]] && __also=", не раскатано: $ABSENT"
+    echo "ИТОГ: расходится файлов: $DIFFERS$__also (раскатать: bash $0 --to-home)" >&2
     __DONE=1; exit 1
   fi
   if [[ "$PRESENT" -eq 0 && "$ABSENT" -ne 0 ]]; then

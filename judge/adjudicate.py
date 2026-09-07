@@ -78,9 +78,9 @@ def url_for(record):
     return normalize_url(os.environ.get('ANTHROPIC_BASE_URL') or DEFAULT_BASE_URL)
 
 
-# The verdict dictionary lives in the image; validate.verdict_vocabulary is
-# its only reader. A literal copy would drift from the image silently.
-DEFAULT_IMAGE = '~/.local/bin/claude'
+# Словарь вердиктов живёт в доме патча, а replay.verdict_vocabulary -- его
+# единственный читатель. Своей копии умолчания образа здесь нет: единственный
+# дом константы -- replay.DEFAULT_IMAGE (волна 40b).
 # Словарь читается в main(), а не НА ИМПОРТЕ: чтение на импорте выполнялось до
 # argparse -- машина без образа по умолчанию падала SystemExit прежде, чем
 # `--image` успевал помочь. И промт рендерился судейскими классами навсегда:
@@ -248,8 +248,9 @@ def main():
     # common contract since before it was one.
     parser.add_argument('--home', default=DEFAULT_HOME, help='дом проб')
     parser.add_argument('--probe', default=DEFAULT_PROBE, help='идентификатор пробы')
-    parser.add_argument('--image', default=os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE,
-                        help='образ, из которого читается словарь вердиктов')
+    parser.add_argument('--image',
+                        default=os.environ.get('CLAUDE_JUDGE_IMAGE') or replay.DEFAULT_IMAGE,
+                        help='образ, с которым СВЕРЯЕТСЯ словарь вердиктов дома')
     args = parser.parse_args()
     configure_paths(args.home, args.probe)
     load_vocabulary(args.image, args.probe)
