@@ -276,9 +276,13 @@ def scenario_c9() -> None:
     patcher = import_file(PATCHER, "platform")
     with tempfile.TemporaryDirectory() as raw:
         path = Path(raw) / "corpus.txt"
-        path.write_text(f"# platform: {patcher.npm_platform_pkg()}\n"
+        pkg = patcher.npm_platform_pkg()
+        path.write_text(f"# platform: {pkg}\n"
                         "foo:bar 2.1.1 -\n", encoding="utf-8")
-        result = subprocess.run([sys.executable, str(CORPUS), str(path)], cwd=ROOT,
+        # Платформа-цель -- обязательный второй аргумент: без него разборщик
+        # отвечает кодом 2 (контракт вызова), и сценарий мерил бы ту дверь, а
+        # не свою (метка с двоеточием).
+        result = subprocess.run([sys.executable, str(CORPUS), str(path), pkg], cwd=ROOT,
                                 capture_output=True, text=True, errors="replace")
         require(result.returncode == 1,
                 f"colon label returned rc={result.returncode}\n{result.stdout}{result.stderr}")
@@ -398,7 +402,10 @@ def signing_call(action: Callable[[], None], label: str, expected_rc: int,
 def signing_shell_cases(identity: str, valid: str) -> None:
     source = PIPELINE.read_text(encoding="utf-8")
     functions = (shell_function(source, "resolve_signing_identity")
-                 + shell_function(source, "sign_macos_binary"))
+                 + shell_function(source, "sign_macos_binary")
+                 # Пара ХОЗЯИНА берётся ВЫРЕЗАННОЙ из конвейера: копия правила
+                 # здесь стала бы его вторым домом и разошлась бы молча.
+                 + shell_function(source, "__host_os_arch"))
     stage = re.search(r"(?ms)^# --- 4\. signature[^\n]*\n(.*?)^# --- 5\. verify", source)
     require(stage is not None, "signature stage not found")
     with tempfile.TemporaryDirectory() as raw:
@@ -445,8 +452,12 @@ def signing_shell_cases(identity: str, valid: str) -> None:
             ("launch failure", {"C13_LAUNCH_RC": "7"}, 1, [security, sign, strict, launch]),
         ]
         # Execute the shipping stage, including its refusal before the next stage.
+        # Платформа ОБРАЗА -- ФИКСТУРА этого случая, а не измеряемое правило:
+        # C13 меряет разрешение личности и вызовы codesign на СВОЁМ образе.
+        # Детектор образа проверяется своими зубами (corpus-tools-bench 158/159).
         script = (f"set -euo pipefail\n{functions}\n"
-                  "uname() { printf 'Darwin\\n'; }\n" + stage.group(1)
+                  "uname() { printf 'Darwin\\n'; }\n"
+                  "__image_os_arch() { printf 'darwin-arm64\\n'; }\n" + stage.group(1)
                   + 'printf "publish\\t\\n" >> "$C13_TRACE"\n')
         for label, overrides, expected_rc, expected_calls in cases:
             trace.write_text("", encoding="utf-8")

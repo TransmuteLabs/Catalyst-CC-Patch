@@ -627,8 +627,65 @@ command -v node >/dev/null || { echo "ERROR: node is required (tweakcc runs on N
 # reached a render within 150s"; a missing `curl` or `tar` surfaces as "could
 # not fetch/unpack"; a missing `codesign` leaves an unsigned image whose
 # keychain access fails much later. Name the missing tool here instead.
+# ПАРА ХОЗЯИНА -- ОДИН дом на весь конвейер. Её спрашивают порознь дверь
+# обязательных инструментов, подписант и стадия гейта интерфейса; три
+# независимых `uname` разошлись бы молча -- ровно тот силуэт, который эта волна
+# и разбирает. Отображение имён -- то же, что у claude_patch.host_os_arch();
+# копия здесь существует потому, что стадия гейта ВЫРЕЗАЕТСЯ стендом и
+# исполняется без кита рядом, то есть импортировать питон ей нечем.
+# печатает <ос>-<дуга> ХОЗЯИНА
+__host_os_arch() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin)               os=darwin ;;
+    Linux)                os=linux ;;
+    MINGW*|MSYS*|CYGWIN*) os=win32 ;;
+    *)                    os=unknown ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64)  arch=x64 ;;
+    *)             arch=unknown ;;
+  esac
+  printf '%s-%s\n' "$os" "$arch"
+}
+__host_os()   { local p; p="$(__host_os_arch)"; printf '%s\n' "${p%%-*}"; }
+__host_arch() { local p; p="$(__host_os_arch)"; printf '%s\n' "${p#*-}"; }
+
+# Пара ОБРАЗА -- у неё дом ОДИН и он питоновский (claude_patch.image_os_arch):
+# магические байты читает разборщик, а не оболочка. Отказ детектора (fat, не
+# образ) -- отказ конвейера: угадывать платформу образа нечем.
+__image_os_arch() {   # путь -> печатает <ос>-<дуга>
+  CP_KIT="$HERE" CP_IMG="$1" python3 - <<'PY_IMG_OS'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ['CP_KIT'])
+import claude_patch
+print('%s-%s' % claude_patch.image_os_arch(Path(os.environ['CP_IMG'])))
+PY_IMG_OS
+}
+
+# КОНСТРЕЙНТ: `codesign` требуется ТОГДА И ТОЛЬКО ТОГДА, когда ОС хозяина --
+# darwin. Не «и ОС цели darwin»: подписать образ можно лишь при хозяин==цель
+# (claude_patch.sign), поэтому на не-darwin хозяине инструмент не может
+# понадобиться НИ ПРИ КАКОЙ цели -- дверь, требующая его там, требует
+# невозможного, и проходить её приходилось заглушкой в PATH. Цель здесь ещё и
+# НЕ ИЗВЕСТНА: дверь стоит до стадии 0, где образ только появляется.
+# Условие вынесено в функцию, а не написано на месте, чтобы стенд мог вырезать
+# её по имени и прогнать ОБЕ ветки на подставном `uname`, не завися от того, на
+# каком хозяине он запущен (тот же приём, что у __gate_script_form).
+__host_needs_codesign() {   # код 0 -- нужен, 1 -- не нужен
+  [[ "$(__host_os)" == "darwin" ]]
+}
+
 MISSING=()
-for t in python3 curl tar perl script seq awk sed grep sort cmp shasum codesign; do
+REQUIRED_TOOLS=(python3 curl tar perl script seq awk sed grep sort cmp shasum)
+if __host_needs_codesign; then
+  REQUIRED_TOOLS+=(codesign)
+else
+  echo "Обязательные инструменты: codesign НЕ требуется -- хозяин $(__host_os), подписать можно только на своей ОС"
+fi
+for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null || MISSING+=("$t")
 done
 if (( ${#MISSING[@]} )); then
@@ -4168,8 +4225,23 @@ echo "==> Applying our multi-provider patches"
   --confirm-possible-dangerous-patch
 
 # --- 4. signature (must be last: both steps above sign ad-hoc) ---------------
-if [[ "$(uname -s)" == "Darwin" ]]; then
+# Ветвление по паре (ОС ОБРАЗА, ОС хозяина), а не по одному `uname`: подписать
+# можно только образ своей ОС, и прежний вид спрашивал ХОЗЯИНА, выдавая ответ за
+# свойство образа. Несовпадение -- ОБЪЯВЛЕННЫЙ пропуск с обеими сторонами в
+# строке, не отказ и не тишина: чужой образ подписать нечем, и это не поломка.
+# КОНСТРЕЙНТ: у пропуска ДВЕ разные причины, и одна строка на обе была бы
+# ложью в объявлении. Чужая ОС -- подписать нечем; своя не-darwin -- подписи у
+# образа нет вовсе. Прежняя редакция этой волны печатала первую причину и на
+# linux/linux, где стороны СОВПАДАЮТ (поймано первым же прогоном конвейера).
+__BIN_OS_ARCH="$(__image_os_arch "$BIN")" || exit 1
+__BIN_OS="${__BIN_OS_ARCH%%-*}"
+__HOST_PAIR="$(__host_os_arch)"
+if [[ "$__BIN_OS" != "${__HOST_PAIR%%-*}" ]]; then
+  echo "==> Подпись ПРОПУЩЕНА: образ ${__BIN_OS_ARCH}, машина ${__HOST_PAIR} -- подписать можно только образ своей ОС"
+elif [[ "$__BIN_OS" == "darwin" ]]; then
   sign_macos_binary "$BIN" || exit 1
+else
+  echo "==> Подписи у образа ${__BIN_OS_ARCH} нет: на этой ОС её не восстанавливают"
 fi
 
 # --- 5. verify ---------------------------------------------------------------
@@ -6856,8 +6928,11 @@ GATE_BUDGET="$(validated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET "${CLAUDE_
 # положительный контроль различителя. Прошли обе или ни одной -- прибор не
 # может мерить (код 2), и молчаливый выбор одной из форм вернул бы тот же немой
 # отказ, из которого выросла эта проба.
-# Проба следов не оставляет (гоняет `true`, вывод в /dev/null), поэтому стоит
-# ДО инварианта порядка, объявленного ниже.
+# Проба следов не оставляет (гоняет `true`, вывод в /dev/null), но зовётся она
+# теперь ВНУТРИ стадии, а не здесь: на чужой платформе гейт ПРОПУСКАЕТСЯ, и
+# замер на верхнем уровне убивал бы прогон кодом 2 ради прибора, который этому
+# прогону не нужен (машина без обеих форм `script`). Путь пропуска форму не
+# мерит и строку про неё не печатает.
 __gate_script_form() {   # печатает utillinux|bsd; код 2 -- обе или ни одной
   local ul=0 bsd=0
   if script -q -c true /dev/null >/dev/null 2>&1; then ul=1; fi
@@ -6873,8 +6948,12 @@ __gate_script_form() {   # печатает utillinux|bsd; код 2 -- обе и
   echo "  а не продукта). Пробы: script -q -c КОМАНДА ФАЙЛ и script -q ФАЙЛ КОМАНДА." >&2
   return 2
 }
-GATE_SCRIPT_FORM="$(__gate_script_form)" || exit 2
-echo "Interface gate: script form ${GATE_SCRIPT_FORM} (measured on this machine, not deduced from the OS)"
+# Пара ЦЕЛИ считается ОДИН раз и передаётся вниз. Считает её ВЫЗЫВАЮЩИЙ, а не
+# стадия: стенд гоняет стадию на ПОДДЕЛЬНОМ $BIN, а он скрипт -- настоящие
+# магические байты взаимоисключающи с шебангом, и детектор отказал бы на нём
+# кодом 1. Позови стадия детектор сама, все её ветки стали бы недостижимы для
+# стенда. Решение при этом остаётся по ОБРАЗУ, а не по хозяину.
+GATE_TARGET="$(__image_os_arch "$BIN")" || exit 1
 
 # Н-3 (круг 24): величина бюджета проверяется ДО первого следа на диске и до
 # запуска ребёнка. Под `set -euo pipefail` отказ валидатора обрывает прогон
@@ -6995,10 +7074,33 @@ PYSTATE
 # гейта интерфейса), а зуб зовёт стадию по имени: вырезанный по якорю блок
 # исполняется стендом с поддельными $BIN и $GATE_HOME.
 # КОНСТРЕЙНТ: функция читает $BIN, $GATE_HOME, $GATE_LOG, $GATE_PROMPT,
-# $GATE_BUDGET и $GATE_SCRIPT_FORM из окружения вызывающего и НЕ создаёт
-# $GATE_HOME сама -- порядок «проверка бюджета -> проба формы -> создание
-# дома» остаётся инвариантом вызывающего.
+# $GATE_BUDGET и $GATE_TARGET из окружения вызывающего и НЕ создаёт $GATE_HOME
+# сама. Порядок вызывающего -- «проверка бюджета -> пара цели -> создание
+# дома»: между проверкой бюджета и созданием дома по-прежнему не должно
+# появляться ничего, что создаёт файлы или процессы. $GATE_SCRIPT_FORM из
+# списка УШЁЛ -- стадия его ВЫЧИСЛЯЕТ сама, после решения о паре платформ и до
+# запуска, чтобы путь пропуска не мерил форму. Пару ХОЗЯИНА стадия тоже берёт
+# сама (__host_os_arch): из окружения приходит только пара ЦЕЛИ, и потому зуб
+# может задать чужую цель, не трогая машину, на которой он запущен.
 __interface_gate() {
+  # Гейт ЗАПУСКАЕТ образ, поэтому он возможен ровно тогда, когда пара образа
+  # равна паре хозяина. Иначе -- ОБЪЯВЛЕННЫЙ пропуск с обеими сторонами в
+  # строке: чужой образ этой машине запустить нечем, и это не поломка продукта.
+  # Молчаливый пропуск был бы хуже отказа -- «гейт прошёл» и «гейта не было»
+  # читались бы одинаково.
+  local __host_pair
+  __host_pair="$(__host_os_arch)"
+  if [[ "$GATE_TARGET" != "$__host_pair" ]]; then
+    echo "==> Гейт интерфейса ПРОПУЩЕН: образ ${GATE_TARGET}, машина ${__host_pair} -- запустить нечем"
+    rm -rf "$GATE_HOME"
+    return 0
+  fi
+  # Форма `script` меряется ЗДЕСЬ -- после решения о паре и до запуска. На пути
+  # пропуска эта строка не исполняется: прибор, который прогону не нужен, не
+  # вправе его убить.
+  GATE_SCRIPT_FORM="$(__gate_script_form)" || exit 2
+  echo "Interface gate: script form ${GATE_SCRIPT_FORM} (measured on this machine, not deduced from the OS)"
+
   # `exec` replaces the subshell so $! is the pid that setsid then makes a session
   # and process-group leader. Killing the single pid leaves `script` and the CLI
   # running: during one version sweep that left 23 sessions and 1.4 GB resident.

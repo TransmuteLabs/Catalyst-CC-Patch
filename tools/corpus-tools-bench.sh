@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=157
-EXPECTED_MUTATIONS=186
+EXPECTED_SCENARIOS=167
+EXPECTED_MUTATIONS=196
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -1582,10 +1582,15 @@ CARVE
   ok "69 пин версии, которой нет в списке -- класс «записывать некуда»"
 }
 
-scenario_70() {   # разборщику нечем узнать платформу -- сломан ПРИБОР
-  # Платформу разборщик берёт из claude_patch. Без модуля он не может мерить
-  # НИЧЕГО, и класс отказа обязан звать чинить кит, а не формат списка: код
-  # «формат нарушен» отправлял бы человека править файл, который не читали.
+scenario_70() {   # вызывающий не назвал платформу -- сломан ВЫЗОВ, не список
+  # Предмет тот же, что и до волны 40c: отказ, который НЕ про формат списка --
+  # код 2 и текст, зовущий чинить кит, а не файл; код «формат нарушен»
+  # отправлял бы человека править файл, который никто не читал (свип
+  # контроллера, волна 22). Причина сменилась вместе с механизмом: платформа
+  # больше не выводится из хозяина, её называет вызывающий вторым аргументом.
+  # Одинокий кит в фикстуре ОСТАЁТСЯ намеренно: дверь контракта вызова обязана
+  # отвечать РАНЬШЕ всего, чему мог бы понадобиться кит рядом, -- иначе
+  # неверный вызов отправлял бы человека править список.
   local lone out rc
   lone="$C/lone-kit"; mkdir -p "$lone/tools"
   cp "$K/tools/corpus-list.py" "$lone/tools/corpus-list.py"
@@ -1594,12 +1599,13 @@ scenario_70() {   # разборщику нечем узнать платфор�
   LAST_EVID="rc=$rc :: $out"
   if (( rc != 2 )); then
     LAST_EVID="КЛАСС_НЕ_ТОТ rc=$rc :: $out"
-    bad "70 нет claude_patch: код возврата $rc, ждали 2"; return
+    bad "70 платформа не названа: код возврата $rc, ждали 2"; return
   fi
-  if [[ "$out" != *"не определить платформу"* ]]; then
-    bad "70 нет claude_patch: причина не названа: $out"; return
+  if [[ "$out" != *"нужны два аргумента"* || "$out" != *"пакет-платформа"* ]]; then
+    LAST_EVID="АРГУМЕНТ_НЕ_НАЗВАН :: $LAST_EVID"
+    bad "70 платформа не названа: текст не называет недостающий аргумент: $out"; return
   fi
-  ok "70 разборщик без claude_patch -- «прибор не может мерить»"
+  ok "70 вызов без платформы -- «прибор не может мерить», аргумент назван"
 }
 
 scenario_71() {   # операторская ручка пропуска не проникает в сценарии стенда
@@ -1904,6 +1910,12 @@ run_all() {
   # блока проверок.
   scenario_150; scenario_151; scenario_152; scenario_153
   scenario_154; scenario_155; scenario_156; scenario_157
+  # Волна 40c: платформа как явная ось -- детектор образа и его положительный
+  # контроль, четыре формы fat, сравнение имён пакетов, три двери разборщика
+  # списка, дверь codesign по хозяину, пропуски гейта и подписанта, замер формы
+  # на пути пропуска и место чужого образа.
+  scenario_158; scenario_159; scenario_160; scenario_161; scenario_162
+  scenario_163; scenario_164; scenario_165; scenario_166; scenario_167
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -4313,7 +4325,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 186 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 196 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -4457,7 +4469,7 @@ scenario_149() {   # детектор процессов не возвращае
 # была зашита BSD-синтаксисом и на util-linux не запускала вообще ничего.
 gate_carve() {   # каталог фрагментов -> печатает число вырезанных кусков
   local dir="$1" n=0 name
-  for name in __gate_script_form gate_state __interface_gate; do
+  for name in __host_os_arch __gate_script_form gate_state __interface_gate; do
     # Голова функции опознаётся ПОДСТРОКОЙ С НАЧАЛА строки, а не регуляркой:
     # у голов есть хвостовой комментарий, и экранирование скобок в шаблоне было
     # бы вторым источником истины о форме объявления.
@@ -4522,15 +4534,20 @@ FAKE41
 # фрагмента, та же оболочка `set -euo pipefail`, та же связка «замер формы ->
 # стадия». Иначе зуб доказывал бы стадию, вызванную не так, как её зовёт кит.
 gate_drv_file() {   # путь
+  # Драйвер НЕ считает форму `script` и не печатает её сам: с волны 40c замер
+  # живёт ВНУТРИ стадии, и вторая копия правила в стенде разошлась бы с
+  # конвейером молча -- ровно то, от чего предостерегает комментарий карвинга.
+  # Сценарии читают СОБСТВЕННУЮ строку стадии.
+  # GATE_TARGET задаёт драйвер: пару ЦЕЛИ стадия читает из окружения
+  # вызывающего, и это единственный способ прогнать её ветки на поддельном
+  # $BIN, который остаётся обычным скриптом.
   cat > "$1" <<'DRV41'
 set -euo pipefail
-source "$1"; source "$2"; source "$3"
-BIN="$4"; GATE_HOME="$5"; GATE_BUDGET="$6"
+source "$1"; source "$2"; source "$3"; source "$4"
+BIN="$5"; GATE_HOME="$6"; GATE_BUDGET="$7"; GATE_TARGET="$8"
 GATE_LOG="$GATE_HOME/capture.log"
 GATE_PROMPT="tweakcc interface gate"
 : > "$GATE_LOG"
-GATE_SCRIPT_FORM="$(__gate_script_form)" || exit 2
-echo "ФОРМА=$GATE_SCRIPT_FORM"
 # Голым именем -- как в конвейере: под `||` `set -e` не действует во всём теле
 # стадии, и зуб мерил бы стадию под ДРУГОЙ оболочкой, чем её гоняет кит.
 __interface_gate
@@ -4546,16 +4563,22 @@ gate_prepare() {   # имя каталога сценария
   GATE_STUB_LOG_F="$GATE_D/stub.log"; : > "$GATE_STUB_LOG_F"
 }
 
-gate_call() {   # режим поддельного бина, что принимает подставной script, бюджет
+# Пара ХОЗЯИНА, посчитанная ТЕМ ЖЕ домом, что и в конвейере: сценарию нужна
+# «своя» цель, а зашитая строка привязала бы зуб к машине, на которой он писан.
+gate_host_pair() { ( source "$GATE_D/frag/__host_os_arch.sh"; __host_os_arch ); }
+
+gate_call() {   # режим бина, что принимает подставной script, бюджет, [цель]
   GATE_H=$(mktemp -d "$GATE_D/home.XXXXXX")
   mkdir -p "$GATE_H/cfg" "$GATE_H/proj"
+  local target="${4:-$(gate_host_pair)}"
   GATE_OUT=$(PATH="$GATE_D/stub:$PATH" GATE_STUB_TAKE="$2" \
              GATE_STUB_LOG="$GATE_STUB_LOG_F" GATE_FAKE_MODE="$1" \
              bash "$GATE_DRV" \
+               "$GATE_D/frag/__host_os_arch.sh" \
                "$GATE_D/frag/__gate_script_form.sh" \
                "$GATE_D/frag/gate_state.sh" \
                "$GATE_D/frag/__interface_gate.sh" \
-               "$GATE_BIN" "$GATE_H" "$3" 2>&1 9>&-)
+               "$GATE_BIN" "$GATE_H" "$3" "$target" 2>&1 9>&-)
   GATE_RC=$?
 }
 
@@ -4564,8 +4587,10 @@ gate_call() {   # режим поддельного бина, что прини�
 gate_launch_line() { grep -F 'run.sh' "$GATE_STUB_LOG_F" | tail -1; }
 
 gate_carved_or_bad() {   # номер сценария -- общий отказ прибора
-  [[ "$GATE_CARVED" == "3" ]] && return 0
-  LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$GATE_CARVED из 3"
+  # ЧЕТЫРЕ, а не три: с волны 40c стадия сама берёт пару ХОЗЯИНА (__host_os_arch)
+  # -- из окружения ей приходит только пара ЦЕЛИ.
+  [[ "$GATE_CARVED" == "4" ]] && return 0
+  LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$GATE_CARVED из 4"
   bad "$1 гейт интерфейса: стадия не вырезана из конвейера -- прибор не мерит"
   return 1
 }
@@ -4577,7 +4602,7 @@ scenario_150() {   # форма script ЗАМЕРЕНА: util-linux-подста
   gate_call e ul 5
   launch=$(gate_launch_line)
   LAST_EVID="rc=$GATE_RC запуск=[$launch] дом=$([[ -d "$GATE_H" ]] && echo есть || echo снят) :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
-  if [[ "$GATE_OUT" != *"ФОРМА=utillinux"* ]]; then
+  if [[ "$GATE_OUT" != *"script form utillinux"* ]]; then
     LAST_EVID="ФОРМА_НЕ_UTILLINUX :: $LAST_EVID"
     bad "150 форма script: util-linux-подставной, а выбрана не его форма"; return
   fi
@@ -4603,7 +4628,7 @@ scenario_151() {   # форма script ЗАМЕРЕНА: BSD-подставно�
   gate_call e bsd 5
   launch=$(gate_launch_line)
   LAST_EVID="rc=$GATE_RC запуск=[$launch] :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
-  if [[ "$GATE_OUT" != *"ФОРМА=bsd"* ]]; then
+  if [[ "$GATE_OUT" != *"script form bsd"* ]]; then
     LAST_EVID="ФОРМА_НЕ_BSD :: $LAST_EVID"
     bad "151 форма script: BSD-подставной, а выбрана не его форма"; return
   fi
@@ -4734,6 +4759,404 @@ scenario_157() {   # красный блок проверок отвечает �
   ok "157 checks-on-image: красный блок отвечает своим кодом, хвост стадии достижим"
 }
 
+# --- волна 40c: платформа как ЯВНАЯ ось (#80) --------------------------------
+# Один вывод платформы обслуживал ЧЕТЫРЕ вопроса (какой пакет качать, можно ли
+# подписать, можно ли запустить, относится ли пин), и на машине, где хозяин и
+# цель расходятся, три из них отвечались про не ту сторону. Ниже -- по зубу на
+# каждое разведённое сравнение.
+
+# Детектор платформы образа гоняется на СИНТЕТИЧЕСКИХ заголовках: наши корпуса
+# несут только Mach-O arm64 и ELF x86-64, а разбор обязан отвечать за все формы,
+# которые он берётся называть. Заголовок строится здесь, а не хранится файлом:
+# двоичная фикстура в дереве -- это байты, которых никто не перечитывает.
+cp_img_probe() {   # путь-образа -> печатает пару либо «ОТКАЗ <код> <причина>»
+  CPK="$K" CPI="$1" python3 - <<'PROBE40C'
+import os, sys, subprocess
+snippet = (
+    "import sys;sys.path.insert(0,%r);import claude_patch,pathlib;"
+    "print('%%s-%%s' %% claude_patch.image_os_arch(pathlib.Path(sys.argv[1])))"
+    % os.environ['CPK'])
+r = subprocess.run([sys.executable, '-c', snippet, os.environ['CPI']],
+                   capture_output=True, text=True)
+if r.returncode == 0:
+    sys.stdout.write(r.stdout.strip() + '\n')
+else:
+    sys.stdout.write('ОТКАЗ %d %s\n' % (r.returncode, r.stderr.strip().replace('\n', ' ')))
+PROBE40C
+}
+
+cp_mkhead() {   # путь, форма
+  CPP="$1" CPF="$2" python3 - <<'HEAD40C'
+import os, struct
+form, path = os.environ['CPF'], os.environ['CPP']
+if form == 'macho-arm64':  b = b"\xcf\xfa\xed\xfe" + struct.pack('<I', 0x0100000C)
+elif form == 'macho-x64':  b = b"\xcf\xfa\xed\xfe" + struct.pack('<I', 0x01000007)
+elif form == 'elf-x64':    b = b"\x7fELF\x02\x01\x01" + b"\0" * 11 + struct.pack('<H', 0x3E)
+elif form == 'elf-arm64':  b = b"\x7fELF\x02\x01\x01" + b"\0" * 11 + struct.pack('<H', 0xB7)
+elif form.startswith('pe-'):
+    machine = 0x8664 if form == 'pe-x64' else 0xAA64
+    head = bytearray(b"MZ" + b"\0" * 0x3E)
+    head[0x3C:0x40] = struct.pack('<I', 0x40)
+    b = bytes(head) + b"PE\0\0" + struct.pack('<H', machine)
+elif form == 'fat-magic':     b = b"\xca\xfe\xba\xbe"
+elif form == 'fat-cigam':     b = b"\xbe\xba\xfe\xca"
+elif form == 'fat-magic64':   b = b"\xca\xfe\xba\xbf"
+elif form == 'fat-cigam64':   b = b"\xbf\xba\xfe\xca"
+elif form == 'мусор':         b = b"\x01\x02\x03\x04garbage"
+else:                         raise SystemExit('неизвестная форма %s' % form)
+open(path, 'wb').write(b + b"\0" * 256)
+HEAD40C
+}
+
+scenario_158() {   # Т1: пара ЦЕЛИ читается из ОБРАЗА, и детектор не слеп
+  local d form got want bad_forms="" answer
+  d="$C/s158"; rm -rf "$d"; mkdir -p "$d"
+  for form in macho-arm64:darwin-arm64 macho-x64:darwin-x64 \
+              elf-x64:linux-x64 elf-arm64:linux-arm64 \
+              pe-x64:win32-x64 pe-arm64:win32-arm64; do
+    want="${form#*:}"; form="${form%%:*}"
+    cp_mkhead "$d/$form.img" "$form"
+    got=$(cp_img_probe "$d/$form.img")
+    [[ "$got" == "$want" ]] || bad_forms="$bad_forms ${form}(ждали ${want}, было «${got}»)"
+  done
+  # Положительный контроль: детектор, который принимает ВСЁ, доказывал бы лишь
+  # то, что он что-то печатает.
+  cp_mkhead "$d/garbage.img" 'мусор'
+  answer=$(cp_img_probe "$d/garbage.img")
+  LAST_EVID="формы:${bad_forms:- все сошлись} мусор=[$answer]"
+  if [[ -n "$bad_forms" ]]; then
+    LAST_EVID="ПАРА_НЕ_ТА :: $LAST_EVID"
+    bad "158 детектор платформы: пара не та --$bad_forms"; return
+  fi
+  if [[ "$answer" != "ОТКАЗ 1 "* ]]; then
+    LAST_EVID="ДЕТЕКТОР_СЛЕП :: $LAST_EVID"
+    bad "158 детектор платформы: мусорный заголовок принят, а обязан отказать"; return
+  fi
+  ok "158 детектор платформы: шесть форм дают свою пару, мусор отвергнут"
+}
+
+scenario_159() {   # Т2: универсальный образ -- ОТКАЗ с причиной, а не догадка
+  # Все ЧЕТЫРЕ формы: FAT_MAGIC и FAT_MAGIC_64 лежат big-endian, FAT_CIGAM и
+  # FAT_CIGAM_64 -- их переставленные близнецы. Разбор, знающий часть из них,
+  # называет остальные «не образом» -- верный отказ по неверной причине.
+  local d form answer bad_forms=""
+  d="$C/s159"; rm -rf "$d"; mkdir -p "$d"
+  for form in fat-magic fat-cigam fat-magic64 fat-cigam64; do
+    cp_mkhead "$d/$form.img" "$form"
+    answer=$(cp_img_probe "$d/$form.img")
+    [[ "$answer" == "ОТКАЗ 1 "*"universal (fat)"* ]] \
+      || bad_forms="$bad_forms ${form}([${answer}])"
+  done
+  LAST_EVID="${bad_forms:-все четыре формы отвергнуты своей причиной}"
+  if [[ -n "$bad_forms" ]]; then
+    LAST_EVID="FAT_ПРИЧИНА_НЕ_НАЗВАНА :: $LAST_EVID"
+    bad "159 fat-образ: причина не названа --$bad_forms"; return
+  fi
+  ok "159 fat-образ: все четыре формы -- отказ кода 1 с названной причиной"
+}
+
+scenario_160() {   # Т3: musl невидим детектору, но не сравнению имён пакетов
+  local out
+  out=$(CPK="$K" python3 - <<'MATCH40C'
+import os, sys
+sys.path.insert(0, os.environ['CPK'])
+import claude_patch as c
+p = '@anthropic-ai/claude-code-'
+print('musl=%s чужая=%s своя=%s' % (
+    c.platform_matches(p + 'linux-x64-musl', ('linux', 'x64')),
+    c.platform_matches(p + 'darwin-arm64', ('linux', 'x64')),
+    c.platform_matches(p + 'linux-x64', ('linux', 'x64'))))
+MATCH40C
+)
+  LAST_EVID="$out"
+  if [[ "$out" != *"musl=True"* ]]; then
+    LAST_EVID="MUSL_НЕ_СОШЁЛСЯ :: $LAST_EVID"
+    bad "160 platform_matches: musl-пакет не сошёлся со своей парой"; return
+  fi
+  if [[ "$out" != *"чужая=False"* || "$out" != *"своя=True"* ]]; then
+    LAST_EVID="ЧУЖАЯ_ПАРА_СОШЛАСЬ :: $LAST_EVID"
+    bad "160 platform_matches: сравнение не различает платформы"; return
+  fi
+  ok "160 platform_matches: -musl отброшен, чужая пара не сошлась"
+}
+
+scenario_161() {   # Т5: отказ по ПИНУ сохраняется -- он верен
+  # Регрессия: разведение предметов не должно снять дверь, которая права.
+  # Пин привязан к ПОЛНОМУ имени пакета, и darwin-пин к linux-образу не
+  # относится, кто бы про него ни спрашивал.
+  local out rc
+  { echo "# platform: @anthropic-ai/claude-code-darwin-arm64"
+    echo "900 0.0.900 -"; } > "$C/s161.txt"
+  out=$(python3 "$K/tools/corpus-list.py" "$C/s161.txt" \
+          @anthropic-ai/claude-code-linux-x64 2>&1 9>&-); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 1 )); then
+    LAST_EVID="ПИН_ДВЕРЬ_СНЯТА :: $LAST_EVID"
+    bad "161 чужая цель: код возврата $rc, ждали 1"; return
+  fi
+  if [[ "$out" != *"список набран для платформы"* \
+     || "$out" != *"darwin-arm64"* || "$out" != *"linux-x64"* ]]; then
+    LAST_EVID="ПРИЧИНА_НЕ_НАЗВАНА :: $LAST_EVID"
+    bad "161 чужая цель: отказ не назвал обе платформы: $out"; return
+  fi
+  ok "161 чужая цель: отказ по пину сохранён и называет обе платформы"
+}
+
+scenario_162() {   # Т6: своя цель, названная ЯВНО, проходит -- снятое ограничение
+  # До волны список darwin-корпуса на linux-хозяине отвергался ВСЕГДА, даже
+  # когда спрашивали именно про darwin: сравнение брало хозяина, а спрашивали
+  # про цель. Здесь цель названа явно и совпадает с объявлением списка.
+  local out rc
+  { echo "# platform: @anthropic-ai/claude-code-darwin-arm64"
+    echo "900 0.0.900 -"; } > "$C/s162.txt"
+  out=$(python3 "$K/tools/corpus-list.py" "$C/s162.txt" \
+          @anthropic-ai/claude-code-darwin-arm64 2>&1 9>&-); rc=$?
+  LAST_EVID="rc=$rc :: $(printf '%s' "$out" | tr '\n' '|')"
+  if (( rc != 0 )) || [[ "$out" != *"0.0.900"* ]]; then
+    LAST_EVID="СВОЯ_ЦЕЛЬ_ОТВЕРГНУТА :: $LAST_EVID"
+    bad "162 своя цель: разбор не прошёл (rc=$rc)"; return
+  fi
+  ok "162 чужая платформа читается, когда про неё и спрашивают"
+}
+
+# Дверь обязательных инструментов вырезается ИЗ КОНВЕЙЕРА по якорям и гоняется
+# на подставном `uname`: обе её ветки обязаны быть достижимы с ОДНОЙ машины,
+# иначе зуб доказывал бы лишь свойство хозяина, на котором запущен стенд.
+tools_door_carve() {   # каталог -> печатает число вырезанных кусков
+  local dir="$1" n=0 name
+  for name in __host_os_arch __host_needs_codesign; do
+    awk -v h="${name}() {" 'index($0, h) == 1 {on=1} on {print} on && $0 == "}" {exit}' \
+      "$K/claude-patch-all.real" > "$dir/$name.sh"
+    [[ -s "$dir/$name.sh" ]] && n=$((n+1))
+  done
+  # __host_os -- ОДНОСТРОЧНОЕ определение: закрывающей строки `}` у него нет,
+  # и общий цикл выше вырезал бы пустоту.
+  awk 'index($0, "__host_os()") == 1 {print; exit}' \
+    "$K/claude-patch-all.real" > "$dir/__host_os.sh"
+  [[ -s "$dir/__host_os.sh" ]] && n=$((n+1))
+  # Сам БЛОК двери -- не пересказ, а те же строки конвейера: копия правила в
+  # стенде разошлась бы с ним молча. Блок кончается ВТОРЫМ `fi` с начала строки.
+  awk '/^MISSING=\(\)$/{on=1} on{print; if ($0 == "fi") {c++; if (c == 2) exit}}' \
+    "$K/claude-patch-all.real" > "$dir/door.sh"
+  [[ -s "$dir/door.sh" ]] && n=$((n+1))
+  printf '%s\n' "$n"
+}
+
+tools_door_run() {   # каталог карвинга, имя прогона, ОС хозяина, «нет codesign»?
+  # Куски берутся из каталога КАРВИНГА, а прогонное хозяйство кладётся в свой
+  # подкаталог. Прежняя редакция искала куски внутри прогонного каталога, все
+  # четыре `source` молча не находили файла, и дверь проходила БЕЗ механизма --
+  # то есть зуб зеленел, ничего не измерив (поймано первым же прогоном на
+  # linux). Поэтому `source` теперь обязан удаться: неудача -- код 9, отдельный
+  # от любого ответа двери.
+  local carve="$1" dir="$1/$2" host="$3" nocs="${4:-}"
+  mkdir -p "$dir/stub"
+  { printf '#!/usr/bin/env bash\n'
+    printf 'case "${1:-}" in\n'
+    printf '  -s) printf "%%s\\n" "$FAKE_UNAME_S" ;;\n'
+    printf '  -m) printf "x86_64\\n" ;;\n'
+    printf '  *)  printf "%%s\\n" "$FAKE_UNAME_S" ;;\n'
+    printf 'esac\n'
+  } > "$dir/stub/uname"
+  chmod +x "$dir/stub/uname"
+  # Подставной `codesign` кладётся ОТДЕЛЬНЫМ каталогом: положительный контроль
+  # снимает именно его, оставляя всё прочее на месте.
+  mkdir -p "$dir/cs"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/cs/codesign"
+  chmod +x "$dir/cs/codesign"
+  local path="$dir/stub:$PATH"
+  [[ -n "$nocs" ]] || path="$dir/cs:$path"
+  { printf 'set -u\n'
+    printf 'source %q || exit 9\n' "$carve/__host_os_arch.sh"
+    printf 'source %q || exit 9\n' "$carve/__host_os.sh"
+    printf 'source %q || exit 9\n' "$carve/__host_needs_codesign.sh"
+    printf 'declare -F __host_needs_codesign >/dev/null || exit 9\n'
+    printf 'source %q\n' "$carve/door.sh"
+    printf 'echo ДВЕРЬ_ПРОЙДЕНА\n'
+  } > "$dir/drv.sh"
+  FAKE_UNAME_S="$host" PATH="$path" bash "$dir/drv.sh" 2>&1 9>&-
+}
+
+scenario_163() {   # Т7: codesign требуется ТОГДА И ТОЛЬКО ТОГДА, когда хозяин darwin
+  local d carved out_lin rc_lin out_dar rc_dar out_ctl rc_ctl
+  d="$C/s163"; rm -rf "$d"; mkdir -p "$d"
+  carved=$(tools_door_carve "$d")
+  if [[ "$carved" != "4" ]]; then
+    LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$carved из 4"
+    bad "163 дверь инструментов: не вырезана из конвейера -- прибор не мерит"; return
+  fi
+  out_lin=$(tools_door_run "$d" lin Linux нет_codesign); rc_lin=$?
+  out_dar=$(tools_door_run "$d" dar Darwin); rc_dar=$?
+  out_ctl=$(tools_door_run "$d" ctl Darwin нет_codesign); rc_ctl=$?
+  if (( rc_lin == 9 || rc_dar == 9 || rc_ctl == 9 )); then
+    LAST_EVID="ФРАГМЕНТ_НЕ_ПОДГРУЖЕН rc=$rc_lin/$rc_dar/$rc_ctl"
+    bad "163 дверь инструментов: вырезанные куски не подгрузились -- прибор не мерит"; return
+  fi
+  LAST_EVID="linux rc=$rc_lin [$(printf '%s' "$out_lin" | tr '\n' '|')] darwin rc=$rc_dar ctl rc=$rc_ctl [$(printf '%s' "$out_ctl" | tr '\n' '|')]"
+  if (( rc_lin != 0 )) || [[ "$out_lin" != *"ДВЕРЬ_ПРОЙДЕНА"* ]]; then
+    LAST_EVID="ДВЕРЬ_CODESIGN_НЕ_ТА :: $LAST_EVID"
+    bad "163 дверь инструментов: на linux-хозяине БЕЗ codesign не прошла"; return
+  fi
+  if (( rc_dar != 0 )) || [[ "$out_dar" != *"ДВЕРЬ_ПРОЙДЕНА"* ]]; then
+    LAST_EVID="ДВЕРЬ_CODESIGN_НЕ_ТА :: $LAST_EVID"
+    bad "163 дверь инструментов: на darwin-хозяине С codesign не прошла"; return
+  fi
+  # Положительный контроль: без него зуб доказывал бы лишь то, что дверь
+  # выключена всегда.
+  if (( rc_ctl != 6 )) || [[ "$out_ctl" != *"codesign"* ]]; then
+    LAST_EVID="ДВЕРЬ_ВЫКЛЮЧЕНА_ВСЕГДА :: $LAST_EVID"
+    bad "163 дверь инструментов: darwin-хозяин без codesign прошёл (rc=$rc_ctl)"; return
+  fi
+  ok "163 дверь инструментов: codesign нужен ровно на darwin-хозяине"
+}
+
+scenario_164() {   # Т8: гейт ПРОПУСКАЕТСЯ на чужой паре и НЕ пропускается на своей
+  local out_skip rc_skip launch_skip
+  gate_prepare s164
+  gate_carved_or_bad 164 || return
+  gate_call e ul 5 "win32-arm64"; out_skip="$GATE_OUT"; rc_skip=$GATE_RC
+  launch_skip=$(gate_launch_line)
+  LAST_EVID="чужая rc=$rc_skip запуск=[$launch_skip] [$(printf '%s' "$out_skip" | tr '\n' '|')]"
+  if (( rc_skip != 0 )) || [[ "$out_skip" != *"Гейт интерфейса ПРОПУЩЕН"* ]]; then
+    LAST_EVID="ПРОПУСК_НЕ_ОБЪЯВЛЕН :: $LAST_EVID"
+    bad "164 гейт: чужая пара не объявлена пропуском"; return
+  fi
+  if [[ "$out_skip" != *"win32-arm64"* ]]; then
+    LAST_EVID="ПРОПУСК_НЕ_НАЗВАЛ_СТОРОНЫ :: $LAST_EVID"
+    bad "164 гейт: пропуск не назвал обе стороны"; return
+  fi
+  if [[ -n "$launch_skip" ]]; then
+    LAST_EVID="ПРОПУСК_ВСЁ_РАВНО_ЗАПУСТИЛ :: $LAST_EVID"
+    bad "164 гейт: путь пропуска всё-таки позвал script"; return
+  fi
+  # Положительный контроль: без него пропуск незаметно стал бы умолчанием на
+  # любой машине.
+  gate_call e ul 5
+  LAST_EVID="$LAST_EVID ;; своя rc=$GATE_RC [$(printf '%s' "$GATE_OUT" | tr '\n' '|')]"
+  if [[ "$GATE_OUT" == *"Гейт интерфейса ПРОПУЩЕН"* ]] \
+     || (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
+    LAST_EVID="ПРОПУСК_СТАЛ_УМОЛЧАНИЕМ :: $LAST_EVID"
+    bad "164 гейт: своя пара тоже пропущена -- гейт не меряет ничего"; return
+  fi
+  ok "164 гейт интерфейса: чужая пара -- объявленный пропуск, своя -- исполнение"
+}
+
+# Решение подписанта вырезается из конвейера теми же якорями и гоняется на
+# подставленных парах: копия условия в стенде разошлась бы с конвейером молча.
+sign_gate_run() {   # каталог, пара образа, пара хозяина -> вывод, код в rc
+  local dir="$1" img="$2" host="$3"
+  mkdir -p "$dir"
+  awk '/^__BIN_OS_ARCH=/{on=1} on{print; if ($0 == "fi") exit}' \
+    "$K/claude-patch-all.real" > "$dir/signblock.sh"
+  [[ -s "$dir/signblock.sh" ]] || { printf 'ЯКОРЬ_ПОТЕРЯН\n'; return 9; }
+  { printf 'set -u\n'
+    printf 'BIN=/dev/null\n'
+    printf '__image_os_arch() { printf "%%s\\n" "%s"; }\n' "$img"
+    printf '__host_os_arch() { printf "%%s\\n" "%s"; }\n' "$host"
+    printf 'sign_macos_binary() { printf "ПОДПИСАНТ ЗВАН\\n"; }\n'
+    printf 'source %q\n' "$dir/signblock.sh"
+  } > "$dir/drv.sh"
+  bash "$dir/drv.sh" 2>&1 9>&-
+}
+
+scenario_165() {   # Т9: подписант зовётся по ПАРЕ, а не по одному хозяину
+  local d out_for rc_for out_own rc_own
+  d="$C/s165"; rm -rf "$d"; mkdir -p "$d"
+  out_for=$(sign_gate_run "$d/for" darwin-arm64 linux-x64); rc_for=$?
+  out_own=$(sign_gate_run "$d/own" darwin-arm64 darwin-arm64); rc_own=$?
+  LAST_EVID="чужой rc=$rc_for [$(printf '%s' "$out_for" | tr '\n' '|')] свой rc=$rc_own [$(printf '%s' "$out_own" | tr '\n' '|')]"
+  if [[ "$out_for" == *"ЯКОРЬ_ПОТЕРЯН"* || "$out_own" == *"ЯКОРЬ_ПОТЕРЯН"* ]]; then
+    bad "165 подписант: решение не вырезано из конвейера -- прибор не мерит"; return
+  fi
+  if [[ "$out_for" == *"ПОДПИСАНТ ЗВАН"* ]]; then
+    LAST_EVID="ПОДПИСАНТ_ЗВАН_НА_ЧУЖОМ :: $LAST_EVID"
+    bad "165 подписант: позван на образе чужой ОС"; return
+  fi
+  if [[ "$out_for" != *"Подпись ПРОПУЩЕНА"* \
+     || "$out_for" != *"darwin-arm64"* || "$out_for" != *"linux-x64"* ]]; then
+    LAST_EVID="ПРОПУСК_НЕ_ОБЪЯВЛЕН :: $LAST_EVID"
+    bad "165 подписант: пропуск не объявлен своей строкой"; return
+  fi
+  # Положительный контроль: иначе зуб доказывал бы, что подписант выключен всегда.
+  if [[ "$out_own" != *"ПОДПИСАНТ ЗВАН"* ]]; then
+    LAST_EVID="ПОДПИСАНТ_НЕ_ЗВАН_НА_СВОЁМ :: $LAST_EVID"
+    bad "165 подписант: не позван на образе своей ОС"; return
+  fi
+  ok "165 подписант: зовётся ровно на паре darwin/darwin, иначе объявленный пропуск"
+}
+
+scenario_166() {   # Т10: путь пропуска НЕ мерит форму `script`
+  # Подставной script не принимает НИ ОДНОЙ формы. На чужой цели стадия обязана
+  # объявить пропуск и дойти до конца: прибор, который прогону не нужен, не
+  # вправе его убить.
+  local out_skip rc_skip
+  gate_prepare s166
+  gate_carved_or_bad 166 || return
+  gate_call e none 5 "win32-arm64"; out_skip="$GATE_OUT"; rc_skip=$GATE_RC
+  LAST_EVID="чужая rc=$rc_skip [$(printf '%s' "$out_skip" | tr '\n' '|')]"
+  if (( rc_skip != 0 )) || [[ "$out_skip" != *"Гейт интерфейса ПРОПУЩЕН"* ]]; then
+    LAST_EVID="ФОРМА_МЕРЕНА_НА_ПРОПУСКЕ :: $LAST_EVID"
+    bad "166 замер формы: путь пропуска не дошёл до конца (rc=$rc_skip)"; return
+  fi
+  if [[ "$out_skip" == *"script form"* || "$out_skip" == *"НЕ ИЗМЕРЕН"* ]]; then
+    LAST_EVID="ФОРМА_МЕРЕНА_НА_ПРОПУСКЕ :: $LAST_EVID"
+    bad "166 замер формы: пропуск всё-таки мерил форму"; return
+  fi
+  # Положительный контроль: иначе зуб доказывал бы, что замер выключен всегда.
+  gate_call e none 5
+  LAST_EVID="$LAST_EVID ;; своя rc=$GATE_RC [$(printf '%s' "$GATE_OUT" | tr '\n' '|')]"
+  if (( GATE_RC != 2 )) || [[ "$GATE_OUT" != *"не принял НИ ОДНОЙ известной формы"* ]]; then
+    LAST_EVID="ЗАМЕР_ВЫКЛЮЧЕН_ВСЕГДА :: $LAST_EVID"
+    bad "166 замер формы: на своей паре замер не сработал (rc=$GATE_RC)"; return
+  fi
+  ok "166 замер формы: не исполняется на пропуске, исполняется на своей паре"
+}
+
+scenario_167() {   # Т12: чужой образ не занимает имя установки и не даёт .orig
+  # Сеть не нужна и не трогается: загрузка подменяется, меряется РЕШЕНИЕ о
+  # месте. Дом версий уводится в свой каталог через XDG_DATA_HOME.
+  local out home
+  home="$C/s167"; rm -rf "$home"; mkdir -p "$home"
+  out=$(CPK="$K" CPH="$home" python3 - <<'DLONLY40C' 2>&1
+import os, sys
+from pathlib import Path
+os.environ['XDG_DATA_HOME'] = os.environ['CPH']
+sys.path.insert(0, os.environ['CPK'])
+import claude_patch as c
+
+def fake_download(version, dest, pkg=None):
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    Path(dest).write_bytes(b'\x7fELF' + b'\0' * 64)
+    print('КАЧАЛИ %s -> %s' % (pkg or c.npm_platform_pkg(), dest))
+
+c.download_binary = fake_download
+host = c.npm_platform_pkg()
+foreign = ('@anthropic-ai/claude-code-win32-x64'
+           if '-win32-' not in host else '@anthropic-ai/claude-code-linux-x64')
+vdir = c.versions_dir()
+
+c.main(['--download-only', '0.0.900', '--platform', foreign])
+print('ЧУЖОЙ_ИМЯ_УСТАНОВКИ=%s' % (vdir / '0.0.900').exists())
+print('ЧУЖОЙ_ORIG=%s' % (vdir / '0.0.900.orig').exists())
+
+c.main(['--download-only', '0.0.901', '--platform', host])
+print('СВОЙ_ИМЯ_УСТАНОВКИ=%s' % (vdir / '0.0.901').exists())
+print('СВОЙ_ORIG=%s' % (vdir / '0.0.901.orig').exists())
+DLONLY40C
+)
+  LAST_EVID="$(printf '%s' "$out" | tr '\n' '|')"
+  if [[ "$out" != *"ЧУЖОЙ_ИМЯ_УСТАНОВКИ=False"* || "$out" != *"ЧУЖОЙ_ORIG=False"* ]]; then
+    LAST_EVID="ЧУЖОЙ_ЗАНЯЛ_ИМЯ_УСТАНОВКИ :: $LAST_EVID"
+    bad "167 чужая платформа: образ занял имя установки или стал .orig"; return
+  fi
+  # Положительный контроль: иначе зуб доказывал бы, что установка сломана всегда.
+  if [[ "$out" != *"СВОЙ_ИМЯ_УСТАНОВКИ=True"* || "$out" != *"СВОЙ_ORIG=True"* ]]; then
+    LAST_EVID="СВОЙ_НЕ_УСТАНОВИЛСЯ :: $LAST_EVID"
+    bad "167 своя платформа: обычный маршрут установки не отработал"; return
+  fi
+  ok "167 чужой образ уходит в staging, своя платформа ставится как прежде"
+}
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -4855,7 +5278,12 @@ MUT_FILE=(x
   # таймаута, неснятый дом гейта и защищённый код красного блока проверок.
   claude-patch-all.real claude-patch-all.real claude-patch-all.real
   claude-patch-all.real claude-patch-all.real claude-patch-all.real
-  claude-patch-all.real tools/checks-on-image.sh)
+  claude-patch-all.real tools/checks-on-image.sh
+  # Волна 40c: платформа как явная ось (#80).
+  claude_patch.py claude_patch.py claude_patch.py
+  tools/corpus-list.py tools/corpus-list.py
+  claude-patch-all.real claude-patch-all.real claude-patch-all.real
+  claude-patch-all.real claude_patch.py)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -4881,7 +5309,7 @@ MUT_PAT=(x
   '\[\[ "\$smoke" == "1" \]\] \|\| why\+=\("дым не подтверждён для \$ver"\)'
   '\[\[ "\$iface" == "1" \]\] \|\| why\+=\("интерфейс не подтверждён"\)'
   '\[\[ "\$bench" == "1" \]\] \|\| why\+=\("стенд зондов не подтверждён"\)'
-  'if declared != here_platform:'
+  'if declared != target_platform:'
   '\(\( \$\{#ALL\[\@\]\} \)\) \|\| \{ echo "SWEEP ОТКАЗ: список версий пуст: \$LIST" >&2; exit 1; \}'
   'flock\(\$fh, LOCK_EX\) or exit 2;'
   'sum_reset "# ПРОГОН НАЧАТ'
@@ -4930,7 +5358,7 @@ MUT_PAT=(x
   '    3\) echo "SWEEP ОТКАЗ: стенд корпусных инструментов занят'
   '        2\) why\+=\("конвейер вернул 2: контракт вызова нарушен или прибор гейта не мерил"\) ;;'
   '    sys\.exit\(2\)'
-  "        die\('не определить платформу \(%s\)' % exc, 2\)"
+  "            'получено аргументов: %d' % \(len\(sys\.argv\) - 1\), 2\)"
   '    SWEEP_SKIP_TOOLS_BENCH="\$\{BENCH_SKIP_TOOLS:-\}" \\\n    SWEEP_SKIP_BUILD_PROBE="\$\{BENCH_SKIP_PROBE:-\}" \\'
   '    \[\[ "\$\{tw:-0\}" != "0" \]\] \|\| why\+=\("tweakcc не применил ни одного патча"\)'
   '    SRC=\("\$\{__sorted\[\@\]: -__n\}"\)'
@@ -5092,7 +5520,18 @@ MUT_PAT=(x
   'GATE_EXITED=1\n          GATE_RC=0\n          wait \$GATE_PID 2>/dev/null \|\| GATE_RC=\$\?'
   '      if \[\[ \$GATE_EXITED -eq 1 \]\]; then'
   '      rm -rf "\$GATE_HOME"\n      ;;'
-  'python3 "\$BLOCK" "\$IMG" "\$PATCH_SRC" \|\| __rc_block=\$\?')
+  'python3 "\$BLOCK" "\$IMG" "\$PATCH_SRC" \|\| __rc_block=\$\?'
+  # Волна 40c
+  'ELF_E_MACHINE = \{0x3E: "x64", 0xB7: "arm64"\}'
+  'if head\[:4\] in FAT_MAGICS:'
+  '    base = pkg\[:-len\("-musl"\)\] if pkg\.endswith\("-musl"\) else pkg'
+  "die\('список набран для платформы %s, а цель -- %s\. Это не подмена '"
+  'if declared != target_platform:'
+  '  \[\[ "\$\(__host_os\)" == "darwin" \]\]'
+  '  if \[\[ "\$GATE_TARGET" != "\$__host_pair" \]\]; then'
+  'if \[\[ "\$__BIN_OS" != "\$\{__HOST_PAIR%%-\*\}" \]\]; then'
+  '    rm -rf "\$GATE_HOME"\n    return 0'
+  '        if foreign:')
 
 MUT_REP=(x
   'if false; then'
@@ -5157,7 +5596,7 @@ MUT_REP=(x
   '    99) echo "SWEEP ОТКАЗ: стенд корпусных инструментов занят'
   '        2) why+=("конвейер вернул 2") ;;'
   '    sys.exit(1)'
-  "        die('не определить платформу (%s)' % exc)"
+  "            'получено аргументов: %d' % (len(sys.argv) - 1))"
   $'    SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" \\\n    SWEEP_SKIP_BUILD_PROBE="${SWEEP_SKIP_BUILD_PROBE:-}" \\'
   '    :'
   '    SRC=("${ALL[@]}")'
@@ -5286,7 +5725,18 @@ MUT_REP=(x
   'GATE_EXITED=1; GATE_RC=0; wait $GATE_PID 2>/dev/null; GATE_RC=$?'
   '      if true; then'
   '      ;;'
-  'python3 "$BLOCK" "$IMG" "$PATCH_SRC"')
+  'python3 "$BLOCK" "$IMG" "$PATCH_SRC"'
+  # Волна 40c
+  'ELF_E_MACHINE = {0x3E: "arm64", 0xB7: "x64"}'
+  'if head[:4] == b"":'
+  '    base = pkg'
+  "die('платформы разошлись: %s и %s. Это не подмена '"
+  'if True:'
+  '  [[ "$(__host_os)" == "linux" ]]'
+  '  if false; then'
+  'if false; then'
+  $'    rm -rf "$GATE_HOME"\n    :'
+  '        if False:')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -5341,7 +5791,8 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                145 145 97 146 146 146 147 148 149 93
                # Волна 41: гейт интерфейса -- по своей мутации на каждый его
                # сценарий.
-               150 151 152 153 154 155 156 157)
+               150 151 152 153 154 155 156 157
+               158 159 160 161 162 163 164 165 166 167)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -5546,7 +5997,18 @@ MUT_CAUSE=(x
   'ВЕТКА_ОТРИСОВАЛ_И_УМЕР_НЕДОСТУПНА'
   'ВЕТКА_ТАЙМАУТА_ПОДМЕНЕНА'
   'ДОМ_НЕ_СНЯТ'
-  'ФОРМА_КОДА_БЛОКА_СНЯТА')
+  'ФОРМА_КОДА_БЛОКА_СНЯТА'
+  # Волна 40c: платформа как явная ось.
+  'ПАРА_НЕ_ТА'
+  'FAT_ПРИЧИНА_НЕ_НАЗВАНА'
+  'MUSL_НЕ_СОШЁЛСЯ'
+  'ПРИЧИНА_НЕ_НАЗВАНА'
+  'СВОЯ_ЦЕЛЬ_ОТВЕРГНУТА'
+  'ДВЕРЬ_CODESIGN_НЕ_ТА'
+  'ПРОПУСК_НЕ_ОБЪЯВЛЕН'
+  'ПОДПИСАНТ_ЗВАН_НА_ЧУЖОМ'
+  'ФОРМА_МЕРЕНА_НА_ПРОПУСКЕ'
+  'ЧУЖОЙ_ЗАНЯЛ_ИМЯ_УСТАНОВКИ')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

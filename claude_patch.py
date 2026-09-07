@@ -113,8 +113,17 @@ def is_musl() -> bool:
         return False
 
 
-def npm_platform_pkg() -> str:
-    """Same mapping the binary uses to pick its own platform package."""
+def host_os_arch() -> tuple[str, str]:
+    """(os, arch) of the MACHINE this script runs on -- never of an image.
+
+    CONSTRAINT: "the platform" is FOUR different questions here -- which
+    registry package to fetch, may this image be SIGNED, may this image be
+    RUN, and does a corpus pin belong to it -- and only the first is about
+    the host. One host-derived answer used to serve all four, so on a machine
+    where host and target differ three of them were answered about the wrong
+    side. This function answers about the host; image_os_arch() answers about
+    the image; each caller names which one it means.
+    """
     machine = platform.machine().lower()
     if machine in ("arm64", "aarch64"):
         arch = "arm64"
@@ -132,8 +141,104 @@ def npm_platform_pkg() -> str:
     else:
         die(f"unsupported platform: {sys.platform}")
 
+    return plat, arch
+
+
+def npm_platform_pkg() -> str:
+    """Same mapping the binary uses to pick its own platform package."""
+    plat, arch = host_os_arch()
     suffix = "-musl" if (plat == "linux" and is_musl()) else ""
     return f"{NPM_MAIN}-{plat}-{arch}{suffix}"
+
+
+# Header constants of the four container formats, taken from their
+# specifications (mach-o/loader.h, mach-o/fat.h, elf.h, PE/COFF) and written
+# as the bytes they occupy ON DISK, which is the only form this reader sees.
+MACHO64_LE_MAGIC = b"\xcf\xfa\xed\xfe"
+# All FOUR fat forms, not the two that come to mind: FAT_MAGIC 0xcafebabe and
+# FAT_MAGIC_64 0xcafebabf are stored big-endian, and FAT_CIGAM / FAT_CIGAM_64
+# are their byte-swapped twins. A reader that knows only some of them calls the
+# rest "not a known image", which is a true refusal for the wrong reason.
+FAT_MAGICS = (
+    b"\xca\xfe\xba\xbe",   # FAT_MAGIC
+    b"\xbe\xba\xfe\xca",   # FAT_CIGAM
+    b"\xca\xfe\xba\xbf",   # FAT_MAGIC_64
+    b"\xbf\xba\xfe\xca",   # FAT_CIGAM_64
+)
+ELF_MAGIC = b"\x7fELF"
+MACHO_CPUTYPE = {0x0100000C: "arm64", 0x01000007: "x64"}
+ELF_E_MACHINE = {0x3E: "x64", 0xB7: "arm64"}
+PE_MACHINE = {0x8664: "x64", 0xAA64: "arm64"}
+# The header lives in the first few hundred bytes; these images are ~250 MB and
+# are never slurped whole (same discipline as has_marker).
+IMAGE_HEAD_BYTES = 4096
+
+
+def image_os_arch(path: Path) -> tuple[str, str]:
+    """(os, arch) of the IMAGE at `path`, read from its own header bytes.
+
+    CONSTRAINT: the pair is (darwin|linux|win32, arm64|x64) and NOTHING else --
+    in particular musl is NOT visible here. glibc and musl builds are different
+    registry packages but carry the same ELF class and machine; only the program
+    headers (PT_INTERP) would tell them apart. For the two questions this answer
+    serves -- may it be signed, may it be run -- the difference does not exist,
+    so the name says os and arch and the package-name comparison that DOES care
+    is platform_matches(), which drops the suffix explicitly.
+
+    A refusal here is class 1 (a refusal on the merits about the image); an
+    unreadable path is class 2 (the call contract -- there is nothing to read).
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(IMAGE_HEAD_BYTES)
+    except OSError as error:
+        die(f"cannot read {path} to determine its platform: {error}", code=2)
+
+    if head[:4] in FAT_MAGICS:
+        # Guessing a slice would be a silent wrong answer: the caller asked
+        # which platform this image is FOR, and a fat image is for several.
+        die(f"{path} is a universal (fat) image, so it does not have one target "
+            f"platform -- extract the slice you mean and pass that")
+    if head[:4] == MACHO64_LE_MAGIC:
+        cputype = int.from_bytes(head[4:8], "little")
+        arch = MACHO_CPUTYPE.get(cputype)
+        if arch is None:
+            die(f"{path}: Mach-O cputype 0x{cputype:08x} is not one this kit builds for")
+        return "darwin", arch
+    if head[:4] == ELF_MAGIC:
+        machine = int.from_bytes(head[18:20], "little")
+        arch = ELF_E_MACHINE.get(machine)
+        if arch is None:
+            die(f"{path}: ELF e_machine 0x{machine:04x} is not one this kit builds for")
+        return "linux", arch
+    if head[:2] == b"MZ":
+        # e_lfanew is the only pointer in the DOS stub that matters, and it may
+        # legitimately point past what we read -- refuse rather than index into
+        # bytes we do not have.
+        offset = int.from_bytes(head[0x3C:0x40], "little")
+        if offset + 6 > len(head) or head[offset:offset + 4] != b"PE\x00\x00":
+            die(f"{path}: starts with MZ but carries no PE header where e_lfanew points")
+        machine = int.from_bytes(head[offset + 4:offset + 6], "little")
+        arch = PE_MACHINE.get(machine)
+        if arch is None:
+            die(f"{path}: PE machine 0x{machine:04x} is not one this kit builds for")
+        return "win32", arch
+    die(f"{path} is not an image of a known platform "
+        f"(first bytes: {head[:8].hex(' ') or '<empty>'})")
+
+
+def platform_matches(pkg: str, os_arch: tuple[str, str]) -> bool:
+    """Does registry package `pkg` build for the (os, arch) pair `os_arch`?
+
+    CONSTRAINT: the `-musl` suffix is dropped, because image_os_arch() cannot
+    see it (see there). This predicate therefore answers "same os and arch",
+    NOT "same package" -- the corpus pin is bound to the FULL package name and
+    must keep comparing that (tools/corpus-list.py), or a glibc pin would be
+    accepted for a musl image.
+    """
+    plat, arch = os_arch
+    base = pkg[:-len("-musl")] if pkg.endswith("-musl") else pkg
+    return base.endswith(f"-{plat}-{arch}")
 
 
 def binary_name() -> str:
@@ -223,16 +328,25 @@ def _verify_tarball(blob: bytes, dist: dict, what: str) -> None:
         f"archive -- refusing to trust it")
 
 
-def download_binary(version: str, dest: Path) -> None:
-    """Fetch the per-platform package (the main npm pkg is only a downloader)."""
-    pkg = npm_platform_pkg()
+def download_binary(version: str, dest: Path, pkg: str | None = None) -> None:
+    """Fetch the per-platform package (the main npm pkg is only a downloader).
+
+    `pkg` names the platform to fetch FOR; the default is this host. It is the
+    one question of the four where the target legitimately does not exist yet,
+    so it cannot be read from an image -- but it still must be SAYABLE, or
+    fetching a foreign build is impossible and the host is silently substituted.
+    """
+    pkg = pkg or npm_platform_pkg()
     info(f"Fetching {pkg}@{version} ...")
     meta = http_json(f"https://registry.npmjs.org/{pkg}/{version}")
     tarball = meta["dist"]["tarball"]
     with urllib.request.urlopen(tarball, timeout=600) as r:
         blob = r.read()
     _verify_tarball(blob, meta.get("dist", {}), f"{pkg}@{version}")
-    member_name = f"package/{binary_name()}"
+    # The member name follows the PACKAGE, not the host: a win32 package carries
+    # claude.exe whoever downloads it, and reading the name off the host would
+    # miss the member and report the archive as broken.
+    member_name = "package/claude.exe" if "-win32-" in pkg else "package/claude"
     tmp = dest.with_name(f"{dest.name}.{os.getpid()}.download")
     try:
         _download_into(blob, member_name, pkg, version, tmp, dest)
@@ -468,9 +582,23 @@ def sign_windows(path: Path) -> None:
 
 
 def sign(path: Path) -> None:
-    if sys.platform == "darwin":
+    """Sign the IMAGE at `path` -- the branch follows the image, not the host.
+
+    CONSTRAINT: signing needs host == target. `codesign` and `signtool` live on
+    one OS each and sign for that OS only, so a foreign image is not a refusal
+    and not silence: it is a DECLARED skip, in the kit's own idiom, naming both
+    sides. Branching on sys.platform read the host and called the answer the
+    image's -- on a darwin host a linux image went down the macOS path.
+    """
+    image_os, image_arch = image_os_arch(path)
+    host_os, host_arch = host_os_arch()
+    if image_os != host_os:
+        info(f"Signing SKIPPED: image is {image_os}-{image_arch}, machine is "
+             f"{host_os}-{host_arch} -- a signature can only be made on its own OS")
+        return
+    if image_os == "darwin":
         sign_macos(path)
-    elif is_windows():
+    elif image_os == "win32":
         sign_windows(path)
     else:
         info("Linux: no code signature to restore.")
@@ -604,6 +732,24 @@ def patch_binary(target: Path, backup: Path | None = None) -> None:
             tmp.unlink()
 
 
+def _take_platform_flag(argv: list[str]) -> tuple[list[str], str | None]:
+    """Pull `--platform <pkg>` out of argv, returning the rest and the package."""
+    rest: list[str] = []
+    pkg: str | None = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--platform":
+            if i + 1 >= len(argv):
+                die("--platform needs the registry package to fetch, e.g. "
+                    f"{NPM_MAIN}-darwin-arm64", code=2)
+            pkg = argv[i + 1]
+            i += 2
+            continue
+        rest.append(argv[i])
+        i += 1
+    return rest, pkg
+
+
 def main(argv: list[str]) -> None:
     if not PATCHER.is_file():
         # Класс 2, а не 1 (адъюдикация круга 25, запрос F-4): пропал
@@ -626,6 +772,14 @@ def main(argv: list[str]) -> None:
     # rename onto None. One name, one meaning -- the pair cannot drift apart.
     update_final: Path | None = None
     update_backup: Path | None = None
+    argv, platform_pkg = _take_platform_flag(argv)
+    if platform_pkg is not None and not (argv and argv[0] == "--download-only"):
+        # --platform names an image for ANOTHER machine. Every other mode ends by
+        # pointing the live launcher at what it built, and the launcher is
+        # executed HERE -- so accepting the flag there would install something
+        # this machine cannot run, with the repoint reported as success.
+        die("--platform only makes sense with --download-only: the other modes "
+            "repoint the live launcher, and the launcher runs on THIS machine")
     if argv and argv[0] == "--download-only":
         # Install a PRISTINE build and stop: used by the combined tweakcc
         # pipeline, which applies the patches itself (and would conflict with
@@ -650,9 +804,25 @@ def main(argv: list[str]) -> None:
         # So when the target exists, download beside it and hand the caller the
         # staging file. The pipeline patches THAT and renames it over the target
         # once every gate has passed.
+        # A FOREIGN image never takes the installed name, and never becomes the
+        # `.orig` of this machine's build. Both of those names mean "this
+        # machine's version <v>": the launcher resolves the first, and the
+        # second is what a human is told to restore from. An image for another
+        # OS under either of them is worse than an unpatched one -- it cannot
+        # execute at all. It goes to the staging name the pipeline already
+        # consumes, which is an existing route, not a new one.
+        foreign = (platform_pkg is not None
+                   and not platform_matches(platform_pkg, host_os_arch()))
+        if foreign:
+            staging = target.with_name(target.name + f".staging.{os.getpid()}")
+            download_binary(version, staging, platform_pkg)
+            info(f"Built {platform_pkg}@{version} for another platform -> {staging}")
+            info("  (not installed and not backed up: this machine cannot run it)")
+            print(staging)
+            return
         if target.exists():
             staging = target.with_name(target.name + f".staging.{os.getpid()}")
-            download_binary(version, staging)
+            download_binary(version, staging, platform_pkg)
             info(f"{version} is already installed; built pristine beside it -> {staging}")
             if not backup.exists() or not _is_pristine(backup):
                 # The installed file may already carry our patches, so it cannot
@@ -669,7 +839,7 @@ def main(argv: list[str]) -> None:
                 info(f"Backed up pristine -> {backup}")
             print(staging)
             return
-        download_binary(version, target)
+        download_binary(version, target, platform_pkg)
         info(f"Installed pristine {version} -> {target}")
         if not backup.exists() or not _is_pristine(backup):
             _replace_backup(target, backup)
