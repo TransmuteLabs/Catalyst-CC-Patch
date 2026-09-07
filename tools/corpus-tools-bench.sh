@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=149
-EXPECTED_MUTATIONS=178
+EXPECTED_SCENARIOS=157
+EXPECTED_MUTATIONS=186
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -1899,6 +1899,11 @@ run_all() {
   # старых сборок распаковщика, контроль без мутации в самопроверке и
   # исключение своего pid у детектора процессов.
   scenario_145; scenario_146; scenario_147; scenario_148; scenario_149
+  # Волна 41: гейт интерфейса -- замер формы `script` с положительным контролем
+  # различителя, достижимость каждой ветки вердикта и честный код красного
+  # блока проверок.
+  scenario_150; scenario_151; scenario_152; scenario_153
+  scenario_154; scenario_155; scenario_156; scenario_157
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -4308,7 +4313,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 178 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 186 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -4440,6 +4445,295 @@ scenario_149() {   # детектор процессов не возвращае
   ok "149 детектор процессов видит соседа и не возвращает исключённый pid"
 }
 
+# --- волна 41: гейт интерфейса (#92) -----------------------------------------
+# Стадия «запуск -> опрос -> вердикт» вырезается ИЗ КОНВЕЙЕРА по якорям и
+# гоняется на поддельных $BIN и `script`: настоящий интерфейс здесь не нужен,
+# нужен ВЕРДИКТ стадии на каждом её пути. Копия стадии в стенде стала бы вторым
+# домом правила и разошлась бы с конвейером молча.
+#
+# До волны 41 стадия жила без имени и без зуба, и три её ветки были
+# НЕДОСТИЖИМЫ: `wait $GATE_PID` под `set -euo pipefail` убивал оболочку ДО
+# присвоения кода (прогон отдавал голый код ребёнка и молчал), а форма `script`
+# была зашита BSD-синтаксисом и на util-linux не запускала вообще ничего.
+gate_carve() {   # каталог фрагментов -> печатает число вырезанных кусков
+  local dir="$1" n=0 name
+  for name in __gate_script_form gate_state __interface_gate; do
+    # Голова функции опознаётся ПОДСТРОКОЙ С НАЧАЛА строки, а не регуляркой:
+    # у голов есть хвостовой комментарий, и экранирование скобок в шаблоне было
+    # бы вторым источником истины о форме объявления.
+    awk -v h="${name}() {" 'index($0, h) == 1 {on=1} on {print} on && $0 == "}" {exit}' \
+      "$K/claude-patch-all.real" > "$dir/$name.sh"
+    [[ -s "$dir/$name.sh" ]] && n=$((n+1))
+  done
+  printf '%s\n' "$n"
+}
+
+# Подставной `script`: принимает РОВНО те формы, что названы в GATE_STUB_TAKE,
+# а на чужой отвечает как настоящий -- ненулевым кодом с диагностикой. Так
+# различитель меряется на ОБЕИХ сторонах с одной машины: замер настоящих
+# бинарей (util-linux 2.40.2 и BSD) снят волной 41 и записан в её бриф.
+gate_stub_script() {   # каталог
+  mkdir -p "$1"
+  cat > "$1/script" <<'STUB41'
+#!/usr/bin/env bash
+# util-linux: script -q -c КОМАНДА ФАЙЛ (команду разбирает sh)
+# BSD:        script -q ФАЙЛ КОМАНДА    (команда -- хвост argv)
+[[ -n "${GATE_STUB_LOG:-}" ]] && printf '%s\n' "$*" >> "$GATE_STUB_LOG"
+if [[ "${1:-}" == "-q" && "${2:-}" == "-c" && $# -eq 4 ]]; then
+  case "${GATE_STUB_TAKE:-}" in
+    ul|both) exec sh -c "$3" ;;
+  esac
+  echo "script: unrecognized option '--strict-mcp-config'" >&2
+  exit 1
+fi
+if [[ "${1:-}" == "-q" && $# -ge 3 ]]; then
+  case "${GATE_STUB_TAKE:-}" in
+    bsd|both) shift 2; exec "$@" ;;
+  esac
+  echo "script: unexpected number of arguments" >&2
+  exit 1
+fi
+echo "script: подставной не понял форму: $*" >&2
+exit 1
+STUB41
+  chmod +x "$1/script"
+}
+
+# Поддельный интерфейс: ведёт себя ровно тем способом, что назван в
+# GATE_FAKE_MODE. Приглашение печатается ТЕМ ЖЕ текстом, что пришло в argv --
+# разбор захвата сверяет именно его, и выдуманная строка проверяла бы другое.
+gate_fake_bin() {   # путь
+  cat > "$1" <<'FAKE41'
+#!/usr/bin/env bash
+prompt="${2:-}"
+case "${GATE_FAKE_MODE:-}" in
+  a) exit 1 ;;
+  b) printf '%s\n' "$prompt"; sleep 4; exit 1 ;;
+  c) sleep 20 ;;
+  d) printf '%s\n' "$prompt"; sleep 20 ;;
+  e) printf '%s\n' "$prompt"; exit 0 ;;
+  *) echo "поддельный интерфейс: неизвестный режим «${GATE_FAKE_MODE:-}»" >&2; exit 9 ;;
+esac
+FAKE41
+  chmod +x "$1"
+}
+
+# Запускатель стадии повторяет ВЫЗОВ конвейера, а не его тело: те же три
+# фрагмента, та же оболочка `set -euo pipefail`, та же связка «замер формы ->
+# стадия». Иначе зуб доказывал бы стадию, вызванную не так, как её зовёт кит.
+gate_drv_file() {   # путь
+  cat > "$1" <<'DRV41'
+set -euo pipefail
+source "$1"; source "$2"; source "$3"
+BIN="$4"; GATE_HOME="$5"; GATE_BUDGET="$6"
+GATE_LOG="$GATE_HOME/capture.log"
+GATE_PROMPT="tweakcc interface gate"
+: > "$GATE_LOG"
+GATE_SCRIPT_FORM="$(__gate_script_form)" || exit 2
+echo "ФОРМА=$GATE_SCRIPT_FORM"
+# Голым именем -- как в конвейере: под `||` `set -e` не действует во всём теле
+# стадии, и зуб мерил бы стадию под ДРУГОЙ оболочкой, чем её гоняет кит.
+__interface_gate
+DRV41
+}
+
+gate_prepare() {   # имя каталога сценария
+  GATE_D="$C/$1"; rm -rf "$GATE_D"; mkdir -p "$GATE_D/frag" "$GATE_D/stub"
+  GATE_CARVED=$(gate_carve "$GATE_D/frag")
+  GATE_BIN="$GATE_D/fake-bin"; gate_fake_bin "$GATE_BIN"
+  gate_stub_script "$GATE_D/stub"
+  GATE_DRV="$GATE_D/drv.sh"; gate_drv_file "$GATE_DRV"
+  GATE_STUB_LOG_F="$GATE_D/stub.log"; : > "$GATE_STUB_LOG_F"
+}
+
+gate_call() {   # режим поддельного бина, что принимает подставной script, бюджет
+  GATE_H=$(mktemp -d "$GATE_D/home.XXXXXX")
+  mkdir -p "$GATE_H/cfg" "$GATE_H/proj"
+  GATE_OUT=$(PATH="$GATE_D/stub:$PATH" GATE_STUB_TAKE="$2" \
+             GATE_STUB_LOG="$GATE_STUB_LOG_F" GATE_FAKE_MODE="$1" \
+             bash "$GATE_DRV" \
+               "$GATE_D/frag/__gate_script_form.sh" \
+               "$GATE_D/frag/gate_state.sh" \
+               "$GATE_D/frag/__interface_gate.sh" \
+               "$GATE_BIN" "$GATE_H" "$3" 2>&1 9>&-)
+  GATE_RC=$?
+}
+
+# Строка ЗАПУСКА, а не строка пробы: обе идут в один журнал подставного, и
+# отличает их путь запускателя.
+gate_launch_line() { grep -F 'run.sh' "$GATE_STUB_LOG_F" | tail -1; }
+
+gate_carved_or_bad() {   # номер сценария -- общий отказ прибора
+  [[ "$GATE_CARVED" == "3" ]] && return 0
+  LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$GATE_CARVED из 3"
+  bad "$1 гейт интерфейса: стадия не вырезана из конвейера -- прибор не мерит"
+  return 1
+}
+
+scenario_150() {   # форма script ЗАМЕРЕНА: util-linux-подставной
+  local launch
+  gate_prepare s150
+  gate_carved_or_bad 150 || return
+  gate_call e ul 5
+  launch=$(gate_launch_line)
+  LAST_EVID="rc=$GATE_RC запуск=[$launch] дом=$([[ -d "$GATE_H" ]] && echo есть || echo снят) :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
+  if [[ "$GATE_OUT" != *"ФОРМА=utillinux"* ]]; then
+    LAST_EVID="ФОРМА_НЕ_UTILLINUX :: $LAST_EVID"
+    bad "150 форма script: util-linux-подставной, а выбрана не его форма"; return
+  fi
+  if [[ "$launch" != "-q -c "* ]]; then
+    LAST_EVID="ЗАПУСК_НЕ_ТОЙ_ФОРМЫ :: $LAST_EVID"
+    bad "150 форма script: стадия позвала script НЕ в выбранной форме"; return
+  fi
+  if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
+    LAST_EVID="ВЕРДИКТ_НЕ_УСПЕХ :: $LAST_EVID"
+    bad "150 форма script: util-linux-форма не довела стадию до успеха"; return
+  fi
+  if [[ -d "$GATE_H" ]]; then
+    LAST_EVID="ДОМ_НЕ_СНЯТ :: $LAST_EVID"
+    bad "150 форма script: успех оставил временный дом гейта"; return
+  fi
+  ok "150 util-linux-подставной: форма замерена, ею же и позвали"
+}
+
+scenario_151() {   # форма script ЗАМЕРЕНА: BSD-подставной
+  local launch
+  gate_prepare s151
+  gate_carved_or_bad 151 || return
+  gate_call e bsd 5
+  launch=$(gate_launch_line)
+  LAST_EVID="rc=$GATE_RC запуск=[$launch] :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
+  if [[ "$GATE_OUT" != *"ФОРМА=bsd"* ]]; then
+    LAST_EVID="ФОРМА_НЕ_BSD :: $LAST_EVID"
+    bad "151 форма script: BSD-подставной, а выбрана не его форма"; return
+  fi
+  if [[ "$launch" != "-q /dev/null "* ]]; then
+    LAST_EVID="ЗАПУСК_НЕ_ТОЙ_ФОРМЫ :: $LAST_EVID"
+    bad "151 форма script: стадия позвала script НЕ в выбранной форме"; return
+  fi
+  if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
+    LAST_EVID="ВЕРДИКТ_НЕ_УСПЕХ :: $LAST_EVID"
+    bad "151 форма script: BSD-форма не довела стадию до успеха"; return
+  fi
+  ok "151 BSD-подставной: форма замерена, ею же и позвали"
+}
+
+scenario_152() {   # положительный контроль различителя: обе и ни одной
+  # Без этих двух случаев «проба выбрала форму» не доказывает ничего: молчаливый
+  # выбор одной из форм даёт ровно тот немой отказ, из которого выросла волна.
+  local out_both rc_both out_none rc_none
+  gate_prepare s152
+  gate_carved_or_bad 152 || return
+  gate_call e both 5; out_both="$GATE_OUT"; rc_both=$GATE_RC
+  gate_call e none 5; out_none="$GATE_OUT"; rc_none=$GATE_RC
+  LAST_EVID="обе rc=$rc_both [$(printf '%s' "$out_both" | tr '\n' '|')] ни_одной rc=$rc_none [$(printf '%s' "$out_none" | tr '\n' '|')]"
+  if (( rc_both != 2 )) || [[ "$out_both" != *"принял ОБЕ известные формы"* ]]; then
+    LAST_EVID="ОБЕ_ФОРМЫ_НЕ_ОТКАЗ :: $LAST_EVID"
+    bad "152 различитель: принявший ОБЕ формы script не дал отказа кода 2"; return
+  fi
+  if (( rc_none != 2 )) || [[ "$out_none" != *"не принял НИ ОДНОЙ известной формы"* ]]; then
+    LAST_EVID="НИ_ОДНОЙ_НЕ_ОТКАЗ :: $LAST_EVID"
+    bad "152 различитель: не принявший НИ ОДНОЙ формы script не дал отказа кода 2"; return
+  fi
+  ok "152 различитель формы: обе и ни одной -- отказ кода 2 с названной причиной"
+}
+
+scenario_153() {   # ветка «вышел без отрисовки» ДОСТИЖИМА
+  gate_prepare s153
+  gate_carved_or_bad 153 || return
+  gate_call a ul 5
+  LAST_EVID="rc=$GATE_RC :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
+  if [[ "$GATE_OUT" != *"exited 1 without drawing anything"* ]]; then
+    LAST_EVID="ВЕТКА_БЕЗ_ОТРИСОВКИ_НЕДОСТУПНА :: $LAST_EVID"
+    bad "153 вердикт: мгновенная смерть ребёнка не названа своей строкой"; return
+  fi
+  if (( GATE_RC == 0 )); then
+    LAST_EVID="ОТКАЗ_НЕ_ОТКАЗ :: $LAST_EVID"
+    bad "153 вердикт: стадия объявила успех на умершем без отрисовки ребёнке"; return
+  fi
+  ok "153 вердикт: вышел кодом 1 без отрисовки -- своей строкой"
+}
+
+scenario_154() {   # ветка «отрисовал и умер» ДОСТИЖИМА
+  # Смерть наступает ПОСЛЕ первой отрисовки, поэтому её ловит цикл добора --
+  # вторая площадка `wait`, у которой своя мутация.
+  gate_prepare s154
+  gate_carved_or_bad 154 || return
+  gate_call b ul 12
+  LAST_EVID="rc=$GATE_RC :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
+  if [[ "$GATE_OUT" != *"drew its message and then exited 1"* ]]; then
+    LAST_EVID="ВЕТКА_ОТРИСОВАЛ_И_УМЕР_НЕДОСТУПНА :: $LAST_EVID"
+    bad "154 вердикт: смерть после отрисовки не названа своей строкой"; return
+  fi
+  if (( GATE_RC == 0 )); then
+    LAST_EVID="ОТКАЗ_НЕ_ОТКАЗ :: $LAST_EVID"
+    bad "154 вердикт: стадия объявила успех на умершем после отрисовки ребёнке"; return
+  fi
+  ok "154 вердикт: отрисовал и умер кодом 1 -- своей строкой"
+}
+
+scenario_155() {   # ветка «не дошёл до отрисовки» ДОСТИЖИМА и не подменена
+  gate_prepare s155
+  gate_carved_or_bad 155 || return
+  gate_call c ul 3
+  LAST_EVID="rc=$GATE_RC :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
+  if [[ "$GATE_OUT" != *"never reached a render within 3s"* ]]; then
+    LAST_EVID="ВЕТКА_ТАЙМАУТА_ПОДМЕНЕНА :: $LAST_EVID"
+    bad "155 вердикт: молчащий живой ребёнок не назван таймаутом бюджета"; return
+  fi
+  if (( GATE_RC == 0 )); then
+    LAST_EVID="ОТКАЗ_НЕ_ОТКАЗ :: $LAST_EVID"
+    bad "155 вердикт: стадия объявила успех, не дождавшись отрисовки"; return
+  fi
+  ok "155 вердикт: живой, но молчащий ребёнок -- таймаут своей строкой"
+}
+
+scenario_156() {   # ветка успеха: вердикт назван и временный дом СНЯТ
+  gate_prepare s156
+  gate_carved_or_bad 156 || return
+  gate_call d ul 12
+  LAST_EVID="rc=$GATE_RC дом=$([[ -d "$GATE_H" ]] && echo есть || echo снят) :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
+  if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
+    LAST_EVID="ВЕРДИКТ_НЕ_УСПЕХ :: $LAST_EVID"
+    bad "156 вердикт: живой отрисовавший ребёнок не признан успехом"; return
+  fi
+  if [[ -d "$GATE_H" ]]; then
+    LAST_EVID="ДОМ_НЕ_СНЯТ :: $LAST_EVID"
+    bad "156 вердикт: успех оставил временный дом гейта"; return
+  fi
+  ok "156 вердикт: отрисовал и жив -- успех, дом гейта снят"
+}
+
+scenario_157() {   # красный блок проверок отвечает СВОИМ кодом
+  # Две половины, и вторая -- ФОРМА, прочитанная из копии кита. Замер (linux,
+  # bash 5.2.26): при ненулевом питоне обрыв по `set -e` отдаёт ТОТ ЖЕ код, что
+  # и честный хвост, -- различить их снаружи нечем. Отличается ГАРАНТИЯ:
+  # отметка `__DONE` не ставится, и часовой оборванного прогона (он и написан
+  # для оболочки, которая теряет код) начинает решать судьбу красного блока
+  # кодом, который сам же и не контролирует. Поэтому поведение здесь -- ПОЛОЖИ-
+  # ТЕЛЬНЫЙ КОНТРОЛЬ (код блока доехал, строки обрыва нет), а зуб держит форма.
+  local out rc form
+  printf 'не образ\n' > "$C/s157.img"
+  out=$(bash "$K/tools/checks-on-image.sh" --script "$K/claude-patch-all.real" \
+          "$C/s157.img" "$K/tweakcc-patch.js" 2>&1 9>&-); rc=$?
+  form=$(grep -cF 'python3 "$BLOCK" "$IMG" "$PATCH_SRC" || __rc_block=$?' \
+           "$K/tools/checks-on-image.sh")
+  LAST_EVID="rc=$rc форма=$form :: $(printf '%s' "$out" | tail -3 | tr '\n' '|')"
+  if (( rc != 1 )); then
+    LAST_EVID="КОД_НЕ_КОД_БЛОКА :: $LAST_EVID"
+    bad "157 checks-on-image: красный блок ответил не своим кодом"; return
+  fi
+  if [[ "$out" == *"прогон оборвался, не дойдя до конца"* ]]; then
+    LAST_EVID="ОБЪЯВЛЕН_ОБРЫВ :: $LAST_EVID"
+    bad "157 checks-on-image: красный блок назван обрывом прогона"; return
+  fi
+  if [[ "$form" != "1" ]]; then
+    LAST_EVID="ФОРМА_КОДА_БЛОКА_СНЯТА :: $LAST_EVID"
+    bad "157 checks-on-image: код блока снимается формой, обрывающей стадию"; return
+  fi
+  ok "157 checks-on-image: красный блок отвечает своим кодом, хвост стадии достижим"
+}
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -4555,7 +4849,13 @@ MUT_FILE=(x
   tools/sweep.sh claude-patch-all.real tools/build-path-probe.real.sh
   claude-patch-all.real
   tools/corpus-tools-bench.real.sh tools/corpus-tools-bench.real.sh
-  tools/corpus-tools-bench.real.sh)
+  tools/corpus-tools-bench.real.sh
+  # Волна 41: форма `script` (безусловная BSD и безусловная util-linux), снятый
+  # отказ различителя, обе площадки `wait` под `set -e`, подмена ветки
+  # таймаута, неснятый дом гейта и защищённый код красного блока проверок.
+  claude-patch-all.real claude-patch-all.real claude-patch-all.real
+  claude-patch-all.real claude-patch-all.real claude-patch-all.real
+  claude-patch-all.real tools/checks-on-image.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -4783,7 +5083,16 @@ MUT_PAT=(x
   '    done \| sort -rn \| cut -f2-'
   '    ctl_red=0; \(\( FAILED > before_failed \)\) && ctl_red=1'
   '    index\(skip, " " \$1 " "\) \{ next \}\n    index\(\$0, root\) && \$0 ~ re \{ print \$1 \}'
-  '    \$2 != p \{ next \}')
+  '    \$2 != p \{ next \}'
+  # Волна 41: гейт интерфейса.
+  '    if \[\[ "\$GATE_SCRIPT_FORM" == utillinux \]\]; then'
+  '    if \[\[ "\$GATE_SCRIPT_FORM" == utillinux \]\]; then'
+  'if \(\( ul == 1 && bsd == 0 \)\)'
+  'GATE_EXITED=1\n      GATE_RC=0\n      wait \$GATE_PID 2>/dev/null \|\| GATE_RC=\$\?'
+  'GATE_EXITED=1\n          GATE_RC=0\n          wait \$GATE_PID 2>/dev/null \|\| GATE_RC=\$\?'
+  '      if \[\[ \$GATE_EXITED -eq 1 \]\]; then'
+  '      rm -rf "\$GATE_HOME"\n      ;;'
+  'python3 "\$BLOCK" "\$IMG" "\$PATCH_SRC" \|\| __rc_block=\$\?')
 
 MUT_REP=(x
   'if false; then'
@@ -4968,7 +5277,16 @@ MUT_REP=(x
   '    done | sort -rn | cut -f1'
   '    ctl_red=0'
   '    index($0, root) && $0 ~ re { print $1 }'
-  '    0 { next }')
+  '    0 { next }'
+  # Волна 41: гейт интерфейса.
+  '    if false; then'
+  '    if true; then'
+  'if (( ul == 1 ))'
+  'GATE_EXITED=1; GATE_RC=0; wait $GATE_PID 2>/dev/null; GATE_RC=$?'
+  'GATE_EXITED=1; GATE_RC=0; wait $GATE_PID 2>/dev/null; GATE_RC=$?'
+  '      if true; then'
+  '      ;;'
+  'python3 "$BLOCK" "$IMG" "$PATCH_SRC"')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -5020,7 +5338,10 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                # зуба к УЖЕ СУЩЕСТВУЮЩИМ сценариям -- ветка по платформе
                # краснит прополку будущей метки (97), опознание воркера по
                # родству краснит смерть воркера зубов (93).
-               145 145 97 146 146 146 147 148 149 93)
+               145 145 97 146 146 146 147 148 149 93
+               # Волна 41: гейт интерфейса -- по своей мутации на каждый его
+               # сценарий.
+               150 151 152 153 154 155 156 157)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -5216,7 +5537,16 @@ MUT_CAUSE=(x
   'ПОРЯДОК_НЕ_ПО_МЕТКЕ'
   'ЗАЧЁТ_БЕЗ_КОНТРОЛЯ'
   'ИСКЛЮЧЕНИЕ_PID_СНЯТО'
-  'ОПОЗНАНИЕ_НЕ_ПО_РОДСТВУ')
+  'ОПОЗНАНИЕ_НЕ_ПО_РОДСТВУ'
+  # Волна 41: гейт интерфейса.
+  'ЗАПУСК_НЕ_ТОЙ_ФОРМЫ'
+  'ЗАПУСК_НЕ_ТОЙ_ФОРМЫ'
+  'ОБЕ_ФОРМЫ_НЕ_ОТКАЗ'
+  'ВЕТКА_БЕЗ_ОТРИСОВКИ_НЕДОСТУПНА'
+  'ВЕТКА_ОТРИСОВАЛ_И_УМЕР_НЕДОСТУПНА'
+  'ВЕТКА_ТАЙМАУТА_ПОДМЕНЕНА'
+  'ДОМ_НЕ_СНЯТ'
+  'ФОРМА_КОДА_БЛОКА_СНЯТА')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

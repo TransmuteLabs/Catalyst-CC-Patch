@@ -6847,6 +6847,35 @@ GATE_BUDGET="$(validated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET "${CLAUDE_
 [[ "$GATE_BUDGET" == "150" ]] \
   || echo "Interface gate: budget ${GATE_BUDGET}s (CLAUDE_PATCH_GATE_BUDGET, default 150)"
 
+# Форма `script` выбирается ЗАМЕРОМ ИНСТРУМЕНТА, а не именем ОС: у util-linux
+# команда приходит СТРОКОЙ в `-c`, у BSD -- хвостом argv после файла, и каждая
+# форма на чужой стороне отвечает ненулевым кодом. Выбор по `uname` -- третий
+# случай того же класса, что и разъехавшийся формат чтения метаданных (#89):
+# имя ОС не удостоверяет, ЧЕМ отвечает бинарь на этой машине.
+# КОНСТРЕЙНТ: ровно одна из проб обязана пройти -- это собственный
+# положительный контроль различителя. Прошли обе или ни одной -- прибор не
+# может мерить (код 2), и молчаливый выбор одной из форм вернул бы тот же немой
+# отказ, из которого выросла эта проба.
+# Проба следов не оставляет (гоняет `true`, вывод в /dev/null), поэтому стоит
+# ДО инварианта порядка, объявленного ниже.
+__gate_script_form() {   # печатает utillinux|bsd; код 2 -- обе или ни одной
+  local ul=0 bsd=0
+  if script -q -c true /dev/null >/dev/null 2>&1; then ul=1; fi
+  if script -q /dev/null /usr/bin/true >/dev/null 2>&1; then bsd=1; fi
+  if (( ul == 1 && bsd == 0 )); then printf 'utillinux\n'; return 0; fi
+  if (( bsd == 1 && ul == 0 )); then printf 'bsd\n'; return 0; fi
+  if (( ul == 1 )); then
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- script принял ОБЕ известные формы," >&2
+  else
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- script не принял НИ ОДНОЙ известной формы," >&2
+  fi
+  echo "  значит различитель не различает: интерфейс мерить нечем (отказ прибора," >&2
+  echo "  а не продукта). Пробы: script -q -c КОМАНДА ФАЙЛ и script -q ФАЙЛ КОМАНДА." >&2
+  return 2
+}
+GATE_SCRIPT_FORM="$(__gate_script_form)" || exit 2
+echo "Interface gate: script form ${GATE_SCRIPT_FORM} (measured on this machine, not deduced from the OS)"
+
 # Н-3 (круг 24): величина бюджета проверяется ДО первого следа на диске и до
 # запуска ребёнка. Под `set -euo pipefail` отказ валидатора обрывает прогон
 # немедленно, а стоял он ниже -- после mktemp -d и после спавна сессии; кривая
@@ -6961,149 +6990,185 @@ print("RENDERED" if re.sub(r"\s+", "", sys.argv[2]) in flat else "PENDING")
 PYSTATE
 }
 
-# `exec` replaces the subshell so $! is the pid that setsid then makes a session
-# and process-group leader. Killing the single pid leaves `script` and the CLI
-# running: during one version sweep that left 23 sessions and 1.4 GB resident.
-# The group kill is what actually ends the run.
-#
-# `9>&-` CLOSES THE PATCH LOCK FOR THIS CHILD, and it is not hygiene -- it is
-# the lock's lifetime. The lock lives in a file DESCRIPTOR, so every process
-# holding a copy of fd 9 holds the lock; bash does not set close-on-exec on a
-# redirection, so the whole tree spawned here inherited it. This gate starts a
-# real CLI session -- which starts MCP servers, hooks and helper processes, in
-# its own session and process group. Anything that escapes the group kill below
-# then keeps the lock ALIVE AFTER THIS RUN EXITS, and the next run reads that as
-# "the pipeline is already running" (code 3). A version sweep that measured one
-# version and then reported the rest as НЕ ИЗМЕРЕНО is exactly this: no pipeline
-# was running, a straggler from the previous version's interface gate was
-# holding the descriptor.
-(
-  cd "$GATE_HOME/proj" || exit 1
-  exec env CLAUDE_CONFIG_DIR="$GATE_HOME/cfg" CLAUDE_CODE_CHILD_SESSION=1 \
-    perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV or die $!' \
-    script -q /dev/null "$BIN" --strict-mcp-config "$GATE_PROMPT" >"$GATE_LOG" 2>&1
-) 9>&- &
-GATE_PID=$!
+# --- 5a2b. стадия гейта интерфейса как ИМЕНОВАННАЯ функция --------------------
+# У стадии появились зубы (tools/corpus-tools-bench.sh, семейство сценариев
+# гейта интерфейса), а зуб зовёт стадию по имени: вырезанный по якорю блок
+# исполняется стендом с поддельными $BIN и $GATE_HOME.
+# КОНСТРЕЙНТ: функция читает $BIN, $GATE_HOME, $GATE_LOG, $GATE_PROMPT,
+# $GATE_BUDGET и $GATE_SCRIPT_FORM из окружения вызывающего и НЕ создаёт
+# $GATE_HOME сама -- порядок «проверка бюджета -> проба формы -> создание
+# дома» остаётся инвариантом вызывающего.
+__interface_gate() {
+  # `exec` replaces the subshell so $! is the pid that setsid then makes a session
+  # and process-group leader. Killing the single pid leaves `script` and the CLI
+  # running: during one version sweep that left 23 sessions and 1.4 GB resident.
+  # The group kill is what actually ends the run.
+  #
+  # `9>&-` CLOSES THE PATCH LOCK FOR THIS CHILD, and it is not hygiene -- it is
+  # the lock's lifetime. The lock lives in a file DESCRIPTOR, so every process
+  # holding a copy of fd 9 holds the lock; bash does not set close-on-exec on a
+  # redirection, so the whole tree spawned here inherited it. This gate starts a
+  # real CLI session -- which starts MCP servers, hooks and helper processes, in
+  # its own session and process group. Anything that escapes the group kill below
+  # then keeps the lock ALIVE AFTER THIS RUN EXITS, and the next run reads that as
+  # "the pipeline is already running" (code 3). A version sweep that measured one
+  # version and then reported the rest as НЕ ИЗМЕРЕНО is exactly this: no pipeline
+  # was running, a straggler from the previous version's interface gate was
+  # holding the descriptor.
+  # Команда уезжает в `script` ЧЕРЕЗ ЗАПУСКАТЕЛЬ, а не строкой: у util-linux `-c`
+  # принимает СТРОКУ, которую разбирает `sh`, и ручная расстановка кавычек стала
+  # бы вторым источником истины о команде. `printf %q` -- встроенная в bash (есть
+  # и в 3.2), запускатель исполняется bash по шебангу, поэтому кавычки верны по
+  # построению. Путь запускателя тоже проходит через %q: mktemp -d вправе вернуть
+  # каталог с пробелом, а строку `-c` разбирает `sh`.
+  { printf '#!/usr/bin/env bash\n'
+    printf 'exec %q %q %q\n' "$BIN" --strict-mcp-config "$GATE_PROMPT"
+  } > "$GATE_HOME/run.sh"
+  chmod +x "$GATE_HOME/run.sh"
+  (
+    cd "$GATE_HOME/proj" || exit 1
+    # Форма меняет только ХВОСТ argv: окружение, setsid и закрытый замок обязаны
+    # быть общими для обеих, иначе одна из платформ поехала бы своим запуском.
+    if [[ "$GATE_SCRIPT_FORM" == utillinux ]]; then
+      __gate_cmd=(script -q -c "$(printf '%q' "$GATE_HOME/run.sh")" /dev/null)
+    else
+      __gate_cmd=(script -q /dev/null "$GATE_HOME/run.sh")
+    fi
+    exec env CLAUDE_CONFIG_DIR="$GATE_HOME/cfg" CLAUDE_CODE_CHILD_SESSION=1 \
+      perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV or die $!' \
+      "${__gate_cmd[@]}" >"$GATE_LOG" 2>&1
+  ) 9>&- &
+  GATE_PID=$!
 
-# Ответ помощника читается КАК ОТВЕТ ПРИБОРА. Пустой ответ или ненулевой код --
-# это отказ РАЗБОРА захвата (нет python3, захват не прочитать), а не медленный
-# интерфейс: без этой развилки прогон уходил в ветку таймаута и печатал «гейт
-# не дождался отрисовки за N с» -- то есть поломка прибора объявлялась
-# свойством продукта.
-gate_state_checked() {
-  local out rc=0
-  out="$(gate_state)" || rc=$?
-  if (( rc != 0 )) || [[ -z "$out" ]]; then
-    printf 'TOOLFAIL разбор захвата не ответил (rc=%s, ответ %s символов)\n' \
-      "$rc" "${#out}"
-    return 0
+  # Ответ помощника читается КАК ОТВЕТ ПРИБОРА. Пустой ответ или ненулевой код --
+  # это отказ РАЗБОРА захвата (нет python3, захват не прочитать), а не медленный
+  # интерфейс: без этой развилки прогон уходил в ветку таймаута и печатал «гейт
+  # не дождался отрисовки за N с» -- то есть поломка прибора объявлялась
+  # свойством продукта.
+  gate_state_checked() {
+    local out rc=0
+    out="$(gate_state)" || rc=$?
+    if (( rc != 0 )) || [[ -z "$out" ]]; then
+      printf 'TOOLFAIL разбор захвата не ответил (rc=%s, ответ %s символов)\n' \
+        "$rc" "${#out}"
+      return 0
+    fi
+    printf '%s\n' "$out"
+  }
+
+  GATE_STATE=PENDING
+  GATE_EXITED=0
+  i=0
+  while (( i < GATE_BUDGET )); do
+    i=$((i + 1))
+    sleep 1
+    GATE_STATE="$(gate_state_checked)"
+    case "$GATE_STATE" in
+      ERROR*|TOOLFAIL*) break ;;
+    esac
+    if ! kill -0 $GATE_PID 2>/dev/null; then
+      # It ended on its own. That is not success by itself: read the exit status.
+      GATE_EXITED=1
+      GATE_RC=0
+      wait $GATE_PID 2>/dev/null || GATE_RC=$?
+      GATE_STATE="$(gate_state_checked)"
+      break
+    fi
+    if [[ "$GATE_STATE" == RENDERED ]]; then
+      # An error can still land after the first paint, so keep watching for a
+      # while instead of declaring victory three seconds in.
+      for _ in $(seq 1 8); do
+        sleep 1
+        GATE_STATE="$(gate_state_checked)"
+        [[ "$GATE_STATE" == ERROR* || "$GATE_STATE" == TOOLFAIL* ]] && break
+        # The same death the outer loop handles, and it must be handled the same
+        # way HERE -- this is the branch the follow-up loop exists for. Breaking
+        # without reading the status left GATE_EXITED at 0, and the block below
+        # then forced GATE_RC=0: a build that drew its message and died one second
+        # later, with a crash whose text matches none of gate_state's patterns
+        # (a stack overflow, an engine-level fatal, a bare non-zero exit), was
+        # reported as a clean interface.
+        if ! kill -0 $GATE_PID 2>/dev/null; then
+          GATE_EXITED=1
+          GATE_RC=0
+          wait $GATE_PID 2>/dev/null || GATE_RC=$?
+          GATE_STATE="$(gate_state_checked)"
+          break
+        fi
+      done
+      break
+    fi
+  done
+
+  if [[ $GATE_EXITED -eq 0 ]]; then
+    kill -TERM -"$GATE_PID" 2>/dev/null || kill -TERM "$GATE_PID" 2>/dev/null || true
+    # GATE_BUDGET bounds the POLLING, not this. A child that ignores TERM -- or is
+    # stuck in a syscall -- leaves the bare `wait` below waiting forever, and the
+    # FATAL that explains the timeout sits after it and never prints. Give TERM a
+    # few seconds, then take the process group out with KILL.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$GATE_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+    if kill -0 "$GATE_PID" 2>/dev/null; then
+      echo "  the interface gate ignored TERM; killing it" >&2
+      kill -KILL -"$GATE_PID" 2>/dev/null || kill -KILL "$GATE_PID" 2>/dev/null || true
+    fi
+    wait $GATE_PID 2>/dev/null || true
+    GATE_RC=0
   fi
-  printf '%s\n' "$out"
+
+  case "$GATE_STATE" in
+    RENDERED)
+      if [[ ${GATE_RC:-0} -ne 0 ]]; then
+        echo "FATAL: the interface drew its message and then exited ${GATE_RC}" >&2
+        echo "  capture kept at $GATE_LOG" >&2
+        return 1
+      fi
+      echo "Interface: came up in a throwaway home and drew its message, no name or type errors"
+      rm -rf "$GATE_HOME"
+      ;;
+    TOOLFAIL*)
+      echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- сломан разбор захвата, а не продукт" >&2
+      echo "  ${GATE_STATE#TOOLFAIL }" >&2
+      echo "  capture kept at $GATE_LOG" >&2
+      return 1
+      ;;
+    ERROR*)
+      echo "FATAL: the interface does not come up — leaving the launcher alone" >&2
+      echo "  ${GATE_STATE#ERROR }" >&2
+      echo "  capture kept at $GATE_LOG" >&2
+      return 1
+      ;;
+    *)
+      # Three different faults arrive here, and only one of them is "the machine is
+      # slow": the child may never have started (a helper missing from PATH exits
+      # 127 in the first second), it may have exited non-zero without drawing, or
+      # it may genuinely still be starting when the budget runs out. Advising a
+      # bigger budget for the first two sends the reader in the wrong direction.
+      if [[ $GATE_EXITED -eq 1 ]]; then
+        echo "FATAL: the interface gate exited ${GATE_RC:-?} without drawing anything." >&2
+        echo "       That is not a timeout — the run ended on its own." >&2
+        tail -n 12 "$GATE_LOG" 2>/dev/null | sed 's/^/  /' >&2
+      else
+        echo "FATAL: the interface gate never reached a render within ${GATE_BUDGET}s," >&2
+        echo "       so it proves nothing — refusing to call this build good." >&2
+        echo "       Raise CLAUDE_PATCH_GATE_BUDGET if the machine is simply slow." >&2
+      fi
+      echo "  capture kept at $GATE_LOG" >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 
-GATE_STATE=PENDING
-GATE_EXITED=0
-i=0
-while (( i < GATE_BUDGET )); do
-  i=$((i + 1))
-  sleep 1
-  GATE_STATE="$(gate_state_checked)"
-  case "$GATE_STATE" in
-    ERROR*|TOOLFAIL*) break ;;
-  esac
-  if ! kill -0 $GATE_PID 2>/dev/null; then
-    # It ended on its own. That is not success by itself: read the exit status.
-    GATE_EXITED=1
-    wait $GATE_PID 2>/dev/null
-    GATE_RC=$?
-    GATE_STATE="$(gate_state_checked)"
-    break
-  fi
-  if [[ "$GATE_STATE" == RENDERED ]]; then
-    # An error can still land after the first paint, so keep watching for a
-    # while instead of declaring victory three seconds in.
-    for _ in $(seq 1 8); do
-      sleep 1
-      GATE_STATE="$(gate_state_checked)"
-      [[ "$GATE_STATE" == ERROR* || "$GATE_STATE" == TOOLFAIL* ]] && break
-      # The same death the outer loop handles, and it must be handled the same
-      # way HERE -- this is the branch the follow-up loop exists for. Breaking
-      # without reading the status left GATE_EXITED at 0, and the block below
-      # then forced GATE_RC=0: a build that drew its message and died one second
-      # later, with a crash whose text matches none of gate_state's patterns
-      # (a stack overflow, an engine-level fatal, a bare non-zero exit), was
-      # reported as a clean interface.
-      if ! kill -0 $GATE_PID 2>/dev/null; then
-        GATE_EXITED=1
-        wait $GATE_PID 2>/dev/null
-        GATE_RC=$?
-        GATE_STATE="$(gate_state_checked)"
-        break
-      fi
-    done
-    break
-  fi
-done
-
-if [[ $GATE_EXITED -eq 0 ]]; then
-  kill -TERM -"$GATE_PID" 2>/dev/null || kill -TERM "$GATE_PID" 2>/dev/null || true
-  # GATE_BUDGET bounds the POLLING, not this. A child that ignores TERM -- or is
-  # stuck in a syscall -- leaves the bare `wait` below waiting forever, and the
-  # FATAL that explains the timeout sits after it and never prints. Give TERM a
-  # few seconds, then take the process group out with KILL.
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 "$GATE_PID" 2>/dev/null || break
-    sleep 0.5
-  done
-  if kill -0 "$GATE_PID" 2>/dev/null; then
-    echo "  the interface gate ignored TERM; killing it" >&2
-    kill -KILL -"$GATE_PID" 2>/dev/null || kill -KILL "$GATE_PID" 2>/dev/null || true
-  fi
-  wait $GATE_PID 2>/dev/null || true
-  GATE_RC=0
-fi
-
-case "$GATE_STATE" in
-  RENDERED)
-    if [[ ${GATE_RC:-0} -ne 0 ]]; then
-      echo "FATAL: the interface drew its message and then exited ${GATE_RC}" >&2
-      echo "  capture kept at $GATE_LOG" >&2
-      exit 1
-    fi
-    echo "Interface: came up in a throwaway home and drew its message, no name or type errors"
-    rm -rf "$GATE_HOME"
-    ;;
-  TOOLFAIL*)
-    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- сломан разбор захвата, а не продукт" >&2
-    echo "  ${GATE_STATE#TOOLFAIL }" >&2
-    echo "  capture kept at $GATE_LOG" >&2
-    exit 1
-    ;;
-  ERROR*)
-    echo "FATAL: the interface does not come up — leaving the launcher alone" >&2
-    echo "  ${GATE_STATE#ERROR }" >&2
-    echo "  capture kept at $GATE_LOG" >&2
-    exit 1
-    ;;
-  *)
-    # Three different faults arrive here, and only one of them is "the machine is
-    # slow": the child may never have started (a helper missing from PATH exits
-    # 127 in the first second), it may have exited non-zero without drawing, or
-    # it may genuinely still be starting when the budget runs out. Advising a
-    # bigger budget for the first two sends the reader in the wrong direction.
-    if [[ $GATE_EXITED -eq 1 ]]; then
-      echo "FATAL: the interface gate exited ${GATE_RC:-?} without drawing anything." >&2
-      echo "       That is not a timeout — the run ended on its own." >&2
-      tail -n 12 "$GATE_LOG" 2>/dev/null | sed 's/^/  /' >&2
-    else
-      echo "FATAL: the interface gate never reached a render within ${GATE_BUDGET}s," >&2
-      echo "       so it proves nothing — refusing to call this build good." >&2
-      echo "       Raise CLAUDE_PATCH_GATE_BUDGET if the machine is simply slow." >&2
-    fi
-    echo "  capture kept at $GATE_LOG" >&2
-    exit 1
-    ;;
-esac
+# Стадия зовётся ГОЛЫМ ИМЕНЕМ, а не через `|| exit $?`: у функции, стоящей в
+# AND-OR списке, `set -e` ИГНОРИРУЕТСЯ ВО ВСЁМ ТЕЛЕ (замерено: под `||`
+# незащищённый `wait` тело не обрывает, голым именем -- обрывает). Форма с `||`
+# молча сняла бы с вынесенного тела ту самую оболочку, под которой оно жило до
+# выноса, и погасила бы вместе с ней зубы этой волны. Ненулевой возврат под
+# `set -e` кончает прогон тем же кодом, каким стадия выходила до выноса.
+__interface_gate
 
 # --- 5a3. the probes must BEHAVE, not merely be present -----------------------
 # The checks above are text checks on the image and the interface gate only
