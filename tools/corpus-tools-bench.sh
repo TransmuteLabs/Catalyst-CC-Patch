@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=170
-EXPECTED_MUTATIONS=199
+EXPECTED_SCENARIOS=171
+EXPECTED_MUTATIONS=200
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -1930,7 +1930,7 @@ run_all() {
   # на пути пропуска и место чужого образа.
   scenario_158; scenario_159; scenario_160; scenario_161; scenario_162
   scenario_163; scenario_164; scenario_165; scenario_166; scenario_167
-  scenario_168; scenario_169; scenario_170
+  scenario_168; scenario_169; scenario_170; scenario_171
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -4429,7 +4429,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 199 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 200 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -4595,6 +4595,18 @@ gate_stub_script() {   # каталог
 # util-linux: script -q -c КОМАНДА ФАЙЛ (команду разбирает sh)
 # BSD:        script -q ФАЙЛ КОМАНДА    (команда -- хвост argv)
 [[ -n "${GATE_STUB_LOG:-}" ]] && printf '%s\n' "$*" >> "$GATE_STUB_LOG"
+# СВИДЕТЕЛЬ ВХОДА (волна 44, #100). Подставной -- bash-скрипт и tcgetattr не
+# зовёт, поэтому СОКЕТ на входе сам по себе его не валит: настоящий отказ
+# воспроизвёл бы только настоящий BSD-`script`. Значит зуб мерит МЕХАНИЗМ --
+# чем закреплён вход проб, -- и для этого подставной сообщает КЛАСС своего
+# stdin. Журнал ОТДЕЛЬНЫЙ: строку argv соседние сценарии читают по префиксу,
+# и дописывание в неё сделало бы их скрытыми потребителями этого зуба.
+if [[ -n "${GATE_STUB_STDIN_LOG:-}" ]]; then
+  __sin=прочее
+  [[ -S /dev/fd/0 ]] && __sin=сокет
+  [[ -c /dev/fd/0 ]] && __sin=символьное
+  printf '%s\t%s\n' "$__sin" "$*" >> "$GATE_STUB_STDIN_LOG"
+fi
 if [[ "${1:-}" == "-q" && "${2:-}" == "-c" && $# -eq 4 ]]; then
   case "${GATE_STUB_TAKE:-}" in
     ul|both) exec sh -c "$3" ;;
@@ -4658,6 +4670,19 @@ __interface_gate
 DRV41
 }
 
+# Драйвер под СОКЕТОМ на дескрипторе 0 -- ровно тот вид входа, что приносят
+# агентский, launchd- и cron-контексты. Отдельным ФАЙЛОМ, а не строкой в
+# командной строке: строка уехала бы в argv и в журналы, которые соседние
+# сценарии читают по префиксу.
+gate_sock_py() {   # путь файла
+  cat > "$1" <<'SOCKPY'
+import socket, os, sys
+a, b = socket.socketpair()
+os.dup2(a.fileno(), 0)
+os.execvp(sys.argv[1], sys.argv[1:])
+SOCKPY
+}
+
 gate_prepare() {   # имя каталога сценария
   GATE_D="$C/$1"; rm -rf "$GATE_D"; mkdir -p "$GATE_D/frag" "$GATE_D/stub"
   GATE_CARVED=$(gate_carve "$GATE_D/frag")
@@ -4665,6 +4690,8 @@ gate_prepare() {   # имя каталога сценария
   gate_stub_script "$GATE_D/stub"
   GATE_DRV="$GATE_D/drv.sh"; gate_drv_file "$GATE_DRV"
   GATE_STUB_LOG_F="$GATE_D/stub.log"; : > "$GATE_STUB_LOG_F"
+  GATE_STUB_SIN_F="$GATE_D/stub-stdin.log"; : > "$GATE_STUB_SIN_F"
+  GATE_SOCK_PY="$GATE_D/sockexec.py"; gate_sock_py "$GATE_SOCK_PY"
 }
 
 # Пара ХОЗЯИНА, посчитанная ТЕМ ЖЕ домом, что и в конвейере: сценарию нужна
@@ -4675,9 +4702,18 @@ gate_call() {   # режим бина, что принимает подстав�
   GATE_H=$(mktemp -d "$GATE_D/home.XXXXXX")
   mkdir -p "$GATE_H/cfg" "$GATE_H/proj"
   local target="${4:-$(gate_host_pair)}"
+  # Запускатель отделён от аргументов: под ручкой GATE_STDIN_SOCK драйвер
+  # получает СОКЕТ на дескрипторе 0 (сценарий 171, #100). По умолчанию ручка
+  # снята, и прочие сценарии идут прежним запуском -- иначе зуб одного
+  # сценария молча менял бы условия замера у всех соседей.
+  local -a __run=(bash "$GATE_DRV")
+  if [[ "${GATE_STDIN_SOCK:-0}" == 1 ]]; then
+    __run=(python3 "$GATE_SOCK_PY" bash "$GATE_DRV")
+  fi
   GATE_OUT=$(PATH="$GATE_D/stub:$PATH" GATE_STUB_TAKE="$2" \
              GATE_STUB_LOG="$GATE_STUB_LOG_F" GATE_FAKE_MODE="$1" \
-             bash "$GATE_DRV" \
+             GATE_STUB_STDIN_LOG="$GATE_STUB_SIN_F" \
+             "${__run[@]}" \
                "$GATE_D/frag/__host_os_arch.sh" \
                "$GATE_D/frag/__gate_script_form.sh" \
                "$GATE_D/frag/gate_state.sh" \
@@ -4765,6 +4801,53 @@ scenario_152() {   # положительный контроль различи�
     bad "152 различитель: не принявший НИ ОДНОЙ формы script не дал отказа кода 2"; return
   fi
   ok "152 различитель формы: обе и ни одной -- отказ кода 2 с названной причиной"
+}
+
+scenario_171() {   # вход проб различителя не наследуется: под СОКЕТОМ форма замерена
+  # Корень #100. BSD-`script` зовёт tcgetattr по СВОЕМУ стандартному вводу;
+  # когда вызывающий отдаёт сокет (агентский контекст, launchd, cron), проба
+  # падает с `Operation not supported on socket`, различитель объявляет «ни
+  # одной известной формы», и конвейер умирает кодом 2 ТАМ, ГДЕ ОБЕ ФОРМЫ НА
+  # МЕСТЕ. Замер 09.09 на настоящем `script`: под сокетом rc=1, с `</dev/null`
+  # rc=0 -- различает ИМЕННО вход, а не машина.
+  #
+  # Подставной `script` -- bash-скрипт, tcgetattr он не зовёт, и сокет сам по
+  # себе его не валит. Поэтому сценарий мерит МЕХАНИЗМ (чем закреплён вход
+  # проб), а не симптом: подставной сообщает КЛАСС входа, который ему дали, а
+  # драйвер запускается с сокетом на дескрипторе 0.
+  #
+  # Предмет -- ТОЛЬКО различитель. Реальный запуск отцеплен через `( … ) &`, и
+  # оболочка подставляет ему /dev/null сама -- замерено, что даже под `bash -m`,
+  # потому что без управляющего терминала управление заданиями не включается.
+  # Утверждение о нём было бы ВАКУУМНЫМ: зеленело бы и без правки.
+  local calls seen_sock
+  local GATE_STDIN_SOCK=1        # видна gate_call по динамической области bash
+  gate_prepare s171
+  gate_carved_or_bad 171 || return
+  gate_call e bsd 5
+  calls=$(awk 'END{print NR+0}' "$GATE_STUB_SIN_F")
+  seen_sock=$(awk -F'\t' '$1=="сокет"{n++} END{print n+0}' "$GATE_STUB_SIN_F")
+  LAST_EVID="rc=$GATE_RC вызовов_подставного=$calls из_них_сокетом=$seen_sock :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
+  # Положительный контроль ПРИБОРА идёт первым: пустой журнал свидетеля сделал
+  # бы проверку «сокетов ноль» истинной впустую. Вызовов обязано быть не меньше
+  # трёх -- две пробы различителя и запуск.
+  if (( calls < 3 )); then
+    LAST_EVID="СВИДЕТЕЛЬ_НЕ_ПИСАЛ вызовов=$calls :: $LAST_EVID"
+    bad "171 вход проб: подставной не засвидетельствовал свой stdin -- прибор не мерит"; return
+  fi
+  if (( seen_sock != 0 )); then
+    LAST_EVID="ВХОД_НАСЛЕДОВАН сокетом=$seen_sock :: $LAST_EVID"
+    bad "171 вход проб: подставной получил СОКЕТ -- вход наследуется от вызывающего"; return
+  fi
+  if [[ "$GATE_OUT" != *"script form bsd"* ]]; then
+    LAST_EVID="ФОРМА_НЕ_ЗАМЕРЕНА :: $LAST_EVID"
+    bad "171 вход проб: под сокетом форма script не замерена"; return
+  fi
+  if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
+    LAST_EVID="ВЕРДИКТ_НЕ_УСПЕХ :: $LAST_EVID"
+    bad "171 вход проб: под сокетом стадия не дошла до успеха"; return
+  fi
+  ok "171 вход проб различителя закреплён: сокет вызывающего до script не доходит"
 }
 
 scenario_153() {   # ветка «вышел без отрисовки» ДОСТИЖИМА
@@ -5392,7 +5475,10 @@ MUT_FILE=(x
   # Отказ конвейера и «успех без правки в образе» (168, 169) ломают свип,
   # положительный контроль (170) -- саму заглушку: мутация снимает
   # ДОПИСЫВАНИЕ метки в образ.
-  tools/sweep.sh tools/sweep.sh claude-patch-all.sh)
+  tools/sweep.sh tools/sweep.sh claude-patch-all.sh
+  # Вход проб различителя формы `script` (#100). Жертва -- НАСТОЯЩИЙ конвейер:
+  # mk_kit переименовывает его в .real, а имя .sh занимает заглушка.
+  claude-patch-all.real)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -5643,7 +5729,8 @@ MUT_PAT=(x
   '        if foreign:'
   '  if \(\( TEETH_DONE == 0 \)\) && \(\( rc == 0 \)\) && \[\[ -f "\$STATE/bin/\$v\.wave\.bin" \]\]; then'
   '    if \[\[ "\$__teeth_ours" == "БИТО" \|\| "\$__teeth_ours" == "0" \]\]; then'
-  '  printf '\''%s\\n'\'' '\''baseURL:/\^claude/i\.test\('\'' >> "\$target"')
+  '  printf '\''%s\\n'\'' '\''baseURL:/\^claude/i\.test\('\'' >> "\$target"'
+  '  if script -q -c true /dev/null </dev/null >/dev/null 2>&1; then ul=1; fi')
 
 MUT_REP=(x
   'if false; then'
@@ -5851,7 +5938,8 @@ MUT_REP=(x
   '        if False:'
   '  if (( TEETH_DONE == 0 )) && (( rc != 3 )) && [[ -f "$STATE/bin/$v.wave.bin" ]]; then'
   '    if false; then'
-  '  true')
+  '  true'
+  '  if script -q -c true /dev/null >/dev/null 2>&1; then ul=1; fi')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -5910,7 +5998,8 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                158 159 160 161 162 163 164 165 166 167
                # Сторож зубной стадии: продукт удостоверен байтами образа
                # (168, 169), положительный контроль -- заглушка с меткой (170).
-               168 169 170)
+               168 169 170
+               171)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -6129,7 +6218,8 @@ MUT_CAUSE=(x
   'ЧУЖОЙ_ЗАНЯЛ_ИМЯ_УСТАНОВКИ'
   'СВОДКА_МОЛЧИТ'
   'ОТКАЗА_НЕТ'
-  'ПРИБОР_НЕ_ЗВАЛСЯ')
+  'ПРИБОР_НЕ_ЗВАЛСЯ'
+  'ВХОД_НАСЛЕДОВАН')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

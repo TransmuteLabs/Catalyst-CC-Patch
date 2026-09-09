@@ -7002,8 +7002,18 @@ GATE_BUDGET="$(validated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET "${CLAUDE_
 # мерит и строку про неё не печатает.
 __gate_script_form() {   # печатает utillinux|bsd; код 2 -- обе или ни одной
   local ul=0 bsd=0
-  if script -q -c true /dev/null >/dev/null 2>&1; then ul=1; fi
-  if script -q /dev/null /usr/bin/true >/dev/null 2>&1; then bsd=1; fi
+  # КОНСТРЕЙНТ: стандартный ввод обеих проб ЗАКРЕПЛЁН и наследоваться не
+  # вправе. BSD-`script` зовёт tcgetattr по своему stdin безусловно; когда
+  # вызывающий отдаёт сокет (агентский контекст, launchd, cron), проба
+  # падает с `tcgetattr/ioctl: Operation not supported on socket`, и
+  # различитель объявляет «ни одной известной формы» -- то есть прибор
+  # меряет состояние ВЫЗЫВАЮЩЕГО, а не хозяина, и валит прогон кодом 2
+  # там, где обе формы на месте. Источник выбран замером, а не наугад:
+  # 09.09 живой конвейер с `</dev/null` на весь прогон не только определил
+  # форму, но и отрисовал интерфейс («came up in a throwaway home and drew
+  # its message»), значит EOF на входе предмет замера не ломает.
+  if script -q -c true /dev/null </dev/null >/dev/null 2>&1; then ul=1; fi
+  if script -q /dev/null /usr/bin/true </dev/null >/dev/null 2>&1; then bsd=1; fi
   if (( ul == 1 && bsd == 0 )); then printf 'utillinux\n'; return 0; fi
   if (( bsd == 1 && ul == 0 )); then printf 'bsd\n'; return 0; fi
   if (( ul == 1 )); then
@@ -7203,9 +7213,22 @@ __interface_gate() {
     else
       __gate_cmd=(script -q /dev/null "$GATE_HOME/run.sh")
     fi
+    # КОНСТРЕЙНТ: ввод закреплён ЯВНО, хотя достижимого отказа здесь НЕ
+    # ИЗМЕРЕНО -- и это записано честно, чтобы читатель не принял строку за
+    # починку живого дефекта. Замер 09.09 (сокет на входе, ребёнок сообщает
+    # класс своего stdin): отцепленная команда получает /dev/null и БЕЗ
+    # этой правки -- как при обычном запуске, так и под `bash -m`, потому
+    # что без управляющего терминала управление заданиями не включается, и
+    # подстановка /dev/null оболочкой действует всегда. То есть сейчас сайт
+    # прикрыт ПРАВИЛОМ ОБОЛОЧКИ, а не нашим кодом. Правило невидимо и
+    # перестанет действовать молча, стоит запуску выйти из формы `( … ) &`
+    # или обзавестись своим перенаправлением ввода. Своего зуба у строки
+    # поэтому НЕТ: мутация на ней зеленела бы, а вакуумный сценарий хуже
+    # отсутствующего. Зуб волны стоит на различителе выше -- там отказ
+    # достижим и измерен.
     exec env CLAUDE_CONFIG_DIR="$GATE_HOME/cfg" CLAUDE_CODE_CHILD_SESSION=1 \
       perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV or die $!' \
-      "${__gate_cmd[@]}" >"$GATE_LOG" 2>&1
+      "${__gate_cmd[@]}" </dev/null >"$GATE_LOG" 2>&1
   ) 9>&- &
   GATE_PID=$!
 
