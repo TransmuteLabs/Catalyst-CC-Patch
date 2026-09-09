@@ -4590,43 +4590,151 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
     'Reissue the dispatch only with the change it names, and never repeat the identical call ' +
     '- an unchanged retry cannot succeed. This review is separate from the permission system ' +
     'and from any routing gate, so do not attribute a cancellation to either.';
-  // 2.1.251 вставил между вызовом сборщика и разворотами ЕЩЁ ОДИН элемент
-  // массива: `r6({...}),Voe(jn,za(d.model)),...t,...pe?[V0e]:[]`. Промежуток
-  // допускается, но ему запрещены скобки массива и объекта -- иначе выражение
-  // могло бы перешагнуть границу элемента и утащить в совпадение чужую
-  // структуру. Ленивый повтор берёт кратчайший промежуток, а не первый
-  // подходящий хвост. Единственность участка по-прежнему проверяется ниже.
-  const rx = new RegExp(
-    '(\\{isNonInteractive:(' + ID + ')\\.isNonInteractiveSession,' +
-    'hasAppendSystemPrompt:\\2\\.hasAppendSystemPrompt\\}\\),' +
-    '[^\\[\\]{}]{0,160}?' +
-    '\\.\\.\\.' + ID + ',\\.\\.\\.' + ID + '\\?\\[' + ID + '\\]:\\[\\])' +
-    '\\]\\.filter\\(Boolean\\)',
+  // CONSTRAINT: the anchor keys on exactly these two property names -- they are
+  // the session-options pair the prompt-head builder reads, and upstream has
+  // spelled them out verbatim on every release so far (251 through 266) while
+  // the shapes AROUND them changed twice. The property-ACCESS half
+  // (`\1.isNonInteractiveSession`) must not be weakened to a bare literal: the
+  // same two KEYS also sit on a trap object
+  // `{isNonInteractive:!1,hasAppendSystemPrompt:!1}` in another array, and a
+  // key-only anchor would light that one up and splice the rule into the
+  // wrong list.
+  const ANCHOR = new RegExp(
+    'isNonInteractive:(' + ID + ')\\.isNonInteractiveSession,' +
+    'hasAppendSystemPrompt:\\1\\.hasAppendSystemPrompt',
   );
-  const m = js.match(rx);
-  if (!m) throw new Error('system-prompt assembly site not found');
-  // The one site in this file that rewrote by a NON-GLOBAL replace without
-  // asserting how many times its pattern matched: `replace` would have taken
-  // the first silently. Counted across all 32 announcements, 31 bound their
-  // edit either to a module (moduleTextAt/editModuleAt) or to an explicit
-  // `!== 1` refusal; this was the exception, and the check block cannot cover
-  // for it -- every one of its 112 entries asks whether the text EXISTS
-  // somewhere, none where it sits, so a rewrite of the wrong same-shaped site
-  // would be found by exactly the checks looking for what was just written.
-  // Minified names are chunk-local since 2.1.242, which is what makes a second
-  // same-shaped site a live possibility rather than a theoretical one.
-  const all = [...js.matchAll(new RegExp(rx.source, 'g'))];
-  if (all.length !== 1) fail(`expected 1 system-prompt assembly site, found ${all.length}`);
-  js = js.replace(
-    rx,
-    // Волна 31 (K-3): то же правило для правила в системном промпте --
-    // выключенный судья не должен оставлять свой текст. Инлайн-читатель
-    // (каноническая форма __envon объявлена в ядре, сюда не видна).
-    '$1,...((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&$2?.agentContext?.agentType==="main"?' +
-      JSON.stringify(RULE).replace(/^/, '[').replace(/$/, ']') +
-      ':[])].filter(Boolean)',
-  );
-  applied.push(`system prompt: dispatch-cancellation rule (options '${m[2]}')`);
+  // CONSTRAINT: uniqueness is asserted BEFORE anything is edited, on the
+  // global count. Minified names are chunk-local since 2.1.242, so a second
+  // same-shaped site is a live possibility, and the check block at the end of
+  // this script asks only whether text EXISTS somewhere, never WHERE it sits:
+  // it cannot cover for a rewrite of the wrong same-shaped site.
+  const sites = [...js.matchAll(new RegExp(ANCHOR.source, 'g'))];
+  if (sites.length !== 1) fail(`expected 1 system-prompt options site, found ${sites.length}`);
+  const OPTS = sites[0][1];
+  const aStart = sites[0].index;
+
+  // 2.1.265 hoisted the builder call out of the array that carries the prompt
+  // (`t=Zo([Wo,tGt({...}),...])` became `hs=Eqt({...});...n=ns([fa,hs,...])`),
+  // so the options object no longer has to sit INSIDE the array it feeds, and
+  // a regex that pins the old layout refuses. From the anchor, walk LEFT to
+  // the nearest `{` -- it opens the options object. The char before it must be
+  // `(` (the object is an argument of the builder call), and what stands
+  // before the call name decides the form: `<ID>=` is the hoisted form (the
+  // array carries the RESULT by name), anything else is the inline form (the
+  // call itself is an array element).
+  const window80 = at => JSON.stringify(js.slice(Math.max(0, at - 40), at + 40));
+  let oi = -1;
+  for (let i = aStart - 1; i >= Math.max(0, aStart - 200); i--) {
+    if (js[i] === '{') { oi = i; break; }
+  }
+  if (oi === -1)
+    fail(`no object literal within 200 chars left of the options site (${window80(aStart)})`);
+  if (js[oi - 1] !== '(')
+    fail(`options object is not a call argument (${window80(oi)})`);
+  let ci = oi - 2;
+  if (ci < 0 || !/[\w$]/.test(js[ci]))
+    fail(`no call name left of the options object (${window80(oi - 1)})`);
+  while (ci - 1 >= 0 && /[\w$]/.test(js[ci - 1])) ci--;
+  if (!/^[A-Za-z_$]/.test(js[ci]))
+    fail(`call name left of the options object is not an identifier (${window80(ci)})`);
+  let TARGET = null;
+  if (js[ci - 1] === '=') {
+    let ti = ci - 2;
+    if (ti < 0 || !/[\w$]/.test(js[ti]))
+      fail(`'=' before the builder call is not an assignment (${window80(ci)})`);
+    while (ti - 1 >= 0 && /[\w$]/.test(js[ti - 1])) ti--;
+    if (!/^[A-Za-z_$]/.test(js[ti]))
+      fail(`assignment target before the builder call is not an identifier (${window80(ci)})`);
+    TARGET = js.slice(ti, ci - 1);
+  }
+
+  // The array is found by BALANCE, not by shape. Every `].filter(Boolean)` in
+  // the bundle is a candidate; from its `]` the walk counts brackets of all
+  // three kinds leftwards, skipping string literals: a quote met while
+  // walking left is the CLOSING delimiter, its opener is the next same-kind
+  // quote behind an EVEN number of backslashes, and none within the window
+  // means the quote never closes there -- that candidate is dropped (a
+  // mismatched `{`/`(` where the balance should open drops it too). The
+  // bracket pair that opens as `[` is the candidate's array. A candidate
+  // passes only if it is OUR array: the anchor lies inside it (inline form),
+  // or its body carries TARGET as a whole token (hoisted form -- `hs2` is not
+  // `hs`).
+  const LIT = '].filter(Boolean)';
+  const passing = [];
+  let at = js.indexOf(LIT);
+  while (at !== -1) {
+    const fi = at;
+    const floor = Math.max(0, fi - 1000);
+    let i = fi - 1;
+    let depth = 0;
+    let open = -1;
+    let done = false;
+    while (i >= floor) {
+      const c = js[i];
+      if (c === "'" || c === '"' || c === '`') {
+        let j = i - 1;
+        let found = -1;
+        while (j >= floor) {
+          if (js[j] === c) {
+            let bs = 0;
+            let k = j - 1;
+            while (k >= floor && js[k] === '\\') { bs++; k--; }
+            if (bs % 2 === 0) { found = j; break; }
+          }
+          j--;
+        }
+        if (found === -1) break; // unterminated quote: drop this candidate
+        i = found - 1;
+        continue;
+      }
+      if (c === ']' || c === '}' || c === ')') depth++;
+      else if (c === '[' || c === '{' || c === '(') {
+        depth--;
+        if (depth < 0) {
+          if (c === '[') { open = i; done = true; }
+          break;
+        }
+      }
+      i--;
+    }
+    if (done) {
+      const body = js.slice(open + 1, fi);
+      const ok =
+        TARGET === null
+          ? aStart >= open && aStart < fi
+          : new RegExp('(^|[\\[,.\\s])' + rxEsc(TARGET) + '([,\\]\\s.]|$)').test(body);
+      if (ok) passing.push({ fi, len: body.length });
+    }
+    at = js.indexOf(LIT, at + 1);
+  }
+  // CONSTRAINT: exactly one candidate may pass. Two passing arrays would mean
+  // two lists equally entitled to the rule, and picking either silently is the
+  // minifier's call, not ours.
+  if (passing.length !== 1)
+    fail(`expected 1 system-prompt assembly array, found ${passing.length}`);
+  const fi = passing[0].fi;
+  // Plausibility bounds: the prompt-head array is small on every known
+  // version (129 chars on 2.1.263, 21 on 2.1.265/266). A walk that crossed a
+  // statement boundary would hand back a huge "array"; a stray `[]` would be
+  // tiny. Both are refusals, not patches.
+  if (passing[0].len < 10 || passing[0].len > 2000)
+    fail(`system-prompt assembly array body is ${passing[0].len} chars, outside [10,2000]`);
+
+  // Волна 31 (K-3): то же правило для правила в системном промпте --
+  // выключенный судья не должен оставлять свой текст. Инлайн-читатель
+  // (каноническая форма __envon объявлена в ядре, сюда не видна).
+  const insertion =
+    ',...((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();' +
+    'return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()' +
+    `&&${OPTS}?.agentContext?.agentType==="main"?` +
+    '[' + JSON.stringify(RULE) + ']' +
+    ':[])';
+  // CONSTRAINT: the edit is an offset splice, never String.replace -- in a
+  // replacement string `$&`, "$`", "$'" and `$1`..`$9` are replace's own
+  // syntax and would rewire the rule text or the spliced names. Spliced by
+  // index, the bytes land in the image exactly as written here.
+  js = js.slice(0, fi) + insertion + js.slice(fi);
+  applied.push(`system prompt: dispatch-cancellation rule (options '${OPTS}')`);
 });
 
 
