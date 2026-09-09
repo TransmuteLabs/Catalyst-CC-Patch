@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=171
-EXPECTED_MUTATIONS=200
+EXPECTED_SCENARIOS=178
+EXPECTED_MUTATIONS=207
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -1931,6 +1931,8 @@ run_all() {
   scenario_158; scenario_159; scenario_160; scenario_161; scenario_162
   scenario_163; scenario_164; scenario_165; scenario_166; scenario_167
   scenario_168; scenario_169; scenario_170; scenario_171
+  # Волна 45: дверь обвала слоя промтов и её различитель публикации (#101).
+  scenario_172; scenario_173; scenario_174; scenario_175; scenario_176; scenario_177; scenario_178
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -4429,7 +4431,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 200 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 207 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -4850,6 +4852,213 @@ scenario_171() {   # вход проб различителя не наслед�
   ok "171 вход проб различителя закреплён: сокет вызывающего до script не доходит"
 }
 
+# --- дверь обвала слоя промтов (#101) ---------------------------------------
+# Дверь живёт в КОНВЕЙЕРЕ, а сценарии свипа гоняют его ЗАГЛУШКУ -- до волны 45 (docnum:other)
+# у неё не было ни одного сценария, и оба её решения (сработать и НАЗВАТЬ
+# ПРИЧИНУ) держались только на замере живого образа. Меряется она тем же
+# приёмом, что и стадия интерфейса: ВЫРЕЗАННЫМ фрагментом настоящего
+# конвейера, чтобы сценарий проверял ТОТ ЖЕ код, а не его пересказ в стенде.
+#
+# Сеть стенду запрещена: `curl` подставной, код ответа называет сценарий.
+# Иначе зуб мерил бы доступность чужого сервера -- то есть краснел бы от
+# погоды, а не от правки.
+DOOR_FUNCS=(__tw_prompt_outage __tw_prompt_dl_error __tw_snapshot_probe __tw_prompt_outage_door)
+
+door_carve() {   # каталог фрагментов -> печатает число вырезанных кусков
+  local dir="$1" n=0 name
+  for name in "${DOOR_FUNCS[@]}"; do
+    awk -v h="${name}() {" 'index($0, h) == 1 {on=1} on {print} on && $0 == "}" {exit}' \
+      "$K/claude-patch-all.real" > "$dir/$name.sh"
+    [[ -s "$dir/$name.sh" ]] && n=$((n+1))
+  done
+  printf '%s\n' "$n"
+}
+
+door_carved_or_bad() {   # номер сценария
+  (( DOOR_CARVED == ${#DOOR_FUNCS[@]} )) && return 0
+  LAST_EVID="ФРАГМЕНТЫ_НЕ_ВЫРЕЗАНЫ вырезано=$DOOR_CARVED из ${#DOOR_FUNCS[@]}"
+  bad "$1 дверь обвала: фрагменты не вырезаны -- прибор смотрит не туда"
+  return 1
+}
+
+door_prepare() {   # имя каталога сценария
+  DOOR_D="$C/$1"; rm -rf "$DOOR_D"; mkdir -p "$DOOR_D/frag" "$DOOR_D/stub" "$DOOR_D/bare"
+  DOOR_CARVED=$(door_carve "$DOOR_D/frag")
+  cat > "$DOOR_D/stub/curl" <<'CURL45'
+#!/usr/bin/env bash
+# Подставной `curl` двери: печатает КОД, названный сценарием, и ничего не качает.
+printf '%s' "${DOOR_HTTP:-200}"
+exit "${DOOR_CURL_RC:-0}"
+CURL45
+  chmod +x "$DOOR_D/stub/curl"
+  # Каталог БЕЗ `curl`: ОТСУТСТВИЕ инструмента заглушкой не подделать -- его
+  # можно только не положить. Кладётся ровно то, что зовут дверь и её пробы;
+  # `bash` в том числе, иначе подмена PATH не найдёт сам запускатель.
+  local __t
+  for __t in bash grep; do ln -sf "$(type -P "$__t")" "$DOOR_D/bare/$__t"; done
+  cat > "$DOOR_D/drv.sh" <<'DOORDRV'
+set -euo pipefail
+source "$1"; source "$2"; source "$3"; source "$4"
+__tw_prompt_outage_door "$5" "$6" 0 0 0
+DOORDRV
+  # Две фикстуры вывода форка: с ОБВАЛОМ (обе иглы двери) и чистая.
+  printf 'Applying patches...\nSystem prompts not available for version 2.1.263\nError downloading system prompts: fetch failed\nDone\n' > "$DOOR_D/out-outage.txt"
+  printf 'Applying patches...\nCustomizations applied successfully!\n' > "$DOOR_D/out-clean.txt"
+}
+
+door_call() {   # фикстура (outage|clean), код ответа адреса, [переменные окружения...]
+  local fix="$1" http="$2"; shift 2
+  DOOR_OUT=$(env "$@" DOOR_HTTP="$http" PATH="${DOOR_PATH:-$DOOR_D/stub:$PATH}" \
+             bash "$DOOR_D/drv.sh" \
+               "$DOOR_D/frag/__tw_prompt_outage.sh" \
+               "$DOOR_D/frag/__tw_prompt_dl_error.sh" \
+               "$DOOR_D/frag/__tw_snapshot_probe.sh" \
+               "$DOOR_D/frag/__tw_prompt_outage_door.sh" \
+               2.1.263 "$DOOR_D/out-$fix.txt" 2>&1 9>&-)
+  DOOR_RC=$?
+}
+
+door_evid() { LAST_EVID="rc=$DOOR_RC :: $(printf '%s' "$DOOR_OUT" | tr '\n' '|')"; }
+
+door_code_two() {   # номер сценария; 0 -- код тот
+  (( DOOR_RC == 2 )) && return 0
+  LAST_EVID="КОД_НЕ_ДВА :: $LAST_EVID"
+  bad "$1 дверь обвала: код $DOOR_RC, а обвал -- это «мерить нечем» (2)"
+  return 1
+}
+
+scenario_172() {   # обвал, адрес отвечает 404 -- апстрим не опубликовал
+  door_prepare s172; door_carved_or_bad 172 || return
+  door_call outage 404; door_evid
+  door_code_two 172 || return
+  if [[ "$DOOR_OUT" != *"НЕ ОПУБЛИКОВАЛ"* ]]; then
+    LAST_EVID="ПУБЛИКАЦИЯ_НЕ_НАЗВАНА :: $LAST_EVID"
+    bad "172 дверь обвала: при 404 не названа непубликация апстрима"; return
+  fi
+  ok "172 обвал при 404 -- дверь называет непубликацию апстрима"
+}
+
+scenario_173() {   # обвал, адрес отвечает 200 -- скачать не смог ЭТОТ хозяин
+  # Корень #101 целиком: снимок ЛЕЖИТ, а форк его не взял. Прежняя дверь звала
+  # ждать публикации -- то есть отправляла чинить не то. Сценарий требует не
+  # только правильной ветки, но и НАЗВАННОЙ переменной прокси с ручкой node:
+  # причина без имени не отличается от догадки.
+  door_prepare s173; door_carved_or_bad 173 || return
+  door_call outage 200 https_proxy=http://127.0.0.1:3128; door_evid
+  door_code_two 173 || return
+  if [[ "$DOOR_OUT" != *"ЭТОТ хозяин"* ]]; then
+    LAST_EVID="ХОЗЯИН_НЕ_НАЗВАН :: $LAST_EVID"
+    bad "173 дверь обвала: при 200 причиной назван не хозяин"; return
+  fi
+  if [[ "$DOOR_OUT" != *"https_proxy"* || "$DOOR_OUT" != *"NODE_USE_ENV_PROXY=1"* ]]; then
+    LAST_EVID="ПРОКСИ_НЕ_НАЗВАН :: $LAST_EVID"
+    bad "173 дверь обвала: заданный прокси и ручка node не названы"; return
+  fi
+  ok "173 обвал при 200 -- дверь называет хозяина, его прокси и ручку node"
+}
+
+scenario_174() {   # обвал, соединения не было -- третий класс, не «нет снимка»
+  door_prepare s174; door_carved_or_bad 174 || return
+  door_call outage 000 DOOR_CURL_RC=7; door_evid
+  door_code_two 174 || return
+  if [[ "$DOOR_OUT" != *"не вышел НИ ОДИН запрос"* ]]; then
+    LAST_EVID="СЕТЬ_НЕ_НАЗВАНА :: $LAST_EVID"
+    bad "174 дверь обвала: отсутствие соединения не отделено от отсутствия снимка"; return
+  fi
+  ok "174 обвал без соединения -- отдельный класс, а не «апстрим не опубликовал»"
+}
+
+scenario_175() {   # различителя нет на хозяине -- дверь не гадает
+  local DOOR_PATH
+  door_prepare s175; door_carved_or_bad 175 || return
+  DOOR_PATH="$DOOR_D/bare"
+  door_call outage 200; door_evid
+  door_code_two 175 || return
+  if [[ "$DOOR_OUT" != *"нет «curl»"* ]]; then
+    LAST_EVID="НЕТ_CURL_НЕ_НАЗВАН :: $LAST_EVID"
+    bad "175 дверь обвала: без curl дверь не называет отсутствие различителя"; return
+  fi
+  ok "175 без curl дверь называет отсутствие различителя, а не причину обвала"
+}
+
+scenario_176() {   # обвала НЕТ -- дверь обязана молчать и пропустить
+  # Отрицательный контроль двери. Без него все 4 сценария выше (docnum:subset)
+  # прошли бы у двери, которая срабатывает ВСЕГДА: «код 2 и правильный текст»
+  # она давала бы и на чистом выводе форка, обрушив каждую здоровую сборку.
+  door_prepare s176; door_carved_or_bad 176 || return
+  door_call clean 200; door_evid
+  if (( DOOR_RC != 0 )); then
+    LAST_EVID="ДВЕРЬ_ВХОЛОСТУЮ :: $LAST_EVID"
+    bad "176 дверь обвала: на чистом выводе форка код $DOOR_RC, а обвала нет"; return
+  fi
+  if [[ -n "$DOOR_OUT" ]]; then
+    LAST_EVID="ДВЕРЬ_НЕ_МОЛЧИТ :: $LAST_EVID"
+    bad "176 дверь обвала: на чистом выводе форка дверь что-то печатает"; return
+  fi
+  ok "176 без обвала дверь молчит и пропускает -- отрицательный контроль"
+}
+
+scenario_177() {   # неожиданный ответ адреса: назван числом и НЕ РОНЯЕТ дверь
+  # Ловушка измерена 10.09 на этой самой правке: кавычка-ёлочка многобайтовая,
+  # и bash 3.2 затягивает её первый байт в ИМЯ переменной -- «$__snap» под
+  # `set -u` даёт «unbound variable» ровно в этой ветке, до единого полезного
+  # слова. Сценарий требует ОБОИХ: оболочка не упала И код назван.
+  #
+  # ВЛАДЕЛЕЦ ЭТОЙ ГАРАНТИИ -- НЕ ЗДЕСЬ. Форму `${имя}` по всему киту держит
+  # ГЕЙТ ИМЁН ПЕРЕМЕННЫХ конвейера (claude-patch-all.sh, «ФОРМЫ ОБОЛОЧКИ»):
+  # он обходит все `*.sh`, пропускает строки-комментарии и несёт свои
+  # положительный и отрицательный контроли. Проверка ЗДЕСЬ -- о поведении
+  # ветки, и она host-зависима: bash 5.2 склеенное имя исполняет верно
+  # (замер 10.09 на linux), так что зубом формы она быть НЕ МОЖЕТ. Ценз
+  # исходника в этом файле НЕ ЗАВОДИТЬ: вторая копия правила разойдётся с
+  # гейтом молча -- волна 45 такую копию завела и сняла.
+  door_prepare s177; door_carved_or_bad 177 || return
+  door_call outage 500; door_evid
+  if [[ "$DOOR_OUT" == *"unbound variable"* ]]; then
+    LAST_EVID="ИМЯ_СЪЕЛО_КАВЫЧКУ :: $LAST_EVID"
+    bad "177 дверь обвала: ветка неожиданного ответа падает по unbound variable"; return
+  fi
+  door_code_two 177 || return
+  if [[ "$DOOR_OUT" != *"неясно-500"* ]]; then
+    LAST_EVID="ОТВЕТ_НЕ_НАЗВАН :: $LAST_EVID"
+    bad "177 дверь обвала: неожиданный ответ адреса не назван числом"; return
+  fi
+  ok "177 неожиданный ответ адреса назван числом, ветка не падает"
+}
+
+
+scenario_178() {   # обязательные инструменты: отсутствующий tsc НАЗВАН дверью
+  # Замер 10.09 на usbox, откуда взялся сценарий: `tsc` нет в неинтерактивном
+  # PATH, дверь инструментов его не требовала, и прогон умирал через полторы
+  # тысячи строк на разборе вклеиваемого кода -- строкой «якорь/строка
+  # пропали», то есть НЕ ТОЙ причиной: якорь был на месте.
+  #
+  # Проверка имён (tools/emit-check.js) зовётся БЕЗУСЛОВНО и объявляет
+  # отсутствующий компилятор отказом, а не пропуском. Значит `tsc` обязателен
+  # ровно как `node`, и дверь обязана называть его ЗДЕСЬ.
+  local d carved out rc
+  d="$C/s178"; rm -rf "$d"; mkdir -p "$d"
+  carved=$(tools_door_carve "$d")
+  if [[ "$carved" != "4" ]]; then
+    LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$carved из 4"
+    bad "178 дверь инструментов: не вырезана из конвейера -- прибор не мерит"; return
+  fi
+  out=$(tools_door_run "$d" notsc Linux нет_codesign tsc); rc=$?
+  LAST_EVID="rc=$rc заглушено:[${DOOR_STUBBED:-}] [$(printf '%s' "$out" | tr '\n' '|')]"
+  if (( rc == 9 )); then
+    bad "178 дверь инструментов: вырезанные куски не подгрузились -- прибор не мерит"; return
+  fi
+  if (( rc != 6 )); then
+    LAST_EVID="TSC_НЕ_ОБЯЗАТЕЛЕН :: $LAST_EVID"
+    bad "178 дверь инструментов: без tsc дверь прошла (rc=$rc), а разбор имён зовётся безусловно"; return
+  fi
+  if [[ "$out" != *"tsc"* ]]; then
+    LAST_EVID="TSC_НЕ_НАЗВАН :: $LAST_EVID"
+    bad "178 дверь инструментов: отказ есть, но tsc в нём не назван"; return
+  fi
+  ok "178 обязательные инструменты: отсутствующий tsc назван дверью по имени"
+}
+
 scenario_153() {   # ветка «вышел без отрисовки» ДОСТИЖИМА
   gate_prepare s153
   gate_carved_or_bad 153 || return
@@ -5151,7 +5360,45 @@ tools_door_run() {   # каталог карвинга, имя прогона, �
   mkdir -p "$dir/cs"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/cs/codesign"
   chmod +x "$dir/cs/codesign"
-  local path="$dir/stub:$PATH"
+  # PATH СТРОИТСЯ, а не наследуется. Прежняя редакция дописывала настоящий
+  # $PATH, и на darwin-хозяине положительный контроль «без codesign» находил
+  # СИСТЕМНЫЙ /usr/bin/codesign: дверь честно проходила, сценарий краснел, и
+  # мерил он не дверь, а машину, на которой запущен. Измерено 10.09 на маке:
+  # с унаследованным PATH контроль даёт rc=0 ДВЕРЬ_ПРОЙДЕНА, с построенным --
+  # rc=6 с именем codesign. Корень тот же, что у #100: прибор наследует
+  # состояние вызывающего.
+  #
+  # Перечень берётся ИЗ ВЫРЕЗАННОГО БЛОКА, а не пишется здесь руками: вторая
+  # копия списка разошлась бы с конвейером молча, и «все инструменты на месте»
+  # означало бы «на месте те, что помнил автор стенда».
+  mkdir -p "$dir/bin"
+  local __t __p __omit="${5:-}"
+  DOOR_STUBBED=""
+  for __t in $(awk -F'[()]' '/^REQUIRED_TOOLS=\(/{print $2}' "$carve/door.sh") bash; do
+    # codesign кладётся ТОЛЬКО отдельным каталогом ниже -- иначе снять его
+    # контролем было бы нечем.
+    if [[ "$__t" == codesign ]]; then continue; fi
+    # Названный пятым аргументом инструмент СНИМАЕТСЯ: так положительный
+    # контроль проверяет, что дверь называет именно его, а не «что-нибудь».
+    if [[ -n "$__omit" && "$__t" == "$__omit" ]]; then continue; fi
+    if __p=$(type -P "$__t"); then
+      ln -sf "$__p" "$dir/bin/$__t"
+    elif [[ "$__t" == bash ]]; then
+      # bash здесь ИСПОЛНЯЕТСЯ -- под ним идёт драйвер, заглушкой не подменить.
+      echo "НЕТ_BASH_НА_ХОЗЯИНЕ" >&2; return 9
+    else
+      # Отсутствующий на хозяине инструмент ЗАГЛУШАЕТСЯ, а не пропускается.
+      # Дверь спрашивает только `command -v`, ничего не исполняя, а предмет
+      # сценария -- ось codesign, не оснащённость машины. Пропуск делал бы
+      # сценарий красным там, где инструмента просто нет: замерено 10.09,
+      # `tsc` отсутствует в неинтерактивном PATH usbox. Что заглушено --
+      # объявляется в следе, а не молчит.
+      printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/bin/$__t"
+      chmod +x "$dir/bin/$__t"
+      DOOR_STUBBED="$DOOR_STUBBED $__t"
+    fi
+  done
+  local path="$dir/stub:$dir/bin"
   [[ -n "$nocs" ]] || path="$dir/cs:$path"
   { printf 'set -u\n'
     printf 'source %q || exit 9\n' "$carve/__host_os_arch.sh"
@@ -5478,6 +5725,12 @@ MUT_FILE=(x
   tools/sweep.sh tools/sweep.sh claude-patch-all.sh
   # Вход проб различителя формы `script` (#100). Жертва -- НАСТОЯЩИЙ конвейер:
   # mk_kit переименовывает его в .real, а имя .sh занимает заглушка.
+  claude-patch-all.real
+  # Дверь обвала слоя промтов и её различитель публикации (#101): жертва --
+  # НАСТОЯЩИЙ конвейер, вырезаемый сценариями во фрагменты.
+  claude-patch-all.real claude-patch-all.real claude-patch-all.real
+  claude-patch-all.real claude-patch-all.real claude-patch-all.real
+  # Волна 45b: число в неожиданном ответе и объявление tsc.
   claude-patch-all.real)
 
 MUT_PAT=(x
@@ -5730,7 +5983,14 @@ MUT_PAT=(x
   '  if \(\( TEETH_DONE == 0 \)\) && \(\( rc == 0 \)\) && \[\[ -f "\$STATE/bin/\$v\.wave\.bin" \]\]; then'
   '    if \[\[ "\$__teeth_ours" == "БИТО" \|\| "\$__teeth_ours" == "0" \]\]; then'
   '  printf '\''%s\\n'\'' '\''baseURL:/\^claude/i\.test\('\'' >> "\$target"'
-  '  if script -q -c true /dev/null </dev/null >/dev/null 2>&1; then ul=1; fi')
+  '  if script -q -c true /dev/null </dev/null >/dev/null 2>&1; then ul=1; fi'
+  '    200\)    printf'
+  '    сеть-недоступна\)'
+  '    нечем\)'
+  '  __snap="\$\(__tw_snapshot_probe "\$__url"\)"'
+  '  \(\( __outage > 0 \|\| __outage_dl > 0 \)\) \|\| return 0'
+  'неясно-%s'
+  'sort cmp shasum tsc\)')
 
 MUT_REP=(x
   'if false; then'
@@ -5939,7 +6199,14 @@ MUT_REP=(x
   '  if (( TEETH_DONE == 0 )) && (( rc != 3 )) && [[ -f "$STATE/bin/$v.wave.bin" ]]; then'
   '    if false; then'
   '  true'
-  '  if script -q -c true /dev/null >/dev/null 2>&1; then ul=1; fi')
+  '  if script -q -c true /dev/null >/dev/null 2>&1; then ul=1; fi'
+  '    999)    printf'
+  '    сеть-недоступнаX)'
+  '    нечемX)'
+  '  __snap=""'
+  '  (( __outage > 0 || __outage_dl > 0 )) || true'
+  'неясно-нет'
+  'sort cmp shasum)')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -5999,7 +6266,11 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                # Сторож зубной стадии: продукт удостоверен байтами образа
                # (168, 169), положительный контроль -- заглушка с меткой (170).
                168 169 170
-               171)
+               171
+               # Волна 45: ветки причины у двери обвала (#101).
+               173 174 175 172 176
+               # Волна 45b: 203 пинит ИСХОДНИК (178), а поведение ветки -- 207.
+               177 178)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -6219,7 +6490,14 @@ MUT_CAUSE=(x
   'СВОДКА_МОЛЧИТ'
   'ОТКАЗА_НЕТ'
   'ПРИБОР_НЕ_ЗВАЛСЯ'
-  'ВХОД_НАСЛЕДОВАН')
+  'ВХОД_НАСЛЕДОВАН'
+  'ХОЗЯИН_НЕ_НАЗВАН'
+  'СЕТЬ_НЕ_НАЗВАНА'
+  'НЕТ_CURL_НЕ_НАЗВАН'
+  'ПУБЛИКАЦИЯ_НЕ_НАЗВАНА'
+  'ДВЕРЬ_ВХОЛОСТУЮ'
+  'ОТВЕТ_НЕ_НАЗВАН'
+  'TSC_НЕ_ОБЯЗАТЕЛЕН')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь
