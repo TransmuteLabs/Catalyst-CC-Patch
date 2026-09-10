@@ -83,6 +83,9 @@
 #   5  nothing to measure ON THIS MACHINE (no patched install with a pristine
 #      twin beside it) -- a skip, not a refusal
 #   6  the lock machinery is broken (perl flock unusable): retrying will not help
+#   7  the probe's own harness is truncated: a scenario victim called a
+#      function whose declaration the dependency closure did not bring. The
+#      scenario answers above measured nothing -- repair the probe's extraction
 #
 # Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
 # traps) and is NOT a kit verdict -- POSIX reports the signal, this table
@@ -452,6 +455,78 @@ if (len(sections) != 2 or not carrier or not match or not vestibule
 function = ("".join(sections) + "".join(layer_consts) + "".join(layer_fns)
             + carrier.group(0) + vestibule.group(0) + match.group(0))
 
+# ЗАМЫКАНИЕ ПО ЗАВИСИМОСТЯМ, а не по образцу имени. Замер 2026-09-10 (задача
+# #108): волна 48 вынесла чтение версии из байтов образа в ОБЩИЙ ДОМ
+# __ver_from_bytes (claude-patch-all.sh:1041); имя дома не начинается на
+# `__tw_`, образец добора его не видел, и жертва получала ВЫЗОВЫ без
+# ОБЪЯВЛЕНИЯ -- 17 отказов «command not found» ЧУЖОЙ причиной за прогон,
+# а зонд докладывал «случай держится». Комментарий у явно названных имён здесь же фиксирует,
+# что ПЕРЕЧЕНЬ имён был тем же дефектом и его сменил образец; урок один --
+# ключ по ИМЕНИ слеп к дому, который имени не носит. Замыкание смотрит на
+# САМИ вызовы: объявление доезжает для любой функции конвейера, чьё имя
+# встречено в жертве ЦЕЛЫМ СЛОВОМ, и так до сходимости -- как дом ни назови.
+#
+# Объявления в конвейере несут ДВЕ формы: многострочная `^имя() {` ... `^}` в
+# столбце 0 и однострочная `имя() { ...; }`, где скобки в столбце 0 нет (замер
+# 2026-09-10: __host_arch, sha_of, __has_staging). Наивный образец «до первой
+# `^}`» принимал однострочник за голову длинного тела и заглатывал СОСЕДА:
+# __has_staging так проглотил __tw_reconcile_misses целиком, и сосед выпадал
+# из словаря. Разбор построчный, обе формы названы явно.
+def declared_functions(text):
+    fns = {}
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        head = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", lines[i])
+        if head is None:
+            i += 1
+            continue
+        if lines[i].rstrip().endswith("}"):
+            fns[head.group(1)] = lines[i]
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and lines[j].rstrip("\r\n") != "}":
+            j += 1
+        if j == len(lines):
+            break   # незакрытая декларация: хвост файла объявлением не считать
+        fns[head.group(1)] = "".join(lines[i:j + 1])
+        i = j + 1
+    return fns
+
+
+pipeline_fns = declared_functions(source)
+# Потолок проходов -- не таймер, а математическая граница сходимости: каждый
+# незакрытый проход добавляет хотя бы одну НОВУЮ функцию, значит проходов
+# нужно не больше, чем функций, плюс один контрольный. Достигнутый потолок
+# означает сломанный механизм добора и обязан быть отказом с названной
+# причиной -- молчаливый выход мерил бы собственную усечённость.
+closure_cap = len(pipeline_fns) + 1
+for _pass in range(closure_cap):
+    victim_fns = set(re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", function))
+    # Зависимость -- это ВЫЗОВ в коде, а не упоминание в комментарии: жертва
+    # называет соседние двери по имени именно в комментариях, и послушный
+    # буквальному замыканию добор притащил бы из комментария всю дверь уровня
+    # -- якоря мутаций в жертве задвоились (замер 2026-09-10: anchor count=2
+    # у M2-misses-read-wrong-layer и M5-version-guard-off). Строки-комментарии
+    # из поиска исключаются; хвостовые комментарии после кода не режутся --
+    # недобранный по такой строке дом ловит свой зуб (missing_home ниже).
+    code_text = "\n".join(ln for ln in function.splitlines()
+                          if not ln.lstrip().startswith("#"))
+    wanted = sorted(fname for fname in pipeline_fns
+                    if fname not in victim_fns
+                    and re.search(r"\b%s\b" % re.escape(fname), code_text))
+    if not wanted:
+        break
+    for fname in wanted:
+        function += pipeline_fns[fname]
+else:
+    print("  FAIL   M: замыкание жертвы по зависимостям не сошлось за %d проходов --"
+          " механизм добора объявлений сломан, зонд мерил бы собственную усечённость"
+          % closure_cap)
+    raise SystemExit(2)
+
+
 # Проверка ПРИЧИН покраснения берётся из ЕДИНСТВЕННОГО дома -- случая (n)
 # ниже по этому же файлу, между метками CAUSE-HOME. Вторая редакция этих
 # двенадцати строк разошлась бы с первой на первой же правке и разошлась бы
@@ -467,6 +542,20 @@ if len(cause_home) != 1:
           % (sys.argv[5], len(cause_home)))
     raise SystemExit(2)
 exec(cause_home[0], globals())
+
+
+def missing_home(result):
+    """Имя функции, которую жертва ЗОВЁТ, а объявления в жертве нет; None -- нет такой.
+
+    ЗАМЕР 2026-09-10 (задача #108): та же недостача общего дома в этом
+    случае -- 17 провалов ЧУЖОЙ причиной (случай N отказывал раньше и
+    маскировал этот отказ до починки вырезки). Слово «command not found» в
+    следе прогона -- усечённость ОСНАСТКИ, а не вердикт механизма: отказ
+    отдельным классом (7, docnum:other -- код выхода зонда, не счёт стенда)
+    и ДО разбора причин мутаций.
+    """
+    hit = re.search(r"bash: (?:line [0-9]+: )?(\S+): command not found", result.stderr)
+    return hit.group(1) if hit else None
 
 VER = "2.1.257"
 NEIGHBOUR = "2.1.252"
@@ -647,6 +736,10 @@ base_evidence = {}
 for name in ORDER:
     misses, out_text, marker, blind, predicate = SCEN[name]
     result = run(function, misses, out_text, marker, blind)
+    miss = missing_home(result)
+    if miss:
+        print("  ОТКАЗ M: жертва зовёт то, чего в ней нет: %s" % miss)
+        raise SystemExit(7)
     base_evidence[name] = cause_evidence(result)
     if predicate(result):
         print("  ok     %s" % name)
@@ -661,6 +754,10 @@ for mutation, old, new, owner in mutations:
         continue
     misses, out_text, marker, blind, predicate = SCEN[owner]
     result = run(function.replace(old, new, 1), misses, out_text, marker, blind)
+    miss = missing_home(result)
+    if miss:
+        print("  ОТКАЗ M: мутация %s -- жертва зовёт то, чего в ней нет: %s" % (mutation, miss))
+        raise SystemExit(7)
     evidence = cause_evidence(result)
     why = cause_verdict(CAUSE[mutation], evidence, base_evidence[owner])
     if predicate(result):
@@ -674,8 +771,14 @@ for mutation, old, new, owner in mutations:
     else:
         print("  RED    mutation %s (%s)" % (mutation, owner))
 
+# Та же дисциплина, что у случая N: финальная строка -- ИСХОД, и на красном
+# прогоне она обязана называть провал и его счёт, а не победу.
+if failed:
+    print("build-path-probe M: FAIL -- красных строк %d (сценарии и мутации выше); случай НЕ держится"
+          % failed)
+    raise SystemExit(1)
 print("build-path-probe M: case held and its controls showed teeth")
-raise SystemExit(1 if failed else 0)
+raise SystemExit(0)
 PY_MISSES
 }
 
@@ -751,6 +854,78 @@ if (len(sections) != 2 or not door or len(counters) < 3
     raise SystemExit(2)
 function = ("".join(sections) + "".join(layer_consts) + "".join(layer_fns)
             + "".join(c.group(0) for c in counters) + door.group(0))
+
+# ЗАМЫКАНИЕ ПО ЗАВИСИМОСТЯМ, а не по образцу имени. Замер 2026-09-10 (задача
+# #108): волна 48 вынесла чтение версии из байтов образа в ОБЩИЙ ДОМ
+# __ver_from_bytes (claude-patch-all.sh:1041); имя дома не начинается на
+# `__tw_`, образец добора его не видел, и жертва получала ВЫЗОВЫ без
+# ОБЪЯВЛЕНИЯ -- 134 отказа «command not found» ЧУЖОЙ причиной за прогон,
+# а зонд докладывал «случай держится». Комментарий у счётчиков выше фиксирует,
+# что ПЕРЕЧЕНЬ имён был тем же дефектом и его сменил образец; урок один --
+# ключ по ИМЕНИ слеп к дому, который имени не носит. Замыкание смотрит на
+# САМИ вызовы: объявление доезжает для любой функции конвейера, чьё имя
+# встречено в жертве ЦЕЛЫМ СЛОВОМ, и так до сходимости -- как дом ни назови.
+#
+# Объявления в конвейере несут ДВЕ формы: многострочная `^имя() {` ... `^}` в
+# столбце 0 и однострочная `имя() { ...; }`, где скобки в столбце 0 нет (замер
+# 2026-09-10: __host_arch, sha_of, __has_staging). Наивный образец «до первой
+# `^}`» принимал однострочник за голову длинного тела и заглатывал СОСЕДА:
+# __has_staging так проглотил __tw_reconcile_misses целиком, и сосед выпадал
+# из словаря. Разбор построчный, обе формы названы явно.
+def declared_functions(text):
+    fns = {}
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        head = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", lines[i])
+        if head is None:
+            i += 1
+            continue
+        if lines[i].rstrip().endswith("}"):
+            fns[head.group(1)] = lines[i]
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and lines[j].rstrip("\r\n") != "}":
+            j += 1
+        if j == len(lines):
+            break   # незакрытая декларация: хвост файла объявлением не считать
+        fns[head.group(1)] = "".join(lines[i:j + 1])
+        i = j + 1
+    return fns
+
+
+pipeline_fns = declared_functions(source)
+# Потолок проходов -- не таймер, а математическая граница сходимости: каждый
+# незакрытый проход добавляет хотя бы одну НОВУЮ функцию, значит проходов
+# нужно не больше, чем функций, плюс один контрольный. Достигнутый потолок
+# означает сломанный механизм добора и обязан быть отказом с названной
+# причиной -- молчаливый выход мерил бы собственную усечённость.
+closure_cap = len(pipeline_fns) + 1
+for _pass in range(closure_cap):
+    victim_fns = set(re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", function))
+    # Зависимость -- это ВЫЗОВ в коде, а не упоминание в комментарии: жертва
+    # называет соседние двери по имени именно в комментариях, и послушный
+    # буквальному замыканию добор притащил бы из комментария всю дверь уровня
+    # -- якоря мутаций в жертве задвоились (замер 2026-09-10: anchor count=2
+    # у M2-misses-read-wrong-layer и M5-version-guard-off). Строки-комментарии
+    # из поиска исключаются; хвостовые комментарии после кода не режутся --
+    # недобранный по такой строке дом ловит свой зуб (missing_home ниже).
+    code_text = "\n".join(ln for ln in function.splitlines()
+                          if not ln.lstrip().startswith("#"))
+    wanted = sorted(fname for fname in pipeline_fns
+                    if fname not in victim_fns
+                    and re.search(r"\b%s\b" % re.escape(fname), code_text))
+    if not wanted:
+        break
+    for fname in wanted:
+        function += pipeline_fns[fname]
+else:
+    print("  FAIL   N: замыкание жертвы по зависимостям не сошлось за %d проходов --"
+          " механизм добора объявлений сломан, зонд мерил бы собственную усечённость"
+          % closure_cap)
+    raise SystemExit(2)
+
 
 VER = "2.1.257"
 NEIGHBOUR = "2.1.252"
@@ -1986,6 +2161,21 @@ def cause_verdict(cause, evidence, base_evidence):
 # CAUSE-HOME-END
 
 
+def missing_home(result):
+    """Имя функции, которую жертва ЗОВЁТ, а объявления в жертве нет; None -- нет такой.
+
+    ЗАМЕР 2026-09-10 (задача #108): недостача общего дома выражалась 134
+    провалами ЧУЖОЙ причиной -- каждый прогон отказывал «command not found»,
+    а прибор списывал это на сценарии, то есть не умел сказать, что усечён
+    он сам. Слово «command not found» в следе прогона -- усечённость
+    ОСНАСТКИ, а не вердикт механизма: отказ отдельным классом (7, docnum:other
+    -- код выхода зонда, не счёт стенда) и ДО разбора причин мутаций, иначе
+    он снова тонет в чужих следах.
+    """
+    hit = re.search(r"bash: (?:line [0-9]+: )?(\S+): command not found", result.stderr)
+    return hit.group(1) if hit else None
+
+
 def unpack(name):
     """Сценарий -- кортеж переменной длины: столбец объявления пропущенных по
     версии добавлен волной 39c, отметка происхождения дома -- волной 39d, и
@@ -2006,6 +2196,10 @@ base_evidence = {}
 for name in ORDER:
     table, out_text, marker, blind, off_decl, floor, vskip, origin, predicate = unpack(name)
     result = run(function, table, out_text, marker, blind, off_decl, floor, vskip, origin)
+    miss = missing_home(result)
+    if miss:
+        print("  ОТКАЗ N: жертва зовёт то, чего в ней нет: %s" % miss)
+        raise SystemExit(7)
     base_evidence[name] = cause_evidence(result)
     if predicate(result):
         print("  ok     %s" % name)
@@ -2021,6 +2215,10 @@ for mutation, old, new, owner in mutations:
     table, out_text, marker, blind, off_decl, floor, vskip, origin, predicate = unpack(owner)
     result = run(function.replace(old, new, 1), table, out_text, marker, blind, off_decl,
                  floor, vskip, origin)
+    miss = missing_home(result)
+    if miss:
+        print("  ОТКАЗ N: мутация %s -- жертва зовёт то, чего в ней нет: %s" % (mutation, miss))
+        raise SystemExit(7)
     evidence = cause_evidence(result)
     why = cause_verdict(CAUSE[mutation], evidence, base_evidence[owner])
     if predicate(result):
@@ -2034,8 +2232,15 @@ for mutation, old, new, owner in mutations:
     else:
         print("  RED    mutation %s (%s)" % (mutation, owner))
 
+# Финальная строка называет ИСХОД, а не служит подписью. Замер 2026-09-10
+# (задача #108): при 135 провалах она печаталась БЕЗУСЛОВНО, и наблюдатель,
+# читающий хвост лога, видел победу на красном прогоне.
+if failed:
+    print("build-path-probe N: FAIL -- красных строк %d (сценарии и мутации выше); случай НЕ держится"
+          % failed)
+    raise SystemExit(1)
 print("build-path-probe N: case held and its controls showed teeth")
-raise SystemExit(1 if failed else 0)
+raise SystemExit(0)
 PY_LEVEL
 }
 
@@ -2832,18 +3037,42 @@ if t.count(NEEDLE) != 1:
                      % t.count(NEEDLE))
     sys.exit(2)
 t2 = t.replace(NEEDLE, '\n        staging = target\n        download_binary(version, staging)\n', 1)
-if t2.count('.with_name(target.name + f".staging.{os.getpid()}")') != 1:
-    sys.stderr.write('МУТАЦИЯ ЗАДЕЛА ЧУЖУЮ ВЕТКУ: стадий осталось %d\n'
-                     % t2.count('.with_name(target.name + f".staging.{os.getpid()}")'))
-    sys.exit(2)
+# ЗАМЕР (волна 109): сайтов стадии в claude_patch.py теперь ТРИ -- ветка
+# чужой платформы и ветка «цель существует» (обе с отступом 12) и путь
+# --update (отступ 8, предмет этой мутации). Прежний страж считал СОСЕДЕЙ
+# после подмены и сверял их число с ЗАШИТОЙ единицей: с тремя сайтами
+# законная подмена оставляла два, страж отказывал, а его диагноз («якорь
+# уехал») называл причину ПЕРВОГО стража. Настоящее намерение -- «подмена
+# задела свой сайт и ни одного чужого» -- выражается РАЗНИЦЕЙ: сайтов после
+# подмены ровно на единицу меньше, чем до; новые законные сайты стадии
+# инварианта не ломают. Форма запинена сценарием 207 стенда.
+STAGE = '.with_name(target.name + f".staging.{os.getpid()}")'
+before_sites = t.count(STAGE)
+after_sites = t2.count(STAGE)
+if after_sites != before_sites - 1:
+    # Код 3, отдельный от кода 2 якоря: ПРИЧИНЫ у стражей разные (задет
+    # чужой сайт против уехавшего якоря), ДЕЙСТВИЕ одно -- контроль НЕ
+    # ИЗМЕРЯЛ, и оболочка ниже переводит оба класса в исход зонда 2.
+    sys.stderr.write('МУТАЦИЯ ЗАДЕЛА ЧУЖУЮ ВЕТКУ: сайтов стадии было %d, стало %d, ждали %d (ровно на единицу меньше)\n'
+                     % (before_sites, after_sites, before_sites - 1))
+    sys.exit(3)
 open(p, 'w', encoding='utf-8').write(t2)
 MUT
   __mrc=$?
   if [[ $__mrc -ne 0 ]]; then
     # Класс ответа называется: 2 -- якорь уехал и контроль НЕ ИЗМЕРЯЛ (чинить
-    # прибор), прочее -- контроль не применился по иной причине.
+    # прибор), 3 -- подмена задела ЧУЖОЙ сайт стадии (тоже «не измерял», но
+    # чинить надо мутацию, а не якорь), прочее -- контроль не применился по
+    # иной причине. ДЕЙСТВИЕ у обоих классов одно, поэтому оба уводят зонд в
+    # код 2; расщеплена ПРИЧИНА: прежде оба стража выходили двойкой, и на
+    # отказ ВТОРОГО оболочка печатала диагноз первого, отправляя чинить не
+    # тот механизм.
     if [[ $__mrc -eq 2 ]]; then
       echo "  ОТКАЗ: контроль случая (u) НЕ ИЗМЕРЯЛ -- якорь мутации уехал" >&2
+      __DONE=1; exit 2
+    fi
+    if [[ $__mrc -eq 3 ]]; then
+      echo "  ОТКАЗ: контроль случая (u) НЕ ИЗМЕРЯЛ -- подмена задела чужой сайт стадии" >&2
       __DONE=1; exit 2
     fi
     bad 'case (u) control: the mutation did not apply -- it proves nothing'
