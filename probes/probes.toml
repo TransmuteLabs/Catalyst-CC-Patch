@@ -38,7 +38,10 @@ attach_total = 90000
 records_keep = 5000
 
 [[probe.judge.models]]
-model = "deepseek-v4-flash"
+# 2026-09-10 (слово юзера: «все запросы на версию что я сказал»): id deepseek-v4-flash
+# (V4-Flash 0731) → deepseek-flash (DeepSeek V4.1-Flash); ступень и effort перенесены
+# без замера на V4.1 — замер судьи по годному набору остаётся должным.
+model = "deepseek-flash"
 # ОСНОВАНИЕ ОТОЗВАНО 2026-08-30. Прежняя запись ссылалась на замер по набору AC
 # (3 повтора, промт P6: `high` -- 4 пропуска из 81 и 8 неустойчивых, `xhigh` --
 # 0 и 3). Набор AC признан негодным для этого вопроса: у 100% его записей вход
@@ -83,7 +86,8 @@ live_threshold = 1
 live_recheck_ms = 60000
 
 [[probe.idle-watch.models]]
-model = "deepseek-v4-flash"
+# 2026-09-10: deepseek-v4-flash → deepseek-flash (V4.1-Flash), слово юзера.
+model = "deepseek-flash"
 effort = "high"
 context_chars = 24000
 
