@@ -4206,12 +4206,12 @@ fi
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-a377c404000e2940b59ab63afa4eec423b791f33}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-650a03f14a4c460cc5f3f4d06c1397aa4dc1668b}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "a377c404000e2940b59ab63afa4eec423b791f33" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "650a03f14a4c460cc5f3f4d06c1397aa4dc1668b" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
