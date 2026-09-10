@@ -532,8 +532,18 @@ sign_macos_binary() {
     return 1
   fi
   # The embedded runtime must start before the staging image can be published.
-  if ! "$bin" --version >/dev/null 2>&1; then
-    echo "FATAL: signed binary --version failed for $bin." >&2
+  # Вывод и код ЗАХВАТЫВАЮТСЯ, а не гасятся в /dev/null: этот `if` -- ЗАМЕР, и
+  # до волны 48 его отказ не называл НИ ОДНОЙ причины, хотя ребёнок причину
+  # сказал. Диагност платформы отделяет «плохи байты цели» от «образ собран под
+  # другую машину»: во втором случае чинить нечего, это просто не тот хозяин.
+  local __sv_out="" __sv_rc=0
+  __sv_out="$("$bin" --version 2>&1)" || __sv_rc=$?
+  if (( __sv_rc != 0 )); then
+    echo "FATAL: signed binary --version failed for $bin (код $__sv_rc)." >&2
+    if [[ -n "$__sv_out" ]]; then
+      echo "  Сказано образом: ${__sv_out%%$'\n'*}" >&2
+    fi
+    __image_run_note "$bin"
     return 1
   fi
   echo "Re-signed with $id (bundle id $BUNDLE_ID); signature and launch verified"
@@ -685,6 +695,45 @@ sys.path.insert(0, os.environ['CP_KIT'])
 import claude_patch
 print('%s-%s' % claude_patch.image_os_arch(Path(os.environ['CP_IMG'])))
 PY_IMG_OS
+}
+
+# ПОЧЕМУ ОБРАЗ НЕ НАЗВАЛСЯ: диагноз, а не первая причина из списка.
+#
+# Четыре двери конвейера просят образ назвать себя (`--version`) и, не получив
+# ответа, печатают отказ. До волны 48 каждая называла ПЕРВУЮ причину своего
+# списка -- «цель не называет свою версию», «образ не запускается», «бэкап
+# держит патч», -- и человек читал их как приговор БАЙТАМ. Между тем у пары
+# «darwin-образ на linux-хозяине» ядро отказывает ДО первого байта программы:
+# байты цели тут ни при чём, и чинить их бессмысленно. Тот же класс, что #105
+# (одно имя на несколько предметов), и лечится тем же: ИЗМЕРИТЬ и НАЗВАТЬ.
+#
+# Функция НИЧЕГО не решает и никого не роняет -- она только ОПИСЫВАЕТ, поэтому
+# возвращает ноль всегда: диагност, роняющий прогон, отнимает у двери право
+# самой выбрать код возврата. Детектор платформы умеет отказать сам (fat-образ,
+# не образ, нечитаемый путь), и тогда честный ответ -- «пара платформ НЕ
+# УСТАНОВЛЕНА» вместе с его собственными словами. Дверь, назвавшая причину
+# наугад, вреднее немой: немая отправляет читать лог, а угадавшая -- чинить не то.
+__image_run_note() {   # <путь к образу> -> диагноз в stderr; код ВСЕГДА 0
+  local __p="$1" __out __host __rc=0
+  __host="$(__host_os_arch)"
+  # stderr детектора СЛИВАЕТСЯ в переменную, а не гасится: `2>/dev/null` здесь
+  # означал бы «причина неизвестна, и мы не покажем почему».
+  __out="$(__image_os_arch "$__p" 2>&1)" || __rc=$?
+  # Форма ответа проверяется, а не предполагается: детектор мог вернуть ноль и
+  # напечатать что-то иное, и тогда сравнение с хозяином было бы гаданием.
+  if (( __rc != 0 )) || [[ ! "$__out" =~ ^(darwin|linux|win32)-(arm64|x64)$ ]]; then
+    echo "  ПАРА ПЛАТФОРМ НЕ УСТАНОВЛЕНА (детектор вернул $__rc): ${__out%%$'\n'*}" >&2
+    echo "  Хозяин: $__host. Отсюда не видно, платформа виновата или байты -- не гадаем." >&2
+    return 0
+  fi
+  if [[ "$__out" != "$__host" ]]; then
+    echo "  ПРИЧИНА: образ собран под $__out, а хозяин $__host. Такой образ здесь не" >&2
+    echo "  исполняется НИ ПРИ КАКИХ байтах -- назваться он не мог, и байты цели ни при" >&2
+    echo "  чём. Чинить нечего: это просто не та машина." >&2
+    return 0
+  fi
+  echo "  Пара платформ СОВПАДАЕТ ($__out) -- причина НЕ в платформе, смотреть на байты." >&2
+  return 0
 }
 
 # КОНСТРЕЙНТ: `codesign` требуется ТОГДА И ТОЛЬКО ТОГДА, когда ОС хозяина --
@@ -962,7 +1011,46 @@ STAGED_FROM_LIVE=0
 # First line only: a patched image prints tweakcc's version on a second line,
 # and reading every line made the comparison below fail against any pristine
 # copy -- refusing the default path outright.
-img_ver() { "$1" --version 2>/dev/null | awk 'NR==1{print $1; exit}'; }
+# ЗАМЕРЕНО волной 48: `--version` МОЖЕТ отказать, и прежняя форма уносила
+# прогон МОЛЧА. Под `set -euo pipefail` присваивание `V="$(img_ver X)"` --
+# простая команда, и ненулевой код пайплайна (pipefail отдаёт код образа)
+# убивал скрипт ПРЯМО НА НЁМ: неисполнимый файл давал 126 -- код, которого нет
+# ни в одной таблице кита, -- и ни одного слова. Обе ветки «unreadable» ниже
+# написаны ровно для этого случая и были НЕДОСТИЖИМЫ: до них не доходило.
+# Пустая строка -- законный ответ «образ не назвался»; ПРИЧИНУ называет
+# вызывающий, спрашивая диагност платформы.
+# ЕДИНСТВЕННЫЙ ДОМ извлечения «первого слова первой строки». Эта форма стояла
+# в ЧЕТЫРЁХ местах, и в каждом несла один и тот же скрытый отказ: `awk` уходит
+# на первой строке, и вывод длиннее буфера трубы даёт `printf` EPIPE -- под
+# `set -o pipefail` это код 141 у ВСЕЙ подстановки, а вызывающий читает её
+# присваиванием и умирает молча. Замер волны 48 на обеих машинах (bash 3.2.57
+# и 5.2.26): образ на 200 000 строк -> rc=141, ни слова в логе. Пояс `|| true`
+# и есть то, что делает объявленный код 0 правдой на ЛЮБОЙ форме вызова.
+__first_word() {   # <текст> -> первое слово его первой строки, либо ПУСТО; код ВСЕГДА 0
+  printf '%s\n' "$1" | awk 'NR==1{print $1; exit}' || true
+}
+
+# ЕДИНСТВЕННЫЙ ДОМ чтения версии ИЗ БАЙТОВ образа (три двери tweakcc читали её
+# каждая своей копией одной и той же трубы). Под `set -o pipefail` образ БЕЗ
+# отметки версии даёт `grep` код 1, и на ПЛОСКОМ вызове это убивает прогон
+# прямо на присваивании -- вместе с веткой «в байтах нет отметки версии»,
+# написанной ровно для этого случая. Замер волны 48 на обеих машинах: плоский
+# вызов rc=1 без единого слова, вызов из условия -- ветка достигается. То есть
+# достижимость объявленной ветки принадлежала ФОРМЕ ВЫЗОВА, а не двери.
+# stderr `grep` НЕ гасится: «нет такого файла» -- это причина, а не шум.
+__ver_from_bytes() {   # <путь к образу> -> версия из байтов, либо ПУСТО; код ВСЕГДА 0
+  LC_ALL=C grep -a -o -m1 '// Version: [0-9][0-9.]*' "$1" | head -1 | sed 's|// Version: ||' || true
+}
+
+img_ver() {   # <путь к образу> -> первое слово `--version`, либо ПУСТО; код ВСЕГДА 0
+  local __out=""
+  # stderr НЕ гасится и НЕ сливается в значение. Погасить -- потерять в ЗАМЕРЕ
+  # единственные слова образа о том, почему он не запустился; слить в `__out`
+  # -- отдать вызывающему сообщение загрузчика ВМЕСТО номера версии. Место
+  # этих слов -- лог, и туда они и идут, мимо подстановки.
+  __out="$("$1" --version)" || true
+  __first_word "$__out"
+}
 # `--only-ours` is excluded on purpose. The hazard 0b exists for is handing
 # tweakcc a patched image, and `--only-ours` never invokes tweakcc at all (the
 # whole stage is behind ONLY_OURS below). Staging from the pristine copy there
@@ -981,6 +1069,9 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]]; then
   # of a DIFFERENT build -- `.orig` means "the stock bytes of the file next to
   # it", and a leftover from an earlier version silently breaks both readers.
   ORIG_STATE=keep
+  # Имя молчавшего образа -- отдельная переменная: `ORIG_STATE` несёт ТЕКСТ
+  # для человека, а диагносту нужен ПУТЬ. Пусто = молчавших не было.
+  ORIG_SILENT=""
   if [[ ! -f "$BIN.orig" ]]; then
     ORIG_STATE="missing"
   elif grep -q -a -F "$OUR_MARKER" "$BIN.orig" || grep -q -a -F 'tweakcc' "$BIN.orig"; then
@@ -988,7 +1079,24 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]]; then
   else
     LIVE_VER="$(img_ver "$BIN")"
     ORIG_VER="$(img_ver "$BIN.orig")"
-    [[ -n "$LIVE_VER" && "$LIVE_VER" == "$ORIG_VER" ]] || ORIG_STATE="a twin of ${ORIG_VER:-an unreadable build}, not of $LIVE_VER"
+    # ПРИЧИНА называется ИЗМЕРЕННАЯ. Слово «unreadable» одинаково описывало
+    # битые байты и образ чужой платформы, а это РАЗНЫЕ поводы: у второго
+    # чинить нечего. Действие ветки волна 48 не меняет -- только основание, --
+    # потому что здесь `$BIN` уже признан пристинным, и класть его копию в
+    # `.orig` законно при любой из причин. Волна 48.
+    if [[ -z "$LIVE_VER" ]]; then
+      ORIG_STATE="not comparable: the live image did not name its version"
+      ORIG_SILENT="$BIN"
+    elif [[ -z "$ORIG_VER" ]]; then
+      ORIG_STATE="not comparable: $BIN.orig did not name its version"
+      ORIG_SILENT="$BIN.orig"
+    elif [[ "$LIVE_VER" != "$ORIG_VER" ]]; then
+      ORIG_STATE="a twin of $ORIG_VER, not of $LIVE_VER"
+    fi
+  fi
+  if [[ -n "$ORIG_SILENT" ]]; then
+    echo "NOTE: $ORIG_SILENT did not name its version -- the twin check was not made." >&2
+    __image_run_note "$ORIG_SILENT"
   fi
   if [[ "$ORIG_STATE" != keep ]]; then
     # Staged and renamed: a copy killed halfway leaves a TRUNCATED `.orig`, and
@@ -1029,6 +1137,16 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]]; then
     if [[ -z "$LIVE_VER" || -z "$ORIG_VER" || "$LIVE_VER" != "$ORIG_VER" ]]; then
       echo "ERROR: $BIN.orig is not a pristine copy of the live build." >&2
       echo "  live=${LIVE_VER:-unreadable}  pristine copy=${ORIG_VER:-unreadable}" >&2
+      # «unreadable» -- НАБЛЮДЕНИЕ, а не причина, и совет ниже («поставь эту
+      # версию») верен только для битых байтов: образу чужой платформы никакая
+      # установка не поможет, там просто не та машина. Молчавший образ
+      # называет СВОЮ причину сам. Волна 48.
+      if [[ -z "$LIVE_VER" ]]; then
+        __image_run_note "$BIN"
+      fi
+      if [[ -z "$ORIG_VER" ]]; then
+        __image_run_note "$BIN.orig"
+      fi
       echo "  Rebuilding from it would swap a different version over the live one." >&2
       echo "  Install the version you mean instead:" >&2
       echo "    bash claude-patch-all.sh --update ${LIVE_VER:-<version>}" >&2
@@ -1109,8 +1227,7 @@ __tw_reconcile_misses() {
   # Байты же есть всегда, и это тот самый образ, о котором идёт речь. Запускать
   # его ради `--version` тут нельзя: на этой стадии он уже правлен и ещё не
   # переподписан.
-  __ver="$(LC_ALL=C grep -a -o -m1 '// Version: [0-9][0-9.]*' "$__bin" 2>/dev/null \
-           | head -1 | sed 's|// Version: ||')"
+  __ver="$(__ver_from_bytes "$__bin")"
   if [[ ! "$__ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     echo "$__say: сверка непроходов tweakcc не может назвать версию образа." >&2
     echo "  В байтах $__bin нет отметки версии, а запись объявленного непрохода" >&2
@@ -1814,8 +1931,7 @@ __tw_check_applied_level() {
   # формы и двери накладок, а они стоят выше объявленного уровня.
   # Слепая ручка проходит ВЫШЕ по тексту и до сюда не доходит: образ без
   # отметки версии она гасит вместе со всеми дверями, как и обещает.
-  __ver="$(LC_ALL=C grep -a -o -m1 '// Version: [0-9][0-9.]*' "$__bin" 2>/dev/null \
-           | head -1 | sed 's|// Version: ||')"
+  __ver="$(__ver_from_bytes "$__bin")"
   if [[ ! "$__ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     echo "FATAL: дверь уровня tweakcc не может назвать версию образа." >&2
     echo "  В байтах $__bin нет отметки версии, а объявленный уровень привязан" >&2
@@ -2223,8 +2339,7 @@ __tw_check_off_set() {        # <вывод tweakcc> <образ> -> 0|1
   # здесь нет намеренно: дверь уровня стоит ПЕРЕД этой и на таком образе уже
   # отказала, а сам вердикт множества от версии не зависит вовсе -- множество
   # принадлежит дому.
-  __ver="$(LC_ALL=C grep -a -o -m1 '// Version: [0-9][0-9.]*' "$__bin" 2>/dev/null \
-           | head -1 | sed 's|// Version: ||')"
+  __ver="$(__ver_from_bytes "$__bin")"
   if [[ ! -f "$TWEAKCC_EXPECTED_OFF" ]]; then
     # Отсутствующий файл = ПУСТОЕ объявленное множество, и пустое измеренное
     # сходится с ним обеими сторонами: comm не даёт ни строки ни туда, ни
@@ -2379,16 +2494,71 @@ fi
 # intact on its own, while a program glued from hundreds of string pieces may
 # not parse at all. The check must be CALLED: while it was merely shipped in
 # the kit, it was broken by two commits and stayed silent.
+# КЛАСС ОТКАЗА РАЗБОРА -- отдельная функция, и это конструктивно.
+#
+# Во-первых, она ЧИСТАЯ: слова ребёнка на входе, названные поводы на выходе,
+# ни файлов, ни сети. Во-вторых, стенд вырезает её ПО ИМЕНИ и гоняет тот же
+# код, а не пересказ: инлайн-кусок посреди прогона нечем позвать, и зуб на
+# него пришлось бы городить полным прогоном конвейера.
+#
+# Поводы НАКАПЛИВАЮТСЯ, а не выбираются первым совпадением: ребёнок может
+# назвать сразу два (якорь пропал И компилятор молчал), и «первый из списка»
+# -- ровно тот дефект, который эта волна и разбирает. Пустой ответ означает
+# «класс НЕ УСТАНОВЛЕН», и звонящий обязан сказать это словом, а не подставить
+# любой из известных. Волна 48.
+__emit_check_why() {   # <вывод разбора> -> печатает поводы через «; », либо ПУСТО
+  local __o="$1" __w=""
+  if [[ "$__o" == *"ЯКОРЬ НЕ НАЙДЕН"* ]]; then
+    __w="$__w; якорь вклейки не найден -- проверять стало нечего"
+  fi
+  if [[ "$__o" == *"НЕ СТРОКА"* ]]; then
+    __w="$__w; вклеиваемое значение оказалось НЕ строкой"
+  fi
+  if [[ "$__o" == *"tsc не запустился"* ]]; then
+    __w="$__w; компилятор типов НЕ ЗАПУСТИЛСЯ -- его нет на PATH этого прогона"
+  fi
+  if [[ "$__o" == *"не выдав"* ]]; then
+    __w="$__w; компилятор типов вышел с ошибкой, не дав ни одной диагностики"
+  fi
+  printf '%s\n' "${__w#; }"
+}
+
 echo "==> Разбор вклеиваемого кода"
-node "$(dirname "$0")/tools/emit-check.js" 9>&- || {
-  __rc=$?
-  if [[ $__rc -eq 2 ]]; then
-    echo "FATAL: разбор НЕ ВЫПОЛНЕН: прибор не может мерить (якорь/строка пропали, rc=2)." >&2
-    echo "  Это не «код не парсится» -- покрытие снято, причина выше." >&2
+# Вывод ребёнка ЗАХВАТЫВАЕТСЯ и печатается целиком, а не пересказывается.
+# Код 2 у emit-check.js несёт ЧЕТЫРЕ повода разной природы -- пропал якорь
+# вклейки (:40), вклеиваемое значение оказалось не строкой (:72), компилятор
+# типов не запустился (:140), компилятор вышел с ошибкой, не дав ни одной
+# диагностики (:169), -- а отказ называл ДВА первых из списка, какой бы ни
+# сработал. Ровно эта строка увела расследование волны 45 в сторону, когда tsc
+# просто не было на PATH у неинтерактивного ssh. Класс знает ТОЛЬКО ребёнок,
+# значит, его надо прочитать у него, а не вспомнить. Волна 48.
+#
+# Молчание списка -- не повод назвать первый: если ни одна известная метка не
+# встретилась, так и печатается «КЛАСС НЕ УСТАНОВЛЕН». Ребёнок мог обзавестись
+# новым поводом, и подставить ему чужое имя хуже, чем сознаться.
+set +e
+__ec_out="$(node "$(dirname "$0")/tools/emit-check.js" 9>&- 2>&1)"
+__rc=$?
+set -e
+if [[ -n "$__ec_out" ]]; then
+  printf '%s\n' "$__ec_out"
+fi
+if (( __rc != 0 )); then
+  if (( __rc == 2 )); then
+    __ec_why="$(__emit_check_why "$__ec_out")"
+    if [[ -n "$__ec_why" ]]; then
+      echo "FATAL: разбор НЕ ВЫПОЛНЕН: прибор не может мерить (rc=2)." >&2
+      echo "  ИЗМЕРЕННАЯ ПРИЧИНА: $__ec_why" >&2
+    else
+      echo "FATAL: разбор НЕ ВЫПОЛНЕН: прибор не может мерить (rc=2)." >&2
+      echo "  КЛАСС НЕ УСТАНОВЛЕН: ни одна известная метка отказа не встретилась." >&2
+      echo "  Смотреть вывод разбора выше -- у прибора появился новый повод." >&2
+    fi
+    echo "  Это не «код не парсится» -- покрытие снято." >&2
     exit 2
   fi
   exit 1
-}
+fi
 
 # The verify block is a python heredoc, and NOTHING was looking inside it:
 # `bash -n` treats a heredoc as data and `node --check` has no opinion about
@@ -4041,12 +4211,41 @@ if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; 
   # a removal. Nor is a copy of another build a valid restore for this one: ask
   # both for their version.
   BACKUP_OK=0
-  if [[ -f "$PRISTINE_SRC" ]] \
-     && ! grep -q -a -F "$OUR_MARKER" "$PRISTINE_SRC" \
-     && ! grep -q -a -F 'tweakcc' "$PRISTINE_SRC"; then
-    SRC_VER="$("$PRISTINE_SRC" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
-    BLD_VER="$("$BIN" --version 2>/dev/null | awk 'NR==1{print $1; exit}')"
-    [[ -n "$SRC_VER" && "$SRC_VER" == "$BLD_VER" ]] && BACKUP_OK=1
+  # ПРИЧИНА непригодности близнеца ИЗМЕРЯЕТСЯ, а не перечисляется. Прежде отказ
+  # ниже печатал список «missing, patched, tweakcc-staged, or another version»,
+  # и какой из четырёх поводов сработал, человек угадывал сам. Хуже того, ПЯТЫЙ
+  # повод в списке не значился вовсе: обе `--version` могут промолчать оттого,
+  # что образ собран под ДРУГУЮ платформу, -- и такой прогон приезжал под чужим
+  # именем «бэкап держит патч». Тот же класс, что #105: имя названо по первому
+  # элементу списка, а не по замеру. Волна 48.
+  BACKUP_WHY=""
+  BACKUP_NOTE=""
+  if [[ ! -f "$PRISTINE_SRC" ]]; then
+    BACKUP_WHY="файла нет"
+  elif grep -q -a -F "$OUR_MARKER" "$PRISTINE_SRC"; then
+    BACKUP_WHY="в нём НАШ маркер -- это уже пропатченные байты, а не сток"
+  elif grep -q -a -F 'tweakcc' "$PRISTINE_SRC"; then
+    BACKUP_WHY="в нём следы tweakcc -- образ прошёл чужую стадию"
+  else
+    # `2>&1` вместо `2>/dev/null`: слова ребёнка -- единственный носитель
+    # причины, и гасить их в замере запрещено.
+    set +e
+    SRC_OUT="$("$PRISTINE_SRC" --version 2>&1)"; SRC_RC=$?
+    BLD_OUT="$("$BIN" --version 2>&1)"; BLD_RC=$?
+    set -e
+    SRC_VER="$(__first_word "$SRC_OUT")"
+    BLD_VER="$(__first_word "$BLD_OUT")"
+    if [[ -z "$SRC_VER" ]]; then
+      BACKUP_WHY="близнец не назвал свою версию (код $SRC_RC): ${SRC_OUT%%$'\n'*}"
+      BACKUP_NOTE="$PRISTINE_SRC"
+    elif [[ -z "$BLD_VER" ]]; then
+      BACKUP_WHY="цель не назвала свою версию (код $BLD_RC): ${BLD_OUT%%$'\n'*}"
+      BACKUP_NOTE="$BIN"
+    elif [[ "$SRC_VER" != "$BLD_VER" ]]; then
+      BACKUP_WHY="это ДРУГАЯ версия: близнец $SRC_VER, цель $BLD_VER"
+    else
+      BACKUP_OK=1
+    fi
   fi
   if [[ $BACKUP_OK -eq 1 ]]; then
     # Staged and renamed, not written in place: a `cp` killed halfway leaves a
@@ -4074,8 +4273,11 @@ if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; 
     fi
   else
     echo "FATAL: tweakcc's backup ($TWEAKCC_BACKUP) holds a PATCHED image, and no" >&2
-    echo "  verified-pristine copy of THIS build is available to repair it from" >&2
-    echo "  ($PRISTINE_SRC is missing, patched, tweakcc-staged, or another version)." >&2
+    echo "  verified-pristine copy of THIS build is available to repair it from." >&2
+    echo "  ИЗМЕРЕННАЯ ПРИЧИНА по $PRISTINE_SRC: $BACKUP_WHY" >&2
+    if [[ -n "$BACKUP_NOTE" ]]; then
+      __image_run_note "$BACKUP_NOTE"
+    fi
     echo "  tweakcc restores that backup over the target before patching, so the" >&2
     echo "  build would be made FROM our own patched bytes -- and 'tweakcc" >&2
     echo "  --restore' would hand a human the patch while reporting a removal." >&2
@@ -4155,12 +4357,23 @@ if [[ $ONLY_OURS -eq 0 ]]; then
   # образа, где бэкап и есть единственный пристинный источник, а
   # восстановление стока -- сам смысл стадии.
   if [[ -f "$TWEAKCC_BACKUP" ]] && ! grep -q -a -F "$OUR_MARKER" "$BIN"; then
-    TGT_VER="$( { "$BIN" --version 2>/dev/null || true; } | awk 'NR==1{print $1; exit}')"
+    # Слова и код ребёнка ЗАХВАТЫВАЮТСЯ: «цель не называет свою версию» --
+    # это СИМПТОМ, а не причина, и до волны 48 он печатался вместо неё. Причин
+    # у пустой версии две разной природы: байты цели негодны ЛИБО ядро отказало
+    # ещё до первого байта программы, потому что образ не для этой машины.
+    set +e
+    TGT_OUT="$("$BIN" --version 2>&1)"; TGT_RC=$?
+    set -e
+    TGT_VER="$(__first_word "$TGT_OUT")"
     if [[ ! "$TGT_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
       echo "FATAL: the target does not name its version, so what tweakcc is about to" >&2
       echo "  do with it cannot be established." >&2
       echo "  target: $BIN" >&2
-      echo "  --version gave: '${TGT_VER:-<nothing>}'" >&2
+      echo "  --version gave: '${TGT_VER:-<nothing>}' (код $TGT_RC)" >&2
+      if [[ -n "$TGT_OUT" ]]; then
+        echo "  Сказано образом: ${TGT_OUT%%$'\n'*}" >&2
+      fi
+      __image_run_note "$BIN"
       echo "  tweakcc restores its backup over the target before patching, and whether" >&2
       echo "  it does depends on this version. Refusing to build blind: the image that" >&2
       echo "  would be shipped may not be the one you named." >&2
@@ -7089,6 +7302,11 @@ set -e
 echo "Version: $(printf '%s\n' "$SMOKE_OUT" | head -1)"
 if [[ $SMOKE_RC -ne 0 || "$SMOKE_OUT" != *"Claude Code"* ]]; then
   echo "FATAL: the patched image does not run — leaving the launcher alone" >&2
+  # «Не запускается» -- это НАБЛЮДЕНИЕ, и оно одинаково выглядит у сломанной
+  # вклейки и у образа чужой платформы. Второму никакая правка вклейки не
+  # поможет, поэтому пара платформ называется здесь, а не додумывается потом.
+  echo "  код $SMOKE_RC; сказано образом: ${SMOKE_OUT%%$'\n'*}" >&2
+  __image_run_note "$BIN"
   exit 1
 fi
 

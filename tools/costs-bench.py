@@ -291,7 +291,12 @@ def scenario_c9() -> None:
 
 
 def shell_function(source: str, name: str) -> str:
-    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", source)
+    # У ГОЛОВЫ функции бывает ХВОСТ -- комментарий с её контрактом, и в ките это
+    # обычная форма (`__image_run_note() {   # <путь> -> диагноз`). Якорь,
+    # требующий перевода строки сразу за `{`, такую функцию просто НЕ НАХОДИТ:
+    # отказ честный и громкий, но он про прибор, а не про предмет. Измерено
+    # волной 48 на подписанте, который начал звать диагност платформы.
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{[^\n]*\n.*?^\}}\n", source)
     require(match is not None, f"shell function {name} not found")
     return match.group(0)
 
@@ -405,7 +410,12 @@ def signing_shell_cases(identity: str, valid: str) -> None:
                  + shell_function(source, "sign_macos_binary")
                  # Пара ХОЗЯИНА берётся ВЫРЕЗАННОЙ из конвейера: копия правила
                  # здесь стала бы его вторым домом и разошлась бы молча.
-                 + shell_function(source, "__host_os_arch"))
+                 + shell_function(source, "__host_os_arch")
+                 # Диагност платформы (волна 48) зовётся подписантом на ветке
+                 # «подписанный образ не назвался»: вырезанный без него
+                 # подписант умирал бы кодом 127 «команда не найдена», и случай
+                 # «launch failure» краснел бы ПРИБОРОМ вместо предмета.
+                 + shell_function(source, "__image_run_note"))
     stage = re.search(r"(?ms)^# --- 4\. signature[^\n]*\n(.*?)^# --- 5\. verify", source)
     require(stage is not None, "signature stage not found")
     with tempfile.TemporaryDirectory() as raw:

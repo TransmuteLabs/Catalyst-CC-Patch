@@ -70,7 +70,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 python3 - "$SCRIPT" "$WORK" <<'PY'
-import re, sys
+import os, re, sys
 src, work = sys.argv[1], sys.argv[2]
 lines = open(src, encoding='utf-8').read().split('\n')
 
@@ -133,16 +133,49 @@ post = '\n'.join(lines[p0:p1 + 1])
 if 'changed WHILE the tweakcc stage' not in post:
     die('в извлечённой пост-сверке нет её сообщения')
 
+# --- помощники, которых страж ЗОВЁТ ------------------------------------------
+# Вырезанный страж исполняется без кита рядом, поэтому всё, что он зовёт,
+# обязано приехать вместе с ним. Диагност платформы (волна 48) зовётся на
+# ветке «цель не назвала свою версию»: без него вырезанный страж умирал бы
+# кодом 127 «команда не найдена» -- и проба читала бы это как «страж не
+# сошёлся», то есть краснела бы ПРИБОРОМ, а не предметом. Именно так эта
+# проба и покраснела на первом же прогоне волны 48.
+def carve(name):
+    head = name + '() {'
+    i = next((k for k, l in enumerate(lines) if l.startswith(head)), None)
+    if i is None:
+        die('функция ' + name + ', которую зовёт страж, не найдена')
+    j = next((k for k in range(i + 1, len(lines)) if lines[k] == '}'), None)
+    if j is None:
+        die('у функции ' + name + ' не найдена закрывающая скобка')
+    return '\n'.join(lines[i:j + 1])
+
+helpers = '\n'.join(carve(n) for n in
+                    ('__host_os_arch', '__image_os_arch', '__image_run_note',
+                     '__first_word'))
+if '__image_run_note' not in guard:
+    die('страж перестал звать диагност платформы -- причина отказа снова безымянна')
+# Дом первого слова (волна 48) страж зовёт на обеих сторонах сравнения версий.
+# Утверждение здесь -- не украшение: список помощников выше и текст стража
+# расходятся МОЛЧА, и разошедшись дают код 127 внутри вырезанного стража,
+# который проба прочла бы как «страж не сошёлся» -- отказ ПРИБОРОМ под видом
+# отказа предмета. Ровно так эта проба покраснела на первом прогоне волны 48.
+if '__first_word' not in guard:
+    die('страж перестал звать дом первого слова -- список помощников устарел')
+
 open(work + '/marker.txt', 'w', encoding='utf-8').write(marker)
 open(work + '/probe-marker.txt', 'w', encoding='utf-8').write(probe_marker)
 open(work + '/guard.sh', 'w', encoding='utf-8').write(
     'set -euo pipefail\nOUR_MARKER=' + repr(marker).replace('"', '\\"') + '\n'
     + 'TWEAKCC_PROBE_CFG_MARKER=' + repr(probe_marker).replace('"', '\\"') + '\n'
+    # Дом кита нужен `__image_os_arch`: он импортирует claude_patch оттуда.
+    + 'HERE=' + repr(os.path.dirname(os.path.abspath(src))) + '\n'
+    + helpers + '\n'
     + guard + '\n'
     + '[ -z "${STAGE_HOOK:-}" ] || eval "$STAGE_HOOK"\n'
     + post + '\necho GUARD-PASSED\n')
 print(f'извлечено: страж {g0+1}..{g1+1}, пост-сверка {p0+1}..{p1+1}, '
-      f'активация {act+1}, маркер из первоисточника')
+      f'активация {act+1}, маркер из первоисточника, помощники стража подцеплены')
 PY
 
 # repr питона даёт одинарные кавычки -- для bash это ровно то, что нужно.

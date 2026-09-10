@@ -85,7 +85,7 @@ PIPELINE = 'claude-patch-all.sh'
 ANCHOR = 'python3 - "$0" <<\'PYDOCS\'\n'
 END = '\nPYDOCS\n'
 # Круг 28, F-12(б): +1 -- мутация D40 на элидированную форму «все N».
-EXPECTED_MUTATIONS = 44
+EXPECTED_MUTATIONS = 45
 
 
 def read(path):
