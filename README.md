@@ -277,6 +277,20 @@ export CLAUDE_JUDGE=enforce             # nothing happens until this is set
 export CLAUDE_IDLE=1                    # the fleet watcher, separately
 ```
 
+The splice is still the default carrier. To stand it down and run the
+function-hooks judge (`mods/catalyst-judge`, spec
+`docs/judge-mod-port-spec.md`):
+
+```sh
+export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
+export CLAUDE_JUDGE_CARRIER=mod
+# plus --plugin-dir pointing at mods/catalyst-judge
+```
+
+`CLAUDE_JUDGE_CARRIER` is in the patch source as of `4cb02a5`; a live
+image that was built before that commit ignores the variable (the splice
+keeps judging). Rebuild the image before relying on the stand-down.
+
 Each probe also reads `~/.claude/probes/<probe>/prompt.md`. If that file is
 missing, the journal records it with the exact path to create, and what happens
 next depends on the posture: in advise the probe consults on a built-in

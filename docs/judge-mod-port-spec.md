@@ -327,7 +327,7 @@ A port is accepted only with all of these, each with its own control:
 * Project-layer `probes.toml` via `$.fs.ancestors` (v1 reads
   `~/.claude/probes/probes.toml` and `.claude/probes/probes.toml`).
 * Compaction of `records/mod-*.json` into the existing journal index.
-* Pass-path `next(e)` is charged against the 10 s (smoke: Agent `next()` settled in 7189 ms). A subagent longer than 10 s may print `exceeded` on a hook that already decided OK. Whether the Agent still completes is UNMEASURED; fail-open on a pass is the tool running, which is the intended pass, but must be confirmed.
+* Pass-path `next(e)` is NOT the 10 s budget. Measured `/tmp/t113-full/p-pass10`: Bash `sleep 15` — hook logged `after next dt=16033`, settled 16034 ms, **zero** `exceeded 10000ms` / `hook failed`, stdout `ZQ-PASS10-DONE`. The timer charges awaited work *around* `next()`, not the tool. Overrun remains only if we `await $.clock.sleep(11000)` (or complete) *before* returning.
 * `next.signal` as a cancellation carrier: present, unexercised.
 * Flag `tengu_plugin_hooks_modules` is off by default; the env
   `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` overrides. Vendor API may change.

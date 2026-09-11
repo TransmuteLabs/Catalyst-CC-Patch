@@ -51,3 +51,18 @@ One file per consultation:
 `~/.claude/probes/judge/records/mod-<tool_use_id>.json`.
 The splice's index line is not written; compaction of the splice journal
 does not see these files yet.
+
+## Pass-path vs the 10 s budget
+
+`return next(e)` can take longer than 10 s (Bash sleep 15 settled in 16034 ms).
+That time is **not** charged: no `exceeded 10000ms`, the tool finished, the
+hook ran its after-`next` write. The 10 s wall is awaited work of ours
+before we return (the fail-open probe slept 11 s *instead of* calling
+`next`). Passing a long Agent is therefore not a budget defect.
+
+## The 897 overlays
+
+They are tweakcc's prompt-snapshot layer in `~/.tweakcc/system-prompts/`,
+not this module. Our only binary prompt feature was injection 26; it lives
+here as `prompt.section` on `communication:L`. This module does not write
+the user's overlay directory.
