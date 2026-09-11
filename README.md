@@ -284,7 +284,8 @@ function-hooks judge (`mods/catalyst-judge`, spec
 ```sh
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 export CLAUDE_JUDGE_CARRIER=mod
-# plus --plugin-dir pointing at mods/catalyst-judge
+export CLAUDE_FORM_CARRIER=mod
+# plus --plugin-dir mods/catalyst-judge --plugin-dir mods/catalyst-form
 ```
 
 `CLAUDE_JUDGE_CARRIER` is in the patch source as of `4cb02a5`; a live

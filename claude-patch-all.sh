@@ -5596,12 +5596,16 @@ def _judge_rides_the_tool(d):
     # `CLAUDE_JUDGE=0`); наблюдатель несёт такой же читатель для
     # CLAUDE_IDLE -- в блоке судьи его нет, и наоборот.
     JUDGE = (rb'String\(process\.env\.CLAUDE_JUDGE\?\?""\)\.trim\(\)\.toLowerCase\(\);'
-             rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}\)\(\)')
+             rb'if\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)return !1;'
+             rb'let __c=String\(process\.env\.CLAUDE_JUDGE_CARRIER\?\?""\)\.trim\(\)\.toLowerCase\(\);'
+             rb'return __c!=="mod"\}\)\(\)')
     WATCH = rb'globalThis\.__ccFleet\?\?=\[\];'
     # The form probe's switch INVERTS the empty case (unset means ON), so its
     # reader lacks the `__s===""||` disjunct and cannot match the judge's.
     FORM = (rb'String\(process\.env\.CLAUDE_FORM\?\?""\)\.trim\(\)\.toLowerCase\(\);'
-            rb'return !\(__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}\)\(\)')
+            rb'if\(__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)return !1;'
+            rb'let __c=String\(process\.env\.CLAUDE_FORM_CARRIER\?\?""\)\.trim\(\)\.toLowerCase\(\);'
+            rb'return __c!=="mod"\}\)\(\)')
     judge_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
                    if re.search(JUDGE, d[c:e])]
     watch_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))

@@ -4054,7 +4054,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           '__K(c.brief_head,"iu").test(String(t??"").split("\\n")[0]))return "brief";' +
       'if(__K(c.report_path,"u").test(String(p??"")))return "report";' +
       'return null};' +
-    'if((()=>{let __s=String(process.env.CLAUDE_FORM??"").trim().toLowerCase();return !(__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&$4?.agentContext?.agentType==="main")' +
+    'if((()=>{let __s=String(process.env.CLAUDE_FORM??"").trim().toLowerCase();if(__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_FORM_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Form]",dirName:"form",arm:!0,label:"FORM",' +
       'rx:"PASS|WARN|REFUSE",act:"REFUSE|WARN",' +
