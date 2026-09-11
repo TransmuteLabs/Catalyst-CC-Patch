@@ -111,9 +111,17 @@ function K(s: string, f: string): RegExp {
 }
 
 function formKind(p: string, t: string, c: any): string | null {
-  if (K(c.brief_path, "u").test(String(p ?? "")) &&
-      K(c.brief_head, "iu").test(String(t ?? "").split("\n")[0])) return "brief"
-  if (K(c.report_path, "u").test(String(p ?? ""))) return "report"
+  const path = String(p ?? "")
+  const text = String(t ?? "")
+  if (K(c.brief_path, "u").test(path)) {
+    // CONSTRAINT: a `>` redirect without a heredoc body has empty post-state
+    // (same as the splice). Measured: after Write A1 deny, grok did
+    // `printf ... > docs/review/zq-brief.md` and the file landed. Path
+    // matching brief_path is enough: empty text fails brief_head and was
+    // skipped. Fail-closed: treat as brief so A1 fires.
+    if (!text || K(c.brief_head, "iu").test(text.split("\n")[0])) return "brief"
+  }
+  if (K(c.report_path, "u").test(path)) return "report"
   return null
 }
 
