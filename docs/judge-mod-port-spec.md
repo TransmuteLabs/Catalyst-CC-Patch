@@ -208,10 +208,66 @@ Every row below is measured; nothing here is assumed.
 | the dispatch's model and effort | `e` on `tool.call`, and `agent.spawn` | `agent.spawn` carries `subagentType, model, parentModel, provider{plugin,tier}, permissionMode, background, fork` |
 | the current turn (injection 21) | `e` on `tool.call` IS that turn | injection 21 becomes unnecessary — one splice retired outright |
 | the consultation | `$.model.complete({model, prompt})` | our proxy ids pass: `deepseek-flash`, `glm-5.3`, `claude-opus-5` → ok; invented id → HTTP 400 |
-| the transcript | `$.session.messages()` | at `tool.call` NOT empty: 3 elements `{role, text, toolUses}` — see the open item in §9 |
+| the transcript | `await $.session.messages()` | returns a PROMISE; awaited it is the WHOLE conversation, growing 3 → 5 → 7 across three sequential calls — see §4a |
 | the journal | `$.fs.write` | lives on 2.1.267, absent on 2.1.265 — see §6 |
 | the rule in the system prompt (splice 26) | `on('prompt.section')` | rewrite proven live, both return forms |
 | the switch, settings layers | `$.settings.read`, module scope, `$.store` | module runs in a separate worker: `globalThis.process` is undefined, so env reading goes through the host's own verb |
+
+### 4a. Transcript fidelity — measured, and it carries provenance
+
+Measured 2026-09-11, probe `/tmp/t113-tx/probe`: one run, the main loop
+reading three fixture files in three separate steps, the transcript dumped
+at every `tool.call`.
+
+**The verb returns a Promise.** `$.session.messages()` is thenable
+(`constructor.name === "Promise"`, own keys `[]`); unawaited, `.length` is
+undefined and `.map` throws. The first pass of this probe measured its own
+defect. Awaited, it yields an array.
+
+**It is the whole conversation, not a window.** Lengths across the three
+calls: 3 → 5 → 7 — two elements added per completed tool round. The earlier
+note "3 elements" was the length at the FIRST call of a short run, read as
+if it were a ceiling.
+
+**Provenance is present, and it is structural — by key presence, not by
+role.** Claude Code puts several different things under `user`, and §6 of
+the architecture records what a judge shown bare roles does with that. The
+carrier discriminates them anyway:
+
+| element | `role` | own keys |
+|---|---|---|
+| what the human typed | `user` | `role, text, toolUses` |
+| a tool RESULT | `user` | `role, text, toolUses, `**`toolResults`** |
+| the model's prose | `assistant` | `role, text, toolUses` |
+| the model's tool call | `assistant` | `role, text, toolUses` (text empty, `toolUses.length > 0`) |
+
+The predicate is `"toolResults" in m` — the same shape of finding as
+`agentId` on `tool.call`: an optional key that expresses a kind by its
+PRESENCE. The judge therefore reconstructs provenance without heuristics on
+text.
+
+**The substance of a result is not in `text`.** A tool-result element has
+`text` of length 0; the material rides the ASSISTANT element's `toolUses`
+entry, which gains `result` and `text` once the result arrives:
+
+```
+{id:"toolu_…", name:"Read", input:{file_path:"…/f1.txt"},
+ result:{type:"text", file:{filePath:"…", content:"ZQ-FIXTURE-ONE-ALPHA\n",
+         numLines:2, startLine:1, totalLines:2}},
+ text:"1\tZQ-FIXTURE-ONE-ALPHA\n2\t"}
+```
+
+**The call under judgment identifies itself.** The in-flight tool use — the
+one the hook was entered for — carries only `{id, name, input}`, with no
+`result`/`text` yet. Every completed call in the same transcript carries
+both. This is a free discriminator, and it is stronger than matching by
+`tool_use_id`.
+
+Residue, named rather than assumed closed: §6 lists FOUR things the `user`
+role conflates — human text, tool results, service insertions, letters from
+other sessions. This run discriminated TWO of them. Service insertions
+(`system-reminder`) and cross-session letters did not occur in it and remain
+UNMEASURED; the probe that closes them must provoke both deliberately.
 
 Retired by measurement: injection 21 (the turn accumulator) — the event
 already carries what the accumulator was built to stash.
@@ -325,15 +381,11 @@ A port is accepted only with all of these, each carrying its own control:
 
 ## 9. Open items — measure before relying
 
-* **Transcript fidelity is NOT yet established.** `$.session.messages()`
-  at `tool.call` returns 3 elements shaped `{role, text, toolUses}`.
-  Two problems, both unmeasured: whether three elements is the whole
-  conversation or a window; and that the shape offers ROLES, while §6 of
-  the architecture records a measured defect — a judge shown bare roles
-  read the defendant's own text as a user sanction. Provenance must be
-  reconstructed inside the mod, or the port loses a guarantee that was
-  paid for once already. This is the largest remaining risk to fidelity
-  and it is named, not deferred.
+* **Transcript fidelity: CLOSED positively** — see §4a. The whole
+  conversation is reachable, and provenance is carried structurally
+  (`"toolResults" in m`). Residue: service insertions and cross-session
+  letters were not present in the run and are still UNMEASURED — the two
+  remaining members of §6's list of four.
 * `$.store` persistence scope (per session? across sessions? size cap?)
   — stage 2 depends on it.
 * `next.signal` as a cancellation carrier: present, unexercised.
