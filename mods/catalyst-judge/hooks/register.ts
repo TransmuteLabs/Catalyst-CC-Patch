@@ -1,18 +1,12 @@
 // CONSTRAINT: loader form — on("event") is a string literal; $ only as
-// $.noun.verb(...) call sites; next.to(e, "<tier>") if used. A green
-// `plugin validate` is not acceptance; read `hooks module … loaded`.
-// CONSTRAINT: the awaited body of tool.call must return in well under
-// 10 000 ms (host fail-open). Model consultation is detached.
-// CONSTRAINT: CLAUDE_JUDGE_CARRIER=mod is what stands the splice down
-// and arms this module; loading the plugin alone does nothing.
-// CONSTRAINT: $.fs.ancestors accepts only relative .md names (measured
-// host check). Project probes.toml is a 24-level walk of PWD with
-// $.fs.read, matching the splice. process is not defined in the module;
-// cwd is $.env.get("PWD").
-// CONSTRAINT: $.fs.write overwrites and there is no append verb. The
-// journal index line is a read-modify-write of journal.jsonl, detached.
-// Unique records/mod-*.json are the durable source; compact.py folds
-// any line the rmw lost.
+// $.noun.verb(...) call sites. A green `plugin validate` is not acceptance.
+// CONSTRAINT: awaited tool.call must return well under 10 000 ms. Consultation
+// is detached. CLAUDE_JUDGE_CARRIER=mod stands the splice down.
+// CONSTRAINT: process and Bun are undefined in the module (measured). Cwd is
+// session.start's e.cwd, stashed in $.store; fallback is relative $.fs.read
+// against the host cwd. $.fs.ancestors rejects non-.md names.
+// CONSTRAINT: $.fs.write overwrites. Unique records/mod-*.json are durable;
+// journal.jsonl is a detached read-modify-write; compact.py folds races.
 
 const PENDING_MSG =
   "Adjudication is in progress for this dispatch. Wait a moment and repeat the SAME Agent/Task call unchanged. An unchanged retry is how the review completes. Do not switch to Bash or another tool."
@@ -23,9 +17,25 @@ const COACHING =
   "If the tool error names a correction: treat that reason as a correction to apply. Reissue the dispatch only with the change it names, and never repeat the identical call — an unchanged retry cannot succeed. " +
   "This review is separate from the permission system and from any routing gate, so do not attribute a cancellation to either."
 
+const CWD_KEY = "catalyst-judge:cwd"
+
 function envOn(v: any): boolean {
   const s = String(v ?? "").trim().toLowerCase()
   return !(s === "" || s === "0" || s === "false" || s === "off" || s === "no")
+}
+
+function bl3(v: any, defaultTrue: boolean): boolean {
+  if (v === undefined || v === null) return defaultTrue
+  if (v === false || v === 0) return false
+  const s = String(v).trim().toLowerCase()
+  if (s === "" || s === "0" || s === "false" || s === "off" || s === "no") return false
+  return true
+}
+
+function num(v: any, fallback: number, floor: number): number {
+  const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10)
+  if (!(n >= floor)) return fallback
+  return n
 }
 
 function parseVerdict(raw: string): { kind: string; rest: string } | null {
@@ -41,25 +51,13 @@ function parseVerdict(raw: string): { kind: string; rest: string } | null {
   return null
 }
 
-function listField(src: string, key: string): string[] {
-  const re = new RegExp(key + "\\s*=\\s*\\[([^\\]]*)\\]")
-  const m = re.exec(src)
-  if (!m) return []
-  const out: string[] = []
-  const inner = m[1]
-  const reQ = /"([^"]*)"/g
-  let q: RegExpExecArray | null
-  while ((q = reQ.exec(inner))) out.push(q[1])
-  return out
-}
-
-function hasField(src: string, key: string): boolean {
-  return new RegExp(key + "\\s*=\\s*\\[").test(src)
-}
-
-function pickList(globalSrc: string, projectSrc: string, key: string): string[] {
-  if (projectSrc && hasField(projectSrc, key)) return listField(projectSrc, key)
-  return listField(globalSrc, key)
+function fnv1a(s: string): string {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0).toString(16)
 }
 
 function classesOf(prompt: string): string[] {
@@ -83,31 +81,118 @@ function normTmp(p: string): string {
   return String(p || "").replace(/^\/private\/tmp\b/, "/tmp")
 }
 
-async function resolveRel($: any, rel: string): Promise<string> {
-  const marker = String(rel).replace(/\/+$/, "") + "/.__catalyst_abs__"
-  try {
-    await $.fs.read(marker)
-    return ""
-  } catch (x) {
-    const m = String(x)
-    const key = "$.fs.read("
-    const a = m.indexOf(key)
-    const b = m.indexOf(") failed:")
-    if (a >= 0 && b > a) {
-      const path = m.slice(a + key.length, b)
-      const suf = "/.__catalyst_abs__"
-      if (path.endsWith(suf)) return path.slice(0, -suf.length)
-    }
-    return ""
-  }
-}
-
 function outcomeOf(kind: string): string {
   if (kind === "OK" || kind === "WARN") return "ok"
   if (kind === "BLOCK" || kind === "STOP" || kind === "DENY") return "block"
   if (kind === "NONE") return "block_no_verdict"
   if (kind === "SKIP") return "skip"
   return "skip"
+}
+
+function parseVal(raw: string): any {
+  let s = String(raw || "").trim()
+  if (s.charAt(0) === '"') {
+    const m = /^"([\s\S]*)"\s*(?:#.*)?$/.exec(s)
+    if (m) return m[1].replace(/\\n/g, "\n").replace(/\\"/g, '"')
+  }
+  if (s.charAt(0) === "'") {
+    const m = /^'([\s\S]*)'\s*(?:#.*)?$/.exec(s)
+    if (m) return m[1]
+  }
+  if (s.charAt(0) === "[") {
+    const m = /^\[([\s\S]*)\]\s*(?:#.*)?$/.exec(s)
+    if (m) {
+      const out: string[] = []
+      const reQ = /"([^"]*)"/g
+      let q: RegExpExecArray | null
+      while ((q = reQ.exec(m[1]))) out.push(q[1])
+      return out
+    }
+  }
+  const hash = s.indexOf("#")
+  if (hash >= 0) s = s.slice(0, hash).trim()
+  if (s === "true") return true
+  if (s === "false") return false
+  if (/^-?\d+$/.test(s)) return parseInt(s, 10)
+  if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s)
+  return s
+}
+
+function parseToml(src: string): any {
+  const root: any = {}
+  let current: any = root
+  function nav(keys: string[], asArray: boolean): any {
+    let d: any = root
+    for (let i = 0; i < keys.length - 1; i++) {
+      const k = keys[i]
+      if (!d[k] || typeof d[k] !== "object" || Array.isArray(d[k])) d[k] = {}
+      d = d[k]
+    }
+    const last = keys[keys.length - 1]
+    if (asArray) {
+      if (!Array.isArray(d[last])) d[last] = []
+      const obj: any = {}
+      d[last].push(obj)
+      return obj
+    }
+    if (!d[last] || typeof d[last] !== "object" || Array.isArray(d[last])) d[last] = {}
+    return d[last]
+  }
+  const lines = String(src || "").split("\n")
+  for (let i = 0; i < lines.length; i++) {
+    const s = lines[i].trim()
+    if (!s || s.charAt(0) === "#") continue
+    const aa = /^\[\[(.+)\]\]$/.exec(s)
+    if (aa) { current = nav(aa[1].split("."), true); continue }
+    const sec = /^\[(.+)\]$/.exec(s)
+    if (sec) { current = nav(sec[1].split("."), false); continue }
+    const kv = /^([A-Za-z0-9_]+)\s*=\s*(.*)$/.exec(s)
+    if (kv) current[kv[1]] = parseVal(kv[2])
+  }
+  return root
+}
+
+function flattenJudge(parsed: any): any {
+  const defaults = (parsed && parsed.defaults) || {}
+  const judge = (parsed && parsed.probe && parsed.probe.judge) || {}
+  const out: any = {}
+  const dk = Object.keys(defaults)
+  for (let i = 0; i < dk.length; i++) out[dk[i]] = defaults[dk[i]]
+  const jk = Object.keys(judge)
+  for (let i = 0; i < jk.length; i++) out[jk[i]] = judge[jk[i]]
+  return out
+}
+
+function listOf(cfg: any, key: string): string[] {
+  const f = cfg && cfg.filter
+  const v = f && f[key]
+  if (!Array.isArray(v)) return []
+  const out: string[] = []
+  for (let i = 0; i < v.length; i++) out.push(String(v[i]))
+  return out
+}
+
+function rungsOf(cfg: any, modelEnv: string): { model: string; effort?: string; max_tokens?: number; timeout_ms?: number; context_chars?: number }[] {
+  if (modelEnv) return [{ model: modelEnv }]
+  const raw = cfg && cfg.models
+  const out: { model: string; effort?: string; max_tokens?: number; timeout_ms?: number; context_chars?: number }[] = []
+  if (Array.isArray(raw) && raw.length) {
+    for (let i = 0; i < raw.length; i++) {
+      const x = raw[i]
+      if (typeof x === "string" && x) out.push({ model: x })
+      else if (x && typeof x === "object" && x.model) {
+        const r: any = { model: String(x.model) }
+        if (x.effort) r.effort = String(x.effort)
+        if (x.max_tokens != null) r.max_tokens = num(x.max_tokens, 0, 1)
+        if (x.timeout_ms != null) r.timeout_ms = num(x.timeout_ms, 0, 1)
+        if (x.context_chars != null) r.context_chars = num(x.context_chars, 0, 1)
+        out.push(r)
+      }
+    }
+  }
+  if (!out.length && cfg && cfg.model) out.push({ model: String(cfg.model) })
+  if (!out.length) out.push({ model: "glm-5.3" })
+  return out
 }
 
 async function readText($: any, path: string): Promise<{ text: string | null; unreadable: string }> {
@@ -133,7 +218,45 @@ async function appendJournal($: any, jpath: string, obj: any) {
   }
 }
 
+async function layerHit($: any, ch: string): Promise<boolean> {
+  // One existence probe per level: host logs ERROR on ENOENT from $.fs.read
+  // (no access() in the module). probes.toml is the layer's discriminator;
+  // prompt-only project dirs without toml are not this port's contract.
+  const r = await readText($, ch + "/probes.toml")
+  return !!(r.unreadable || r.text !== null)
+}
+
+async function findProjectHome($: any, cwd: string, globalHome: string): Promise<string> {
+  if (cwd) {
+    let p = cwd
+    for (let i = 0; i < 24; i++) {
+      if (!p) break
+      const ch = p + "/.claude/probes"
+      if (normTmp(ch) !== normTmp(globalHome) && await layerHit($, ch)) return ch
+      const up = parentDir(p)
+      if (!up || up === p) break
+      p = up
+    }
+    return ""
+  }
+  let dots = ""
+  for (let i = 0; i < 24; i++) {
+    const rel = dots + ".claude/probes"
+    if (await layerHit($, rel)) return rel
+    dots = dots + "../"
+  }
+  return ""
+}
+
 export function register(on: any) {
+  on("session.start", async ($: any, e: any, next: any) => {
+    try {
+      const cwd = e && e.cwd
+      if (cwd) await $.store.set(CWD_KEY, String(cwd))
+    } catch (x) {}
+    return next(e)
+  })
+
   on("prompt.section", async ($: any, e: any, next: any) => {
     let carrier: any = ""
     try { carrier = await $.env.get("CLAUDE_JUDGE_CARRIER") } catch (x) { carrier = "" }
@@ -162,27 +285,12 @@ export function register(on: any) {
     const id = String((e && e.tool_use_id) || "")
     const prompt = String((e && e.prompt) || "")
     const agent = String((e && e.subagent_type) || "")
-    // CONSTRAINT: a retry mints a new tool_use_id. PENDING/OK must key on the
-    // dispatch (tool+agent+prompt), or each retry starts a new ladder (measured:
-    // 64 denies / 63 records on one Agent ping when keyed by tool_use_id).
-    const key = "verdict:" + tool + "|" + agent + "|" + String(prompt.length) + "|" + prompt.slice(0, 160) + "|" + prompt.slice(-160)
+    // CONSTRAINT: $.store keys max 256 chars (measured: 302-char dispatch
+    // digest of head+tail threw; PENDING never landed and retries re-ran
+    // the ladder). Hash the prompt; keep tool/agent/len as plaintext.
+    const key = "v:" + tool + "|" + agent + "|" + String(prompt.length) + "|" + fnv1a(prompt)
     let stored: any
     try { stored = await $.store.get(key) } catch (x) { stored = undefined }
-
-    if (stored && typeof stored === "object" && stored.kind) {
-      if (stored.kind === "OK" || stored.kind === "WARN") return next(e)
-      if (stored.kind === "PENDING") return { deny: PENDING_MSG }
-      if (stored.kind === "BLOCK" || stored.kind === "STOP" || stored.kind === "DENY") {
-        return { deny: "Subagent dispatch cancelled by the dispatch judge (this is NOT the routing-table.toml gate). Reason: " + String(stored.rest || stored.kind) }
-      }
-      if (stored.kind === "NONE") {
-        return { deny: "Subagent dispatch cancelled: the judge obtained no verdict on any rung. This is NOT the routing-table.toml gate. Tell the human and do the work without a subagent, or retry later." }
-      }
-    }
-
-    const cls = classesOf(prompt)
-    const amb = cls.length > 1
-    const cl = cls.length === 1 ? cls[0] : ""
 
     let probesDir: any = ""
     try { probesDir = await $.env.get("CLAUDE_PROBES_DIR") } catch (x) { probesDir = "" }
@@ -192,62 +300,85 @@ export function register(on: any) {
     try { home = await $.env.get("HOME") } catch (x) { home = "" }
     let pwd: any = ""
     try { pwd = await $.env.get("PWD") } catch (x) { pwd = "" }
+    let modelEnv: any = ""
+    try { modelEnv = await $.env.get("CLAUDE_JUDGE_MODEL") } catch (x) { modelEnv = "" }
+    let promptEnv: any = ""
+    try { promptEnv = await $.env.get("CLAUDE_JUDGE_PROMPT") } catch (x) { promptEnv = "" }
+    let tmoEnv: any = ""
+    try { tmoEnv = await $.env.get("CLAUDE_JUDGE_TIMEOUT_MS") } catch (x) { tmoEnv = "" }
 
-    let globalHome = ""
     const probesDirS = String(probesDir || "").trim()
     const configDirS = String(configDir || "").trim()
     const homeS = String(home || "")
+    let globalHome = ""
     if (probesDirS) globalHome = probesDirS
     else if (configDirS) globalHome = configDirS + "/probes"
     else globalHome = homeS + "/.claude/probes"
 
     const globalTomlR = await readText($, globalHome + "/probes.toml")
-    const globalToml = globalTomlR.text || ""
+    const globalCfg = flattenJudge(parseToml(globalTomlR.text || ""))
+
+    let cwd = ""
+    try { cwd = String(await $.store.get(CWD_KEY) || "") } catch (x) { cwd = "" }
+    if (!cwd) cwd = String(pwd || "")
 
     let projectHome = ""
-    let projectToml = ""
+    let projectCfg: any = {}
     if (!probesDirS) {
-      // CONSTRAINT: process is not defined here. PWD can be absent (env -i)
-      // or stale. $.fs.read of a relative path is resolved against the host
-      // cwd (measured). Walk "../".repeat(i)+".claude/probes". Skip the
-      // candidate whose resolved path is the global home (same as splice).
-      let dots = ""
-      for (let i = 0; i < 24; i++) {
-        const rel = dots + ".claude/probes"
-        const files = [
-          rel + "/probes.toml",
-          rel + "/judge/prompt.md",
-          rel + "/judge/prompt.extra.md",
-          rel + "/judge/body.json",
-        ]
-        let hit = false
-        for (let j = 0; j < files.length; j++) {
-          const r = await readText($, files[j])
-          if (r.unreadable) { hit = true; break }
-          if (r.text !== null) { hit = true; break }
-        }
-        if (hit) {
-          let abs = await resolveRel($, rel)
-          if (!abs && pwd) {
-            let q = String(pwd)
-            for (let k = 0; k < i; k++) q = parentDir(q)
-            if (q) abs = q + "/.claude/probes"
-          }
-          if (!(abs && normTmp(abs) === normTmp(globalHome))) {
-            projectHome = abs || rel
-            const pt = await readText($, rel + "/probes.toml")
-            projectToml = pt.text || ""
-            break
-          }
-        }
-        dots = dots + "../"
+      projectHome = await findProjectHome($, cwd, globalHome)
+      if (projectHome) {
+        const pt = await readText($, projectHome + "/probes.toml")
+        if (pt.text) projectCfg = flattenJudge(parseToml(pt.text))
+      }
+    }
+    const cfg: any = {}
+    const gk = Object.keys(globalCfg)
+    for (let i = 0; i < gk.length; i++) cfg[gk[i]] = globalCfg[gk[i]]
+    const pk = Object.keys(projectCfg)
+    for (let i = 0; i < pk.length; i++) cfg[pk[i]] = projectCfg[pk[i]]
+
+    const recName = "mod-" + (id || "noid") + ".json"
+    const recPath = globalHome + "/judge/records/" + recName
+    const jpath = globalHome + "/judge/journal.jsonl"
+    const t0 = $.clock.now()
+    const doRecord = cfg.record !== false
+    const swS = String(sw || "")
+    const enforce = swS === "enforce" || bl3(cfg.enforce, true)
+    const failClosed = bl3(cfg.fail_closed, true)
+
+    if (stored && typeof stored === "object" && stored.kind) {
+      if (stored.kind === "OK" || stored.kind === "WARN") return next(e)
+      if (stored.kind === "PENDING") return { deny: PENDING_MSG }
+      if (stored.kind === "BLOCK" || stored.kind === "STOP" || stored.kind === "DENY") {
+        if (!enforce) return next(e)
+        return { deny: "Subagent dispatch cancelled by the dispatch judge (this is NOT the routing-table.toml gate). Reason: " + String(stored.rest || stored.kind) }
+      }
+      if (stored.kind === "NONE") {
+        if (!failClosed) return next(e)
+        return { deny: "Subagent dispatch cancelled: the judge obtained no verdict on any rung. This is NOT the routing-table.toml gate. Tell the human and do the work without a subagent, or retry later." }
       }
     }
 
-    const skipC = pickList(globalToml, projectToml, "classes_skip")
-    const skipA = pickList(globalToml, projectToml, "agents_skip")
-    const judgeC = pickList(globalToml, projectToml, "classes_judge")
-    const judgeA = pickList(globalToml, projectToml, "agents_judge")
+    if (cfg.enabled === false) {
+      try { $.ui.log("catalyst-judge skip_disabled") } catch (x) {}
+      ;(async () => {
+        try {
+          await appendJournal($, jpath, {
+            t: new Date(t0).toISOString(), tool, agent, outcome: "skip_disabled",
+            rec: recName, carrier: "mod", sw: swS, ms: 0,
+          })
+        } catch (x) {}
+      })()
+      return next(e)
+    }
+
+    const cls = classesOf(prompt)
+    const amb = cls.length > 1
+    const cl = cls.length === 1 ? cls[0] : ""
+    const skipC = listOf(cfg, "classes_skip")
+    const skipA = listOf(cfg, "agents_skip")
+    const judgeC = listOf(cfg, "classes_judge")
+    const judgeA = listOf(cfg, "agents_judge")
     let by: string | null = null
     if (!amb) {
       for (let i = 0; i < skipC.length; i++) {
@@ -270,25 +401,15 @@ export function register(on: any) {
       if (!hit) by = cl ? "not_in_judge_list" : "no_class_marker"
     }
 
-    const recName = "mod-" + (id || "noid") + ".json"
-    const recPath = globalHome + "/judge/records/" + recName
-    const jpath = globalHome + "/judge/journal.jsonl"
-    const t0 = $.clock.now()
-
     if (by) {
       try { $.ui.log("catalyst-judge filtered " + by + " cls=" + cl + " project=" + projectHome) } catch (x) {}
-      const rec: any = {
-        id, tool, agent, cls, by, kind: "SKIP", t0,
-        projectHome, globalHome, carrier: "mod",
-      }
-      try { $.fs.write(recPath, JSON.stringify(rec)) } catch (x) {}
+      const rec: any = { id, tool, agent, cls, by, kind: "SKIP", t0, projectHome, globalHome, carrier: "mod" }
+      if (doRecord) { try { $.fs.write(recPath, JSON.stringify(rec)) } catch (x) {} }
       ;(async () => {
         try {
           await appendJournal($, jpath, {
-            t: new Date(t0).toISOString(),
-            tool, agent, outcome: "skip",
-            rec: recName, carrier: "mod",
-            reason: by, cls, ms: 0, sw: String(sw || ""),
+            t: new Date(t0).toISOString(), tool, agent, outcome: "skip",
+            rec: recName, carrier: "mod", reason: by, cls, ms: 0, sw: swS,
           })
         } catch (x) {}
       })()
@@ -298,19 +419,54 @@ export function register(on: any) {
     try { await $.store.set(key, { kind: "PENDING" }) } catch (x) {}
 
     ;(async () => {
-      const rec: any = { id, tool, agent, cls, t0, projectHome, globalHome, carrier: "mod" }
+      const rec: any = { id, tool, agent, cls, t0, projectHome, globalHome, carrier: "mod", en: enforce ? "config" : "off", fcl: failClosed, promptHead: prompt.slice(0, 240) }
       try {
         let sys = ""
-        const gPrompt = await readText($, globalHome + "/judge/prompt.md")
-        if (gPrompt.text) sys = gPrompt.text
-        if (projectHome) {
-          const pPrompt = await readText($, projectHome + "/judge/prompt.md")
-          if (pPrompt.text) sys = pPrompt.text
-          const extra = await readText($, projectHome + "/judge/prompt.extra.md")
-          if (extra.text) sys = sys + "\n\nПРАВИЛА ЭТОГО ПРОЕКТА\n" + extra.text
+        const promptPath = String(promptEnv || "").trim()
+        if (promptPath) {
+          const pr = await readText($, promptPath)
+          if (pr.text) sys = pr.text
+        } else {
+          const gPrompt = await readText($, globalHome + "/judge/prompt.md")
+          if (gPrompt.text) sys = gPrompt.text
+          if (projectHome) {
+            const pPrompt = await readText($, projectHome + "/judge/prompt.md")
+            if (pPrompt.text) sys = pPrompt.text
+            const extra = await readText($, projectHome + "/judge/prompt.extra.md")
+            if (extra.text) sys = sys + "\n\nПРАВИЛА ЭТОГО ПРОЕКТА\n" + extra.text
+          }
         }
+
+        const atn = num(cfg.attach_files, 0, 0)
+        const atc = num(cfg.attach_chars, 40000, 0)
+        const atb = num(cfg.attach_total, 90000, 0)
+        const att: { path: string; n: number }[] = []
+        if (atn > 0 && atc > 0 && atb > 0) {
+          const rx = /(~|\/)[A-Za-z0-9._~\/-]*\.(?:md|txt)(?![A-Za-z0-9])/g
+          const seen: any = {}
+          let sp = 0
+          let mm: RegExpExecArray | null
+          while ((mm = rx.exec(prompt)) && att.length < atn) {
+            let f = mm[0]
+            if (f.charAt(0) === "~") f = homeS + f.slice(1)
+            if (seen[f]) continue
+            seen[f] = 1
+            const body = await readText($, f)
+            if (body.text == null) continue
+            let chunk = body.text
+            if (chunk.length > atc) chunk = chunk.slice(0, atc)
+            if (sp + chunk.length > atb) chunk = chunk.slice(0, Math.max(0, atb - sp))
+            if (!chunk) break
+            att.push({ path: f, n: chunk.length })
+            sys = sys + "\n\n=== ATTACHED " + f + " ===\n" + chunk
+            sp += chunk.length
+          }
+        }
+        rec.att = att
+
         let msgs: any[] = []
         try { msgs = await $.session.messages() } catch (x) { msgs = [] }
+        const ctxN = num(cfg.context_chars, 24000, 0) || 24000
         const ctx: string[] = []
         if (Array.isArray(msgs)) {
           for (let i = 0; i < msgs.length; i++) {
@@ -321,22 +477,33 @@ export function register(on: any) {
             ctx.push(kind + ": " + text.slice(0, 2000))
           }
         }
-        const context = ctx.join("\n").slice(-24000)
+        const context = ctx.join("\n").slice(-ctxN)
+        const dchars = num(cfg.dispatch_chars, 16000, 0) || 16000
         const dispatch = JSON.stringify({
           tool,
           subagent_type: agent,
           model: e && e.model,
-          prompt: prompt.slice(0, 16000),
+          prompt: prompt.slice(0, dchars),
         })
         const user = "=== SESSION SO FAR ===\n" + context + "\n\n=== DISPATCH ===\n" + dispatch
         const full = (sys ? sys + "\n\n" : "") + user
-        const models = ["deepseek-flash", "glm-5.3", "gpt-5.6-terra"]
+        const ladder = rungsOf(cfg, String(modelEnv || "").trim())
+        rec.ladder = ladder.map((r) => r.model)
         let verdict: { kind: string; rest: string } | null = null
         let used = ""
-        for (let i = 0; i < models.length; i++) {
-          used = models[i]
+        const floorTok = num(cfg.max_tokens, 8000, 1)
+        const floorTmo = num(tmoEnv, num(cfg.timeout_ms, 0, 1), 1)
+        for (let i = 0; i < ladder.length; i++) {
+          const rung = ladder[i]
+          used = rung.model
           try {
-            const raw = await $.model.complete({ model: models[i], prompt: full })
+            const arg: any = { model: rung.model, prompt: full }
+            if (rung.effort) arg.effort = rung.effort
+            const mt = rung.max_tokens || floorTok
+            if (mt) arg.max_tokens = mt
+            const tmo = rung.timeout_ms || floorTmo
+            if (tmo) arg.timeoutMs = tmo
+            const raw = await $.model.complete(arg)
             rec["raw_" + used] = String(raw).slice(0, 500)
             verdict = parseVerdict(String(raw))
             if (verdict) break
@@ -349,36 +516,36 @@ export function register(on: any) {
         if (verdict) {
           rec.kind = verdict.kind
           rec.rest = verdict.rest
-          await $.store.set(key, { kind: verdict.kind, rest: verdict.rest, used, dtMs: rec.dtMs })
+          await $.store.set(key, { kind: verdict.kind, rest: verdict.rest, used, dtMs: rec.dtMs, enforce, failClosed })
         } else {
           rec.kind = "NONE"
-          await $.store.set(key, { kind: "NONE", used, dtMs: rec.dtMs })
+          await $.store.set(key, { kind: "NONE", used, dtMs: rec.dtMs, enforce, failClosed })
         }
       } catch (x) {
         rec.threw = String(x).slice(0, 400)
         rec.dtMs = $.clock.now() - t0
-        try { await $.store.set(key, { kind: "NONE", threw: rec.threw, dtMs: rec.dtMs }) } catch (y) {}
+        try { await $.store.set(key, { kind: "NONE", threw: rec.threw, dtMs: rec.dtMs, enforce, failClosed }) } catch (y) {}
       }
-      try { $.fs.write(recPath, JSON.stringify(rec)) } catch (x) {
-        try { $.ui.log("catalyst-judge journal write: " + String(x).slice(0, 160)) } catch (y) {}
+      if (doRecord) {
+        try { $.fs.write(recPath, JSON.stringify(rec)) } catch (x) {
+          try { $.ui.log("catalyst-judge journal write: " + String(x).slice(0, 160)) } catch (y) {}
+        }
       }
       try {
         const kind = String(rec.kind || "NONE")
         const rest = String(rec.rest || "")
+        let oc = outcomeOf(kind)
+        if ((kind === "BLOCK" || kind === "STOP" || kind === "DENY") && !enforce) oc = "block_not_enforced"
         await appendJournal($, jpath, {
           t: new Date(t0).toISOString(),
-          tool, agent,
-          ms: rec.dtMs,
-          sw: String(sw || ""),
-          outcome: outcomeOf(kind),
+          tool, agent, ms: rec.dtMs, sw: swS,
+          outcome: oc,
           verdict: (kind + ": " + rest).slice(0, 400),
-          jm: rec.used,
-          rec: recName,
-          carrier: "mod",
-          cls,
+          jm: rec.used, rec: recName, carrier: "mod", cls,
+          en: enforce ? "config" : "off",
         })
       } catch (x) {}
-      try { $.ui.log("catalyst-judge done kind=" + rec.kind + " dt=" + rec.dtMs) } catch (x) {}
+      try { $.ui.log("catalyst-judge done kind=" + rec.kind + " dt=" + rec.dtMs + " jm=" + rec.used) } catch (x) {}
     })()
 
     return { deny: PENDING_MSG }

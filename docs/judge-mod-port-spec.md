@@ -353,7 +353,15 @@ A port is accepted only with all of these, each with its own control:
 * Compaction of `records/mod-*.json` into the journal index: the hook
   writes the line; `compact.py fold_mod_records` repairs races.
 * Pass-path `next(e)` is NOT the 10 s budget. Measured `/tmp/t113-full/p-pass10`: Bash `sleep 15` — hook logged `after next dt=16033`, settled 16034 ms, **zero** `exceeded 10000ms` / `hook failed`, stdout `ZQ-PASS10-DONE`. The timer charges awaited work *around* `next()`, not the tool. Overrun remains only if we `await $.clock.sleep(11000)` (or complete) *before* returning.
+* `$.store` key length: max 256 (measured). Dispatch head+tail overflowed
+  (302); FNV-1a of the prompt plus tool/agent/len fits.
+* Operator knobs from `probes.toml` (no Bun.TOML in the module): ladder
+  `[[probe.judge.models]]`, `enforce` / `fail_closed` / `enabled`,
+  `attach_*`, `dispatch_chars` / `context_chars`, env
+  `CLAUDE_JUDGE_MODEL` / `_PROMPT` / `_TIMEOUT_MS`. `session.start` `e.cwd`
+  is the walk root.
 * `next.signal` as a cancellation carrier: present, unexercised.
+
 * Flag `tengu_plugin_hooks_modules` is off by default; the env
   `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` overrides. Vendor API may change.
 

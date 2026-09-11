@@ -109,3 +109,30 @@ Detached read-modify-write of `journal.jsonl` (overwrite, no append verb).
 `judge/compact.py fold_mod_records` inserts any `mod-*.json` whose `rec`
 is missing. Isolated wipe → fold restored 2 skip lines; second pass added 0.
 Launchd `com.maratkarimov.judge-compact` runs `~/.claude/judge/compact.py`.
+
+## TOML-driven ladder, enforce, attach (staging, 2026-09-12)
+
+Bun.TOML.parse and `process` are undefined in the module (p-bun). A subset
+parser reads `[defaults]`, `[probe.judge]`, `[probe.judge.filter]`,
+`[[probe.judge.models]]`. Shallow merge matches the splice: project keys
+replace, including the whole models array.
+
+`session.start` `e.cwd` is stashed (`catalyst-judge:cwd`) and is the walk
+root. Relative walk runs only when cwd is empty.
+
+`$.store` keys max 256 characters. The old head+tail digest was 302 and
+threw; PENDING never landed. Key is now `v:tool|agent|len|fnv1a(prompt)`.
+
+Measured on `/tmp/t113-full/267.staging` with isolated CONFIG_DIR:
+
+| case | result |
+|---|---|
+| project `[probe.judge.filter] classes_skip=["scout-enum"]` | `filtered classes_skip`, SKIP record, 0 judge complete |
+| `[probe.judge] enabled = false` | `skip_disabled` journal, no record, no PENDING |
+| `[[probe.judge.models]]` only `glm-5.3` | `ladder ['glm-5.3']`, `jm=glm-5.3`, `threw` null, one `done` |
+| store key | dbg `v:Agent|worker|107|d2ce9188` |
+
+`$.model.complete` accepts extra fields `effort`, `max_tokens`, `timeoutMs`,
+`system` (host check: invented model → HTTP 400, not form error). Attach
+scans the Agent *dispatch* prompt (same regex as the splice); a parent that
+omits the path from `e.prompt` attaches nothing — not a parser miss.
