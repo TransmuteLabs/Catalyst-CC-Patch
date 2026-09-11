@@ -232,7 +232,7 @@ Every row is measured.
 | which agent | `e.subagent_type`; `$.agent.list()` if needed | spawn also carries `model, parentModel` |
 | consultation | detached `$.model.complete({model, prompt})` | proxy ids pass; invented id → HTTP 400; after deny: p8 1706 ms ALLOW |
 | transcript | `await $.session.messages()` | Promise; whole conversation; `"toolResults" in m` |
-| journal | `$.fs.write` one file per record | overwrite, no append; concurrent hooks race a shared file |
+| journal | unique `records/mod-*.json` + rmw of `journal.jsonl`; `compact.py` folds misses | overwrite, no append; rmw can lose a concurrent line; fold is idempotent |
 | switch, home | `$.env.get("CLAUDE_JUDGE")` etc. as a **string literal** | scan lists the names; object form is rejected |
 | rule in the system prompt | `on("prompt.section")` | both return forms proven (`ZQA`/`ZQB`) |
 | extra methods | `on("engine.create")` then `{...await next(e), noun:{ method(){} }}` | `$.zqprobe.ping()` = PONG in 0.7 ms; does not lift the budget |
@@ -273,11 +273,23 @@ and cross-session letters were not in that run.
 
 ## 6. The journal
 
-`$.fs.write` overwrites. Design: one file per consultation,
-`~/.claude/probes/judge/records/mod-<tool_use_id>.json` (id is unique per attempt; the *verdict cache* is the dispatch digest). The splice's
-index line is not written by this carrier. Compaction of the splice
-journal does not yet see these files — that is a follow-up, not a reason
-to share a file.
+`$.fs.write` overwrites; there is no append verb. Design:
+
+* one file per consultation, `records/mod-<tool_use_id>.json` (id is unique
+  per attempt; the *verdict cache* is the dispatch digest);
+* an index line in `journal.jsonl` via read-modify-write, detached so it
+  is not charged against the 10 s budget. Two concurrent hooks can lose a
+  line (measured: two tools in one assistant message). The unique record
+  files are the source of truth.
+* `judge/compact.py` folds any `mod-*.json` whose `rec` is not yet in the
+  index (idempotent; nightly launchd already runs this file). Measured:
+  wipe of a two-line isolated journal → fold restored both skip lines;
+  a second pass added 0.
+
+The home of the files is the probe home: `CLAUDE_PROBES_DIR`, else
+`CLAUDE_CONFIG_DIR/probes`, else `~/.claude/probes` (same ladder as the
+splice, круг 21 F-8). Isolated `CLAUDE_CONFIG_DIR` no longer leaks into
+the live journal.
 
 ---
 
@@ -324,9 +336,22 @@ A port is accepted only with all of these, each with its own control:
 * Uncoached retry on opus/fable (measured on grok-4.6).
 * Background lifetime in an interactive session (measured killed under
   `-p` when the process exits).
-* Project-layer `probes.toml` via `$.fs.ancestors` (v1 reads
-  `~/.claude/probes/probes.toml` and `.claude/probes/probes.toml`).
-* Compaction of `records/mod-*.json` into the existing journal index.
+* Project-layer `probes.toml`: `$.fs.ancestors` is **CLOSED NEGATIVELY**
+  for this (host check: names must each be a `.md` file). The splice
+  walks `process.cwd()` 24 levels; `process` is not defined in a module.
+  `PWD` is absent under `env -i`. Measured: relative `$.fs.read` is
+  resolved against the host cwd, and ENOENT errors name the absolute
+  path. v2 walks `"../".repeat(i)+".claude/probes"` and skips the
+  candidate whose resolved path is the global home. Overlay of
+  `classes_skip` / `agents_skip` / `classes_judge` / `agents_judge` is
+  last-layer-wins (project key present replaces, even if `[]`).
+  `prompt.md` in the project layer replaces, `prompt.extra.md` appends.
+  `CLAUDE_PROBES_DIR` disables the walk. Measured `/tmp/t113-full/p-layer/skip2`:
+  cwd two levels below the project file, no `PWD`, `classes_skip=["scout-enum"]`
+  → `filtered classes_skip`, journal `outcome=skip`, 0 PENDING; the same
+  tree under v1 (cwd-only / empty PWD) judged (15 PENDING).
+* Compaction of `records/mod-*.json` into the journal index: the hook
+  writes the line; `compact.py fold_mod_records` repairs races.
 * Pass-path `next(e)` is NOT the 10 s budget. Measured `/tmp/t113-full/p-pass10`: Bash `sleep 15` — hook logged `after next dt=16033`, settled 16034 ms, **zero** `exceeded 10000ms` / `hook failed`, stdout `ZQ-PASS10-DONE`. The timer charges awaited work *around* `next()`, not the tool. Overrun remains only if we `await $.clock.sleep(11000)` (or complete) *before* returning.
 * `next.signal` as a cancellation carrier: present, unexercised.
 * Flag `tengu_plugin_hooks_modules` is off by default; the env

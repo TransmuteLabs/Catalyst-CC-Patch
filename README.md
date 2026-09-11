@@ -291,6 +291,12 @@ export CLAUDE_JUDGE_CARRIER=mod
 image that was built before that commit ignores the variable (the splice
 keeps judging). Rebuild the image before relying on the stand-down.
 
+The module walks 24 parents of the host cwd for a project
+`.claude/probes` (the splice's walk; `$.fs.ancestors` rejects non-`.md`
+names). `CLAUDE_PROBES_DIR` disables that layer. Index lines go to
+`journal.jsonl`; `judge/compact.py` folds any `records/mod-*.json` the
+read-modify-write missed.
+
 Each probe also reads `~/.claude/probes/<probe>/prompt.md`. If that file is
 missing, the journal records it with the exact path to create, and what happens
 next depends on the posture: in advise the probe consults on a built-in

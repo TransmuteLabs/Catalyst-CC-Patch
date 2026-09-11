@@ -78,3 +78,34 @@ untouched. On that image:
 | unset | 0 (inert) | **+1** grok-scout ok |
 
 The live install still lacks the variable until it is rebuilt.
+
+## Project layer measured (staging image, 2026-09-12)
+
+`$.fs.ancestors` rejects anything that is not a relative `.md` name
+(host check). `process` is not defined in the module. `PWD` is not a
+cwd: `env -i` strips it and the walk from HOME-only missed a project
+file two levels up.
+
+Relative `$.fs.read(".claude/probes/probes.toml")` / `"../".repeat(i)` is
+resolved against the host cwd. ENOENT errors contain the absolute path
+(`/private/tmp/...`), which is how the walk skips the global home.
+
+On `/tmp/t113-full/267.staging` with isolated `CLAUDE_CONFIG_DIR`,
+`CLAUDE_JUDGE_CARRIER=mod`, cwd=`.../tree/sub/deep`, project toml at
+`.../tree/.claude/probes/probes.toml` with `classes_skip = ["scout-enum"]`,
+no `PWD`:
+
+* filter log: `filtered classes_skip cls=scout-enum project=/private/tmp/.../tree/.claude/probes`
+* records `kind=SKIP`, journal `outcome=skip` `carrier=mod`
+* 0 `Adjudication is in progress`; agent returned `ZQ-LAYER-PONG`
+* the same tree on the previous walk (empty PWD, absolute from PWD)
+  judged: 15 PENDING, `projectHome=""`, outcome ok
+
+`CLAUDE_PROBES_DIR` still disables the walk (splice `__o.dirEnv`).
+
+## Journal index
+
+Detached read-modify-write of `journal.jsonl` (overwrite, no append verb).
+`judge/compact.py fold_mod_records` inserts any `mod-*.json` whose `rec`
+is missing. Isolated wipe → fold restored 2 skip lines; second pass added 0.
+Launchd `com.maratkarimov.judge-compact` runs `~/.claude/judge/compact.py`.

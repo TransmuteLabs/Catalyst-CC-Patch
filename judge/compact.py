@@ -35,6 +35,136 @@ import replay
 TMP_HELD_SECONDS = 24 * 3600
 
 
+def _clip(v, n=400):
+    if isinstance(v, str) and len(v) > n:
+        return v[:n]
+    return v
+
+
+def _outcome_of(kind):
+    if kind in ('OK', 'WARN'):
+        return 'ok'
+    if kind in ('BLOCK', 'STOP', 'DENY'):
+        return 'block'
+    if kind == 'NONE':
+        return 'block_no_verdict'
+    if kind == 'SKIP':
+        return 'skip'
+    return 'skip'
+
+
+def _line_from_mod(rec, filename):
+    kind = rec.get('kind')
+    rest = rec.get('rest') or rec.get('by') or ''
+    t0 = rec.get('t0')
+    t = None
+    if isinstance(t0, (int, float)) and t0 > 0:
+        t = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(t0 / 1000.0))
+    verdict = None
+    if kind:
+        verdict = _clip(f'{kind}: {rest}')
+    line = {
+        't': t,
+        'tool': rec.get('tool'),
+        'agent': rec.get('agent'),
+        'ms': rec.get('dtMs') if rec.get('dtMs') is not None else 0,
+        'outcome': _outcome_of(kind),
+        'verdict': verdict,
+        'jm': rec.get('used'),
+        'rec': filename,
+        'carrier': 'mod',
+        'cls': rec.get('cls'),
+    }
+    if rec.get('by'):
+        line['reason'] = rec.get('by')
+    return {k: v for k, v in line.items() if v is not None}
+
+
+def _load_mod_record(path):
+    try:
+        if path.endswith('.gz'):
+            with gzip.open(path, 'rt', encoding='utf-8') as fh:
+                return json.load(fh)
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+
+
+def fold_mod_records(journal_path, records_dir, dry_run=False):
+    """Insert missing journal index lines for records/mod-*.json{,.gz}.
+
+    The function-hooks carrier has no append verb ($.fs.write overwrites).
+    The hook does a read-modify-write of journal.jsonl; two concurrent
+    hooks can lose a line. Unique record files are the source of truth.
+    Idempotent: a line whose rec field already names the file is left
+    alone. Does not rewrite existing splice lines.
+    """
+    added = skipped = unread = 0
+    if not os.path.isdir(records_dir):
+        print(f'fold mod: записей нет ({records_dir})')
+        return
+    names = []
+    for pat in ('mod-*.json', 'mod-*.json.gz'):
+        names.extend(os.path.basename(x) for x in glob.glob(os.path.join(records_dir, pat)))
+    if not names:
+        print('fold mod: нечего вкладывать')
+        return
+    seen = set()
+    existing = ''
+    try:
+        with open(journal_path, encoding='utf-8') as fh:
+            existing = fh.read()
+    except FileNotFoundError:
+        existing = ''
+    if existing:
+        for raw in existing.splitlines():
+            if not raw.strip():
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            rec = obj.get('rec')
+            if isinstance(rec, str):
+                seen.add(rec)
+                if rec.endswith('.json'):
+                    seen.add(rec + '.gz')
+                if rec.endswith('.json.gz'):
+                    seen.add(rec[:-3])
+    new_lines = []
+    for name in sorted(names):
+        rec_field = name[:-3] if name.endswith('.gz') else name
+        if name in seen or rec_field in seen:
+            skipped += 1
+            continue
+        loaded = _load_mod_record(os.path.join(records_dir, name))
+        if loaded is None:
+            continue
+        if loaded is False:
+            unread += 1
+            continue
+        if not isinstance(loaded, dict):
+            unread += 1
+            continue
+        line = _line_from_mod(loaded, rec_field)
+        new_lines.append(json.dumps(line, ensure_ascii=False))
+        added += 1
+    if new_lines and not dry_run:
+        pfx = ''
+        if existing and not existing.endswith('\n'):
+            pfx = '\n'
+        os.makedirs(os.path.dirname(journal_path) or '.', exist_ok=True)
+        with open(journal_path, 'a', encoding='utf-8') as fh:
+            fh.write(pfx + '\n'.join(new_lines) + '\n')
+    print(f'fold mod: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
+          f'{" (dry-run)" if dry_run else ""}')
+
+
+
+
 def main():
     p = argparse.ArgumentParser()
     # Лестница дома -- та же, что у ядра (круг 21, F-8).
@@ -56,6 +186,10 @@ def main():
     a = p.parse_args()
     if a.dir is None:
         a.dir = os.path.join(os.path.expanduser(a.home), a.probe, 'records')
+
+    journal_path = os.path.join(os.path.expanduser(a.home), a.probe, 'journal.jsonl')
+    fold_mod_records(journal_path, a.dir, dry_run=a.dry_run)
+
 
     cutoff = time.time() - a.older_than_hours * 3600
     done = saved = skipped = vanished = gz_gone = orphans = src_gone = 0

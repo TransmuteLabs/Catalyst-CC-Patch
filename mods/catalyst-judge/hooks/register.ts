@@ -5,6 +5,14 @@
 // 10 000 ms (host fail-open). Model consultation is detached.
 // CONSTRAINT: CLAUDE_JUDGE_CARRIER=mod is what stands the splice down
 // and arms this module; loading the plugin alone does nothing.
+// CONSTRAINT: $.fs.ancestors accepts only relative .md names (measured
+// host check). Project probes.toml is a 24-level walk of PWD with
+// $.fs.read, matching the splice. process is not defined in the module;
+// cwd is $.env.get("PWD").
+// CONSTRAINT: $.fs.write overwrites and there is no append verb. The
+// journal index line is a read-modify-write of journal.jsonl, detached.
+// Unique records/mod-*.json are the durable source; compact.py folds
+// any line the rmw lost.
 
 const PENDING_MSG =
   "Adjudication is in progress for this dispatch. Wait a moment and repeat the SAME Agent/Task call unchanged. An unchanged retry is how the review completes. Do not switch to Bash or another tool."
@@ -45,6 +53,15 @@ function listField(src: string, key: string): string[] {
   return out
 }
 
+function hasField(src: string, key: string): boolean {
+  return new RegExp(key + "\\s*=\\s*\\[").test(src)
+}
+
+function pickList(globalSrc: string, projectSrc: string, key: string): string[] {
+  if (projectSrc && hasField(projectSrc, key)) return listField(projectSrc, key)
+  return listField(globalSrc, key)
+}
+
 function classesOf(prompt: string): string[] {
   const found = String(prompt).match(/\[dispatch-class:[\w-]+\]/g) || []
   const set: string[] = []
@@ -53,6 +70,67 @@ function classesOf(prompt: string): string[] {
     if (set.indexOf(c) < 0) set.push(c)
   }
   return set
+}
+
+function parentDir(p: string): string {
+  const trimmed = String(p || "").replace(/\/+$/, "")
+  const i = trimmed.lastIndexOf("/")
+  if (i <= 0) return ""
+  return trimmed.slice(0, i)
+}
+
+function normTmp(p: string): string {
+  return String(p || "").replace(/^\/private\/tmp\b/, "/tmp")
+}
+
+async function resolveRel($: any, rel: string): Promise<string> {
+  const marker = String(rel).replace(/\/+$/, "") + "/.__catalyst_abs__"
+  try {
+    await $.fs.read(marker)
+    return ""
+  } catch (x) {
+    const m = String(x)
+    const key = "$.fs.read("
+    const a = m.indexOf(key)
+    const b = m.indexOf(") failed:")
+    if (a >= 0 && b > a) {
+      const path = m.slice(a + key.length, b)
+      const suf = "/.__catalyst_abs__"
+      if (path.endsWith(suf)) return path.slice(0, -suf.length)
+    }
+    return ""
+  }
+}
+
+function outcomeOf(kind: string): string {
+  if (kind === "OK" || kind === "WARN") return "ok"
+  if (kind === "BLOCK" || kind === "STOP" || kind === "DENY") return "block"
+  if (kind === "NONE") return "block_no_verdict"
+  if (kind === "SKIP") return "skip"
+  return "skip"
+}
+
+async function readText($: any, path: string): Promise<{ text: string | null; unreadable: string }> {
+  try {
+    const v = await $.fs.read(path)
+    if (v === null || v === undefined) return { text: null, unreadable: "" }
+    return { text: String(v), unreadable: "" }
+  } catch (x) {
+    const m = String(x)
+    if (m.indexOf("ENOENT") >= 0) return { text: null, unreadable: "" }
+    return { text: null, unreadable: m.slice(0, 160) }
+  }
+}
+
+async function appendJournal($: any, jpath: string, obj: any) {
+  const line = JSON.stringify(obj)
+  let prev = ""
+  try { prev = String(await $.fs.read(jpath) || "") } catch (x) { prev = "" }
+  let pfx = ""
+  if (prev.length > 0 && prev.charCodeAt(prev.length - 1) !== 10) pfx = "\n"
+  try { await $.fs.write(jpath, prev + pfx + line + "\n") } catch (x) {
+    try { $.ui.log("catalyst-judge journal: " + String(x).slice(0, 160)) } catch (y) {}
+  }
 }
 
 export function register(on: any) {
@@ -106,20 +184,70 @@ export function register(on: any) {
     const amb = cls.length > 1
     const cl = cls.length === 1 ? cls[0] : ""
 
+    let probesDir: any = ""
+    try { probesDir = await $.env.get("CLAUDE_PROBES_DIR") } catch (x) { probesDir = "" }
+    let configDir: any = ""
+    try { configDir = await $.env.get("CLAUDE_CONFIG_DIR") } catch (x) { configDir = "" }
     let home: any = ""
     try { home = await $.env.get("HOME") } catch (x) { home = "" }
-    const tomlPath = String(home) + "/.claude/probes/probes.toml"
-    let toml = ""
-    try { toml = String(await $.fs.read(tomlPath) || "") } catch (x) { toml = "" }
-    try {
-      const local = String(await $.fs.read(".claude/probes/probes.toml") || "")
-      if (local) toml = toml + "\n" + local
-    } catch (x) {}
+    let pwd: any = ""
+    try { pwd = await $.env.get("PWD") } catch (x) { pwd = "" }
 
-    const skipC = listField(toml, "classes_skip")
-    const skipA = listField(toml, "agents_skip")
-    const judgeC = listField(toml, "classes_judge")
-    const judgeA = listField(toml, "agents_judge")
+    let globalHome = ""
+    const probesDirS = String(probesDir || "").trim()
+    const configDirS = String(configDir || "").trim()
+    const homeS = String(home || "")
+    if (probesDirS) globalHome = probesDirS
+    else if (configDirS) globalHome = configDirS + "/probes"
+    else globalHome = homeS + "/.claude/probes"
+
+    const globalTomlR = await readText($, globalHome + "/probes.toml")
+    const globalToml = globalTomlR.text || ""
+
+    let projectHome = ""
+    let projectToml = ""
+    if (!probesDirS) {
+      // CONSTRAINT: process is not defined here. PWD can be absent (env -i)
+      // or stale. $.fs.read of a relative path is resolved against the host
+      // cwd (measured). Walk "../".repeat(i)+".claude/probes". Skip the
+      // candidate whose resolved path is the global home (same as splice).
+      let dots = ""
+      for (let i = 0; i < 24; i++) {
+        const rel = dots + ".claude/probes"
+        const files = [
+          rel + "/probes.toml",
+          rel + "/judge/prompt.md",
+          rel + "/judge/prompt.extra.md",
+          rel + "/judge/body.json",
+        ]
+        let hit = false
+        for (let j = 0; j < files.length; j++) {
+          const r = await readText($, files[j])
+          if (r.unreadable) { hit = true; break }
+          if (r.text !== null) { hit = true; break }
+        }
+        if (hit) {
+          let abs = await resolveRel($, rel)
+          if (!abs && pwd) {
+            let q = String(pwd)
+            for (let k = 0; k < i; k++) q = parentDir(q)
+            if (q) abs = q + "/.claude/probes"
+          }
+          if (!(abs && normTmp(abs) === normTmp(globalHome))) {
+            projectHome = abs || rel
+            const pt = await readText($, rel + "/probes.toml")
+            projectToml = pt.text || ""
+            break
+          }
+        }
+        dots = dots + "../"
+      }
+    }
+
+    const skipC = pickList(globalToml, projectToml, "classes_skip")
+    const skipA = pickList(globalToml, projectToml, "agents_skip")
+    const judgeC = pickList(globalToml, projectToml, "classes_judge")
+    const judgeA = pickList(globalToml, projectToml, "agents_judge")
     let by: string | null = null
     if (!amb) {
       for (let i = 0; i < skipC.length; i++) {
@@ -141,19 +269,46 @@ export function register(on: any) {
       }
       if (!hit) by = cl ? "not_in_judge_list" : "no_class_marker"
     }
+
+    const recName = "mod-" + (id || "noid") + ".json"
+    const recPath = globalHome + "/judge/records/" + recName
+    const jpath = globalHome + "/judge/journal.jsonl"
+    const t0 = $.clock.now()
+
     if (by) {
-      try { $.ui.log("catalyst-judge filtered " + by + " cls=" + cl) } catch (x) {}
+      try { $.ui.log("catalyst-judge filtered " + by + " cls=" + cl + " project=" + projectHome) } catch (x) {}
+      const rec: any = {
+        id, tool, agent, cls, by, kind: "SKIP", t0,
+        projectHome, globalHome, carrier: "mod",
+      }
+      try { $.fs.write(recPath, JSON.stringify(rec)) } catch (x) {}
+      ;(async () => {
+        try {
+          await appendJournal($, jpath, {
+            t: new Date(t0).toISOString(),
+            tool, agent, outcome: "skip",
+            rec: recName, carrier: "mod",
+            reason: by, cls, ms: 0, sw: String(sw || ""),
+          })
+        } catch (x) {}
+      })()
       return next(e)
     }
 
     try { await $.store.set(key, { kind: "PENDING" }) } catch (x) {}
 
-    const t0 = $.clock.now()
     ;(async () => {
-      const rec: any = { id, tool, agent, cls, t0 }
+      const rec: any = { id, tool, agent, cls, t0, projectHome, globalHome, carrier: "mod" }
       try {
         let sys = ""
-        try { sys = String(await $.fs.read(String(home) + "/.claude/probes/judge/prompt.md") || "") } catch (x) { sys = "" }
+        const gPrompt = await readText($, globalHome + "/judge/prompt.md")
+        if (gPrompt.text) sys = gPrompt.text
+        if (projectHome) {
+          const pPrompt = await readText($, projectHome + "/judge/prompt.md")
+          if (pPrompt.text) sys = pPrompt.text
+          const extra = await readText($, projectHome + "/judge/prompt.extra.md")
+          if (extra.text) sys = sys + "\n\nПРАВИЛА ЭТОГО ПРОЕКТА\n" + extra.text
+        }
         let msgs: any[] = []
         try { msgs = await $.session.messages() } catch (x) { msgs = [] }
         const ctx: string[] = []
@@ -204,14 +359,25 @@ export function register(on: any) {
         rec.dtMs = $.clock.now() - t0
         try { await $.store.set(key, { kind: "NONE", threw: rec.threw, dtMs: rec.dtMs }) } catch (y) {}
       }
-      try {
-        $.fs.write(
-          String(home) + "/.claude/probes/judge/records/mod-" + id + ".json",
-          JSON.stringify(rec),
-        )
-      } catch (x) {
+      try { $.fs.write(recPath, JSON.stringify(rec)) } catch (x) {
         try { $.ui.log("catalyst-judge journal write: " + String(x).slice(0, 160)) } catch (y) {}
       }
+      try {
+        const kind = String(rec.kind || "NONE")
+        const rest = String(rec.rest || "")
+        await appendJournal($, jpath, {
+          t: new Date(t0).toISOString(),
+          tool, agent,
+          ms: rec.dtMs,
+          sw: String(sw || ""),
+          outcome: outcomeOf(kind),
+          verdict: (kind + ": " + rest).slice(0, 400),
+          jm: rec.used,
+          rec: recName,
+          carrier: "mod",
+          cls,
+        })
+      } catch (x) {}
       try { $.ui.log("catalyst-judge done kind=" + rec.kind + " dt=" + rec.dtMs) } catch (x) {}
     })()
 
