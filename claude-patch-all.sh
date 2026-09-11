@@ -131,6 +131,24 @@ while [[ $# -gt 0 ]]; do
     # time, by the program that reads the file -- not by the one that handed it
     # over minutes earlier. See 0c.
     --expect-sha) shift; [[ $# -gt 0 ]] || { echo "--expect-sha needs a hex digest" >&2; exit 2; }
+                 # The VALUE is checked here, not only its presence. The guard
+                 # at the read site is `[[ -n "$EXPECT_SHA" && ... ]]` -- it has
+                 # to be, because running without a pin is lawful -- so an EMPTY
+                 # value arriving through this door is indistinguishable there
+                 # from "the caller pinned nothing", and the run measures
+                 # whatever lies at the path, greenly, while the caller believes
+                 # it bound the bytes. That is how a caller whose
+                 # `$(shasum ... | awk ...)` failed silently still got a green
+                 # build. A malformed value is refused for the same reason in
+                 # the other direction: without the shape check it would reach
+                 # the comparison and exit 4, naming "the target is not the
+                 # bytes" for what is actually a typo in the pin. Lowercase is
+                 # required because that is what `shasum -a 256` prints, and the
+                 # comparison downstream is a plain string equality.
+                 [[ "$1" =~ ^[0-9a-f]{64}$ ]] || {
+                   echo "--expect-sha needs a 64-character lowercase sha256 digest, got: '$1'" >&2
+                   exit 2
+                 }
                  EXPECT_SHA="$1"; shift ;;
     --update)    DO_UPDATE=1; shift
                  [[ $# -gt 0 && "$1" != --* ]] && { UPDATE_VER="$1"; shift; } || true ;;

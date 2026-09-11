@@ -1975,46 +1975,102 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   // (233/240/242 carry zero occurrences), so the capture is optional and older
   // builds keep the unconditional throw -- there is no recovery there to
   // preserve.
-  const rxFinal = new RegExp(
+  // The site is parsed FROM THE TELEMETRY CONSTANT, not by one long regexp
+  // pinning the shape of a whole instruction. That was the sixth case of the
+  // root defect "the locator pins a written form instead of a stable
+  // structure": the old pattern swallowed text up to `error:<ID> instanceof
+  // Error?` INSIDE the telemetry object, so 2.1.267 -- which lawfully hoisted
+  // that repeated expression into a variable (`error:NN,`) -- stopped
+  // matching. Two hazards lived in the same pattern: the replacement REBUILT
+  // the swallowed tail from its own guess about the shape, and it took the
+  // THROWN value from the telemetry field. On 2.1.265 the field happened to
+  // name the same identifier that was thrown; on 2.1.267 the field reads a
+  // STRING (`NN=...` built from the error) while the instruction throws the
+  // raw error carried by its own tail `}),<ID>}`. Widening the old pattern
+  // alone would have produced `throw NN` -- a thrown string instead of an
+  // Error, green and silent. So every operand now gets its own shape control
+  // and its own refusal, and the constant occurs five times in the image
+  // (measured on 2.1.265 and 2.1.267, darwin and linux) --
+  // the site is the only occurrence whose preceding text ends with
+  // `break <label>}throw <fn>(`.
+  const CONST = '"tengu_streaming_fallback_to_non_streaming"';
+  const rxCandidate = new RegExp(`break (${ID})\\}throw (${ID})\\($`);
+  const candidates = [];
+  for (const occ of js.matchAll(new RegExp(CONST, 'g'))) {
+    const before = js.slice(Math.max(0, occ.index - 200), occ.index);
+    const mPref = before.match(rxCandidate);
+    if (mPref) {
+      candidates.push({
+        label: mPref[1],
+        constStart: occ.index,
+        // The offset of the throw keyword is computed FROM THE SHAPE the
+        // regexp has just proved -- `break <label>}throw <fn>(` -- and never
+        // searched for inside the matched text: a label whose minified name
+        // happened to contain `throw` would move an indexOf-based offset, and
+        // the splice below would then cut at the wrong byte and corrupt the
+        // image with no refusal anywhere.
+        throwStart:
+          occ.index -
+          mPref[0].length +
+          'break '.length +
+          mPref[1].length +
+          '}'.length,
+      });
+    }
+  }
+  if (candidates.length !== 1) {
+    fail(
+      `streaming fallback site: expected exactly one telemetry occurrence ` +
+        `preceded by 'break <label>}throw <fn>(', found ${candidates.length}`,
+    );
+  }
+  const { label, constStart, throwStart } = candidates[0];
+  const constEnd = constStart + CONST.length;
+
+  // The request options object, from the model field of the telemetry
+  // payload. 2.1.257 wrapped the model in a call: it was `{model:<opts>.model,`
+  // and became `{model:<fn>(<opts>.model),`. The wrapper is allowed and only
+  // the inner object is captured, because the recovery branch below reads
+  // `isNonInteractiveSession` and `querySource` off it. Confusing the wrapper
+  // with the object is the costliest mistake here: `recoverable` would
+  // silently read fields of a function.
+  const mOpts = js
+    .slice(constEnd, constEnd + 200)
+    .match(new RegExp(`,\\{model:(?:${ID}\\()?(${ID})\\.model\\)?`));
+  if (!mOpts) fail('streaming fallback site: the request options object not found after the telemetry constant');
+  const opts = mOpts[1];
+
+  // The thrown value is the instruction's OWN tail `}),<ID>}` -- never the
+  // telemetry field, which on 2.1.267 holds a string built from the error.
+  const mThrown = js.slice(constEnd, constEnd + 1200).match(/\}\),([A-Za-z_$][\w$]*)\}/);
+  if (!mThrown) fail('streaming fallback site: the thrown value not found after the telemetry object');
+  const thrown = mThrown[1];
+
+  // Form control of the telemetry object -- the role the old
+  // `error:<ID> instanceof Error?` tail used to carry. Both marker fields of
+  // the partial-finalize telemetry must be present between the constant and
+  // the object's close; their composition and order are identical on 2.1.265
+  // and 2.1.267, only the minified names differ.
+  const telemetryBody = js.slice(constEnd, constEnd + mThrown.index);
+  if (
+    !telemetryBody.includes(',attemptNumber:') ||
+    !telemetryBody.includes('any_stream_event_yielded:')
+  )
+    fail('streaming fallback site: the telemetry object is not the partial-finalize one');
+
+  // The rewritable region ends where the candidate's `throw` begins, so the
+  // pattern is anchored to the END of the slice and the label -- already
+  // known from the anchor -- goes in as a literal.
+  const rxRegion = new RegExp(
     `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"` +
       `(?:,truncatedAfterOutput:([^,;{}]{0,80}))?((?:,[^;]{0,300}?)?)\\}\\),(${ID})!=="credited"\\)` +
-      `\\5="credited",(${ID})\\+=([^;]{0,300}?);break (${ID})\\}` +
-      // 2.1.257 обернул модель в вызов: было `{model:<opts>.model,`, стало
-      // `{model:<fn>(<opts>.model),`. Голое `<ID>.model` перестало совпадать, и
-      // шаг падал целиком. Обёртка допускается необязательной, но захватов
-      // теперь ДВА: всё выражение целиком -- чтобы `tail` восстанавливал байты
-      // ДОСЛОВНО, а не пересобирал их по своей догадке о форме, -- и отдельно
-      // объект настроек, потому что ветка восстановления ниже читает у него
-      // `isNonInteractiveSession` и `querySource`. Спутать обёртку с объектом
-      // здесь дороже всего: `recoverable` молча стал бы читать поля у функции.
-      `throw (${ID})\\("tengu_streaming_fallback_to_non_streaming",` +
-      `\\{model:((?:${ID}\\()?(${ID})\\.model\\)?),` +
-      `error:(${ID}) instanceof Error\\?`,
+      `\\5="credited",(${ID})\\+=([^;]{0,300}?);break ${rxEsc(label)}\\}$`,
   );
-  const mFinal = js.match(rxFinal);
-  if (!mFinal) fail('streaming partial-finalize site not found');
-  // Every captured value below is spliced into a replacement string whose
-  // pattern is this 11-group RegExp, so there `$1`..`$9` are live backreferences
-  // and `$$` collapses. Five of them were escaped and six were not; the six were
-  // `$`-free on 233/240/242/246/247, which is why nothing broke. `accExpr` is the
-  // one to watch -- it captures up to 300 characters of arbitrary expression, not
-  // an identifier -- but minified identifiers may carry `$` too. repEsc on all of
-  // them, so the discipline holds by construction instead of by measurement.
-  const [
-    ,
-    arFn,
-    content,
-    truncExpr,
-    extraTail,
-    credited,
-    acc,
-    accExpr,
-    label,
-    throwFn,
-    modelExpr,
-    opts,
-    errVar,
-  ] = mFinal;
+  const regionSliceStart = Math.max(0, throwStart - 2500);
+  const mRegion = js.slice(regionSliceStart, throwStart).match(rxRegion);
+  if (!mRegion) fail('streaming partial-finalize region not found before the telemetry throw');
+  const regionStart = regionSliceStart + mRegion.index;
+  const [, arFn, content, truncExpr, extraTail, credited, acc, accExpr] = mRegion;
 
   // Захваченный объект обязан быть ТЕМ САМЫМ объектом запроса, а не обёрткой
   // вокруг него: ниже у него читаются `isNonInteractiveSession` и
@@ -2030,39 +2086,40 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
         'shape changed and the capture landed on the wrapper',
     );
 
-  const tail =
-    `throw ${throwFn}("tengu_streaming_fallback_to_non_streaming",` +
-    `{model:${modelExpr},error:${errVar} instanceof Error?`;
-
+  // The edit is a SPLICE BY OFFSET, not a String.replace: everything from the
+  // throw keyword on -- the telemetry call the upstream minifier wrote --
+  // stays in the image byte for byte and is never rebuilt. Splicing by
+  // concatenation is exactly why escaping `$` (repEsc) is FORBIDDEN here
+  // rather than optional: a plain concatenation has no replacement-string
+  // syntax, so a doubled `$` from repEsc would reach the image as a literal
+  // and corrupt the spliced name.
+  let replacement;
   if (truncExpr === undefined) {
     // No truncation marker in this build: nothing downstream can recover from
     // it, so the half answer is simply not finalized.
-    js = js.replace(
-      rxFinal,
-      `,${repEsc(credited)}!=="credited")${repEsc(credited)}="credited",` +
-        `${repEsc(acc)}+=${repEsc(accExpr)};throw ${repEsc(errVar)}}${repEsc(tail)}`,
-    );
+    replacement =
+      `,${credited}!=="credited")${credited}="credited",` +
+      `${acc}+=${accExpr};throw ${thrown}}`;
   } else {
     const recoverable =
       `(${opts}.isNonInteractiveSession&&` +
       `(${opts}.querySource?.startsWith("repl_main_thread")||${opts}.querySource==="sdk")&&` +
       `(${truncExpr}))`;
-    js = js.replace(
-      rxFinal,
-      `,${repEsc(recoverable)}?yield ${repEsc(arFn)}({content:${repEsc(content)},` +
-        `error:"server_error",truncatedAfterOutput:${repEsc(truncExpr)}${repEsc(extraTail)}})` +
-        `:void 0,${repEsc(credited)}!=="credited")${repEsc(credited)}="credited",` +
-        `${repEsc(acc)}+=${repEsc(accExpr)};` +
-        `if(!${repEsc(recoverable)})throw ${repEsc(errVar)};break ${repEsc(label)}}${repEsc(tail)}`,
-    );
+    replacement =
+      `,${recoverable}?yield ${arFn}({content:${content},` +
+      `error:"server_error",truncatedAfterOutput:${truncExpr}${extraTail}})` +
+      `:void 0,${credited}!=="credited")${credited}="credited",` +
+      `${acc}+=${accExpr};` +
+      `if(!${recoverable})throw ${thrown};break ${label}}`;
   }
+  js = js.slice(0, regionStart) + replacement + js.slice(throwStart);
 
   applied.push(
     `a broken stream is retried, never finalized as a half answer ` +
       `(interactive lanes; the non-interactive recoverable lane keeps the stock ` +
       `partial-plus-nudge by design) ` +
       `(backoff '${backoff}', budgets ${mBudget[3]}/${mBudget[7]} -> 300, ` +
-      `dropped content gate on '${mGate[1]}', error var '${errVar}', ` +
+      `dropped content gate on '${mGate[1]}', thrown var '${thrown}', ` +
       `${truncExpr === undefined ? 'no truncation marker in this build' : `truncation marker kept for the recoverable lane ('${truncExpr}')`}, ` +
       `+${js.length - before} bytes)`,
   );

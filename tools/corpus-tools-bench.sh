@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=207
-EXPECTED_MUTATIONS=277
+EXPECTED_SCENARIOS=213
+EXPECTED_MUTATIONS=283
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -1959,6 +1959,9 @@ run_all() {
   # с литералом; каждому коду таблицы зонда -- своя ветвь свипа (4 и 7 --
   # класс «НЕ ИЗМЕРЕН», не красный прогон; связка цензуется в обе стороны).
   scenario_204; scenario_205; scenario_206; scenario_207
+  # Правка 19 (#114): локатор от константы телеметрии, отказ у каждой
+  # двери, врезка срезами, брошенное значение -- из хвоста инструкции.
+  scenario_208; scenario_209; scenario_210; scenario_211; scenario_212; scenario_213
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -4457,7 +4460,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 277 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 283 мутации corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -6729,6 +6732,161 @@ scenario_207() {   # ФОРМА стража случая (u): сверка «д
   ok "207 страж случая (u) сверяет сайты «до/после», а не соседей с литералом"
 }
 
+
+# --- шаг 19 патчера: локатор правки про оборванный поток (#114) ----------------
+# Шестой случай корневого дефекта «локатор пинит форму записи вместо
+# устойчивой структуры»: единый регексп поглощал текст вплоть до поля
+# телеметрии и пересобирал хвост по собственной догадке о форме, а брошенное
+# значение брал из ПОЛЯ ТЕЛЕМЕТРИИ -- на 2.1.267 это строка, а бросается Error.
+# Теперь шаг разбирается от константы телеметрии, у каждой двери отказа свой
+# текст, врезка идёт склейкой срезов, и хвост инструкции остаётся нетронутым.
+#
+# Сценарии гоняют ВЫРЕЗАННЫЙ по якорю шаг на синтетическом образе 2.1.267-формы
+# (телеметрия читает переменную-строку, бросается сырой Error): живой прогон
+# стоит минут и покрыт приёмкой по корпусу, а предмет здесь -- ПОВЕДЕНИЕ ДВЕРЕЙ
+# отказа, которое на живом образе не изолировать по одной. Носители шага
+# (step/fail/applied/repEsc) даёт драйвер теми же семантиками, что и файл
+# патча; вырезка ищет заголовок шага и первое закрывающее «});» -- так же, как
+# стенд вырезает функции из конвейера, а не ведёт вторую копию правила.
+s19_prepare() {   # имя каталога сценария
+  S19_D="$C/$1"; rm -rf "$S19_D"; mkdir -p "$S19_D"
+  cat > "$S19_D/drv.js" <<'S19DRV'
+const fs = require('fs');
+const patch = fs.readFileSync(process.argv[2], 'utf8');
+const fixture = fs.readFileSync(process.argv[3], 'utf8');
+const lines = patch.split('\n');
+let start = -1;
+let end = -1;
+for (let i = 0; i < lines.length; i++) {
+  if (start < 0 && lines[i].startsWith("step('19 a broken stream")) start = i;
+  else if (start >= 0 && lines[i] === '});') { end = i; break; }
+}
+if (start < 0 || end < 0) {
+  console.log('СРЕЗ_НЕ_НАЙДЕН');
+  process.exit(0);
+}
+const body = lines.slice(start, end + 1).join('\n');
+const failures = [];
+const applied = [];
+const fail = (msg) => { throw new Error('multi-provider patch: ' + msg); };
+const repEsc = (s) => String(s).replace(/\$/g, '$$$$');
+const rxEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const step = (name, fn) => {
+  try {
+    fn();
+  } catch (error) {
+    failures.push(`${name}: ${String(error.message).replace(/^multi-provider patch: /, '')}`);
+  }
+};
+const run = new Function('js', 'step', 'fail', 'applied', 'repEsc', 'rxEsc',
+                         body + '\nreturn js;');
+const out = run(fixture, step, fail, applied, repEsc, rxEsc);
+if (failures.length > 0) {
+  console.log('ШАГ_КРАСЕН ' + failures.join(' | '));
+} else {
+  console.log('ШАГ_ЗЕЛЁН spliced=' +
+    (out.includes('throw Iw;break e}throw tel(') ? 1 : 0) +
+    ' tail=' + (out.includes('error:NN,') ? 1 : 0));
+}
+S19DRV
+  printf '%s' 'function bk(n,c,j=32000){let w=Math.min(500*Math.pow(2,n-1),j),x=w*j;return x}let q=3,cnt={value:0},sm=2,st=0,cr=0,fl=!1,im=1,iv=0,res=1;if(res=null,!iv)await sl(100*st,sig);continue e}let cap=mr();if(conn&&stop===null&&tries<cap){if(!hc&&stop===null&&(iv?ivn<im:stn<sm)){,yield ar({content:"partial text",error:"server_error",truncatedAfterOutput:ta&&!it?!0:void 0}),cr!=="credited")cr="credited",acc+=p.querySource;break e}throw tel("tengu_streaming_fallback_to_non_streaming",{model:St(p.model),error:NN,attemptNumber:hf,maxOutputTokens:cS,thinkingType:u(r.type),fallback_disabled:Wp,request_id:lS(qr),fallback_cause:_("partial_yield"),any_stream_event_yielded:nc}),Iw}if(done)' > "$S19_D/fixture.js"
+}
+
+s19_run() {   # вывод драйвера на образе каталога S19_D
+  node "$S19_D/drv.js" "$K/tweakcc-patch.js" "$S19_D/fixture.js" 2>&1
+}
+
+s19_mut_fixture() {   # образец, замена -- той же дисциплиной, что и мутации кита
+  PAT="$1" REP="$2" perl -0pi -e 's/$ENV{PAT}/$ENV{REP}/' "$S19_D/fixture.js"
+}
+
+scenario_208() {   # образ 267-формы: шаг применяется, хвост телеметрии нетронут
+  local out
+  s19_prepare s208
+  out=$(s19_run)
+  LAST_EVID="$out"
+  if [[ "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    LAST_EVID="ШАГ_УПАЛ :: $out"
+    bad "208 правка 19: на синтетическом образе шаг упал целиком"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    LAST_EVID="ВРЕЗКА_НЕ_ТА :: $out"
+    bad "208 правка 19: наша ветка броска не врезана в образ"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "208 правка 19: телеметрия после врезки не побайтово та же"; return
+  fi
+  ok "208 правка 19: шаг применяется к 267-форме, бросок и телеметрия на месте"
+}
+
+scenario_209() {   # якорь: вхождений константы с префиксом break}throw ровно одно
+  local out
+  s19_prepare s209
+  # Второй кандидат -- приманка ПЕРВЫМ по тексту: снятая дверь обязана увести
+  # разбор на приманку, а не на настоящий сайт позади неё.
+  s19_mut_fixture '^' 'break q}throw z("tengu_streaming_fallback_to_non_streaming",1);'
+  out=$(s19_run)
+  LAST_EVID="$out"
+  if [[ "$out" != *"found 2"* ]]; then
+    LAST_EVID="ЯКОРЬ_НЕ_СЧИТЕН :: $out"
+    bad "209 правка 19: два кандидата под константой не названы числом"; return
+  fi
+  ok "209 правка 19: единственность якоря телеметрии считается и отказывает"
+}
+
+scenario_210() {   # объект запроса не разобрался -- свой отказ
+  local out
+  s19_prepare s210
+  s19_mut_fixture ',\{model:St\(' ',{modex:St('
+  out=$(s19_run)
+  LAST_EVID="$out"
+  if [[ "$out" != *"the request options object not found"* ]]; then
+    LAST_EVID="ОПТС_НЕ_ОТКАЗАН :: $out"
+    bad "210 правка 19: пропажа объекта запроса не отказывает своим текстом"; return
+  fi
+  ok "210 правка 19: объект запроса опознаётся, пропажа названа своим текстом"
+}
+
+scenario_211() {   # контроль формы объекта телеметрии -- свой отказ
+  local out
+  s19_prepare s211
+  s19_mut_fixture ',attemptNumber:hf' ''
+  out=$(s19_run)
+  LAST_EVID="$out"
+  if [[ "$out" != *"the telemetry object is not the partial-finalize one"* ]]; then
+    LAST_EVID="КОНТРОЛЬ_НЕ_ОТКАЗАН :: $out"
+    bad "211 правка 19: чужой объект телеметрии не опознан контролем формы"; return
+  fi
+  ok "211 правка 19: контроль формы опознаёт объект телеметрии правки"
+}
+
+scenario_212() {   # брошенное значение ищется в хвосте инструкции -- свой отказ
+  local out
+  s19_prepare s212
+  s19_mut_fixture '\}\),Iw\}' '})}'
+  out=$(s19_run)
+  LAST_EVID="$out"
+  if [[ "$out" != *"the thrown value not found"* ]]; then
+    LAST_EVID="БРОСОК_НЕ_НАЙДЕН :: $out"
+    bad "212 правка 19: хвост броска пропал, а отказа нет"; return
+  fi
+  ok "212 правка 19: брошенное значение берётся из хвоста инструкции"
+}
+
+scenario_213() {   # переписываемая область перед броском -- свой отказ
+  local out
+  s19_prepare s213
+  s19_mut_fixture 'error:"server_error"' 'error:"server_error_x"'
+  out=$(s19_run)
+  LAST_EVID="$out"
+  if [[ "$out" != *"region not found before the telemetry throw"* ]]; then
+    LAST_EVID="РЕГИОН_НЕ_ОТКАЗАН :: $out"
+    bad "213 правка 19: испорченная область перед броском не отказывает"; return
+  fi
+  ok "213 правка 19: область перед броском опознаётся своей формой"
+}
+
 # --- мутации для --self-check ------------------------------------------------
 # Каждая -- ОДНА правка в копии кита, отменяющая ровно одну починенную гарантию.
 #
@@ -6918,7 +7076,10 @@ MUT_FILE=(x
   # у зонда.
   tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh
   tools/sweep.sh tools/sweep.sh
-  tools/build-path-probe.real.sh tools/build-path-probe.real.sh)
+  tools/build-path-probe.real.sh tools/build-path-probe.real.sh
+  # Правка 19 (#114): жертва -- сам патчер.
+  tweakcc-patch.js tweakcc-patch.js tweakcc-patch.js
+  tweakcc-patch.js tweakcc-patch.js tweakcc-patch.js)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -7271,7 +7432,15 @@ MUT_PAT=(x
   '    6\) echo "SWEEP ОТКАЗ: машинерия замка сломана'
   '    \*\) echo "SWEEP ОТКАЗ: зонд пути сборки вышел кодом'
   'if after_sites != before_sites - 1:'
-  'if after_sites != before_sites - 1:')
+  'if after_sites != before_sites - 1:'
+  # Правка 19 (#114): по образцу на каждую дверь отказа локатора;
+  # каждый обязан встречаться в tweakcc-patch.js ровно один раз.
+  'js\.slice\(throwStart\)'
+  'candidates\.length !== 1'
+  'if \(!mOpts\) fail\('
+  "!telemetryBody\.includes\(',attemptNumber:'\)"
+  'if \(!mThrown\) fail\('
+  'if \(!mRegion\) fail\(')
 
 MUT_REP=(x
   'if false; then'
@@ -7590,7 +7759,16 @@ MUT_REP=(x
   '    66) echo "SWEEP ОТКАЗ: машинерия замка сломана'
   '    8) echo "SWEEP ОТКАЗ: зонд пути сборки вышел кодом'
   'if after_sites != 1:'
-  'if t2.count('\''.with_name(target.name + f".staging.{os.getpid()}")'\'') != 1:')
+  'if t2.count('\''.with_name(target.name + f".staging.{os.getpid()}")'\'') != 1:'
+  # Правка 19 (#114): замены держат файл патчера разбираемым: ни одна
+  # не ломает синтаксис, каждая снимает ровно одну дверь отказа.
+  'js.slice(throwStart + 1)'
+  # приманка даёт двух кандидатов: мутация принимает именно двух -- отказ снят
+  'candidates.length !== 2'
+  'if (!mOpts && false) fail('
+  'false'
+  'if (!mThrown && false) fail('
+  'if (!mRegion && false) fail(')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -7687,7 +7865,10 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
                # Волна 109/110: на каждый сценарий -- свои мутации: класс и
                # причина у новых ветвей, обе стороны связки, обе формы
                # стража (u).
-               204 204 205 205 206 206 207 207)
+               204 204 205 205 206 206 207 207
+  # Правка 19 (#114): по мутации на каждую новую дверь отказа локатора;
+  # шестая -- продукт: врезка обязана сохранить хвост инструкции.
+  208 209 210 211 212 213)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -8008,7 +8189,14 @@ MUT_CAUSE=(x
   'КОД_БЕЗ_ВЕТВИ:6'
   'ВЕТВЬ_БЕЗ_КОДА:8'
   'СВЕРКА_ДО_ПОСЛЕ_НЕТ'
-  'СВЕРКА_СОСЕДЕЙ_ВЕРНУЛАСЬ')
+  'СВЕРКА_СОСЕДЕЙ_ВЕРНУЛАСЬ'
+  # Правка 19 (#114): свой след на каждую дверь отказа локатора.
+  'ВРЕЗКА_НЕ_ТА'
+  'ЯКОРЬ_НЕ_СЧИТЕН'
+  'ОПТС_НЕ_ОТКАЗАН'
+  'КОНТРОЛЬ_НЕ_ОТКАЗАН'
+  'БРОСОК_НЕ_НАЙДЕН'
+  'РЕГИОН_НЕ_ОТКАЗАН')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь
