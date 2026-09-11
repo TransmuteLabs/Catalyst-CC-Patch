@@ -4205,7 +4205,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     // Волна 31 (K-3): тот же типизированный читатель для выключателя
     // наблюдателя -- CLAUDE_IDLE=0 обязан значить ВЫКЛ, инлайн по той же
     // причине области видимости (каноническая форма -- __envon в ядре).
-    'if((()=>{let __s=String(process.env.CLAUDE_IDLE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&$4?.agentContext?.agentType==="main")' +
+    'if((()=>{let __s=String(process.env.CLAUDE_IDLE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_IDLE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Watch]",dirName:"idle-watch",arm:!1,label:"FLEET",' +
       // Its own vocabulary: the watcher has nothing to permit or forbid; it
