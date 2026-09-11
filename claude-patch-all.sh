@@ -5960,11 +5960,15 @@ def _cancellation_rule_is_whole(d):
     alone proves none of them.
     """
     # Волна 31 (K-3): перед arm стоит типизированный читатель выключателя
-    # (инлайн-форма канонического __envon из ядра), и пин проходит по нему
-    # целиком -- ослабления нет, пин стал длиннее прежнего.
+    # (инлайн-форма канонического __envon из ядра). 2026-09-12: тот же сайт
+    # несёт CLAUDE_JUDGE_CARRIER=mod (splice stands down). Пин проходит по
+    # читателю ЦЕЛИКОМ включая stand-down -- иначе ручка выпадёт, а правило
+    # в промте останется, и два носителя снова судят вместе.
     if not re.search(rb'\.\.\.\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_JUDGE\?\?""\)'
                      rb'\.trim\(\)\.toLowerCase\(\);'
-                     rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
+                     rb'if\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)return !1;'
+                     rb'let __c=String\(process\.env\.CLAUDE_JUDGE_CARRIER\?\?""\)'
+                     rb'\.trim\(\)\.toLowerCase\(\);return __c!=="mod"\}'
                      rb'\)\(\)&&' + ID
                      + rb'\?\.agentContext\?\.agentType==="main"\?\['
                      rb'"A subagent dispatch may be reviewed before it runs\.', d):

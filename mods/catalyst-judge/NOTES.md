@@ -66,3 +66,15 @@ They are tweakcc's prompt-snapshot layer in `~/.tweakcc/system-prompts/`,
 not this module. Our only binary prompt feature was injection 26; it lives
 here as `prompt.section` on `communication:L`. This module does not write
 the user's overlay directory.
+
+## Stand-down measured (staging image, 2026-09-12)
+
+Patched a *copy* of 2.1.267.orig (`/tmp/t113-full/267.staging`). Live inode
+untouched. On that image:
+
+| `CLAUDE_JUDGE_CARRIER` | mod PENDING | splice journal |
+|---|---|---|
+| `mod` | yes (then OK, agent PONG) | **delta 0** |
+| unset | 0 (inert) | **+1** grok-scout ok |
+
+The live install still lacks the variable until it is rebuilt.
