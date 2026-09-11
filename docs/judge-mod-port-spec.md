@@ -6,26 +6,37 @@ Companion to `judge-architecture.md` (what the judge IS) and
 the judge BECOMES when its carrier changes from a binary splice to a
 function-hooks module, and what must NOT change with it.
 
-Status: design, ratified on the budget fork by the user 2026-09-11
-("перестройка + поднять предел патчем"). No splice is removed from the
-patch layer until its mod carrier has been measured live — the standing
-honesty boundary of task #116.
+Status: design, rewritten 2026-09-11 evening against the live measurements
+in `project_function_hooks_recon.md` (ПОЛНАЯ КАРТИНА ПОРТА) and the probes
+under `/tmp/t113-*` and `/tmp/t113-full/`. The  morning ratification
+"rebuild AND raise the host budget with a one-line patch" is **half-void**:
+rebuild stands; the budget patch is closed negatively (bytecode, operand
+`1e4` not addressable). No splice is removed from the image until this
+carrier has been measured live — the standing honesty boundary of task
+#116. `CLAUDE_JUDGE_CARRIER=mod` stands the splice down without deleting it.
 
 ---
 
-## 0. The user's decision and its two halves
+## 0. The user's decision
 
 > «логику работы прокси оставляем патчем а остальное пишем модом»
-> (2026-09-11) — and, on the budget fork the same day: rebuild the judge
-> AND raise the host's hook budget with a one-line patch.
+> (2026-09-11), then: the patch stays but shrinks; it becomes a patch for
+> *capability*, features go in the mod («да, двигайся в этом направлении»).
 
-Both halves are load-bearing, and the second is not a convenience:
+What that means after the measurements:
 
-* **Rebuild** — the judge must hold a refusal BY ITS OWN CONSTRUCTION,
-  because fail-open is a property of the HOST and survives any limit.
-* **Raise the limit** — because the measurement below shows the model
-  rung cannot be squeezed under the stock limit by any amount of
-  rebuilding.
+* **Proxy stays a patch.** Three controls: core inference does not pass
+  through `$.model.complete`; rewriting `turn.start` does not change the
+  answer; `turn.step` arrives with a finished answer.
+* **Judge and prompts go in the mod.** The 10 s host budget is not raised
+  (cannot be). The judge holds a refusal by construction: inverted
+  fail-closed, not by waiting inside the hook.
+* **tweakcc does not go away** — the proxy splices keep it. The insertion
+  shrinks.
+
+The capability the remaining patch grows is one environment variable:
+`CLAUDE_JUDGE_CARRIER=mod` makes injection 22 and injection 26 no-ops so
+the two carriers cannot double-judge. Default (unset) is the splice.
 
 ---
 
@@ -42,11 +53,10 @@ The host printed:
         (tool.call; skipped; what is below it ran in its place)
 ```
 
-and the model answered `##` — the first line of `/etc/hosts`. **The tool
-executed; the refusal was lost.** Neighbouring constants of the same
-measurement: grace after an abort `h0e = 5000`; core handlers declared
-`budgetMs:0` (no limit); classic config-file hooks get `timeout
-600000ms`, sixty times more.
+**The tool executed; the refusal was lost.** Neighbouring constants of
+the same measurement: grace after an abort `h0e = 5000`; core handlers
+declared `budgetMs:0` (no limit); classic config-file hooks get `timeout
+600000ms`.
 
 This directly contradicts the judge's shipped mode: `[defaults] enforce =
 true` plus `[probe.judge] fail_closed = true`.
@@ -55,8 +65,7 @@ true` plus `[probe.judge] fail_closed = true`.
 
 Counted by the controller over the live journal
 `~/.claude/probes/judge/journal.jsonl`, 5997 records,
-2026-08-24T11:20 → 2026-09-11T09:41 (docnum:other — these are judgings,
-not kit counters):
+2026-08-24T11:20 → 2026-09-11T09:41:
 
 | quantile | latency |
 |---|---|
@@ -69,343 +78,273 @@ not kit counters):
 
 | threshold | records above it |
 |---|---|
-| > 5 000 ms | 99.87 % |
 | > 10 000 ms | **97.85 %** |
 | > 30 000 ms | 63.03 % |
 | > 60 000 ms | 22.78 % |
 
-Outcomes: `ok` 5201, `warn` 556, `block` 221, `block_no_verdict` 19.
-Rungs: one rung 5765, two 205, three 8, four 19.
-
-**97.85 % of live adjudications exceed the stock hook budget.** A port
-that only "re-fits the judge under 10 s" would lose the verdict on
+A port that only "re-fits the judge under 10 s" would lose the verdict on
 ninety-eight of every hundred dispatches — silently, by fail-open, in the
-direction of approval. The budget patch is therefore structural, not an
-optimisation.
+direction of approval.
 
 ### 1.3 The 840-second tail is the ladder's own worst case, not a hang
 
 Twenty records exceed 600 s; nineteen of them carry `tries: 4`. The
-shipped per-rung `timeout_ms` is 240 000 ms and the automatic retry runs
-on half its rung's clock, so a ladder walked to exhaustion costs
-`240 + 240 + 240 + 120 = 840` seconds — exactly the 840 019 ms observed.
-The tail is a derivation, not an anomaly: any host budget must be chosen
-against the judge's OWN configured ceiling, not against its median.
+shipped per-rung `timeout_ms` is 240 000 ms; a ladder walked to exhaustion
+costs `240 + 240 + 240 + 120 = 840` seconds — exactly the 840 019 ms
+observed.
 
-### 1.4 A fast rung does exist
+### 1.4 A fast rung exists, and size is not the 36 s
 
-From inside `tool.call`, `$.model.complete` with `deepseek-flash`
-returned `ALLOW` in **2008 ms** (same probe session). The carrier is not
-slow; the judge's own prompt and transcript are what cost the time.
+From inside `tool.call`, `$.model.complete` with `deepseek-flash` returned
+`ALLOW` in **2008 ms** (toy prompt). Detached, the same verb with a 44 000
+byte pad (combat prompt home is 42 588 bytes) returned `ALLOW` in **2877
+ms** (`/tmp/t113-full/p7-long`). The 36.7 s median is the judge's ladder
+and reasoning, not the prompt's length, and not the carrier.
 
-### 1.5 Why the median moved (INFERRED, with the confound named)
+### 1.5 The budget operand is not patchable
 
-`judge-architecture.md` §5 records a median of 5.9 s on a 4.7 KB body in
-August. Today's live median is 36.7 s. Two candidates, and this
-measurement does not separate them: the judge's prompt home grew (42.6 KB
-today), and the carrier model id changed editions. The journal shows the
-editions differ sharply — `deepseek-v4-flash` median 37 457 ms (n=5354)
-against `deepseek-flash` median 19 676 ms (n=411) — so the newer edition
-is roughly twice as fast on the same work. Recorded as INFERRED; the
-discriminating probe is one transcript run against both bodies on one
-model id.
+Measured 2026-09-11 with a positive control of form (8233 boxed-ints in
+the image; 10000 not among them). The hook engine runs from bytecode; its
+JS text is inert. `var b0e=1e4` / `budgetMs:n=b0e` (linux `dPe`) is that
+inert text. Three `double 10000.0` hits are the native dtoa table, not a
+JS constant. `engine.create` adds nouns; it does not lift `budgetMs`
+(same worker). There is no host setting. Path (b) of the morning
+decision — raise the limit with a locator — is closed.
+
+### 1.6 Detached work is not charged against the 10 s
+
+The 10 s clock is the *awaited* duration of the hook. A promise started
+without `await` and finishing after `return` is not charged:
+
+* `/tmp/t113-defer`: sleep 2003 ms after `next()`, no `exceeded` line.
+* `/tmp/t113-full/p1-det-complete-next`: `$.model.complete` ALLOW in 3924
+  ms after `next()`, log line after the model's `stop`.
+* `/tmp/t113-full/p8-synth`: complete ALLOW in 1706 ms after `{deny}`,
+  retry saw `OK:ALLOW`.
+
+The 50 s of judge thinking the operator asked about is this path: it is
+not in the 10 s.
+
+A `-p` process that exits before the background finishes kills it
+(`/tmp/t113-full/p3-death-sleep`, 15 s sleep, 14.5 s wall, no `bg.json`).
+An interactive session keeps the process; the background lives with it.
 
 ---
 
 ## 2. The invariant that replaces fail-open
 
-> **Our deadline must always fire before the host's.**
+> **The awaited body of `tool.call` returns in milliseconds. The
+> consultation is detached. A missing verdict is a refusal, never a pass.**
 
 The host cannot be made fail-closed — its abort path skips the hook and
 runs what is below it. Therefore the mod must never be the party that
-runs out of time. The judge computes its own deadline from a constant it
-owns, arms it before any I/O, and on expiry RETURNS `{deny: …}` itself.
-The host budget is then a backstop that, in correct operation, never
-fires — and if it ever does, that is a defect of ours, observable as a
-`hook failed: exceeded` line with no matching journal record.
+runs out of time. It does not await the ladder. It writes PENDING, returns
+`{deny}`, and lets the background write the verdict into `$.store`. A
+retry that still sees PENDING is the same deny (no second ladder). A
+retry that sees BLOCK/NONE is a final refusal. A retry that sees OK/WARN
+calls `next(e)`.
 
-This is the precise form of "the judge must hold the refusal itself". It
-is testable, and its test is in §8.
+The 10 s host budget is a wall around the awaited body, not a deadline
+for the judge. 50 s of thinking is normal (p75 57 s) and happens in the
+background.
 
 ---
 
-## 3. Architecture — three stages, one obligation flag
+## 3. Architecture — two stages, inverted fail-closed
 
-The splice's obligation flag (`__jarm` in §7 of the architecture) ports
-unchanged in MEANING: armed as soon as it is known the call is not
-filtered out and `enforce` + `fail_closed` are on; cleared only by the
-last action of a successful path. Everything that leaves the hook without
-clearing it leaves with a refusal.
+The splice's obligation flag (`__jarm`) ports in MEANING: armed as soon as
+the call is not filtered out and `enforce` + `fail_closed` are on;
+cleared only by the last action of a successful path. On this carrier the
+flag *is* the PENDING record in `$.store`. Leaving the hook without a
+record already in store leaves with `{deny}`.
 
-### Stage 0 — the deterministic gate (synchronous, no I/O)
+### Stage 0 — the selector (synchronous, small I/O)
 
-Everything the routing table decides without a model: is the model named;
-is `[dispatch-class:<id>]` present; is the model admitted for that class;
-is the effort pin present for a proxy model; does an Anthropic model in a
-non-executor class carry `[anthropic-exception:<basis>]`; agent-name →
-class coercion.
+Combat stage 0 (`tweakcc-patch.js` ~3040–3105) is a filter «judge or not»,
+not a set of routing refusals. It reads `probes.toml` (measured 1–2 ms
+for a 7888-byte fixture plus regexp plus branch, `/tmp/t113-stage0`),
+honours `enabled`, `classes_skip` / `agents_skip` / `classes_judge` /
+`agents_judge`, and the `__ask` flag. Refusals of the *dispatch* are
+issued by the model later, not here.
 
-This stage is **fail-closed by construction**: it performs no I/O, so it
-cannot time out, and a missing or unparseable rule set means the rules
-are UNKNOWN, which denies (the three-outcome layer reader of §7 of the
-architecture — "absent", "read", "present but not understood" — ports as
-is). Cost: microseconds against the ~12 ms the hook itself costs.
+This stage fits the 10 s budget with a ~5000× margin. `{deny}` from a
+synchronous return is delivered verbatim (positive control). An
+artificial overrun still loses the deny (negative control).
 
-On today's traffic this stage is where the overwhelming majority of
-refusals are already decided; it is the reason the port is viable at all.
+A missing or unparseable rule set does not skip the call: the module
+still arms PENDING and consults (fail-closed on the judgment itself). A
+filter match (`classes_skip` etc.) calls `next(e)` and writes
+`filtered` to the record.
 
-### Stage 1 — model adjudication under OUR deadline
+### Stage 1 — inverted fail-closed (the whole ladder)
 
-Reached only when stage 0 has no verdict. The ladder ports with its
-rung fields (`model`, `timeout_ms`, `max_tokens`, `context_chars`,
-`effort`) and its escalation causes (network error, threshold, non-2xx,
-and **2xx without a verdict** — the rung that answers with emptiness must
-not stall the ladder). `$.model.complete` is the channel; it keeps the
-contract that `claude-*` stays on the subscription lane, PROVIDED the
-routing splices remain in the patch (§ below).
+Reached only when stage 0 says judge. The awaited hook:
 
-Two rules the carrier forces on the ladder:
+1. reads `$.store` at a digest of the dispatch (`tool|agent|prompt`), not `tool_use_id` — a retry mints a new id (measured: 64 denies / 63 ladders on one Agent ping when keyed by id);
+2. if PENDING / BLOCK / NONE / OK / WARN — returns as in §2, no I/O;
+3. if empty — `$.store.set(PENDING)` **before** the deny (without this,
+   a retry storm starts a new ladder each time; measured `/tmp/t113-full/p2`
+   four completes, `/tmp/t113-full/p4` one);
+4. starts a detached ladder (`$.model.complete` on `deepseek-flash`,
+   then `glm-5.3`, then `gpt-5.6-terra`);
+5. returns `{deny: PENDING_MSG}` in milliseconds.
 
-* **The ladder's total is capped by our deadline, not by the sum of its
-  rungs.** Today the sum is 840 s; under the port the cap is the
-  constant of §2, and rung budgets are derived from it, not the reverse.
-* **There is no cancellation handle on a pending request**: measured —
-  `$.model.complete` returns a STRING, not an object. A rung that
-  overruns cannot be aborted from inside; the deadline is therefore
-  enforced AROUND the call (`$.clock` + the obligation flag), and an
-  overrun rung is abandoned, not cancelled. Its tokens are spent. This is
-  a cost, and it is why the deadline is set once and not retried
-  optimistically.
+The detached ladder writes OK/WARN/BLOCK/NONE into the same key and a
+per-record file under `records/mod-<id>.json`. Parsing of the verdict is
+unchanged: first line `^(OK|BLOCK|STOP|DENY|WARN):`, else last such line
+in the body (architecture §7).
 
-### Stage 2 — deny-now, verdict-later (the tail, and the fallback)
+`$.model.complete` returns a STRING; there is no cancellation handle. A
+rung that hangs is abandoned by walking to the next after the call
+throws, not by aborting it.
 
-For the fraction that exceeds even the raised deadline, and as the
-behaviour if the budget patch is ever absent (a stock binary, a machine
-without our patch layer):
+### Prompt rule (replaces injection 26)
 
-1. deny immediately with a message that names the reason as a channel
-   defect, not a judgment defect;
-2. continue the consultation and write the verdict into `$.store` keyed
-   by a digest of the dispatch;
-3. on the model's retry of the same dispatch, answer from the cache.
+`on("prompt.section")` for `communication:L` appends, in English:
 
-This keeps `block_no_verdict` distinguishable from `block` — the
-separation §7 of the architecture was built to preserve — and it makes
-the mod correct on an unpatched host, merely slower to converge.
+* if the tool error says adjudication is in progress: wait and repeat
+  the SAME dispatch unchanged;
+* if the tool error names a correction: apply it, never repeat the
+  identical call.
+
+The two must not be collapsed. Measured (`/tmp/t113-full/p2c`): deny
+text «wait and repeat the SAME» with no verdict yet is a retry storm
+(68 denies, killed). Measured (`/tmp/t113-full/p2b`): «all tools
+blocked» is a stop. Measured (`/tmp/t113-full/p2`): a Read-only deny is
+walked around with Bash `head`. This module therefore intercepts
+`Agent` and `Task` only (the splice's own gate) and the PENDING text
+names «do not switch to Bash».
+
+Grok-4.6 without coaching will not wait 50 s. The section is load-bearing.
 
 ---
 
 ## 4. Carrier map
 
-Every row below is measured; nothing here is assumed.
+Every row is measured.
 
 | What the splice does | Mod carrier | Evidence |
 |---|---|---|
-| intercept before the tool runs | `on('tool.call')` | fires once per call; hook cost ~12 ms |
-| cancel the dispatch | return `{deny:"text"}` | arrives verbatim as `<tool_use_error>…</tool_use_error>`, `is_error: true`, `toolDenialKind: "permission-rule"`; the model acts on it |
-| "main loop only" (`agentType == "main"`) | `!("agentId" in e)` | `agentId` present ONLY on a subagent's call; positive control ran both cases in one session |
-| which agent, if not main | `$.agent.list()`, match `id` to `e.agentId` | element `{id, description, type, status}` — strictly more than the old `agentType` |
-| the dispatch's model and effort | `e` on `tool.call`, and `agent.spawn` | `agent.spawn` carries `subagentType, model, parentModel, provider{plugin,tier}, permissionMode, background, fork` |
-| the current turn (injection 21) | `e` on `tool.call` IS that turn | injection 21 becomes unnecessary — one splice retired outright |
-| the consultation | `$.model.complete({model, prompt})` | our proxy ids pass: `deepseek-flash`, `glm-5.3`, `claude-opus-5` → ok; invented id → HTTP 400 |
-| the transcript | `await $.session.messages()` | returns a PROMISE; awaited it is the WHOLE conversation, growing 3 → 5 → 7 across three sequential calls — see §4a |
-| the journal | `$.fs.write` | lives on 2.1.267, absent on 2.1.265 — see §6 |
-| the rule in the system prompt (splice 26) | `on('prompt.section')` | rewrite proven live, both return forms |
-| the switch, settings layers | `$.settings.read`, module scope, `$.store` | module runs in a separate worker: `globalThis.process` is undefined, so env reading goes through the host's own verb |
+| intercept before the tool runs | `on("tool.call")` | fires once per call |
+| cancel the dispatch | return `{deny:"text"}` | `<tool_use_error>`, `toolDenialKind=permission-rule` |
+| main loop only | `!("agentId" in e)` | `agentId` only on a subagent's call |
+| Agent / Task only | `e.tool === "Agent" \|\| e.tool === "Task"` | same gate as the splice (`$2.name`) |
+| which agent | `e.subagent_type`; `$.agent.list()` if needed | spawn also carries `model, parentModel` |
+| consultation | detached `$.model.complete({model, prompt})` | proxy ids pass; invented id → HTTP 400; after deny: p8 1706 ms ALLOW |
+| transcript | `await $.session.messages()` | Promise; whole conversation; `"toolResults" in m` |
+| journal | `$.fs.write` one file per record | overwrite, no append; concurrent hooks race a shared file |
+| switch, home | `$.env.get("CLAUDE_JUDGE")` etc. as a **string literal** | scan lists the names; object form is rejected |
+| rule in the system prompt | `on("prompt.section")` | both return forms proven (`ZQA`/`ZQB`) |
+| extra methods | `on("engine.create")` then `{...await next(e), noun:{ method(){} }}` | `$.zqprobe.ping()` = PONG in 0.7 ms; does not lift the budget |
 
-### 4a. Transcript fidelity — measured, and it carries provenance
+`e` on `tool.call` is FLAT (`e.input` is undefined). Read has `file_path`;
+Agent/Task have `prompt`, `subagent_type`, `model` on `e` itself.
 
-Measured 2026-09-11, probe `/tmp/t113-tx/probe`: one run, the main loop
-reading three fixture files in three separate steps, the transcript dumped
-at every `tool.call`.
+### 4a. Transcript fidelity
 
-**The verb returns a Promise.** `$.session.messages()` is thenable
-(`constructor.name === "Promise"`, own keys `[]`); unawaited, `.length` is
-undefined and `.map` throws. The first pass of this probe measured its own
-defect. Awaited, it yields an array.
-
-**It is the whole conversation, not a window.** Lengths across the three
-calls: 3 → 5 → 7 — two elements added per completed tool round. The earlier
-note "3 elements" was the length at the FIRST call of a short run, read as
-if it were a ceiling.
-
-**Provenance is present, and it is structural — by key presence, not by
-role.** Claude Code puts several different things under `user`, and §6 of
-the architecture records what a judge shown bare roles does with that. The
-carrier discriminates them anyway:
-
-| element | `role` | own keys |
-|---|---|---|
-| what the human typed | `user` | `role, text, toolUses` |
-| a tool RESULT | `user` | `role, text, toolUses, `**`toolResults`** |
-| the model's prose | `assistant` | `role, text, toolUses` |
-| the model's tool call | `assistant` | `role, text, toolUses` (text empty, `toolUses.length > 0`) |
-
-The predicate is `"toolResults" in m` — the same shape of finding as
-`agentId` on `tool.call`: an optional key that expresses a kind by its
-PRESENCE. The judge therefore reconstructs provenance without heuristics on
-text.
-
-**The substance of a result is not in `text`.** A tool-result element has
-`text` of length 0; the material rides the ASSISTANT element's `toolUses`
-entry, which gains `result` and `text` once the result arrives:
-
-```
-{id:"toolu_…", name:"Read", input:{file_path:"…/f1.txt"},
- result:{type:"text", file:{filePath:"…", content:"ZQ-FIXTURE-ONE-ALPHA\n",
-         numLines:2, startLine:1, totalLines:2}},
- text:"1\tZQ-FIXTURE-ONE-ALPHA\n2\t"}
-```
-
-**The call under judgment identifies itself.** The in-flight tool use — the
-one the hook was entered for — carries only `{id, name, input}`, with no
-`result`/`text` yet. Every completed call in the same transcript carries
-both. This is a free discriminator, and it is stronger than matching by
-`tool_use_id`.
-
-Residue, named rather than assumed closed: §6 lists FOUR things the `user`
-role conflates — human text, tool results, service insertions, letters from
-other sessions. This run discriminated TWO of them. Service insertions
-(`system-reminder`) and cross-session letters did not occur in it and remain
-UNMEASURED; the probe that closes them must provoke both deliberately.
-
-Retired by measurement: injection 21 (the turn accumulator) — the event
-already carries what the accumulator was built to stash.
+Measured `/tmp/t113-tx`. Awaited `$.session.messages()` is the whole
+conversation (3→5→7). Provenance is structural: a tool RESULT is `role
+user` plus the extra key `toolResults`; the substance of a result rides
+the assistant element's `toolUses[i].result`. Residue: service insertions
+and cross-session letters were not in that run.
 
 ---
 
 ## 5. What the carrier's form costs the port
 
-Four hard rules of the loader, each rejected by the validator otherwise:
-
-1. the event name must be a string LITERAL inside `on("...")`;
-2. `$` may not be indexed dynamically, nor reached through `?.`;
-3. `$.noun` may not be READ as a value — only call sites `$.noun.verb(...)`;
-4. a green `plugin validate` is compatible with a module that never
-   loaded: one stray event name breaks the construction of `$`
-   ("could not build $"), and — fail-closed — "its withholdings kept
-   while it is declared". Acceptance MUST read `hooks module … loaded`
-   from `--debug-file`, never the validator's exit alone.
-
-Consequence for the judge: **no dynamic dispatch anywhere**. The routing
-table cannot be walked as data into `$.noun[verb]` calls; it must be
-compiled into literal call sites, or kept as pure data consumed by code
-that itself performs no `$` lookups. Stage 0 is written so that the rule
-set stays DATA and only the fixed handful of `$` verbs appear literally.
-
-Two more shapes, measured, that the port must respect:
-
-* **`$.clock.sleep` counts MILLISECONDS** (`sleep(45)` returned in 46 ms).
-  The first ceiling measurement was vacuous because of this.
-* **Concurrent hooks are real**: two tools in one assistant message
-  produced simultaneous `tool.call` hooks. The judge may not assume
-  ordering, and shared state must tolerate interleaving.
-
-Free instrument, for every future measurement of this class: `-p ""`
-loads the module and the CLI errors before any model call — module-load
-and `$`-construction defects are found at zero token cost.
+1. Event name — string LITERAL in `on("...")`.
+2. `$` is not indexed dynamically, not reached through `?.`.
+3. `$.noun` is not READ as a value — only `$.noun.verb(...)`.
+4. A green `plugin validate` can coexist with a module that never loaded.
+   Acceptance reads `hooks module … loaded` and `$ built for …` from
+   `--debug-file`.
+5. `engine.create`: the value of `next(e)` must not be used in a
+   `BinaryExpression` and must not be passed as an argument.
+   Spread `{...await next(e), noun:{ ping(){} }}` is legal. An interface
+   is an object of **functions**, not `{owner, methods}`.
+6. `$.clock.sleep` is milliseconds.
+7. Two tools in one assistant message = concurrent hooks. `$.store` keys
+   are per `tool_use_id`; a shared key races (`/tmp/t113-full/p5-race`,
+   both empty in the same millisecond).
+8. `$.env.get("NAME")` — the name is a string literal so the scan can
+   list it.
 
 ---
 
 ## 6. The journal
 
-`$.fs.write` OVERWRITES; there is no append verb. A journal therefore
-becomes read-modify-write, and §5's concurrency makes that a race: two
-simultaneous `tool.call` hooks can each read the same file and the second
-write can drop the first record. Since the journal is the mechanism that
-makes a switched-off judge distinguishable from an approving one (§8 of
-the architecture), losing records silently would reintroduce exactly the
-defect the journal exists to close.
-
-Design: one file PER RECORD, named by timestamp plus a random suffix —
-the `records/` layout the judge already uses — and the index line
-rebuilt by the existing compaction tool rather than appended live. This
-removes the shared-file race entirely instead of guarding it.
-
-`$.ui.log` is the fallback carrier (it works on 2.1.265 too and lands in
-`--debug-file`), but it is a diagnostic, not a journal: it does not
-survive the session.
+`$.fs.write` overwrites. Design: one file per consultation,
+`~/.claude/probes/judge/records/mod-<tool_use_id>.json` (id is unique per attempt; the *verdict cache* is the dispatch digest). The splice's
+index line is not written by this carrier. Compaction of the splice
+journal does not yet see these files — that is a follow-up, not a reason
+to share a file.
 
 ---
 
-## 7. The budget patch (the one line that stays in the patch layer)
+## 7. The budget patch — CLOSED NEGATIVELY
 
-Locator, structural, from the measurement:
+There is no line in the patch layer that raises `budgetMs`. §1.5. The
+morning locator (`budgetMs:n=<NAME>`, `var <NAME>=1e4` → `3e5`) would
+edit inert text. Do not ship it. Do not keep a reserved slot for it.
 
-* `budgetMs:n=<NAME>` — the SINGLE default site;
-* `var <NAME>=1e4;` — the SINGLE declaration;
-* the name is platform-dependent (`b0e` on darwin, `dPe` on linux), so it
-  is READ FROM THE SITE and never pinned as a letter. This is the lesson
-  of #75 and #114 applied before the fact rather than after.
-
-Value, chosen by the controller against §1.2 and §1.3:
-
-* judge's own deadline (stage 1 cap): **240 000 ms** — covers p99
-  (193 713 ms); the ~1 % beyond it falls to stage 2, i.e. an explicit
-  refusal, never a silent pass;
-* host budget constant: **300 000 ms** — the deadline plus a 25 % margin,
-  so the host's abort is unreachable in correct operation.
-
-Declared cost, accepted with the decision: the limit is shared by every
-hook of the plugin tier, so a third-party mod could hold a call for that
-long. Mitigated by the fact that the plugin directory is ours and its
-contents are ours; not mitigated by the patch itself. Recorded here so
-that nobody rediscovers it as a surprise.
+`CLAUDE_JUDGE_CARRIER` is the only new patch surface, and it is a
+stand-down, not a budget change.
 
 ---
 
 ## 8. Acceptance
 
-A port is accepted only with all of these, each carrying its own control:
+A port is accepted only with all of these, each with its own control:
 
-1. `hooks module … loaded` present in `--debug-file` (not the validator's
-   exit) — the green-validator-dead-mod class of §5.4.
-2. **Positive control on the budget patch**: the 20 000 ms hook that today
-   loses its `{deny}` must, on the patched image, DELIVER it — same probe,
-   same prompt, the model reporting the refusal instead of the file's
-   first line.
-3. **Negative control on the same patch**: on an unpatched image the same
-   probe still loses the refusal. Without this the first control proves
-   only that the probe ran.
-4. **Our-deadline-fires-first**: a rung pinned to a dead address, deadline
-   set below the host budget; the outcome must be OUR `{deny}` with a
-   journal record, and the host must print no `exceeded … budget` line.
-5. Stage 0 denies with the rule set removed (rules UNKNOWN ⇒ deny), and
-   the refusal names the file — the three-outcome layer reader.
-6. `block` and `block_no_verdict` remain distinguishable in the journal.
-7. The refusal path is exercised deliberately, as §7 of the architecture
-   requires: names read by `catch` declared above the `try`, and a live
-   call against a dead address after any edit.
+1. `hooks module catalyst-judge loaded` and `$ built for catalyst-judge`
+   in `--debug-file`.
+2. Stage 0 filter: a `classes_skip` match calls `next(e)` (tool runs);
+   a class the judge list names is denied PENDING on the first call.
+3. PENDING is one ladder: a coached retry does not start a second
+   `$.model.complete` (`bgStarted === 1`).
+4. A BLOCK verdict on the retry is `{deny}` naming the reason; the
+   Agent/Task does not run.
+5. An OK verdict on the retry calls `next(e)`; the Agent/Task runs.
+6. The awaited hook never prints `exceeded 10000ms budget`.
+7. With `CLAUDE_JUDGE_CARRIER` unset, this module is inert and the splice
+   still judges (negative control on the stand-down).
+8. `block` and `block_no_verdict` (NONE) remain distinguishable in the
+   record file.
+9. No splice is deleted from `tweakcc-patch.js` until a live journal of
+   this carrier matches today's outcomes on the same traffic.
 
 ---
 
 ## 9. Open items — measure before relying
 
-* **Transcript fidelity: CLOSED positively** — see §4a. The whole
-  conversation is reachable, and provenance is carried structurally
-  (`"toolResults" in m`). Residue: service insertions and cross-session
-  letters were not present in the run and are still UNMEASURED — the two
-  remaining members of §6's list of four.
-* `$.store` persistence scope (per session? across sessions? size cap?)
-  — stage 2 depends on it.
+* Service insertions and cross-session letters in `$.session.messages()`
+  (two of the four `user`-role kinds in architecture §6).
+* `$.model.complete` with the *text* of the combat judge prompt (size is
+  measured; reasoning latency of that text in the detached verb is not).
+* Uncoached retry on opus/fable (measured on grok-4.6).
+* Background lifetime in an interactive session (measured killed under
+  `-p` when the process exits).
+* Project-layer `probes.toml` via `$.fs.ancestors` (v1 reads
+  `~/.claude/probes/probes.toml` and `.claude/probes/probes.toml`).
+* Compaction of `records/mod-*.json` into the existing journal index.
+* Pass-path `next(e)` is charged against the 10 s (smoke: Agent `next()` settled in 7189 ms). A subagent longer than 10 s may print `exceeded` on a hook that already decided OK. Whether the Agent still completes is UNMEASURED; fail-open on a pass is the tool running, which is the intended pass, but must be confirmed.
 * `next.signal` as a cancellation carrier: present, unexercised.
-* Whether `agent.spawn` alone can carry the whole gate, letting
-  `tool.call` handle only non-dispatch tools.
+* Flag `tengu_plugin_hooks_modules` is off by default; the env
+  `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` overrides. Vendor API may change.
 
 ---
 
 ## 10. What does NOT move
 
-The proxy contour stays a patch, by three controlled measurements
-(#116): core inference does not pass through `model.complete` (positive
-control: our own call did fire it); rewriting the input on `turn.start`
-does not change the answer; `turn.step` arrives with a finished answer.
-Splices 1, 2, 8, 9, 10, 11 and 19 therefore remain, and 19
-(broken-stream recovery) remains permanently — there is no own-stream
-form to move it to.
+The proxy contour stays a patch, by the three controls in §0. Splices 1,
+2, 8, 9, 10, 11 and 19 remain; 19 (broken-stream recovery) remains
+permanently — there is no own-stream form to move it to.
 
-And the reason this boundary is not merely tidy: `$.model.complete` is
-"one completion on the session's client". The judge in a mod inherits the
-client's lane — subscription for `claude-*`, proxy for everything else —
-ONLY while the routing splices keep shaping that client. Move them, and
-the judge's own consultations start billing at API prices.
+`$.model.complete` is "one completion on the session's client". The judge
+in a mod inherits the client's lane — subscription for `claude-*`, proxy
+for everything else — ONLY while those routing splices keep shaping that
+client.
+
+Form-probe and idle-watch still share `__ccProbe` in injection 22. They
+are not this port. The user's order was providers (stay a patch) and
+judges (this document) first.

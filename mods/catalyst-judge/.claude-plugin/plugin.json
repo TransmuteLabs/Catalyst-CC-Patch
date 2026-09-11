@@ -1,0 +1,5 @@
+{
+  "name": "catalyst-judge",
+  "version": "0.1.0",
+  "description": "Dispatch judge and system-prompt rule as a function-hooks module. Pair with CLAUDE_JUDGE_CARRIER=mod so the splice stands down."
+}

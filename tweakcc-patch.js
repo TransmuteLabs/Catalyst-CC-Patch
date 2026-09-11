@@ -2213,7 +2213,7 @@ step('21 current turn reachable at tool dispatch', () => {
   // core's declaration list, spelled out here because this site sits outside
   // the core function's scope.
   const stash =
-    '((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()?((globalThis.__ccJudgeTurn??=new Map()),' +
+    '((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()?((globalThis.__ccJudgeTurn??=new Map()),' +
     'globalThis.__ccJudgeTurn.set($5.id,$2.includes($3)?$2.slice():[...$2,$3]),' +
     'globalThis.__ccJudgeTurn.size>64&&(()=>{' +
     'let __k=globalThis.__ccJudgeTurn.keys().next().value;' +
@@ -3900,7 +3900,10 @@ step('22 judge consulted before a subagent dispatch', () => {
     // (каноническая форма -- __envon в списке деклараций ядра; здесь инлайн,
     // потому что место врезки вне области видимости ядра). Непустая строка
     // истинна, и CLAUDE_JUDGE=0 прежде ВКЛЮЧАЛ пробу.
-    'if((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()&&($2.name==="Agent"||$2.name==="Task")' +
+    // CONSTRAINT: CLAUDE_JUDGE_CARRIER=mod stands this splice down so the
+    // function-hooks carrier can own the judge without a double consultation.
+    // Unset (default) keeps the splice. The splice is not deleted.
+    'if((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()&&($2.name==="Agent"||$2.name==="Task")' +
       '&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Judge]",dirName:"judge",arm:!0,' +
@@ -4782,7 +4785,8 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
   // (каноническая форма __envon объявлена в ядре, сюда не видна).
   const insertion =
     ',...((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();' +
-    'return !(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")})()' +
+    'if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;' +
+    'let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()' +
     `&&${OPTS}?.agentContext?.agentType==="main"?` +
     '[' + JSON.stringify(RULE) + ']' +
     ':[])';
