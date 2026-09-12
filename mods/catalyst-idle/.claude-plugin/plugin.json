@@ -1,5 +1,0 @@
-{
-  "name": "catalyst-idle",
-  "version": "0.1.0",
-  "description": "Fleet idle watcher as a function-hooks module. Pair with CLAUDE_IDLE_CARRIER=mod. NUDGE via $.ui.toast (measured)."
-}

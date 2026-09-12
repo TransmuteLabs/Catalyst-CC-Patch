@@ -1,6 +1,11 @@
 # The probes registry — spec
 
-Status: **implementation not started**. Written 2026-08-24, after the basis
+Status: **implemented as the function-hooks engine** `catalyst-probes`
+in `TransmuteLabs/Catalyst` (2026-09-12). The module is the core;
+`[probe.<id>]` tables are the consultants. A new watcher is a table plus
+`prompt.md`, not a binary rebuild and not a new plugin. Built-in ids
+`judge` / `idle-watch` / `form` keep their live-toml behaviour when the
+registry keys (`on`/`act`/`rx`/`when`) are absent. Written 2026-08-24, after the basis
 underneath it had been verified by a live run (see "What has already been
 measured").
 

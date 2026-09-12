@@ -71,9 +71,8 @@ looks).
 
 ## The third consumer
 
-The list of consumers is currently baked into the image in two places, so a
-new watcher requires rebuilding the binary. The proposal to move the list into
-files is `docs/probe-registry-spec.md` (not accepted for implementation). The
-readiness criterion for that implementation: both current consumers are
-expressible in its vocabulary WITHOUT a behavior change, and the same bench
-scenarios pass without editing their expectations.
+The splice still bakes two consumers into the image. The function-hooks
+engine (`catalyst-probes@catalyst`) moves the list into `probes.toml`: a
+new consultant is a `[probe.<id>]` table plus `prompt.md`, not a rebuild
+and not a new plugin. Vocabulary: `docs/probe-registry-spec.md`. Built-in
+ids `judge` / `idle-watch` / `form` remain expressible without those keys.

@@ -6,6 +6,11 @@ Companion to `judge-architecture.md` (what the judge IS) and
 the judge BECOMES when its carrier changes from a binary splice to a
 function-hooks module, and what must NOT change with it.
 
+Live carrier (2026-09-12): one plugin `catalyst-probes@catalyst` in
+`TransmuteLabs/Catalyst` (`plugins/catalyst-probes/`). The module is the
+core; consultants are `[probe.<id>]` in `probes.toml`. The kit `mods/`
+directory is not the live install.
+
 Status: design, rewritten 2026-09-11 evening against the live measurements
 in `project_function_hooks_recon.md` (ПОЛНАЯ КАРТИНА ПОРТА) and the probes
 under `/tmp/t113-*` and `/tmp/t113-full/`. The  morning ratification

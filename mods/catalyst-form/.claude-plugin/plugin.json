@@ -1,5 +1,0 @@
-{
-  "name": "catalyst-form",
-  "version": "0.1.0",
-  "description": "Deterministic form probe as a function-hooks module. Pair with CLAUDE_FORM_CARRIER=mod so the splice stands down."
-}
