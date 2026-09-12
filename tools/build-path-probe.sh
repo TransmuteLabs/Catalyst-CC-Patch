@@ -167,9 +167,9 @@ CASES=abcdurxplkmn
 CASE_K_SCENARIOS=1; CASE_K_MUTATIONS=1
 CASE_L_SCENARIOS=4; CASE_L_MUTATIONS=4
 CASE_M_SCENARIOS=9; CASE_M_MUTATIONS=11
-CASE_N_SCENARIOS=77; CASE_N_MUTATIONS=84
-EXPECTED_SCENARIOS=91
-EXPECTED_MUTATIONS=100
+CASE_N_SCENARIOS=80; CASE_N_MUTATIONS=87
+EXPECTED_SCENARIOS=94
+EXPECTED_MUTATIONS=103
 if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS
       || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS )); then
   echo "build-path-probe: ОТКАЗ -- объявленная сумма разошлась со вкладами случаев:" >&2
@@ -1120,7 +1120,7 @@ row_five = "%s\t5\tизмерено\n" % VER
 
 
 def run(body, table, out_text, marker=VER, blind=False, off_decl=None, floor=None,
-        inert=None, origin=None):
+        inert=None, origin=None, knob=False):
     """off_decl/floor/inert: None -- сходящееся объявление, False -- файла нет
     вовсе, строка -- тело файла как есть.
 
@@ -1160,6 +1160,10 @@ def run(body, table, out_text, marker=VER, blind=False, off_decl=None, floor=Non
         marker_bytes = ("// Version: %s\n" % marker).encode() if marker else b"no version marker\n"
         img.write_bytes(b"\x00\x01binary\x00noise\x00" + marker_bytes + b"\x00tail\x00")
         env = "CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1\n" if blind else ""
+        # Выключатель слоя промтов -- вход ОСНАСТКИ, а не вывода форка: зуб
+        # подстановки держится ровно на расхождении «кит подставил ручку» и
+        # «форк объявился». Вывести его из вывода -- значит проверять нечего.
+        env += "TW_PROMPTS_KNOB=1\n" if knob else "TW_PROMPTS_KNOB=0\n"
         script = ("set -uo pipefail\n" + env
                   + "TWEAKCC_EXPECTED_APPLIED=%s\n" % shlex.quote(str(tf))
                   + "TWEAKCC_EXPECTED_INERT=%s\n" % shlex.quote(str(vf))
@@ -1191,6 +1195,17 @@ out_with_off = out_rows(12, 21, 1, off=2)
 # Накладка тоже умеет печататься кружком. Названа она НАРОЧНО как правка кода:
 # в множество выключенных правок КОДА она не входит по СЕКЦИИ, а не по имени.
 out_off_overlay = out_rows(12, 21, 1, off=2, extra_prompt=["○ patch o9"])
+
+# Слой промтов ВЫКЛЮЧЕН ручкой: форк печатает объявление ДО всякой работы, и
+# весь слой молчит -- накладок ноль во всех трёх счётах. Строка кладётся перед
+# выводом целиком, как её и печатает форк (объявление идёт из startupCheck, то
+# есть раньше применения правок).
+LAYER_OFF_LINE = ("System prompt layer DISABLED by TWEAKCC_NO_SYSTEM_PROMPTS"
+                  " (no snapshot download, no overlay patch)\n")
+out_layer_off = LAYER_OFF_LINE + out_rows(14, 0, 1)
+# То же объявление, а слой ВСЁ РАВНО работал: ручку услышала не всякая его
+# половина. Двусторонний зуб -- иначе объявление стало бы индульгенцией.
+out_layer_off_alive = LAYER_OFF_LINE + out_rows(14, 21, 1)
 
 SCEN = {
     # Сошлись оба слоя: 15 попыток кода (14 легло, один непроход) и 21 промт --
@@ -1669,6 +1684,26 @@ SCEN = {
                       and "объявление выключенных правок tweakcc для дома" in r.stderr
                       and "не найдено" in r.stderr
                       and "создан прогоном" not in r.stderr),
+    # ВЫКЛЮЧЕННЫЙ слой промтов. Объявление пола на месте и требует 21 -- то
+    # есть ветка обязана пол НЕ СПРАШИВАТЬ: спросит -- увидит просадку 21 -> 0
+    # и покрасит выключение, сделанное нарочно. Ручка при этом НЕ поднята:
+    # вывод с объявлением приходит и от оператора, задавшего её себе сам.
+    "N78": (row_here, out_layer_off, VER, False, None, None, None, None, False,
+            lambda r: r.returncode == 0
+                      and "слой ВЫКЛЮЧЕН ручкой" in r.stderr
+                      and "промтов 0" in r.stderr
+                      and "просел" not in r.stderr),
+    # Объявлено выключение, а накладки легли: двусторонний зуб.
+    "N79": (row_here, out_layer_off_alive, VER, False, None, None, None, None, False,
+            lambda r: r.returncode == 1
+                      and "ВЫКЛЮЧЕННЫМ, но слой работал" in r.stderr
+                      and "легло 21" in r.stderr),
+    # Кит подставил ручку, а форк не объявился: пин форка старше ручки, и его
+    # нули значат «слой отработал», а не «слой выключен».
+    "N80": (row_here, out_rows(14, 21, 1), VER, False, None, None, None, None, True,
+            lambda r: r.returncode == 1
+                      and "форк выключение НЕ ОБЪЯВИЛ" in r.stderr
+                      and "943beb9" in r.stderr),
 }
 ORDER = ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12",
          "N13", "N14", "N15", "N16", "N17", "N18", "N19", "N20", "N21", "N22",
@@ -1677,7 +1712,7 @@ ORDER = ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N1
          "N43", "N44", "N45", "N46", "N47", "N48", "N49", "N50", "N51", "N52",
          "N53", "N54", "N55", "N56", "N57", "N58", "N59", "N60", "N61", "N62",
          "N63", "N64", "N65", "N66", "N67", "N68", "N69", "N70", "N71", "N72",
-         "N73", "N74", "N75", "N76", "N77"]
+         "N73", "N74", "N75", "N76", "N77", "N78", "N79", "N80"]
 
 mutations = [
     ("N1-cross-counted",
@@ -1717,11 +1752,13 @@ mutations = [
     ("N8-floor-made-two-sided", "elif (( __prompts < __want_prompts )); then",
      "elif (( __prompts != __want_prompts )); then", "N8"),
     ("N9-nolayer-door-off",
-     "if (( __prompts > 0 || __nf > 0 || __pfail > 0 )); then", "if false; then", "N9"),
+     'if (( __prompts > 0 || __nf > 0 || __pfail > 0 )); then\n        echo "FATAL: на $__ver слой промтов объявлен отсутствующим',
+     'if false; then\n        echo "FATAL: на $__ver слой промтов объявлен отсутствующим', "N9"),
     # Маркер обязан ПРИНИМАТЬ настоящее отсутствие слоя: отказ на нуле сделал бы
     # объявление невыполнимым, и человеку осталось бы только стереть строку.
     ("N10-nolayer-refuses-zero",
-     "if (( __prompts > 0 || __nf > 0 || __pfail > 0 )); then", "if true; then", "N10"),
+     'if (( __prompts > 0 || __nf > 0 || __pfail > 0 )); then\n        echo "FATAL: на $__ver слой промтов объявлен отсутствующим',
+     'if true; then\n        echo "FATAL: на $__ver слой промтов объявлен отсутствующим', "N10"),
     ("N11-notfound-silent", 'echo "NOTE: накладок промтов не нашлось в образе:', 'true "', "N11"),
     ("N12-floor-validation-off", 'elif [[ ! "$__want_prompts" =~ ^[0-9]+$ ]]; then', "elif false; then", "N12"),
     # Якорь берётся ДВУМЯ строками И с отступом: тримом ключа заняты три
@@ -2000,6 +2037,21 @@ mutations = [
     ("N77-origin-emptiness-ignored",
      'if [[ -s "$TWEAKCC_HOME_ORIGIN" ]]; then',
      'if [[ -f "$TWEAKCC_HOME_ORIGIN" ]]; then', "N77"),
+    # Снять ветку выключенного слоя -- и выключение, сделанное нарочно, уходит
+    # в пол: объявленный 21 против измеренного 0 читается как регресс слоя.
+    ("N78-layer-off-branch-off",
+     'if (( __loff > 0 )); then\n    # Двусторонне',
+     'if false; then\n    # Двусторонне', "N78"),
+    # Сделать ветку ОДНОСТОРОННЕЙ -- и объявление форка становится
+    # индульгенцией: слой работает, а дверь молчит.
+    ("N79-layer-off-one-sided",
+     'if (( __prompts > 0 || __nf > 0 || __pfail > 0 )); then\n      echo "FATAL: на $__ver форк объявил',
+     'if false; then\n      echo "FATAL: на $__ver форк объявил', "N79"),
+    # Снять зуб подстановки -- и пин форка, не знающий ручки, отдаёт полный
+    # слой под видом выключенного.
+    ("N80-knob-tooth-off",
+     'if (( ${TW_PROMPTS_KNOB:-0} == 1 && __loff == 0 )); then',
+     'if false; then', "N80"),
 ]
 
 # ПРИЧИНА покраснения -- по одной на мутацию, приём корпусного стенда
@@ -2026,6 +2078,9 @@ CAUSE = {
     "N5-version-filter-off": ("нет: уровень tweakcc не объявлен", "сошёлся: код 15 попыток"),
     "N6-blind-knob-silent": "нет: дверь уровня tweakcc погашена",
     "N7-prompt-floor-off": "нет: слой промтов tweakcc просел",
+    "N78-layer-off-branch-off": "слой промтов tweakcc просел",
+    "N79-layer-off-one-sided": "нет: ВЫКЛЮЧЕННЫМ, но слой работал",
+    "N80-knob-tooth-off": "нет: форк выключение НЕ ОБЪЯВИЛ",
     "N8-floor-made-two-sided": "пол 21, легло 30",
     "N9-nolayer-door-off": "нет: слой промтов объявлен отсутствующим, но он ожил",
     "N10-nolayer-refuses-zero": "но он ожил: легло 0, не найдено 0, не легло 0",
@@ -2186,7 +2241,8 @@ def unpack(name):
     table, out_text, marker, blind, off_decl, floor = row[:6]
     vskip = row[6] if len(row) > 7 else None
     origin = row[7] if len(row) > 8 else None
-    return table, out_text, marker, blind, off_decl, floor, vskip, origin, row[-1]
+    knob = row[8] if len(row) > 9 else False
+    return table, out_text, marker, blind, off_decl, floor, vskip, origin, knob, row[-1]
 
 
 failed = 0
@@ -2194,8 +2250,8 @@ failed = 0
 # ОТСЮДА: второй прогон того же сценария ради причины удвоил бы стенд.
 base_evidence = {}
 for name in ORDER:
-    table, out_text, marker, blind, off_decl, floor, vskip, origin, predicate = unpack(name)
-    result = run(function, table, out_text, marker, blind, off_decl, floor, vskip, origin)
+    table, out_text, marker, blind, off_decl, floor, vskip, origin, knob, predicate = unpack(name)
+    result = run(function, table, out_text, marker, blind, off_decl, floor, vskip, origin, knob)
     miss = missing_home(result)
     if miss:
         print("  ОТКАЗ N: жертва зовёт то, чего в ней нет: %s" % miss)
@@ -2212,9 +2268,9 @@ for mutation, old, new, owner in mutations:
         failed += 1
         print("  FAIL   mutation %s anchor count=%s" % (mutation, function.count(old)))
         continue
-    table, out_text, marker, blind, off_decl, floor, vskip, origin, predicate = unpack(owner)
+    table, out_text, marker, blind, off_decl, floor, vskip, origin, knob, predicate = unpack(owner)
     result = run(function.replace(old, new, 1), table, out_text, marker, blind, off_decl,
-                 floor, vskip, origin)
+                 floor, vskip, origin, knob)
     miss = missing_home(result)
     if miss:
         print("  ОТКАЗ N: мутация %s -- жертва зовёт то, чего в ней нет: %s" % (mutation, miss))
@@ -2719,7 +2775,29 @@ run_pipeline() {  # <script> <bindir> <logfile> [аргументы конвей
   seed_version_mismatch
   # Люки конвейера снимаются на запуске: зонд обязан мерить КИТ, а не среду
   # оператора. Тот же список и то же основание, что у свипа (раунд 19, В-5).
-  ( PATH="$2:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  # Closed PATH so the recognizer sees EXACTLY one claude image (the case
+  # bindir). Inheriting the parent PATH fails that invariant: on a machine
+  # with a live install the pipeline exits 1, "2 different Claude Code
+  # images on PATH" (measured 2026-09-11 usbox after a naive inherit:
+  # bindir + ~/.local/share/claude/versions/2.1.267). The mac-centric
+  # closed list, though, dropped `tsc`, which on linux lives in
+  # ~/.npm-global/bin -- every real-build case then exited 6, a foreign
+  # cause that masked the subject. So the list stays closed AND the
+  # directory of parent-PATH `tsc` is prepended when the parent has one
+  # (and that directory itself contains no `claude`, or the recognizer
+  # would fire for the same reason as inherit).
+  tsc_dir=
+  tsc_path=$(command -v tsc) || tsc_path=
+  if [[ -n "$tsc_path" ]]; then
+    tsc_dir="${tsc_path%/*}"
+    if [[ -e "$tsc_dir/claude" || -e "$tsc_dir/claude.exe" ]]; then
+      echo "build-path-probe: directory of tsc also contains claude: $tsc_dir" >&2
+      tsc_dir=
+    else
+      tsc_dir="$tsc_dir:"
+    fi
+  fi
+  ( PATH="$2:${tsc_dir}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES= CLAUDE_PATCH_SKIP_BENCH= \
     CLAUDE_PATCH_GATE_BUDGET= CLAUDE_PATCH_SIGN_ID= TWEAKCC_LOCAL= \
     CATALYST_TWEAKCC_REPO= CATALYST_TWEAKCC_SHA= \
