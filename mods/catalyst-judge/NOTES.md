@@ -106,10 +106,12 @@ no `PWD`:
 
 ## Journal index
 
-Detached read-modify-write of `journal.jsonl` (overwrite, no append verb).
-`judge/compact.py fold_mod_records` inserts any `mod-*.json` whose `rec`
-is missing. Isolated wipe → fold restored 2 skip lines; second pass added 0.
-Launchd `com.maratkarimov.judge-compact` runs `~/.claude/judge/compact.py`.
+`$.fs.write` overwrites. RMW of `journal.jsonl` replaced 6302 lines with
+one (2026-09-12, short/failed read of 5.7 MB). The hook writes
+`journal.jsonl.shard.<rec>` only. `compact.py fold_journal_shards` appends
+with Python `open(..., 'a')`; `fold_mod_records` still inserts missing
+`mod-*.json`. Launchd `com.maratkarimov.judge-compact` runs
+`~/.claude/judge/compact.py`.
 
 ## TOML-driven ladder, enforce, attach (staging, 2026-09-12)
 

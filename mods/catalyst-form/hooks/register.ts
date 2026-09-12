@@ -344,8 +344,13 @@ export function register(on: any) {
       return next(e)
     }
 
-    let cwd = ""
-    try { cwd = String(await $.store.get(CWD_KEY) || "") } catch (x) { cwd = "" }
+    let pwd: any = ""
+    try { pwd = await $.env.get("PWD") } catch (x) { pwd = "" }
+    // CONSTRAINT: $.store is shared across sessions. PWD first.
+    let cwd = String(pwd || "").trim()
+    if (!cwd) {
+      try { cwd = String(await $.store.get(CWD_KEY) || "") } catch (x) { cwd = "" }
+    }
 
     const evs: any[] = []
     const sk: string[] = []

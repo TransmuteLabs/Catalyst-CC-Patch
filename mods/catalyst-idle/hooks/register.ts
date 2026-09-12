@@ -72,6 +72,14 @@ export function register(on: any) {
     else if (configDirS) globalHome = configDirS + "/probes"
     else globalHome = homeS + "/.claude/probes"
 
+    let pwd: any = ""
+    try { pwd = await $.env.get("PWD") } catch (x) { pwd = "" }
+    let cwd = String(pwd || "").trim()
+    if (!cwd) {
+      try { cwd = String(await $.store.get(CWD_KEY) || "") } catch (x) { cwd = "" }
+    }
+    const lastKey = LAST_KEY + ":" + cwd.slice(-80)
+
     let live = 0
     try {
       const lst = await $.agent.list()
@@ -81,7 +89,7 @@ export function register(on: any) {
 
     const t0 = $.clock.now()
     let last: any = 0
-    try { last = Number(await $.store.get(LAST_KEY) || 0) } catch (x) { last = 0 }
+    try { last = Number(await $.store.get(lastKey) || 0) } catch (x) { last = 0 }
     const cooldownMs = 30 * 60 * 1000
     const toml = await readText($, globalHome + "/probes.toml")
     let cd = cooldownMs
@@ -90,7 +98,7 @@ export function register(on: any) {
       if (m) cd = parseInt(m[1], 10) * 60 * 1000
     }
     if (last && t0 - last < cd) return next(e)
-    try { await $.store.set(LAST_KEY, t0) } catch (x) {}
+    try { await $.store.set(lastKey, t0) } catch (x) {}
 
     ;(async () => {
       const rec: any = { t0, tool, live, carrier: "mod" }

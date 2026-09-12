@@ -232,7 +232,7 @@ Every row is measured.
 | which agent | `e.subagent_type`; `$.agent.list()` if needed | spawn also carries `model, parentModel` |
 | consultation | detached `$.model.complete({model, prompt})` | proxy ids pass; invented id → HTTP 400; after deny: p8 1706 ms ALLOW |
 | transcript | `await $.session.messages()` | Promise; whole conversation; `"toolResults" in m` |
-| journal | unique `records/mod-*.json` + rmw of `journal.jsonl`; `compact.py` folds misses | overwrite, no append; rmw can lose a concurrent line; fold is idempotent |
+| journal | unique `records/mod-*.json` + `journal.jsonl.shard.<rec>`; `compact.py` `fold_journal_shards` | `$.fs.write` overwrites; RMW of the combined jsonl replaced 6302 lines with one (2026-09-12). Never RMW the index. |
 | switch, home | `$.env.get("CLAUDE_JUDGE")` etc. as a **string literal** | scan lists the names; object form is rejected |
 | rule in the system prompt | `on("prompt.section")` | both return forms proven (`ZQA`/`ZQB`) |
 | extra methods | `on("engine.create")` then `{...await next(e), noun:{ method(){} }}` | `$.zqprobe.ping()` = PONG in 0.7 ms; does not lift the budget |
@@ -277,14 +277,15 @@ and cross-session letters were not in that run.
 
 * one file per consultation, `records/mod-<tool_use_id>.json` (id is unique
   per attempt; the *verdict cache* is the dispatch digest);
-* an index line in `journal.jsonl` via read-modify-write, detached so it
-  is not charged against the 10 s budget. Two concurrent hooks can lose a
-  line (measured: two tools in one assistant message). The unique record
-  files are the source of truth.
-* `judge/compact.py` folds any `mod-*.json` whose `rec` is not yet in the
-  index (idempotent; nightly launchd already runs this file). Measured:
-  wipe of a two-line isolated journal → fold restored both skip lines;
-  a second pass added 0.
+* an index line as a unique sibling `journal.jsonl.shard.<rec>` (one
+  line). `$.fs.write` overwrites the whole path; RMW of `journal.jsonl`
+  is fail-open on a short/failed read (measured 2026-09-12: 6302 lines /
+  5.7 MB replaced with one). Unique record files remain the source of
+  truth.
+* `judge/compact.py` `fold_journal_shards` appends those siblings with
+  Python `open(..., 'a')` and deletes the shard after read-back;
+  `fold_mod_records` still inserts any `mod-*.json` whose `rec` is not
+  yet in the index (idempotent; nightly launchd).
 
 The home of the files is the probe home: `CLAUDE_PROBES_DIR`, else
 `CLAUDE_CONFIG_DIR/probes`, else `~/.claude/probes` (same ladder as the

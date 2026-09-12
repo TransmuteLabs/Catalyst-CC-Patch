@@ -6,7 +6,8 @@
 // session.start's e.cwd, stashed in $.store; fallback is relative $.fs.read
 // against the host cwd. $.fs.ancestors rejects non-.md names.
 // CONSTRAINT: $.fs.write overwrites. Unique records/mod-*.json are durable;
-// journal.jsonl is a detached read-modify-write; compact.py folds races.
+// journal.jsonl is never RMW'd (short read replaced 6302 lines, 2026-09-12).
+// Index line → journal.jsonl.shard.<rec>; compact.py fold_journal_shards.
 
 const PENDING_MSG =
   "Adjudication is in progress for this dispatch. Wait a moment and repeat the SAME Agent/Task call unchanged. An unchanged retry is how the review completes. Do not switch to Bash or another tool."
@@ -324,9 +325,12 @@ export function register(on: any) {
     const globalTomlR = await readText($, globalHome + "/probes.toml")
     const globalCfg = flattenJudge(parseToml(globalTomlR.text || ""))
 
-    let cwd = ""
-    try { cwd = String(await $.store.get(CWD_KEY) || "") } catch (x) { cwd = "" }
-    if (!cwd) cwd = String(pwd || "")
+    // CONSTRAINT: $.store is per-plugin across sessions. Another session's
+    // session.start overwrites CWD_KEY. PWD first; store only if PWD is empty.
+    let cwd = String(pwd || "").trim()
+    if (!cwd) {
+      try { cwd = String(await $.store.get(CWD_KEY) || "") } catch (x) { cwd = "" }
+    }
 
     let projectHome = ""
     let projectCfg: any = {}
