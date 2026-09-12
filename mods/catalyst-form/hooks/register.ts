@@ -252,12 +252,15 @@ function resolvePath(p: string, home: string, cwd: string): string {
 }
 
 async function appendJournal($: any, jpath: string, obj: any) {
-  const line = JSON.stringify(obj)
-  let prev = ""
-  try { prev = String(await $.fs.read(jpath) || "") } catch (x) { prev = "" }
-  let pfx = ""
-  if (prev.length > 0 && prev.charCodeAt(prev.length - 1) !== 10) pfx = "\n"
-  try { await $.fs.write(jpath, prev + pfx + line + "\n") } catch (x) {}
+  // CONSTRAINT: $.fs.write overwrites. Never RMW journal.jsonl (see judge).
+  const line = JSON.stringify(obj) + "\n"
+  const rec = String((obj && obj.rec) || ("t" + String($.clock.now())))
+  let safe = ""
+  for (let i = 0; i < rec.length; i++) {
+    const c = rec.charAt(i)
+    safe += /[A-Za-z0-9._-]/.test(c) ? c : "_"
+  }
+  try { await $.fs.write(jpath + ".shard." + safe, line) } catch (x) {}
 }
 
 function actOf(cfg: any, cls: string): string {

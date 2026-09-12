@@ -163,6 +163,110 @@ def fold_mod_records(journal_path, records_dir, dry_run=False):
           f'{" (dry-run)" if dry_run else ""}')
 
 
+def fold_journal_shards(journal_path, dry_run=False):
+    """Append unique sibling shards written by the function-hooks carrier.
+
+    The hook cannot append: $.fs.write overwrites. It writes
+    ``<journal.jsonl>.shard.<rec>`` (one line). This pass copies those
+    lines into journal.jsonl with open(..., 'a') and deletes the shard
+    after a read-back. Idempotent on rec-field / exact line.
+    """
+    added = skipped = unread = 0
+    d = os.path.dirname(os.path.abspath(journal_path)) or '.'
+    base = os.path.basename(journal_path)
+    prefix = base + '.shard.'
+    shards = []
+    try:
+        names = os.listdir(d)
+    except FileNotFoundError:
+        print('fold shards: каталога нет')
+        return
+    for name in names:
+        if name.startswith(prefix):
+            shards.append(os.path.join(d, name))
+    if not shards:
+        print('fold shards: нечего вкладывать')
+        return
+    seen_rec = set()
+    seen_line = set()
+    existing = ''
+    try:
+        with open(journal_path, encoding='utf-8') as fh:
+            existing = fh.read()
+    except FileNotFoundError:
+        existing = ''
+    for raw in existing.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        seen_line.add(s)
+        try:
+            obj = json.loads(s)
+        except json.JSONDecodeError:
+            continue
+        rec = obj.get('rec')
+        if isinstance(rec, str):
+            seen_rec.add(rec)
+    new_lines = []
+    consumed = []
+    for path in sorted(shards):
+        try:
+            text = open(path, encoding='utf-8').read()
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError):
+            unread += 1
+            continue
+        local = []
+        dup = True
+        for raw in text.splitlines():
+            s = raw.strip()
+            if not s:
+                continue
+            try:
+                obj = json.loads(s)
+            except json.JSONDecodeError:
+                unread += 1
+                dup = False
+                continue
+            rec = obj.get('rec')
+            if s in seen_line or (isinstance(rec, str) and rec in seen_rec):
+                skipped += 1
+                continue
+            dup = False
+            local.append(s)
+            seen_line.add(s)
+            if isinstance(rec, str):
+                seen_rec.add(rec)
+            added += 1
+        if local:
+            new_lines.extend(local)
+        if not dup or local:
+            consumed.append(path)
+        elif dup:
+            consumed.append(path)
+    if new_lines and not dry_run:
+        pfx = ''
+        if existing and not existing.endswith('\n'):
+            pfx = '\n'
+        os.makedirs(os.path.dirname(journal_path) or '.', exist_ok=True)
+        with open(journal_path, 'a', encoding='utf-8') as fh:
+            fh.write(pfx + '\n'.join(new_lines) + '\n')
+        # read-back: the just-appended tail must contain every new line
+        with open(journal_path, encoding='utf-8') as fh:
+            got = set(x.strip() for x in fh.read().splitlines() if x.strip())
+        if not set(new_lines) <= got:
+            print('fold shards: read-back missed lines; shards kept')
+            consumed = []
+    if not dry_run:
+        for path in consumed:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+    print(f'fold shards: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
+          f'{" (dry-run)" if dry_run else ""}')
+
 
 
 def main():
@@ -189,6 +293,7 @@ def main():
 
     journal_path = os.path.join(os.path.expanduser(a.home), a.probe, 'journal.jsonl')
     fold_mod_records(journal_path, a.dir, dry_run=a.dry_run)
+    fold_journal_shards(journal_path, dry_run=a.dry_run)
 
 
     cutoff = time.time() - a.older_than_hours * 3600

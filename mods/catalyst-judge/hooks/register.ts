@@ -208,12 +208,18 @@ async function readText($: any, path: string): Promise<{ text: string | null; un
 }
 
 async function appendJournal($: any, jpath: string, obj: any) {
-  const line = JSON.stringify(obj)
-  let prev = ""
-  try { prev = String(await $.fs.read(jpath) || "") } catch (x) { prev = "" }
-  let pfx = ""
-  if (prev.length > 0 && prev.charCodeAt(prev.length - 1) !== 10) pfx = "\n"
-  try { await $.fs.write(jpath, prev + pfx + line + "\n") } catch (x) {
+  // CONSTRAINT: $.fs.write overwrites the whole path. RMW of journal.jsonl
+  // is fail-open on a short/failed read: a 5.7 MB index was replaced with
+  // one line (2026-09-12). Unique sibling; compact.py folds it in.
+  const line = JSON.stringify(obj) + "\n"
+  const rec = String((obj && obj.rec) || ("t" + String($.clock.now())))
+  let safe = ""
+  for (let i = 0; i < rec.length; i++) {
+    const c = rec.charAt(i)
+    safe += /[A-Za-z0-9._-]/.test(c) ? c : "_"
+  }
+  const shard = jpath + ".shard." + safe
+  try { await $.fs.write(shard, line) } catch (x) {
     try { $.ui.log("catalyst-judge journal: " + String(x).slice(0, 160)) } catch (y) {}
   }
 }
