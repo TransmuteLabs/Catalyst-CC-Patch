@@ -1,0 +1,24 @@
+{
+  "name": "catalyst-mods",
+  "description": "Catalyst function-hooks modules: dispatch judge, form probe, fleet idle watcher. Pair with CLAUDE_*_CARRIER=mod so the binary splices stand down.",
+  "owner": {
+    "name": "TransmuteLabs"
+  },
+  "plugins": [
+    {
+      "name": "catalyst-judge",
+      "source": "./catalyst-judge",
+      "description": "Dispatch judge and system-prompt rule as a function-hooks module."
+    },
+    {
+      "name": "catalyst-form",
+      "source": "./catalyst-form",
+      "description": "Deterministic form probe as a function-hooks module."
+    },
+    {
+      "name": "catalyst-idle",
+      "source": "./catalyst-idle",
+      "description": "Fleet idle watcher as a function-hooks module."
+    }
+  ]
+}

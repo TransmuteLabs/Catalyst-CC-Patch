@@ -5,22 +5,23 @@ Mod. Companion spec: `docs/judge-mod-port-spec.md`.
 
 ## Arming
 
-Both of these, together:
+Primary (persists, no `--plugin-dir`): marketplace `mods/.claude-plugin/marketplace.json`
+registered once (`claude plugin marketplace add --scope user <kit>/mods`), then
+`~/.claude/settings.json`:
 
 ```
-export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
-export CLAUDE_JUDGE=enforce          # same switch as the splice
-export CLAUDE_JUDGE_CARRIER=mod      # splice stands down; this module arms
+env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
+env.CLAUDE_JUDGE_CARRIER=mod
+enabledPlugins["catalyst-judge@catalyst-mods"]=true
 ```
 
-and load the plugin:
+`CLAUDE_JUDGE` stays the same switch as the splice (`enforce` / `1`). Without
+`CLAUDE_JUDGE_CARRIER=mod` the plugin is inert (pass-through) and the splice
+keeps judging. Without `CLAUDE_JUDGE` both carriers are off.
 
-```
-claude --plugin-dir /path/to/Catalyst-CC-Patch/mods/catalyst-judge ...
-```
-
-Without `CLAUDE_JUDGE_CARRIER=mod` the plugin is inert (pass-through) and
-the splice keeps judging. Without `CLAUDE_JUDGE` both carriers are off.
+`--plugin-dir` is session-only (`name@inline`). extraKnownMarketplaces in
+settings.json does not register the marketplace by itself — the add writes
+`plugins/known_marketplaces.json`. Fallback launcher: `scripts/claude-mods.sh`.
 
 Acceptance of a load is the debug line
 `hooks module catalyst-judge loaded (worker, environment 1, tier user)`

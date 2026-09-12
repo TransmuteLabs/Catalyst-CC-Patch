@@ -1,6 +1,11 @@
 #!/bin/bash
-# Claude Code + the three Catalyst function-hooks modules.
-# Does not write ~/.claude/settings.json and does not patch the live binary.
+# Session-only fallback: FUNCTION_HOOKS + CARRIER=mod + three --plugin-dir.
+# Primary path (measured on 2.1.267): ~/.claude/settings.json env +
+# extraKnownMarketplaces catalyst-mods (directory) + enabledPlugins
+# plugin-id@catalyst-mods. `claude plugin marketplace add --scope user`
+# writes known_marketplaces.json; extraKnownMarketplaces alone does not
+# register. This script does not write settings.json and does not patch
+# the live binary.
 set -euo pipefail
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
 pick_image() {
