@@ -286,7 +286,8 @@ export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 export CLAUDE_JUDGE_CARRIER=mod
 export CLAUDE_FORM_CARRIER=mod
 export CLAUDE_IDLE_CARRIER=mod
-# plus --plugin-dir for catalyst-judge, catalyst-form, catalyst-idle
+# or: bash scripts/claude-mods.sh
+# one plugin = one module (host check: a second hooks.json modules entry is refused)
 ```
 
 `CLAUDE_JUDGE_CARRIER` is in the patch source as of `4cb02a5`; a live
