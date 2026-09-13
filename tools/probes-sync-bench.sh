@@ -15,8 +15,8 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=7
-EXPECTED_MUTATIONS=8
+EXPECTED_SCENARIOS=8
+EXPECTED_MUTATIONS=9
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -28,7 +28,7 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8)
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -361,8 +361,40 @@ scenario_5() {
   fi
   ok '5 стадии: --diff не считает расхождением стадию живого писателя'
 }
+# Отказ сверки НАЗЫВАЕТ ОБА направления. Расхождение не говорит, чья сторона
+# верна, а команды чинки уничтожают работу каждая на своей стороне: совет,
+# знающий одно направление, ведёт читателя в потерю ровно в том случае, ради
+# которого объявлен `--from-home` (правка сделана в доме -- штатный случай для
+# промтов судьи). Сценарий строит именно его.
+scenario_8() {
+  local root script out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s8.XXXXXX")
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '8 направление отказа: исходная раскатка отказала'; return; }
+  printf 'правка, сделанная В ДОМЕ\n' > "$CLAUDE_PROBES_DIR/judge/prompt.md"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if (( rc != 1 )); then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "8 направление отказа: правка в доме обязана быть расхождением (1), получили $rc"
+    return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '8 направление отказа: назван не весь выбор -- совет уничтожил бы правку в доме'
+    return
+  fi
+  ok '8 отказ сверки называет оба направления и потерю каждого'
+}
+
 run_scenario() {
-  case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; 6) scenario_6 ;; 7) scenario_7 ;; 8) scenario_7 ;; *) return 2 ;; esac
+  case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; 6) scenario_6 ;; 7) scenario_7 ;; 8) scenario_7 ;; 9) scenario_8 ;; *) return 2 ;; esac
 }
 
 # Круг 25, E-3: тела heredoc'ов .sh-жертвы, поданные питону, по правилу гейта
@@ -539,6 +571,16 @@ elif number == 8:
     # не через зависание, а через проверку сироты.
     old, new = ('    : > "$release"\n    kill "$first_pid" 2>/dev/null\n',
                 '    kill "$first_pid" 2>/dev/null  # mutation: release withheld\n')
+elif number == 9:
+    # Отказ возвращается к ДОСЛОВНОЙ прежней редакции: одна строка, одно
+    # направление. Расхождение остаётся расхождением (код прежний), но выбора
+    # у читателя больше нет -- и совет уничтожает правку, сделанную в доме.
+    old = ('    echo "ИТОГ: расходится файлов: $DIFFERS$__also" >&2\n'
+           '    echo "  Направление НЕ выводится из расхождения -- решает человек:" >&2\n'
+           '    echo "    bash $0 --to-home     канон -> дом  (потеряет правки, сделанные В ДОМЕ)" >&2\n'
+           '    echo "    bash $0 --from-home   дом -> канон  (потеряет правки, сделанные В КАНОНЕ)" >&2\n'
+           '    echo "  Стороны: канон $ROOT, дом проб $PROBES_HOME, дом инструментов $TOOLS_HOME" >&2\n')
+    new = '    echo "ИТОГ: расходится файлов: $DIFFERS$__also (раскатать: bash $0 --to-home)" >&2\n'
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)
@@ -562,7 +604,7 @@ PY
 
 self_check() {
   local n root before reddened=0
-  for n in 1 2 3 4 5 6 7 8; do
+  for n in 1 2 3 4 5 6 7 8 9; do
     root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-mut.XXXXXX")
     mk_kit "$root/kit"
     if ! mutate "$root" "$n"; then rm -rf "$root"; return 2; fi
@@ -580,6 +622,7 @@ self_check() {
         6:*"rc=0"*) reddened=$((reddened + 1)); say '  ok     мутация 6 покраснила сценарий 6 своей причиной' ;;
         7:*"ПУТЬ_ОТКАЗА_ЗАВИС"*) reddened=$((reddened + 1)); say '  ok     мутация 7 покраснила сценарий 7 своей причиной' ;;
         8:*"СИРОТА_ЗАГЛУШКИ"*) reddened=$((reddened + 1)); say '  ok     мутация 8 покраснила сценарий 7 своей причиной' ;;
+        9:*"ОДНО_НАПРАВЛЕНИЕ"*) reddened=$((reddened + 1)); say '  ok     мутация 9 покраснила сценарий 8 своей причиной' ;;
         *) say "  ПРОВАЛ мутация $n покраснила чужой причиной: $LAST_EVID" ;;
       esac
       FAILED=$before
@@ -595,7 +638,7 @@ self_check() {
 case "${1:-}" in
   '')
     check_mut_tables || exit 4
-    scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6; scenario_7
+    scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6; scenario_7; scenario_8
     say "probes-sync-bench: ИТОГ сценариев=$RUN расхождений=$FAILED"
     [[ $RUN -eq $EXPECTED_SCENARIOS ]] || exit 4
     [[ $FAILED -eq 0 ]] || exit 1
