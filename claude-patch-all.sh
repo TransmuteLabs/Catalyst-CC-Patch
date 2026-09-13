@@ -5088,6 +5088,69 @@ d = open(sys.argv[1], 'rb').read()
 src = open(sys.argv[2], encoding='utf-8').read()
 ID = rb'[A-Za-z_$][\w$]*'
 
+
+def SWITCH(env, empty_off=True):
+    """The typed on/off reader of one probe consumer, as a regexp.
+
+    CONSTRAINT: one home for a shape that five checks read. Before this builder
+    each of them carried its own hand-written copy, and the carrier split
+    (CLAUDE_*_CARRIER=mod stands a splice down) updated only some of them: the
+    stragglers went on pinning a form that exists in NO image, so they could not
+    RISE -- the mirror of a check that cannot fall, and just as silent. A check
+    that is red on every payload says nothing about any of them.
+
+    Two parameters, because the shape genuinely has two variants and the
+    difference is load-bearing: the judge and the watcher are OFF unless their
+    variable is set, the form probe is ON unless it is turned off, so the form
+    probe's reader lacks the `__s===""||` disjunct. That absence is what keeps
+    the three readers from matching each other, and every caller relies on it.
+    """
+    empty = rb'__s===""\|\|' if empty_off else rb''
+    return (rb'\(\(\)=>\{let __s=String\(process\.env\.' + env + rb'\?\?""\)'
+            rb'\.trim\(\)\.toLowerCase\(\);'
+            rb'if\(' + empty + rb'__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)'
+            rb'return !1;'
+            rb'let __c=String\(process\.env\.' + env + rb'_CARRIER\?\?""\)'
+            rb'\.trim\(\)\.toLowerCase\(\);return __c!=="mod"\}\)\(\)')
+
+
+# Апстримовый отказ, который несёт ТОЛЬКО форма-фабрика инструмента диспатча:
+# с 2.1.269 инструмент строит `create()`, чей внутренний `call` отказывает без
+# движка, а тело запуска отдано этому движку ЗНАЧЕНИЕМ. Измерено на четырёх
+# образах окна: 0 вхождений на 2.1.267/268 (форма метода), 4 на 2.1.269/270.
+#
+# CONSTRAINT: форма решает, чем связан `this` на месте врезки, и тем самым --
+# можно ли судье вообще проверять имя инструмента в рантайме. На форме-фабрике
+# `this` принадлежит движку, и такая проверка не страж, а отмена каждого
+# диспатча. Этот читатель НЕЗАВИСИМ от того, как форму выбирает сам патч (он
+# идёт от головы над якорем глубины): два пути к одному ответу, и сборка, где
+# они расходятся, краснеет вместо тихого согласия с любой врезкой.
+FACTORY_MARK = b'launching needs the executor (call.runEngine)'
+
+
+def _is_factory_shape(d):
+    return FACTORY_MARK in d
+
+
+def _judge_gate_matches_shape(d):
+    """Гейт судьи -- с тем пунктом личности, который РАЗРЕШАЕТ форма, и никаким другим.
+
+    Пункт личности (`X.name==="Agent"||X.name==="Task"`) -- страж ровно на
+    формах-методах, где `this` и есть инструмент. На форме-фабрике он читает
+    `this` движка: гейт стоит ВНЕ try/catch пробы, поэтому чтение либо бросает
+    на каждом диспатче, либо тихо даёт ложь, и судья не работает вовсе.
+    Поэтому проверка двусторонняя и обе стороны краснеют:
+      * форма метода без пункта -- гейт стал шире, чем задумано;
+      * форма-фабрика С пунктом -- вернулся живой дефект 2.1.269/270.
+    """
+    ident = (rb'\(' + ID + rb'\.name==="Agent"\|\|' + ID + rb'\.name==="Task"\)&&')
+    return bool(re.search(
+        rb'if\(' + SWITCH(b'CLAUDE_JUDGE') + rb'&&'
+        + (rb'' if _is_factory_shape(d) else ident)
+        + ID + rb'\?\.agentContext\?\.agentType==="main"\)'
+        rb'await globalThis\.__ccProbe\(\{', d))
+
+
 def _same_env_helper(d):
     # The two edited sites live megabytes apart, so sameness cannot be asserted
     # with one backreference: name the helper at the gate, then look for that
@@ -5213,28 +5276,32 @@ def _effort_binding_reaches_the_launch(d):
     is the same shape that cost the watcher its journal line one scope over,
     and nothing asserted it here.
 
+    Re-grounded 13.09. The previous form pinned two WRITTEN heads of the
+    handler -- `async call(__ccIn` and `async call(X…){let __ccEffort=X.effort;`.
+    Patch 12 no longer emits a separate statement (it binds inside the pattern
+    the body already destructures), and since 2.1.269 the launch body is not a
+    method at all, so both heads matched ZERO images of the window: the check
+    could not RISE, which is the same as printing nothing. What is asserted now
+    is the guarantee itself and nothing about the spelling of the head -- walk
+    from the binding to the read and prove the scope never CLOSED in between.
+    Nesting is allowed (a closure sees the name); leaving is not.
+
     Measured, not argued: string literals are blanked first, so a brace inside
-    a message cannot close a function that is still open.
+    a message cannot close a scope that is still open.
     """
-    # Начало области -- голова обработчика в той форме, которую несёт образ:
-    # переименованный параметр (<=2.1.259) либо привязка усилия отдельным
-    # оператором в теле (2.1.260+). Ровно одна форма, иначе неизвестно, чью
-    # область мерим.
-    heads = [mm.start() for mm in re.finditer(rb'async call\(__ccIn', d)]
-    if not heads:
-        heads = [mm.start() for mm in
-                 re.finditer(rb'async call\(' + ID + rb'[^)]*\)\{let __ccEffort=' + ID
-                             + rb'\.effort;', d)]
-    if len(heads) != 1:
+    binds = [mm.end() for mm in re.finditer(rb'effort:__ccEffort', d)]
+    uses = [mm.start() for mm in re.finditer(rb'__ccRaw=typeof __ccEffort', d)]
+    if len(binds) != 1 or len(uses) != 1 or binds[0] >= uses[0]:
         return False
-    start = heads[0]
-    use = d.find(b'__ccRaw=typeof __ccEffort')
-    if use < 0 or use < start:
+    # Обход начинается ЗА закрывающей скобкой самого образца: связывание --
+    # свойство в деструктурирующем образце, и его собственная `}` о видимости
+    # не говорит ничего. Заведи апстрим вложенный образец ПОСЛЕ нашего
+    # свойства -- обход стартует скобкой раньше и уйдёт в минус: красное, а не
+    # молчаливое согласие.
+    close = d.find(b'}', binds[0])
+    if close < 0 or close >= uses[0]:
         return False
-    body = d.find(b'{', d.find(b')', start))
-    if body < 0 or body > use:
-        return False
-    region = d[body:use]
+    region = d[close + 1:uses[0]]
     for pat in (rb'"(?:[^"\\\n]|\\.)*"', rb"'(?:[^'\\\n]|\\.)*'", rb'`(?:[^`\\]|\\.)*`'):
         region = re.sub(
             pat,
@@ -5247,9 +5314,9 @@ def _effort_binding_reaches_the_launch(d):
             depth += 1
         elif ch == b'}':
             depth -= 1
-            if depth == 0:
+            if depth < 0:
                 return False
-    return depth > 0
+    return True
 
 def _strip_strings(b):
     # Same length, no punctuation carried over from inside a literal: the walk
@@ -5383,7 +5450,31 @@ def _escaped_interpolations(src):
     # pattern that cannot match. So siteName counts for js.replace and never for
     # new RegExp.
     refused = set(re.findall(r'const (\w+) = siteName\(', src))
-    names = _captured_names(src)
+    # ИМЕНА ВИДНЫ ПО ОБЛАСТИ, а не по всему файлу. Патч устроен как ряд
+    # верхнеуровневых `step('N …', () => { … })`, и `const` внутри одного шага
+    # невидим другому -- это разные стрелочные функции. Прежняя редакция
+    # держала файл одним пространством имён, и однобуквенный локал правки 12
+    # (`const t = mm[0]`) отравлял постороннее `${t}` в тексте ОТКАЗА правки 22:
+    # ложная тревога на месте, где опасности нет вовсе. Ложная тревога здесь
+    # громкая, а не тихая, но она требует правки исходника, которая ничего не
+    # чинит -- то есть учит не доверять проверке.
+    spans = []
+    for mm0 in re.finditer(r"^step\('", src, re.M):
+        nxt = re.search(r"^step\('", src[mm0.end():], re.M)
+        spans.append((mm0.start(), mm0.end() + nxt.start() if nxt else len(src)))
+    outside = src
+    for a, b in reversed(spans):
+        outside = outside[:a] + outside[b:]
+    module_names = _captured_names(outside)
+    span_names = [(a, b, _captured_names(src[a:b])) for a, b in spans]
+
+    def visible(pos):
+        """Captured names in scope at this position: module level plus one step."""
+        for a, b, n in span_names:
+            if a <= pos < b:
+                return module_names | n
+        return module_names
+
     bad = []
 
     # `.replace(pattern, replacement)` has TWO slots with OPPOSITE rules, and
@@ -5421,6 +5512,13 @@ def _escaped_interpolations(src):
             cur.append(ch); i2 += 1
         return out
 
+    # Стрелка или `function` в слоте замены. У ФУНКЦИИ-заменителя нет
+    # `$`-синтаксиса вовсе: подстановкой служит её возвращаемое значение, а
+    # `$1`/`$&` внутри неё -- обычные символы. Прежняя редакция считала этот
+    # слот опасным, и имя, подставленное в текст ОТКАЗА внутри колбэка,
+    # читалось как живая ссылка на группу.
+    FN = re.compile(r'\s*(?:function\b|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>)')
+
     def slots(call_pos, kind):
         """Which argument slots of this call are dangerous for a bare name."""
         a = args_at(call_pos)
@@ -5431,15 +5529,18 @@ def _escaped_interpolations(src):
         pat = a[0].lstrip()
         # A literal-string pattern is a verbatim search: safe slot.
         literal = pat[:1] in ('`', '"', "'")
-        return (a[1:2] if literal else a[:2])
+        rep = a[1:2]
+        if rep and FN.match(rep[0]):
+            rep = []
+        return rep if literal else (a[:1] + rep)
 
     for m in re.finditer(r'new RegExp\s*\(', src):
         for slot in slots(m.end() - 1, 'regexp'):
-            bad += [x for x in names if '${%s}' % x in slot]
+            bad += [x for x in visible(m.start()) if '${%s}' % x in slot]
 
     for m in re.finditer(r'\.replace\s*\(', src):
         for slot in slots(m.end() - 1, 'replace'):
-            bad += [x for x in names if '${%s}' % x in slot and x not in refused]
+            bad += [x for x in visible(m.start()) if '${%s}' % x in slot and x not in refused]
 
     return not bad
 
@@ -5455,10 +5556,61 @@ def _judge_both_shapes(src):
     # `hii(e).execute(w,ctx,…)`, where `hii(e) = e.executor ?? {execute:…}`.
     # The judge locator must hold BOTH shapes and latch onto the tool itself,
     # not the wrapper: the tool has `.name`, the adapter does not.
+    # Перезаземлено 13.09. Прежняя редакция пинила ТРИ ЛИТЕРАЛА блока:
+    # `\\.call|`, `\\)\\.execute` и `m[2] ?? m[3]`. Локатор переписан в одну
+    # альтернацию `(?:call|execute)`, а переменная совпадения переименована с
+    # `m` на `head` -- все три литерала отсутствовали, и проверка краснела на
+    # сборке, где обе формы как раз СОХРАНЕНЫ: подняться она не могла.
+    # Утверждается ПОВЕДЕНИЕ: собственный исходник локатора поднимается из
+    # блока и ГОНЯЕТСЯ по двум синтетическим головам -- по одной на форму --
+    # плюс отрицательный контроль.
     i = src.find("step('22 judge consulted")
     j = src.find("step('23", i)
     blk = src[i:j] if i >= 0 and j > i else ''
-    return (r'\\.call|' in blk) and (r'\\)\\.execute' in blk) and ('m[2] ?? m[3]' in blk)
+    if not blk:
+        return False
+    mm = re.search(r'`([^`]*\(\?:call\|execute\)[^`]*)`', blk)
+    idm = re.search(r"const ID = '([^']*)'", src)
+    if not mm or not idm:
+        return False
+    # Шаблон -- исходник JS: `${ID}` там единственная подстановка, а `\\.` --
+    # один обратный слэш в строке, которую видит конструктор RegExp. Поэтому
+    # подстановка делается ДО снятия экранирования, а не после.
+    try:
+        rx = re.compile(mm.group(1).replace('${ID}', idm.group(1)).replace('\\\\', '\\'))
+    except re.error:
+        return False
+    direct = rx.search('qn=await e.call')
+    adapter = rx.search('qn=await hii(e).execute')
+    if not direct or not adapter:
+        return False
+    # Приёмник -- ИНСТРУМЕНТ, а не переходник: наблюдатель читает с него
+    # `.name`, которого у `hii(e)` нет. Какая из двух альтернатив сработала,
+    # видно по тому, в какой группе оказалось имя.
+    if (direct.group(2), direct.group(3)) != ('e', None):
+        return False
+    if (adapter.group(2), adapter.group(3)) != (None, 'e'):
+        return False
+    if rx.search('qn=await e.foo'):
+        return False
+    # ...и блок берёт ту альтернативу, которая совпала. Написания переменных
+    # свободны -- они ВЫЛАВЛИВАЮТСЯ: сперва имя скомпилированного локатора (по
+    # месту найденного шаблона), затем имя его совпадения, и только потом
+    # требуется соединение `[2] ?? [3]` ИМЕННО этого совпадения.
+    # Свободная форма `X[2] ?? Y[3]` тут не годится: первая её редакция
+    # зеленела на постороннем `__m[1]??__m[2]??__m[3]??""` внутри текста пробы,
+    # то есть проверка не могла УПАСТЬ на своём же предмете (измерено зубом
+    # «локатор не берёт совпавшую альтернативу»).
+    rxv = re.search(r'(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new RegExp\s*\(\s*$',
+                    blk[:mm.start()])
+    if not rxv:
+        return False
+    hit = re.search(r'(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*'
+                    + re.escape(rxv.group(1)) + r'\.exec\(', blk)
+    if not hit:
+        return False
+    h = re.escape(hit.group(1))
+    return bool(re.search(h + r'\[2\]\s*\?\?\s*' + h + r'\[3\]', blk))
 
 def _session_memory_ungated(d):
     """Both session-memory gates are gone, checked WITHOUT naming the flags.
@@ -5489,13 +5641,28 @@ def _session_memory_ungated(d):
     window = d[at:at + 8000]
     if re.search(rb'if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)\s*return[^;]*;', window):
         return False
-    predicate = (rb'function ' + ID + rb'\(\)\{if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)return!1;'
-                 rb'return!' + ID + rb'\(\)\|\|' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\}')
-    if re.search(predicate, d):
+    # Вторая половина -- предикат режима. Прежняя редакция требовала тело из
+    # ОДНОГО return («forced») и отдельно искала гейтованную форму тем же
+    # однострочным написанием. С 2.1.269 апстрим держит в этом теле ещё и
+    # ранний возврат (`function X(){if(Y()!==null)return!0;return!Z()||…}`),
+    # поэтому «forced» не совпадал НИКОГДА, а «gated» -- тем более: одна
+    # половина не могла подняться, вторая не могла упасть, и обе печатались как
+    # работающие. Утверждается ГАРАНТИЯ: хвост-«keep» на месте и единственный, и
+    # между головой его функции и им НЕТ флагового гарда. Ранние возвраты
+    # апстрима допускаются -- они не про наш флаг, и правка 7 их не трогает.
+    # Измерено на 2.1.267/268/269/270: форма «keep» -- ровно 1 вхождение на
+    # каждом, от головы до неё 15 (267) и 24 (270) байта.
+    keeps = list(re.finditer(rb'return!' + ID + rb'\(\)\|\|' + ID
+                             + rb'\("tengu_[a-z0-9_]+",!1\)\}', d))
+    if len(keeps) != 1:
         return False
-    forced = (rb'function ' + ID + rb'\(\)\{return!' + ID + rb'\(\)\|\|'
-              + ID + rb'\("tengu_[a-z0-9_]+",!1\)\}')
-    return len(re.findall(forced, d)) == 1
+    at_keep = keeps[0].start()
+    back = d[max(0, at_keep - 400):at_keep]
+    heads = list(re.finditer(rb'function ' + ID + rb'\(\)\{', back))
+    if not heads:
+        return False
+    body = back[heads[-1].end():]
+    return not re.search(rb'if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)return!1;', body)
 
 
 def _stream_finalize_ok(d):
@@ -5740,17 +5907,11 @@ def _judge_rides_the_tool(d):
     # типизированному выключателю (сырая истинность строки ушла вместе с
     # `CLAUDE_JUDGE=0`); наблюдатель несёт такой же читатель для
     # CLAUDE_IDLE -- в блоке судьи его нет, и наоборот.
-    JUDGE = (rb'String\(process\.env\.CLAUDE_JUDGE\?\?""\)\.trim\(\)\.toLowerCase\(\);'
-             rb'if\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)return !1;'
-             rb'let __c=String\(process\.env\.CLAUDE_JUDGE_CARRIER\?\?""\)\.trim\(\)\.toLowerCase\(\);'
-             rb'return __c!=="mod"\}\)\(\)')
+    JUDGE = SWITCH(b'CLAUDE_JUDGE')
     WATCH = rb'globalThis\.__ccFleet\?\?=\[\];'
     # The form probe's switch INVERTS the empty case (unset means ON), so its
     # reader lacks the `__s===""||` disjunct and cannot match the judge's.
-    FORM = (rb'String\(process\.env\.CLAUDE_FORM\?\?""\)\.trim\(\)\.toLowerCase\(\);'
-            rb'if\(__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)return !1;'
-            rb'let __c=String\(process\.env\.CLAUDE_FORM_CARRIER\?\?""\)\.trim\(\)\.toLowerCase\(\);'
-            rb'return __c!=="mod"\}\)\(\)')
+    FORM = SWITCH(b'CLAUDE_FORM', empty_off=False)
     judge_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
                    if re.search(JUDGE, d[c:e])]
     watch_sites = [i for i, (c, e) in enumerate(zip(core_end, ends))
@@ -5761,28 +5922,59 @@ def _judge_rides_the_tool(d):
             or len({judge_sites[0], watch_sites[0], form_sites[0]}) != 3:
         return False
 
-    # The judge's home: the tool's own call, with the pattern re-bound in the
-    # body and `this` as the tool.
+    # Дом судьи -- собственное тело запуска инструмента диспатча, в той форме,
+    # которую несёт образ. Имена входа и контекста берутся ИЗ САМОЙ ГОЛОВЫ, а
+    # не предполагаются: ниже ими проверяется `input:`/`ctx:` в блоке.
+    #
+    # Прежняя редакция этого места пинила ДВА НАПИСАНИЯ: переименованный
+    # параметр <=2.1.259 и `{let __ccEffort=X.effort;` -- отдельный оператор,
+    # который когда-то ставила правка 12. Ни одного из них больше нет: правка
+    # 12 связывает усилие ВНУТРИ образца, который тело и так деструктурирует, а
+    # с 2.1.269 тело запуска вообще не метод. Обе головы совпадали с НУЛЁМ
+    # образов, то есть проверка не могла ПОДНЯТЬСЯ: она печатала красное на
+    # верной сборке и напечатала бы красное на сломанной -- это то же самое,
+    # что не печатать ничего.
     ji = judge_sites[0]
     head = d[max(0, starts[ji] - 400):starts[ji]]
-    # Дом судьи -- собственный `call` инструмента, в той форме, которую несёт
-    # образ. <=2.1.259: параметр переименован, а образец деструктуризации
-    # перенесён в тело первым оператором. 2.1.260+: вход и так приходит целым,
-    # переносить нечего, и домом опознаётся привязка усилия, поставленная
-    # шагом 12 ровно перед блоком. Имя входа берётся из совпавшей формы, а не
-    # предполагается: ниже им проверяется `input:` в самом блоке.
-    hA = re.search(rb'async call\(__ccIn,' + ID + rb'[^)]*\)\{let \{prompt:' + ID
-                   + rb',subagent_type:' + ID + rb',description:' + ID + rb',model:'
-                   + ID + rb',[^{}]*\}=__ccIn;$', head)
-    hB = re.search(rb'async call\((' + ID + rb'),' + ID + rb'[^)]*\)\{let __ccEffort=\1'
-                   + rb'\.effort;$', head)
-    if not hA and not hB:
+    hC = re.search(rb'async function ' + ID + rb'\(\{[^{}]*agentInput:(' + ID
+                   + rb')[^{}]*toolUseContext:(' + ID + rb')[^{}]*\}\)\{$', head)
+    hA = re.search(rb'async call\(__ccIn,(' + ID + rb')[^)]*\)\{$', head)
+    hB = re.search(rb'async call\((' + ID + rb'),(' + ID + rb')[^)]*\)\{$', head)
+    if hC:
+        tool_in, ctx_in, want_factory = hC.group(1), hC.group(2), True
+    elif hA:
+        tool_in, ctx_in, want_factory = b'__ccIn', hA.group(1), False
+    elif hB:
+        tool_in, ctx_in, want_factory = hB.group(1), hB.group(2), False
+    else:
         return False
-    tool_in = b'__ccIn' if hA else hB.group(1)
+    # Два НЕЗАВИСИМЫХ пути к форме: совпавшая голова и апстримовый отказ,
+    # который несёт только сборка-фабрика. Образ, где они расходятся, этой
+    # проверкой не виден ни разу -- красное, а не молчаливый выбор одного из
+    # двух.
+    if want_factory != _is_factory_shape(d):
+        return False
     body = d[core_end[ji]:ends[ji]]
-    if body.count(b'this.name==="Agent"||this.name==="Task"') != 1:
-        return False
-    if b'tool:this,input:' + tool_in + b',ctx:' not in body:
+    ident = body.count(b'this.name==="Agent"||this.name==="Task"')
+    if want_factory:
+        # CONSTRAINT: на форме-фабрике `this` принадлежит движку, поэтому
+        # рантайм-тест имени -- не страж, а отмена КАЖДОГО диспатча (гейт
+        # читается ВНЕ try/catch пробы). Личность здесь даётся МЕСТОМ, и
+        # отсутствие теста ТРЕБУЕТСЯ, а не допускается.
+        if ident != 0:
+            return False
+        if b'tool:{name:"Agent"},input:' + tool_in + b',ctx:' + ctx_in + b',' not in body:
+            return False
+    else:
+        if ident != 1:
+            return False
+        if b'tool:this,input:' + tool_in + b',ctx:' + ctx_in + b',' not in body:
+            return False
+    # То МЕСТО, на которое опирается форма-фабрика, утверждается для ВСЕХ форм:
+    # блок стоит в начале тела, чей отказ по глубине и называет этот
+    # инструмент. Измерено на четырёх образах окна (2.1.267/268/269/270): от
+    # конца блока до якоря 278 байт на каждом.
+    if d.find(b'"subagent_launch","subagent_depth_cap"', ends[ji], ends[ji] + 2200) < 0:
         return False
 
     # The watcher's home: in front of the main dispatch call, every name bound
@@ -5797,10 +5989,15 @@ def _judge_rides_the_tool(d):
         return False
     tool, inp, ctx, key = (re.escape(b4.group(i)) for i in (1, 2, 3, 4))
     tail = d[ends[wi]:ends[wi] + 400]
+    # Хвост пинится ДО ключа и не дальше. `userModified` прежде лежал внутри
+    # объекта опций; на 2.1.270 он уехал в ШЕСТОЙ аргумент
+    # (`…,toolUseId:n},d,m,F,{userModified:…}`), и пин на него красил эту
+    # проверку на сборке, где все четыре имени, о которых она и есть, связаны
+    # верно. Долг этой проверки -- что четыре имени СОБСТВЕННЫЕ имена вызова;
+    # порядок аргументов за ключом -- дело апстрима.
     if not re.match(ID + rb'=await (?:' + tool + rb'\.call|' + ID + rb'\(' + tool
                     + rb'\)\.execute)\(' + inp + rb',\{\.\.\.' + ctx
-                    + rb',toolUseId:' + key + rb',userModified:' + ID
-                    + rb'\.userModified\?\?!1\},', tail):
+                    + rb',toolUseId:' + key + rb'[,}]', tail):
         return False
 
     # The form probe's home: the same statement site as the watcher, directly
@@ -5863,8 +6060,7 @@ def _turn_belongs_to_the_judge(d):
     suppliers = [i for i, (c, e) in enumerate(zip(core_end, ends))
                  if b'turn:()=>{' in d[c:e]]
     judges = [i for i, (c, e) in enumerate(zip(core_end, ends))
-              if re.search(rb'String\(process\.env\.CLAUDE_JUDGE\?\?""\)\.trim\(\)\.toLowerCase\(\);'
-                           rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}\)\(\)', d[c:e])]
+              if re.search(SWITCH(b'CLAUDE_JUDGE'), d[c:e])]
     if suppliers != judges or len(suppliers) != 1:
         return False
     c, e = core_end[suppliers[0]], ends[suppliers[0]]
@@ -6544,23 +6740,15 @@ checks = {
     'judge stashes the current turn': bool(re.search(
                                               rb'\.streamingToolExecutor\.addTool\(' + ID + rb',' + ID + rb','
                                               # волна 31 (K-3): стэш гейтится тем же типизированным читателем --
-                                              # CLAUDE_JUDGE=0 больше не наполняет карту хода
-                                              rb'\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_JUDGE\?\?""\)'
-                                              rb'\.trim\(\)\.toLowerCase\(\);'
-                                              rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
-                                              rb'\)\(\)\?'
+                                              # CLAUDE_JUDGE=0 больше не наполняет карту хода. Написание читателя
+                                              # живёт в SWITCH(): пять проверок держали его СВОИМИ копиями, и
+                                              # карьерное расщепление обновило не все -- отставшие пинили форму,
+                                              # которой нет ни в одном образе.
+                                              rb'\(' + SWITCH(b'CLAUDE_JUDGE') + rb'\?'
                                               rb'\(\(globalThis\.__ccJudgeTurn\?\?=new Map\(\)\)', d)),
     # judge part 2: consulted before a subagent dispatch, off unless
     # CLAUDE_JUDGE is set, fail-open on every path
-    'judge consulted before dispatch': bool(re.search(
-                                              # волна 31 (K-3): инлайн-читатель выключателя (см. E1)
-                                              rb'if\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_JUDGE\?\?""\)'
-                                              rb'\.trim\(\)\.toLowerCase\(\);'
-                                              rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
-                                              rb'\)\(\)&&\(' + ID + rb'\.name==="Agent"'
-                                              rb'\|\|' + ID + rb'\.name==="Task"\)&&' + ID +
-                                              rb'\?\.agentContext\?\.agentType==="main"\)'
-                                              rb'await globalThis\.__ccProbe\(\{', d)),
+    'judge consulted before dispatch': _judge_gate_matches_shape(d),
     'judge rides the tool, watcher the dispatcher': _judge_rides_the_tool(_probe_full),
     'consumers do not reach into the core': _consumer_uses_no_core_privates(_probe_full),
     'probe names match the image bindings': _probe_uses_the_images_own_names(_probe_full),
@@ -6621,11 +6809,8 @@ checks = {
     # definition here would mean the decomposition into a core never happened.
     'watcher rides the same core': bool(re.search(
                                               # волна 31 (K-3): тот же типизированный читатель для
-                                              # выключателя наблюдателя
-                                              rb'if\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_IDLE\?\?""\)'
-                                              rb'\.trim\(\)\.toLowerCase\(\);'
-                                              rb'return !\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)\}'
-                                              rb'\)\(\)&&' + ID +
+                                              # выключателя наблюдателя -- написание в SWITCH()
+                                              rb'if\(' + SWITCH(b'CLAUDE_IDLE') + rb'&&' + ID +
                                               rb'\?\.agentContext\?\.agentType==="main"\)'
                                               rb'await globalThis\.__ccProbe\(\{'
                                               rb'tag:"\[Watch\]",dirName:"idle-watch",arm:!1,'

@@ -507,39 +507,100 @@ step('7 session memory', () => {
   }
 
   // (b) the extract-mode predicate: `flagA && (!something || flagB)`.
-  const modeRx = new RegExp(
-    `(function ${ID}\\(\\))\\{if\\(!${ID}\\("tengu_[a-z0-9_]+",!1\\)\\)return!1;` +
-      `return!${ID}\\(\\)\\|\\|${ID}\\("tengu_[a-z0-9_]+",!1\\)\\}`,
-    'g'
-  );
-  const modes = js.match(modeRx) || [];
+  //
+  // THE GUARD IS FOUND INSIDE THE FUNCTION, NOT AS THE FUNCTION'S FIRST BYTES.
+  //
+  // This locator used to be a single regex over the whole body, and it pinned
+  // two things it never needed: that the flag guard is the FIRST statement, and
+  // that the body holds nothing besides it and the return. 2.1.270 took the
+  // site away without changing either of those in MEANING -- it inserted an
+  // early return in front of the guard:
+  //   function bat(){if(f0e()!==null)return!0;
+  //                  if(!I("tengu_passport_quail",!1))return!1;
+  //                  return!ke()||I("tengu_slate_thimble",!1)}
+  // (root task #75, the tenth case).
+  //
+  // The function is identified by the two features it CARRIES, wherever in it
+  // they sit: a flag guard that returns !1, and the interactivity return whose
+  // second term is the escape-hatch flag. Census by the controller over 22
+  // payloads, 2.1.233…2.1.270: exactly ONE such function on every one of them.
+  // The search walks BACK from each guard to the nearest parameterless function
+  // head -- measured distance head-to-guard: 0 through 2.1.268 (the guard is
+  // the first statement) and 25 on 2.1.270; the window below is that
+  // measurement with room, and bounded so a build that moved the guard out of
+  // this function cannot latch onto an unrelated neighbour above it.
+  const bodyAt = (at) => {
+    let d = 0;
+    for (let i = at; i < js.length && i - at < 3000; i++) {
+      const c = js[i];
+      if (c === '{') d++;
+      else if (c === '}') {
+        d--;
+        if (d === 0) return js.slice(at, i + 1);
+      }
+    }
+    return null;
+  };
+  const guardRx = new RegExp(`if\\(!${ID}\\("tengu_[a-z0-9_]+",!1\\)\\)return!1;`);
+  const keepRx = new RegExp(`return!${ID}\\(\\)\\|\\|${ID}\\("tengu_[a-z0-9_]+",!1\\)`);
+  const fnHeadRx = new RegExp(`function ${ID}\\(\\)\\{`, 'g');
+  const HEAD_BACK = 400;
+  // Every function that carries BOTH features, found from one of them.
+  const carriers = (fromRx) => {
+    const out = new Map();
+    for (const hit of js.matchAll(new RegExp(fromRx.source, 'g'))) {
+      const from = Math.max(0, hit.index - HEAD_BACK);
+      const heads = [...js.slice(from, hit.index).matchAll(fnHeadRx)];
+      if (!heads.length) continue;
+      const h = heads[heads.length - 1];
+      const open = from + h.index + h[0].length - 1;
+      const body = bodyAt(open);
+      // The head must be the one this hit lives IN, not merely one above it.
+      if (!body || !body.includes(hit[0])) continue;
+      if (!keepRx.test(body)) continue;
+      out.set(from + h.index, { open, body, hit: hit[0], hitAt: hit.index });
+    }
+    return [...out.values()];
+  };
+  const modes = carriers(guardRx);
   if (modes.length > 1) {
     fail(`session-memory extract-mode predicate is ambiguous (${modes.length} candidates)`);
   }
   const modeDone = modes.length === 1;
   if (modeDone) {
-    const modeAt = js.indexOf(modes[0]);
-    const head = modes[0].slice(0, modes[0].indexOf('{'));
-    // Keep everything the predicate returns once its flag guard is gone. Slicing
-    // it out of the match keeps the minified names of the interactivity helper
-    // and the escape-hatch flag reader out of this locator entirely.
-    const GUARD_END = 'return!1;';
-    const body = modes[0].slice(modes[0].indexOf(GUARD_END) + GUARD_END.length, -1);
-    js = js.slice(0, modeAt) + `${head}{${body}}` + js.slice(modeAt + modes[0].length);
+    // ONLY the guard statement is cut. Everything else the predicate does stays
+    // where it is -- including 2.1.270's early return, which answers a question
+    // about a different thing entirely and is none of this patch's business.
+    js = js.slice(0, modes[0].hitAt) + js.slice(modes[0].hitAt + modes[0].hit.length);
   }
-  if (new RegExp(modeRx.source).test(js)) {
-    fail('session-memory extract-mode predicate still consults its feature flags');
-  }
-  const forcedRx = new RegExp(
-    `function ${ID}\\(\\)\\{return!${ID}\\(\\)\\|\\|${ID}\\("tengu_[a-z0-9_]+",!1\\)\\}`,
-    'g'
-  );
-  const forced = js.match(forcedRx) || [];
-  if (forced.length !== 1) {
+
+  // THE POSTCONDITION IS THE GUARANTEE, NOT ONE SPELLING OF IT.
+  //
+  // It used to assert a literal end shape -- `function X(){return!Y()||Z(…)}`
+  // -- which is what our own edit and the unpacker's OLD edit both happened to
+  // produce, because both DELETED the guard statement. The unpacker's locator
+  // was itself rebuilt structurally (fork b7546b8) and now NEUTRALISES the flag
+  // read instead, leaving `if(!!0)return!1;` -- `!!0` is `false`, so the guard
+  // can never again return !1. Same guarantee, different bytes, and the literal
+  // assertion called it a failure. A postcondition that names one producer's
+  // spelling breaks every time that producer is improved.
+  //
+  // What has to be true is exactly two things: the predicate still carries the
+  // interactivity term (so extraction did NOT become unconditional -- that was
+  // the defect this step's comment above describes, and asserting only the
+  // absence of the gate would let it back in), and it no longer performs a LIVE
+  // flag read that can return !1.
+  const finals = carriers(keepRx);
+  if (finals.length !== 1) {
     fail(
-      `session-memory extract-mode predicate is not in the forced shape ` +
-        `(${forced.length} matches; expected exactly 1) -- it was neither patched ` +
-        `here nor left in the shape tweakcc writes, so extraction may still be off`
+      `session-memory extract-mode predicate is not identifiable after the edit ` +
+        `(${finals.length} functions carry the interactivity return; expected exactly 1)`
+    );
+  }
+  if (guardRx.test(finals[0].body)) {
+    fail(
+      'session-memory extract-mode predicate still performs a live feature-flag ' +
+        'read that returns !1 -- extraction may still be off'
     );
   }
 
@@ -1171,33 +1232,72 @@ step('12 dispatch may choose model and effort (forks included)', () => {
   js = js.replace(bgField, `${repEsc(newFields)}$1$2`);
 
   // (c) destructure effort in the tool's call handler, alongside the rest
-  // The handler binds its input in one of two shapes, and `effort` is in
-  // neither, so it is added wherever that build actually reads the input.
-  // Through 2.1.259 the binding lived in the PARAMETER LIST
-  // (`async call({prompt:e,subagent_type:n,…},C,I,F,B){`); 2.1.261 takes the
-  // object whole and destructures in the body
-  // (`async call(e,t,r,o,d){let{subagent_type:p,…}=e,…`). Pinning the first
-  // shape made this locator miss the very method it stands on. Both forms end
-  // with `__ccEffort` bound at the top of the handler, which is the entire
-  // contract the rest of this patch — and patch 22 — depends on.
-  const callRxA = new RegExp(`(async call\\(\\{prompt:${ID},subagent_type:${ID},[^}]{0,400}?)(\\},${ID},)`);
-  const callRxB = new RegExp(`(async call\\((${ID})(?:,${ID})*\\)\\{)(let\\{subagent_type:${ID},)`);
-  const callA = js.match(callRxA);
-  const callB = callA ? null : js.match(callRxB);
-  if (!callA && !callB) fail('agent tool call handler not found');
+  //
+  // WHAT IS PINNED HERE IS THE BINDING, NOT WHERE IT SITS.
+  //
+  // This locator used to carry one regex per observed SHAPE of the handler's
+  // head, and every build that moved the head cost a release: through 2.1.259
+  // the binding lived in the PARAMETER LIST
+  // (`async call({prompt:e,subagent_type:n,…},C,I,F,B){`); 2.1.261 took the
+  // object whole and destructured in the body
+  // (`async call(e,t,r,o,d){let{subagent_type:p,…}=e,…`); 2.1.270 dropped the
+  // method altogether for a free function with named parameters
+  // (`async function <id>({agentInput:e,toolUseContext:n,…}){let{subagent_type:m,…}=e,…`).
+  // Three shapes, one meaning — and the third one broke both regexes at once
+  // (root task #75, the seventh case).
+  //
+  // The durable fact underneath all three is the OBJECT PATTERN that binds the
+  // tool's own input fields. It is found by what it binds, not by what precedes
+  // it: an object with no nested braces that binds BOTH `subagent_type` and
+  // `run_in_background`, every one of whose pairs is `key:identifier`.
+  //
+  // The bare-identifier test is the whole discriminator. From 2.1.260 the image
+  // also CONSTRUCTS such an object —
+  //   {...e,prompt:n.prompt,…,subagent_type:n.subagentType,…,run_in_background:n.background,…}
+  // — and a locator reading only the two key names would have had two
+  // candidates to choose between. In a pattern the values are BINDINGS (bare
+  // identifiers); in a construction they are expressions. That is a difference
+  // of kind, not of spelling.
+  //
+  // Census by the controller over 22 payloads, 2.1.233…2.1.270 (21 corpus
+  // images plus 2.1.270): EXACTLY ONE pattern on every one of them, with the
+  // construction present from 260 on and correctly rejected each time.
+  //
+  // The field is added INSIDE the pattern on all three shapes, so the binding
+  // happens wherever that build binds the rest — which is the entire contract
+  // the rest of this patch, and patch 22, depend on.
+  const inputPatterns = () => {
+    const out = [];
+    const rx = /\{[^{}]{0,800}?\}/g;
+    for (let mm; (mm = rx.exec(js)); ) {
+      const t = mm[0];
+      if (!t.includes('subagent_type:') || !t.includes('run_in_background:')) continue;
+      const pairs = t.slice(1, -1).split(',');
+      if (!pairs.every((p) => /^[$\w]+:[$\w]+$/.test(p.trim()))) continue;
+      out.push({ at: mm.index, text: t });
+    }
+    return out;
+  };
+  const pats = inputPatterns();
+  if (pats.length === 0) {
+    fail(
+      'agent tool input pattern not found — no brace-free object binds both ' +
+        'subagent_type and run_in_background to bare identifiers',
+    );
+  }
+  if (pats.length !== 1) {
+    fail(`agent tool input pattern is not unique (${pats.length} candidates)`);
+  }
   // Both names are checked here, before EITHER is written: `__ccEffort` is
   // inserted a few lines below, and a later `includes('__ccE…')` test would
   // then match its own prefix and refuse on a clean build.
   if (js.includes('__ccEffort')) fail('__ccEffort already present — refusing to shadow it');
   if (js.includes('__ccLvl')) fail('__ccLvl already present — refusing to shadow it');
-  if (callA) {
-    js = js.replace(callRxA, `$1,effort:__ccEffort$2`);
-  } else {
-    // A statement, not a pattern field: the input object is already bound, so
-    // the read is plain property access and cannot throw where the handler's
-    // own destructuring of the same object would not have thrown first.
-    js = js.replace(callRxB, `$1let __ccEffort=$2.effort;$3`);
-  }
+  const pat = pats[0];
+  js =
+    js.slice(0, pat.at) +
+    `${pat.text.slice(0, -1)},effort:__ccEffort}` +
+    js.slice(pat.at + pat.text.length);
 
   // (c) attach it to the definition handed to the launch — the field the
   //     runtime turns into an effort permission layer.
@@ -2268,22 +2368,98 @@ step('22 judge consulted before a subagent dispatch', () => {
   // the new one would break on them in exactly the same way.
   //
   // The judge latches onto the TOOL ITSELF, not the adapter: `e` has `.name`,
-  // the wrapper does not. In the direct shape the tool name is caught by group
-  // 2, in the adapter shape by group 3; both then reduce to one name, and the
-  // group numbers do not stick out.
-  const rx = new RegExp(
-    `(${ID})=await (?:(${ID})\\.call|${ID}\\((${ID})\\)\\.execute)` +
-      `\\((${ID}),\\{\\.\\.\\.(${ID}),toolUseId:(${ID}),` +
-      `userModified:(${ID})\\.userModified\\?\\?!1\\},(${ID}),(${ID}),(${ID})\\)`,
+  // the wrapper does not.
+  //
+  // THE ARGUMENT LIST IS PARSED, NOT MATCHED.
+  //
+  // This locator used to be one regex spelling the whole call out to its last
+  // argument — `…userModified:X.userModified??!1},o,i,p)`. That pinned the
+  // ARITY and the POSITION of a key, and 2.1.270 changed both without changing
+  // anything this patch depends on: `userModified` moved out of the context
+  // object into a sixth argument of its own.
+  //   2.1.268  Fn=await e.call(Pe,{...o,toolUseId:n,userModified:pn.userModified??!1},d,p,F)
+  //   2.1.270  tr=await e.call(Pe,{...s,toolUseId:n},d,m,F,{userModified:hn.userModified??!1})
+  // The regex refused, the whole layer refused with it, and nothing was written
+  // (root task #75, the eighth case).
+  //
+  // What is actually required of this site is a property of its ARGUMENTS, not
+  // of their order: the second argument carries `toolUseId:`, some argument
+  // carries `userModified:`, and none carries `fileReadingLimits:`.
+  //
+  // That last condition is the discriminator against the REPL's inner tool
+  // call, which is the only other awaited call with the same two keys. It is
+  // not a synonym for the `innerCall:!0` marker — that marker is younger than
+  // the site. On 2.1.233 and 2.1.246 the inner call carries no marker at all,
+  // and only the raised read limits tell the two apart. Raising the limits is
+  // what the inner call is FOR, so the condition names its purpose.
+  //
+  // Census by the controller over 22 payloads, 2.1.233…2.1.270: EXACTLY ONE
+  // site on each, five arguments through 2.1.268 and six on 2.1.270, `execute`
+  // on 2.1.240 and `call` everywhere else — all three differences absorbed.
+  const argsAt = (s, open) => {
+    let depth = 0;
+    let start = open + 1;
+    const list = [];
+    for (let i = open; i < s.length; i++) {
+      const c = s[i];
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') {
+        depth--;
+        if (depth === 0) {
+          list.push(s.slice(start, i));
+          return list;
+        }
+      } else if (c === ',' && depth === 1) {
+        list.push(s.slice(start, i));
+        start = i + 1;
+      }
+      // A tool call is a handful of arguments; anything longer is not this
+      // site, and scanning to the end of a 200 MB payload for every `.call(`
+      // in it would turn a locator into a build step.
+      if (i - open > 4000) return null;
+    }
+    return null;
+  };
+  const headRx = new RegExp(
+    `(${ID})=await (?:(${ID})\\.(?:call|execute)|${ID}\\((${ID})\\)\\.(?:call|execute))$`,
   );
-  const m = js.match(rx);
-  if (!m) fail('tool dispatch call site not found');
-  const TOOL = m[2] ?? m[3];
-  // Only what the watcher's body actually reads is bound. The locator still
-  // captures the result variable and the userModified holder -- they pin the
-  // call's SHAPE, which is what keeps this pattern from matching some other
-  // call -- but a captured group is not automatically a slot.
-  const SLOT = { $2: TOOL, $3: m[4], $4: m[5], $5: m[6] };
+  const sites = [];
+  for (const mm of js.matchAll(/\.(?:call|execute)\(/g)) {
+    const open = mm.index + mm[0].length - 1;
+    const list = argsAt(js, open);
+    if (!list || list.length < 2) continue;
+    if (!list[1].includes('toolUseId:')) continue;
+    if (!list.some((a) => a.includes('userModified:'))) continue;
+    if (list.some((a) => a.includes('fileReadingLimits:'))) continue;
+    // The result has to be BOUND for the watcher to have a statement boundary
+    // to be spliced in front of; an awaited call in expression position is a
+    // different site and is passed over rather than mangled.
+    const from = Math.max(0, mm.index - 160);
+    const head = headRx.exec(js.slice(from, open));
+    if (!head) continue;
+    const spread = /^\s*\{\.\.\.([$\w]+)\s*,/.exec(list[1]);
+    const tuid = /[,{]\s*toolUseId:([$\w]+)\s*[,}]/.exec(list[1]);
+    if (!spread || !tuid) continue;
+    sites.push({
+      at: from + head.index,
+      recv: head[2] ?? head[3],
+      input: list[0].trim(),
+      ctx: spread[1],
+      toolUseId: tuid[1],
+    });
+  }
+  if (sites.length === 0) fail('tool dispatch call site not found');
+  if (sites.length !== 1) {
+    fail(`tool dispatch call site is not unique (${sites.length} candidates)`);
+  }
+  const site = sites[0];
+  const m = { index: site.at, 4: site.input, 5: site.ctx };
+  const TOOL = site.recv;
+  // Only what the watcher's body actually reads is bound. The parse recognises
+  // more than it binds -- the result variable and the userModified holder are
+  // what keep this from being some other awaited call -- but a recognised part
+  // is not automatically a slot.
+  const SLOT = { $2: TOOL, $3: site.input, $4: site.ctx, $5: site.toolUseId };
 
   // THE SECOND SITE IS THE TOOL ITSELF, NOT ANOTHER DISPATCHER.
   //
@@ -2327,90 +2503,169 @@ step('22 judge consulted before a subagent dispatch', () => {
   // decoration -- a nested destructuring or a default value would need
   // different handling, and this refuses instead of mangling one.
   //
-  // TWO SHAPES, ONE METHOD. Through 2.1.259 the handler destructured its input
-  // in the parameter list; 2.1.261 takes the object whole and destructures in
-  // the body. Shape A therefore identifies the method by its parameter pattern;
-  // shape B has no pattern to read, so it is identified by the binding patch 12
-  // just installed at the top of the body — which is the same proof of a shared
-  // landing the effort-marker assertion gives shape A, only earlier.
-  const rxToolA = new RegExp(
-    `async call\\((\\{prompt:${ID},subagent_type:${ID},description:${ID},` +
-      `model:${ID},[^{}]*\\}),(${ID})((?:,${ID})*)\\)\\{`,
-  );
-  const rxToolB = new RegExp(
-    `async call\\((${ID}),(${ID})((?:,${ID})*)\\)\\{let __ccEffort=\\1\\.effort;`,
-  );
-  let toolShape = 'pattern';
-  let mTool = js.match(rxToolA);
-  if (!mTool) {
-    toolShape = 'whole-object';
-    mTool = js.match(rxToolB);
-  }
-  if (!mTool) fail('dispatch tool call implementation not found');
-  const rxTool = toolShape === 'pattern' ? rxToolA : rxToolB;
-  const allTool = js.match(new RegExp(rxTool.source, 'g'));
-  if (allTool.length !== 1) {
-    fail(`dispatch tool call implementation is not unique (${allTool.length} matches)`);
-  }
-  // Shape is not identity, and uniqueness of the shape does not make it one.
-  // A later build could carry ONE unrelated method with the same four leading
-  // fields while the real one changed, and both checks above would still pass
-  // while the judge was installed where it can never fire. In a mechanism that
-  // fails CLOSED that is not a missed edit, it is a silent pass.
+  // IDENTITY FIRST, SHAPE SECOND.
   //
-  // The dispatch tool names itself in its own first statements: it is the only
-  // place in the image that refuses a launch by the nesting-depth cap. Measured
-  // on the four payloads in range: exactly one occurrence each, 179-193
-  // characters past the start of the match (2.1.233 and 240 at 193, 242 at 180,
-  // 246 at 179), so the window below is the measurement with room, not a guess.
+  // This used to run the other way round: a regex per observed SHAPE chose the
+  // site, and the depth-cap literal then confirmed the choice. Both orderings
+  // refuse when the shape moves, but only this one refuses for the right
+  // reason -- and 2.1.270 moved the shape a third time, past both regexes:
+  //   233…259  async call({prompt:e,subagent_type:t,…},C,I,F,B){
+  //   260…268  async call(e,n,r,o,d){let{subagent_type:p,…}=e,…
+  //   270      async function <id>({agentInput:e,toolUseContext:n,…}){let{subagent_type:m,…}=e,…
+  // The third one is not a METHOD at all: a free function taking named
+  // arguments, with the tool's input under the key `agentInput`. A locator
+  // built on `async call(` cannot see it (root task #75, the ninth case).
+  //
+  // What does not move is what the function IS. The dispatch tool is the only
+  // place in the image that refuses a launch by the nesting-depth cap, and it
+  // does so in its own first statements. That literal is therefore the anchor,
+  // not the confirmation: shape is read only AFTER the function is identified,
+  // so a future head this patch has never seen fails as "unknown head shape"
+  // -- naming the thing that actually changed -- instead of as "not found".
+  //
+  // Census by the controller over 22 payloads, 2.1.233…2.1.270: EXACTLY ONE
+  // occurrence of the literal on every one, and walking back from it to the
+  // nearest head recovers the right function on every one. The distance from
+  // head to literal was measured on all 22: 179 (2.1.246/247) to 357 (2.1.270).
+  // The window below is that measurement with room -- and bounded, so that a
+  // build which drops the head entirely cannot silently latch onto some
+  // unrelated function far above.
   const DEPTH_CAP = '"subagent_launch","subagent_depth_cap"';
-  if (!js.slice(mTool.index, mTool.index + 600).includes(DEPTH_CAP)) {
+  const capHits = js.split(DEPTH_CAP).length - 1;
+  if (capHits === 0) {
     fail(
-      'the matched call implementation is not the dispatch tool ' +
-        '(no depth-cap refusal among its first statements)',
+      'the dispatch tool cannot be identified: this build carries no ' +
+        'nesting-depth refusal, which is the only thing that names it',
     );
   }
-  // Patch 12 destructures `effort` in THIS handler's parameter pattern, and
-  // this step rewrites that pattern into the body. The order is therefore
-  // load-bearing in one direction: run this step first and #12's locator no
-  // longer matches the signature it expects, because the signature is no
-  // longer the one it was written against. That failure would be loud but
-  // would name the wrong thing. Asserting the marker also proves the two
-  // locators, written independently, landed on the SAME method.
-  // Shape B carries that proof inside its own locator (`let __ccEffort=<in>.
-  // effort;` is part of the match), so asserting it again here would only
-  // restate the match. Shape A must still be checked: its locator would match
-  // an unpatched signature just as well.
-  if (toolShape === 'pattern' && !mTool[1].includes('effort:__ccEffort')) {
+  if (capHits !== 1) {
+    fail(`the nesting-depth refusal is not unique (${capHits} occurrences)`);
+  }
+  const capAt = js.indexOf(DEPTH_CAP);
+  const HEAD_WINDOW = 1200;
+  const winFrom = Math.max(0, capAt - HEAD_WINDOW);
+  const rxHead = new RegExp(
+    `async call\\((\\{[^{}]*\\}),(${ID})((?:,${ID})*)\\)\\{` +
+      `|async call\\((${ID}),(${ID})((?:,${ID})*)\\)\\{` +
+      `|async function ${ID}\\((\\{[^{}]*\\})\\)\\{`,
+    'g',
+  );
+  const heads = [...js.slice(winFrom, capAt).matchAll(rxHead)];
+  if (heads.length === 0) {
     fail(
-      'the dispatch tool signature carries no effort binding from patch 12 ' +
-        '(run patch 12 first — it destructures effort in the pattern this step rewrites)',
+      'the dispatch tool was identified by its depth-cap refusal, but its head ' +
+        'is in none of the three known shapes (parameter pattern / positional ' +
+        `method / free function with named arguments) within ${HEAD_WINDOW} chars above it`,
     );
   }
-
-  // The parameter pattern moves into the body verbatim, so the destructuring
-  // that the original signature performed still happens, in the same order and
-  // with the same failure on a null input; the judge runs after it, on the
-  // whole object under a name of our own.
-  // Shape A renames the parameter, because the pattern that used to occupy the
-  // slot has to move into the body under a name. Shape B already HAS a name for
-  // the whole input — introducing a second one would only add an alias whose
-  // only purpose is to look like shape A.
-  const TOOL_IN = toolShape === 'pattern' ? '__ccIn' : mTool[1];
+  const head = heads[heads.length - 1];
+  const headAt = winFrom + head.index;
+  // `TOOL_IN` is the name under which the body already sees the WHOLE tool
+  // input, and `CTX` the tool-use context. Shape A has neither: its input is a
+  // pattern occupying the parameter slot, so the pattern moves into the body
+  // and the slot takes a name of our own. Shapes B and C already have both --
+  // inventing a second name there would add an alias whose only purpose is to
+  // look like shape A.
+  let toolShape;
+  let TOOL_IN;
+  let CTX;
+  let rebind = '';
+  let newHead = head[0];
+  if (head[1] !== undefined) {
+    toolShape = 'pattern';
+    TOOL_IN = '__ccIn';
+    CTX = head[2];
+    newHead = `async call(${TOOL_IN},${head[2]}${head[3]})\{`;
+    // The parameter pattern moves into the body verbatim, so the destructuring
+    // that the original signature performed still happens, in the same order
+    // and with the same failure on a null input; the judge runs after it, on
+    // the whole object under a name of our own.
+    rebind = `let ${head[1]}=${TOOL_IN};`;
+  } else if (head[4] !== undefined) {
+    toolShape = 'whole-object';
+    TOOL_IN = head[4];
+    CTX = head[5];
+  } else {
+    toolShape = 'named-arguments';
+    const named = head[7];
+    const inKey = new RegExp(`[{,]agentInput:(${ID})[,}]`).exec(named);
+    const ctxKey = new RegExp(`[{,]toolUseContext:(${ID})[,}]`).exec(named);
+    if (!inKey || !ctxKey) {
+      fail(
+        'the dispatch tool takes named arguments, but they do not carry both ' +
+          `agentInput and toolUseContext (${named.slice(0, 120)})`,
+      );
+    }
+    TOOL_IN = inKey[1];
+    CTX = ctxKey[1];
+  }
+  // Patch 12 binds `effort` in THIS handler's input pattern, wherever that
+  // build keeps it. Asserting the marker proves the two locators, written and
+  // measured independently, landed on the SAME function -- and it is checked
+  // in the function's own head-and-first-statements window, because shapes B
+  // and C keep the pattern in the body rather than in the signature. The order
+  // is load-bearing in one direction: run this step first and #12 no longer
+  // finds the pattern it is written against, and that failure, while loud,
+  // would name the wrong thing.
+  if (!js.slice(headAt, capAt).includes('effort:__ccEffort')) {
+    fail(
+      'the dispatch tool carries no effort binding from patch 12 ' +
+        '(run patch 12 first — it binds effort in the input pattern this step stands on)',
+    );
+  }
+  // Whether the launch body is a METHOD of the tool or a free function the
+  // engine is handed by value. The distinction is not cosmetic: it decides
+  // what `this` is, and therefore whether the tool can be recognised at
+  // runtime at all.
+  const isFactoryShape = toolShape === 'named-arguments';
+  // CONSTRAINT: on the factory shape identity comes from the SITE, so the site
+  // is PROVED, not assumed. Two facts carry it and both are asserted: the
+  // depth-cap anchor this step navigated by is unique (checked above), and the
+  // dispatch tool's descriptor -- the only place upstream declares what this
+  // tool is -- is unique too. The descriptor is named by its search hint and
+  // NOT by its `name:` binding: that binding's value sits in a different chunk
+  // (~6 MB from the descriptor on 2.1.270) and minified names are chunk-scoped,
+  // so reading it would tie the patch to a chunk boundary upstream is free to
+  // move. Asserted only on this shape, because only this shape leans on it --
+  // on the method shapes identity is `this`, checked at runtime.
+  const HINT = 'searchHint:"delegate work to a subagent"';
+  if (isFactoryShape) {
+    const hintHits = js.split(HINT).length - 1;
+    if (hintHits !== 1) {
+      fail(
+        'the dispatch tool is a factory here, so its identity has to come from ' +
+          `the site -- but the descriptor that declares it is not unique (${hintHits} ` +
+          `occurrences of ${HINT})`,
+      );
+    }
+  }
   const SLOT_TOOL = {
-    // `this` is the tool. Every route into this method binds it -- `e.call(…)`
-    // at the main dispatcher, `s.call(…)` in serve mode, and the adapter's
-    // arrow, which calls `e.call(…)` too. A future build that detaches the
-    // method would make `$2.name` throw, i.e. cancel the dispatch: the right
-    // polarity for a mechanism that fails closed, and loud instead of silent.
-    $2: 'this',
+    // On the METHOD shapes `this` is the tool. Every route into the method
+    // binds it -- `e.call(…)` at the main dispatcher, `s.call(…)` in serve
+    // mode, and the adapter's arrow, which calls `e.call(…)` too. A future
+    // build that detaches the METHOD would make `$2.name` throw, i.e. cancel
+    // the dispatch: the right polarity for a mechanism that fails closed, and
+    // loud instead of silent.
+    //
+    // CONSTRAINT: on the FACTORY shape (2.1.269+) `this` is not the tool, and
+    // the same throw stops being a guard and becomes a defect. The descriptor
+    // and the callable are different objects there: the launch body is a free
+    // function passed to the engine by value (`r.runEngine(<body>,…)`), so
+    // inside it `this` belongs to the engine -- undefined under a strict
+    // module, and the gate that reads `.name` sits OUTSIDE the probe's
+    // try/catch, so it would cancel EVERY dispatch. Identity is therefore
+    // fixed at patch time from the proved site above. The literal keeps the
+    // subject's name in the journal record (the core reads `tool.name` and
+    // nothing else from this slot, inside its try/catch) without taking a
+    // runtime dependency on anything upstream can rename.
+    $2: isFactoryShape ? '{name:"Agent"}' : 'this',
     $3: TOOL_IN,
-    $4: mTool[2],
+    $4: CTX,
     // The dispatcher puts `toolUseId` in the context it builds; serve mode
     // does not, and an undefined key degrades the record name and the turn
     // stash without stopping anything -- the judge's own material is the brief
     // and the model, both of which are in the input.
-    $5: `${mTool[2]}.toolUseId`,
+    $5: `${CTX}.toolUseId`,
   };
   // The judge rides the client's OWN single-shot query
   // (queryModelWithoutStreaming), not its own HTTP call: this function goes
@@ -2439,7 +2694,7 @@ step('22 judge consulted before a subagent dispatch', () => {
   // on 246, 433 on 242; 233 and 240 have a single module altogether). Asserted
   // rather than assumed, because a future split would be silent.
   const [qLo, qHi] = moduleSliceAround(js, qm.index);
-  for (const [label, at] of [['watcher', m.index], ['judge', mTool.index]]) {
+  for (const [label, at] of [['watcher', m.index], ['judge', headAt]]) {
     if (at < qLo || at >= qHi) {
       fail(
         `the single-shot query engine is defined in a different module than the ` +
@@ -3903,7 +4158,15 @@ step('22 judge consulted before a subagent dispatch', () => {
     // CONSTRAINT: CLAUDE_JUDGE_CARRIER=mod stands this splice down so the
     // function-hooks carrier can own the judge without a double consultation.
     // Unset (default) keeps the splice. The splice is not deleted.
-    'if((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()&&($2.name==="Agent"||$2.name==="Task")' +
+    'if((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()' +
+      // CONSTRAINT: the identity clause is PER-SHAPE, and on the factory shape
+      // it is omitted rather than faked. There `$2` is a patch-time literal
+      // (see SLOT_TOOL) because the SITE proves the tool, so a runtime name
+      // test would be a tautology that allocates. Emitting it unconditionally
+      // was the live defect on 2.1.269/270: `this` is the engine's there, and
+      // this gate is read OUTSIDE the probe's try/catch, so the read either
+      // threw on every dispatch or silently answered false.
+      (isFactoryShape ? '' : '&&($2.name==="Agent"||$2.name==="Task")') +
       '&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Judge]",dirName:"judge",arm:!0,' +
@@ -4415,22 +4678,29 @@ step('22 judge consulted before a subagent dispatch', () => {
   const edits = [
     { at: m.index, len: 0, text: formBlock + watchBlock },
     {
-      at: mTool.index,
-      len: mTool[0].length,
-      // Shape A rebuilds the signature and re-performs the parameter
-      // destructuring as the handler's first statement, so the judge runs after
-      // it. Shape B has nothing to move, so the block is appended to the match
-      // verbatim and the handler's own destructuring runs AFTER the judge —
-      // a different order, and safe for the one reason that matters: the judge
-      // reads the whole input object, never the destructured locals, and a null
-      // input still throws before it, on the `<in>.effort` read patch 12 put
-      // one statement earlier. Same polarity as shape A, different statement.
-      text:
-        toolShape === 'pattern'
-          ? `async call(${TOOL_IN},${mTool[2]}${mTool[3]}){` +
-            `let ${mTool[1]}=${TOOL_IN};` +
-            judgeBlock
-          : mTool[0] + judgeBlock,
+      at: headAt,
+      len: head[0].length,
+      // One rule for all three shapes: the head as this build spells it (rebuilt
+      // only where the input pattern had to vacate the parameter slot), then the
+      // re-binding if there was one, then the judge.
+      //
+      // Shape A therefore re-performs the parameter destructuring as the
+      // handler's first statement and the judge runs AFTER it. Shapes B and C
+      // have nothing to move, so the judge runs BEFORE the handler's own
+      // destructuring. The two orders are both safe, for a reason that is about
+      // this block and not about its neighbours: the judge reads the WHOLE input
+      // object and never a destructured local, and the handler's destructuring
+      // still runs immediately after, throwing on a malformed input exactly as
+      // it did before. Either way a throw means the dispatch does not happen --
+      // the polarity a fail-closed mechanism needs.
+      //
+      // The ground this paragraph used to cite -- that patch 12 left an
+      // `<in>.effort` read one statement ahead of the judge, so a null input
+      // threw before it -- is GONE: patch 12 now binds effort INSIDE the input
+      // pattern on all three shapes, so in B and C nothing of ours precedes the
+      // judge. The conclusion did not change; the reason for it did, and a
+      // reason that has quietly stopped being true is worse than none.
+      text: newHead + rebind + judgeBlock,
     },
   ];
   for (const e of [...edits].sort((x, y) => y.at - x.at)) {
@@ -4439,9 +4709,9 @@ step('22 judge consulted before a subagent dispatch', () => {
 
   applied.push(
     `judge: consulted inside the dispatch tool's own call (context ` +
-      `'${mTool[2]}', ${toolShape === 'pattern'
+      `'${CTX}', ${toolShape === 'pattern'
         ? `input pattern re-bound as '${TOOL_IN}'`
-        : `input taken whole as '${TOOL_IN}'`}); watcher on the ` +
+        : `input taken whole as '${TOOL_IN}' (${toolShape})`}); watcher on the ` +
       `main dispatcher (tool '${TOOL}', input '${m[4]}', context '${m[5]}')`,
   );
 });
