@@ -387,3 +387,163 @@ client.
 Form-probe and idle-watch still share `__ccProbe` in injection 22. They
 are not this port. The user's order was providers (stay a patch) and
 judges (this document) first.
+
+---
+
+## 11. The `agent.spawn` site — measured 2026-09-13
+
+Everything above places the judge on `tool.call`. That was written without
+this site. `agent.spawn` is a purpose-built adjudication point on the
+Agent tool's own path, and it carries what `tool.call` does not: the
+**model**, and the right to change it.
+
+Measured live, mac, patched 2.1.267, isolated `CLAUDE_CONFIG_DIR`, probe
+plugin loaded with `--plugin-dir` (no marketplace, no live install
+touched). Eleven cases, each its own `claude -p` run; acceptance of every
+case is the host's own debug line plus the artefact the module wrote.
+
+### 11.1 It fires on an ordinary Agent dispatch
+
+Not on a mod-initiated spawn — on the dispatch the main loop itself makes.
+One firing per dispatch:
+
+```
+hooks module spawnprobe loaded (worker, environment 1, tier user); events: agent.spawn
+engine.create: no plugin-provided interfaces; $ built for spawnprobe
+hooks module spawnprobe agent.spawn settled in 5.1ms (worker hop, next() included)
+```
+
+The module also loads inside the subagent's own worker (a second debug
+file), but `agent.spawn` fires only in the dispatching session.
+
+### 11.2 The argument
+
+Twelve keys reach the handler. Writability is the image's own split
+(`wPt` is the pinned set: "the identity of the spawn and its parent is
+pinned"):
+
+| key | value in the probe run | |
+|---|---|---|
+| `prompt` | the dispatch prompt | writable |
+| `description` | `Reply OK` | writable |
+| `subagentType` | `worker` | writable |
+| `model` | `undefined` (inherit) | writable |
+| `background` | `true` | writable |
+| `cwd` | `undefined` | writable (absolute path) |
+| `tool_use_id` | `toolu_01PEfiXubGkEYNJRR9JGsqJJ` | pinned |
+| `parentModel` | `claude-opus-5[1m]` | pinned |
+| `permissionMode` | `default` | pinned |
+| `fork` | `false` | pinned |
+| `name` | `undefined` | pinned |
+| `provider` | `{plugin, tier}` | pinned |
+
+`parentAgentId` is pinned too but did not reach the handler in a main-loop
+dispatch. `resolveModel` exists at the call site and is NOT exposed to the
+module — a handler cannot ask the host what a model id will resolve to.
+
+### 11.3 The four outcomes
+
+| handler returns | host line | dispatch |
+|---|---|---|
+| `next(e)` | `agent.spawn settled in 4.8ms` | runs unchanged |
+| `{deny: "…"}` | `agent.spawn worker: denied by a hook (…)` | **refused**; the model reads `Subagent spawn denied by a plugin: …` |
+| `{model: "opus"}` | `agent.spawn worker: model (inherit) -> opus by a hook (resolves to claude-opus-5[1m])` | runs on the named model |
+| `{}` (neither) | `agent.spawn hook skipped: returned the wrong shape (neither { model } nor { deny })` | **runs anyway** |
+
+`next(modified)` rewrites the argument: `agent.spawn worker: prompt,
+description rewritten by a hook`. Rewriting a pinned key throws and the
+handler is discarded whole — its other rewrites with it:
+
+```
+agent.spawn hook skipped: threw spawnprobe: next() passed an argument with
+a changed tool_use_id (the identity of the spawn and its parent is pinned; …)
+```
+
+### 11.4 Retype works, and the caller is not told
+
+`next({...e, subagentType: "probe-beta"})` on a dispatch the main loop
+addressed to `probe-alpha`:
+
+```
+agent.spawn probe-alpha: subagentType rewritten by a hook
+```
+
+`probe-beta` ran. The caller saw only the content — in the probe run the
+main loop noticed by itself that the answer did not match the agent it had
+asked for. A retype is therefore a silent substitution unless the mod says
+so in the `prompt` it also rewrites.
+
+### 11.5 The admission asymmetry — a defect of the site, not of us
+
+An unknown **agent** is refused by the host:
+
+```
+Subagent spawn denied by a plugin: a hook's subagentType 'ЗАМЕР-НЕТ-ТАКОГО-113'
+names no agent this call can dispatch (available: probe-alpha, probe-beta, worker)
+```
+
+An unknown **model** is not checked at all. `{model: "ЗАМЕР-МОДЕЛЬ-113"}`
+produced `model (inherit) -> ЗАМЕР-МОДЕЛЬ-113 by a hook (resolves to
+ЗАМЕР-МОДЕЛЬ-113)` and the run died downstream at the API with `400
+unknown provider for model ЗАМЕР-МОДЕЛЬ-113`. The hook is the last word on
+the model with nothing behind it: **a routing mod that writes `model` owns
+the id's validity outright.** Our own table is the only check there will
+be, and a typo in it surfaces as a 400 in the middle of a dispatch, not as
+a refusal at the gate.
+
+Further refusal branches read from the image, not exercised here: a retype
+on a web-fetch dispatch admitted without classifier review; a rewrite that
+a permission rule would have denied or asked about (re-checked after the
+rewrite); `cwd` together with `isolation: "worktree"`; an in-process
+teammate backgrounded by the hook; MCP servers required by the named
+agent.
+
+### 11.6 The budget is the same 10 s, and the same fail-open
+
+`await sleep(12000)` before `next(e)`:
+
+```
+agent.spawn hook skipped: ran past its 10s budget
+hooks module spawnprobe agent.spawn settled in 10010.6ms (worker hop, next() included)
+```
+
+The dispatch ran. This is §1.1's rule on a second site, and it is charged
+the same way as §9's pass-path note: work awaited *before* returning is
+charged, `next()` itself is not.
+
+What does fit: `$.model.complete` runs on this site —
+`{model:"glm-5.3-flash", max_tokens:16, timeoutMs:8000}` answered in
+**3520 ms**, the site settled in 3527.9 ms. `$.agent.spawn` also runs from
+inside it (1377–1544 ms for a trivial subagent), and the host guards
+re-entry by itself:
+
+```
+agent.spawn skipped: re-entry (its own frame is being dispatched; origin spawnprobe#0)
+```
+
+so a module's own nested spawn does not re-enter its own handler. The
+`$.agent.spawn` API budget is **50 spawns per session, 4 at once**.
+
+Measured API detail: `$.agent.spawn` wants **camelCase `subagentType`**.
+The tool-shaped `subagent_type` alone is dropped and the call fails with
+`subagent_type is required: the general-purpose agent is not available in
+this session`.
+
+### 11.7 What this changes for the port
+
+The judge is two things, and this site splits them cleanly:
+
+* **The deterministic table gate** (class membership, markers, effort
+  pins — no completion involved) belongs on `agent.spawn`. It is
+  microseconds, so the 10 s budget is not a constraint, and it gains what
+  the classic `PreToolUse` gate never had: it can **reroute** a dispatch
+  to the right model instead of only refusing it. The gate's refusal text
+  already names the right point; on this site it could simply go there.
+* **The consulting judge** (a completion, then a verdict) does not belong
+  here as a blocking call. A fast rung fits (3.5 s), the combat ladder
+  does not, and an overrun is silent pass-through — §2's inverted
+  fail-closed is still the only construction that holds a refusal.
+
+Neither half is written yet. What is settled is that the site exists, that
+it fires on real dispatches, and that model and agent are both writable
+from it.

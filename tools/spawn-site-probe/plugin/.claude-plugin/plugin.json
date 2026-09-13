@@ -1,0 +1,6 @@
+{
+  "name": "spawnprobe",
+  "description": "Measurement instrument for the agent.spawn function-hook site. Not a product mod.",
+  "version": "0.1.0",
+  "author": { "name": "Catalyst-CC-Patch" }
+}
