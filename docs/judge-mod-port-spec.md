@@ -547,3 +547,55 @@ The judge is two things, and this site splits them cleanly:
 Neither half is written yet. What is settled is that the site exists, that
 it fires on real dispatches, and that model and agent are both writable
 from it.
+
+### 11.8 What the carrier can reach — measured 2026-09-13
+
+The gate half cannot move until a module can read the gate's own table.
+The table ships inside the `catalyst` plugin; the consultation engine is a
+different plugin (`catalyst-probes`). Measured on the same stand (probe
+`coexist`, one `claude -p`, isolated config):
+
+**One plugin carries BOTH a classic hooks block and a module.** A single
+`hooks/hooks.json` with `"hooks"` *and* `"modules"` loaded both: the
+classic `PreToolUse` hook wrote its artefact and the module wrote its own
+in the same run, with `hooks module coexist loaded … events: agent.spawn`
+and `$ built for coexist` in the debug. So the `agent.spawn` module can
+live in the `catalyst` plugin, next to the table — it does not have to
+join `catalyst-probes`.
+
+**But the module is not told where its plugin is.** `CLAUDE_PLUGIN_ROOT`
+reached the classic hook (absolute path) and reached the module as EMPTY.
+Relative `$.fs.read` does not help: `target.txt`, `./target.txt` and
+`hooks/target.txt` were all refused, and the error names the path resolved
+against the HOST CWD (this is §9's earlier note, re-confirmed on a second
+site). `$.fs.ancestors` is not an escape either — host check: "takes
+names, a list of relative .md file names".
+
+**Absolute paths read fine, and the active install is DERIVABLE** with no
+new environment handle:
+
+```
+<config home>/plugins/installed_plugins.json
+  → the record for "catalyst@catalyst"
+  → its installPath (absolute, already version-keyed)
+  → + "/hooks/routing-table.toml"
+```
+
+Measured live from inside the module: `installed_plugins.json` read,
+record `{scope:"user", installPath:".../cache/catalyst/catalyst/0.8.25",
+version:"0.8.25", gitCommitSha:"e90739b9…"}`, table read, `[selection]`
+present, `qwen3.8-flash` absent. Use `installPath` verbatim — do not
+rebuild it from `version`, and do not reach for the version at all.
+
+**TRAP — the marketplace clone is not the active install.**
+`<config home>/plugins/marketplaces/<mp>/hooks/routing-table.toml` is also
+readable and is the one stable, version-free path, which makes it the
+tempting choice. It is the install SOURCE, not what is installed: on this
+machine the clone and the cache agreed only by accident of timing, and a
+module reading it would enforce a different table than the classic gate
+beside it enforces. The two carriers of one rule must read one file.
+
+**INSTRUMENT TRAP.** `$.fs.read` returns a STRING — its `.length` is
+characters, not bytes. The table read as 23 500 while the file is 34 210
+bytes; with Cyrillic prose the two differ by ~45 %. Do not compare a
+module's length against `stat`/`wc -c` without converting.
