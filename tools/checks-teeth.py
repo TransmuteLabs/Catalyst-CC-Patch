@@ -51,7 +51,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 26
+EXPECTED_MUTATIONS = 28
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.
@@ -196,7 +196,45 @@ def edits_b2(base: bytes) -> list[tuple[int, bytes]]:
     return [(derived.start(1), b"1" + b"0" * (len(expr) - 1))]
 
 
-DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2}
+def edits_m2(base: bytes) -> list[tuple[int, bytes]]:
+    """Умолчание maxTokens сведено с ПРЕДЕЛОМ в одно имя.
+
+    Литеральный зуб здесь невозможен по той же причине, что у B2: и предел, и
+    умолчание минифицированы, а имена РАЗНЫЕ на darwin и linux одной версии
+    (2.1.270: предел `sMt` и умолчание `H0s` против `cMt` и `fOs`). Якорь с
+    любым из них был бы зубом одной платформы.
+
+    Мутация идёт той же иглой, что проверка: имя предела берётся из сравнения
+    внутри сторожа, затем в выражении `(<arg>??<DEF>)` имя умолчания
+    заменяется именем ПРЕДЕЛА. Это и есть предмет: после снятия предела мод,
+    не передавший maxTokens, просит не свои 256, а Infinity -- вред, которого
+    на стоке нет и который создаёт именно шаг 30.
+    """
+    site = re.search(
+        rb'if\((' + ID + rb')!==void 0&&\(!Number\.isInteger\(\1\)\|\|\1<1\|\|\1>(' + ID + rb')\)\)'
+        rb'throw new ' + ID + rb'\(`\$\{' + ID + rb'\}: \$\.model\.complete: '
+        rb'maxTokens must be an integer from 1 to \$\{\2\} \(got \$\{String\(\1\)\}\)`\)', base)
+    if not site:
+        raise Refusal("M2: отказ maxTokens мод-API не найден -- предел назвать нечем")
+    arg, lim = site.group(1), site.group(2)
+    tail_at = site.end()
+    use = re.search(rb'\(' + re.escape(arg) + rb'\?\?(' + ID + rb')\)',
+                    base[tail_at:tail_at + 900])
+    if not use:
+        raise Refusal("M2: выражение умолчания `(<arg>??<DEF>)` не найдено рядом со сторожем")
+    default = use.group(1)
+    if default == lim:
+        raise Refusal("M2: умолчание УЖЕ равно пределу в исходном образе -- красить нечего")
+    if len(default) != len(lim):
+        # Разная длина сдвинула бы весь хвост образа, и покраснело бы всё
+        # подряд чужой причиной. Честный отказ прибора, а не тихая подгонка.
+        raise Refusal(
+            f"M2: имена разной длины (умолчание {len(default)}, предел {len(lim)}) -- "
+            f"замена сдвинула бы хвост образа")
+    return [(tail_at + use.start(1), lim)]
+
+
+DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2, "M2": edits_m2}
 
 
 def pipeline_lock_path() -> str:

@@ -5565,6 +5565,115 @@ step('29 mod-API session model budget ceiling becomes operator-set', () => {
   );
 });
 
+// --------------------------------------------------------------------------
+// 30. The mod API's PER-CALL maxTokens ceiling stops being a hardcoded limit
+//     and becomes an operator-set one -- with the handle unset there is NO
+//     cap at all.
+//
+//     This is the SECOND door of the same room. Step 29 removed the budget a
+//     plugin may spend across the process; this one removes the ceiling on a
+//     SINGLE `$.model.complete`. Removing only the first leaves a mechanism
+//     that may now call the model forever, but never with a reply longer than
+//     8192 tokens -- and our dispatch judge's own recorded attempts ask for
+//     24000. A limit that blocks the known consumer is not addressed by
+//     lifting the limit beside it.
+//
+//     Measured on 2.1.270 (pristine darwin image, offset 174322645; the same
+//     shape on linux at 194611162 under a different minified name -- sMt vs
+//     cMt -- which is why nothing here is pinned by name):
+//       var <LIM>=8192;
+//       async function <f>({model:e,prompt:n,system:r,maxTokens:s},{plugin:d,budget:m},S){
+//         if(s!==void 0&&(!Number.isInteger(s)||s<1||s><LIM>))
+//           throw new <E>(`${d}: $.model.complete: maxTokens must be an
+//                          integer from 1 to ${<LIM>} (got ${String(s)})`);
+//         ...let D=(s??<DEF>)+M;...
+//     2 of the 3 conditions in that guard are CORRECTNESS, not policy
+//     (docnum:other -- conditions of an upstream `if`, not a kit counter) --
+//     `Number.isInteger` and `<1` refuse values the API could not use at all
+//     -- and they are left exactly as they are. Only the upper bound moves.
+//
+//     `<DEF>` (256 on 2.1.270) is deliberately NOT touched: it is the value a
+//     caller gets by NOT passing maxTokens, and any caller that wants more
+//     passes more. A default a consumer can lift is not a ceiling, and
+//     rewriting it would change replies nobody asked us to change.
+//
+//     With the handle unset the comparison `s > Infinity` is never true, and
+//     the refusal's own text -- which interpolates the SAME name -- then reads
+//     "from 1 to Infinity", so the image never announces a limit it does not
+//     enforce. What the API itself accepts as max_tokens remains the API's
+//     answer to give: this edit stops the IMAGE from refusing first, it does
+//     not promise the model will serve any number.
+//
+//     The limit's minified name is NOT pinned (root #75): it is READ OUT of
+//     the comparison inside the guard, and the guard is found by its own
+//     user-visible message. Scoping the rewrite to the module is not a
+//     formality here -- it is load-bearing, and measured: on the 2.1.270
+//     darwin image the name occurs 15 times, of which exactly 3 belong to
+//     this module (the declaration, the comparison, the message slot). The
+//     other 12 are tslib's `__generator` in another chunk, an `onSelect`
+//     callback in a UI chunk, and bun's own string tables -- a whole-image
+//     rewrite would rename a generator and a menu handler.
+// --------------------------------------------------------------------------
+step('30 mod-API per-call maxTokens ceiling becomes operator-set', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+
+  const guard = new RegExp(
+    'if\\((' + ID + ')!==void 0&&\\(!Number\\.isInteger\\(\\1\\)\\|\\|\\1<1\\|\\|\\1>(' + ID + ')\\)\\)' +
+    'throw new ' + ID + '\\(`\\$\\{' + ID + '\\}: \\$\\.model\\.complete: ' +
+    'maxTokens must be an integer from 1 to \\$\\{\\2\\} \\(got \\$\\{String\\(\\1\\)\\}\\)`\\)',
+    'g',
+  );
+  const sites = [...js.matchAll(guard)];
+  if (sites.length !== 1) {
+    fail(
+      `the mod-API maxTokens refusal must occur exactly once, found ${sites.length} -- ` +
+      `more than one site would mean the limit is consulted where this edit does not reach`,
+    );
+  }
+  const lim = sites[0][2];
+  const at = sites[0].index;
+
+  // Uniqueness is required in the module that DEFINES the name, not in the
+  // whole bundle -- see the census in the block above: the same letters name
+  // a tslib generator and a UI callback in other chunks.
+  const declSrc = 'var ' + rxEsc(lim) + '=(\\d+);';
+  const mod = moduleTextAt(at);
+  const decls = mod.match(new RegExp(declSrc, 'g')) || [];
+  if (decls.length !== 1) {
+    fail(
+      `the maxTokens limit '${lim}' must be declared exactly once in the refusal's module, ` +
+      `found ${decls.length} -- the locator would rewrite an unrelated constant`,
+    );
+  }
+  const stock = new RegExp(declSrc).exec(mod)[1];
+
+  // Read on EVERY consult, not once at module init -- the same reason step 28
+  // and step 29 carry: the image moves its own environment around while the
+  // process runs, so a value read at load time can be the wrong one by the
+  // time the guard consults it. Both in-module uses coerce this object: the
+  // comparison `>` takes the number hint, the message's `${...}` slot takes
+  // the string hint, and the handler ignores the hint and answers with a
+  // number in both.
+  editModuleAt(at, text =>
+    text.replace(new RegExp(declSrc), () =>
+      // ZERO IS NO CAP, exactly as in step 29, and so is every other value
+      // that is not a usable positive ceiling: unset, empty, non-numeric,
+      // negative, NaN. An operator writing 0 means "no per-call ceiling",
+      // never "a ceiling of nothing", and a value nobody can read must not
+      // quietly reintroduce the limit it was written to remove.
+      'var ' + lim + '={[Symbol.toPrimitive](){' +
+      'let v=process.env.CLAUDE_CODE_MOD_MAX_TOKENS;' +
+      'if(v===void 0||v==="")return Infinity;' +
+      'let n=Number(v);' +
+      'return Number.isFinite(n)&&n>0?n:Infinity}};',
+    ),
+  );
+  applied.push(
+    `30 mod-API per-call maxTokens: limit '${lim}' (stock ${stock}) now reads ` +
+    `CLAUDE_CODE_MOD_MAX_TOKENS; unset or unusable = no cap`,
+  );
+});
+
 
 // The gate lives at the very END on purpose: it was once placed mid-file, and
 // the four steps written after it ran unguarded — a broken locator among them

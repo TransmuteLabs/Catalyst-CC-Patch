@@ -1018,7 +1018,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 124 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 126 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -5039,7 +5039,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 124 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 126 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -6480,6 +6480,78 @@ def _mod_budget_warning_derives_from_the_ceiling(d):
         return False
     cap = site.group(2)
     return bool(re.search(rb'var ' + ID + rb'=' + re.escape(cap) + rb'\*' + ID + rb';', d))
+
+
+# Отказ мод-API по пределу maxTokens ОДНОГО вызова -- вторая дверь той комнаты
+# и единственный дом имени предела. Имя берётся ИЗ сравнения внутри сторожа:
+# на 2.1.270 оно `sMt` на darwin и `cMt` на linux (измерено), вшитое имя
+# промахнулось бы на второй платформе сегодня. Обе проверки ниже ловят имя
+# одной иглой и потому не могут разъехаться между собой.
+_MOD_MAXTOKENS_REFUSAL = (
+    rb'if\((' + ID + rb')!==void 0&&\(!Number\.isInteger\(\1\)\|\|\1<1\|\|\1>(' + ID + rb')\)\)'
+    rb'throw new ' + ID + rb'\(`\$\{' + ID + rb'\}: \$\.model\.complete: '
+    rb'maxTokens must be an integer from 1 to \$\{\2\} \(got \$\{String\(\1\)\}\)`\)'
+)
+
+
+def _mod_maxtokens_ceiling_is_operator_set(d):
+    """Предел maxTokens на ОДИН вызов объявлен НАШЕЙ формой.
+
+    Предмет тот же, что у потолка сессии, и по тем же причинам: имя предела
+    захватывается из САМОГО сравнения, которое бросает отказ, а объявление
+    требуется у ЗАХВАЧЕННОГО имени -- «в образе есть имя переменной окружения»
+    не говорит о пределе ничего.
+
+    Пинится тело вставки целиком, включая обе ветки умолчания и ЛЕНИВУЮ форму:
+    `Symbol.toPrimitive` значит, что окружение читается на КАЖДОМ обращении.
+    Здесь у ленивости есть и вторая работа, которой не было у потолка сессии:
+    имя коэрцится ДВАЖДЫ за один отказ -- числом в сравнении и строкой в тексте
+    «from 1 to ...». Нетерпеливая форма заморозила бы оба на значении момента
+    загрузки, и текст отказа начал бы называть не то число, по которому
+    отказывают.
+    """
+    site = re.search(_MOD_MAXTOKENS_REFUSAL, d)
+    if not site:
+        return False
+    lim = site.group(2)
+    return bool(re.search(
+        rb'var ' + re.escape(lim) + rb'=\{\[Symbol\.toPrimitive\]\(\)\{let (' + ID + rb')='
+        rb'process\.env\.CLAUDE_CODE_MOD_MAX_TOKENS;'
+        rb'if\(\1===void 0\|\|\1===""\)return Infinity;'
+        rb'let (' + ID + rb')=Number\(\1\);'
+        rb'return Number\.isFinite\(\2\)&&\2>0\?\2:Infinity\}\};', d))
+
+
+def _mod_maxtokens_default_is_not_the_ceiling(d):
+    """Умолчание maxTokens -- ОТДЕЛЬНАЯ константа, а не тот же предел.
+
+    Гарантия отдельная и с другим предметом, поэтому и проверка отдельная.
+    Рядом со сторожем стоит `(<arg>??<DEF>)` -- значение, которое получает мод,
+    НЕ передавший maxTokens (256 на 2.1.270, имена `H0s` на darwin и `fOs` на
+    linux). Пока это своя константа, снятие предела её не трогает: не передал
+    -- получил 256, как и на стоке.
+
+    Если апстрим когда-нибудь сведёт их в одно имя (`<arg>??<LIM>`), наш же
+    шаг 30 превратит «мод не передал maxTokens» в запрос на Infinity токенов --
+    вред, которого на стоке не было и который создаёт именно наша правка.
+    Своего отказа у этого нет ни в одном другом доме, а молча он выглядел бы
+    как ошибка провайдера, а не как наша.
+
+    Зелена на пристинном образе ПО ОПРЕДЕЛЕНИЮ: предмет -- стоковое свойство,
+    на которое опирается наш шаг. Она объявлена в списке пола по этой причине.
+    """
+    site = re.search(_MOD_MAXTOKENS_REFUSAL, d)
+    if not site:
+        return False
+    arg, lim = site.group(1), site.group(2)
+    # Окно берётся от сторожа вперёд: умолчание стоит в теле той же функции,
+    # несколькими выражениями ниже. Окно, а не весь образ, -- чтобы `??` из
+    # чужого чанка не ответил за этот.
+    tail = d[site.end():site.end() + 900]
+    use = re.search(rb'\(' + re.escape(arg) + rb'\?\?(' + ID + rb')\)', tail)
+    if not use:
+        return False
+    return use.group(1) != lim
 
 
 def _cancellation_rule_is_whole(d):
@@ -8004,6 +8076,15 @@ checks = {
     # warning silent with it.
     'the mod-API model budget ceiling is operator-set': _mod_budget_ceiling_is_operator_set(d),
     'the mod-API budget warning derives from that ceiling': _mod_budget_warning_derives_from_the_ceiling(d),
+    # The SECOND door of the same room. Lifting only the process budget leaves
+    # a mechanism that may call the model forever but never get a reply longer
+    # than 8192 tokens, and the judge's own recorded attempts ask for 24000 --
+    # so the first record is what makes the fan work at all, and the second
+    # guards the premise our edit depends on: the value a mod gets by NOT
+    # passing maxTokens must stay a constant of its own, or lifting the
+    # ceiling would silently turn that default into Infinity.
+    'the mod-API per-call maxTokens ceiling is operator-set': _mod_maxtokens_ceiling_is_operator_set(d),
+    'the mod-API per-call maxTokens default is not the ceiling': _mod_maxtokens_default_is_not_the_ceiling(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -8012,7 +8093,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 124
+EXPECTED_CHECKS = 126
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -8028,7 +8109,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 124 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 126 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
