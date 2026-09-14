@@ -66,6 +66,11 @@
 # leaves the snapshots under the probe root, named in the line above.
 #
 # Exit codes -- the kit's shared table (see the top of claude-patch-all.sh):
+# ФОРМА строк ниже жёсткая: «#», три пробела, цифра, два пробела. Таблицу
+# читает регексп сценария 206 стенда корпусных инструментов
+# (tools/corpus-tools-bench.sh), цензующий связку кодов с ветвями разбора
+# в tools/sweep.sh; строка другой формы для ценза невидима, и код уедет
+# в общую ветвь без собственного ответа.
 #   0  green
 #   1  a case went red, or an instrument of this probe (the lock probe, the
 #      backup guard) says the kit is broken -- retrying will not help
@@ -86,6 +91,13 @@
 #   7  the probe's own harness is truncated: a scenario victim called a
 #      function whose declaration the dependency closure did not bring. The
 #      scenario answers above measured nothing -- repair the probe's extraction
+#   8  the material half has nothing to measure on this machine (the same
+#      SKIP causes as 5), while the logical half above WAS measured and held
+#      -- the SKIP+ line on stderr names how many cases and which letters
+#      held. Split out of 5 (task #112): "nothing was measured" and "the
+#      logical half held, the material half absent" are different answers
+#      for the consumer's summary, and an action cannot be chosen from a
+#      code that names two -- the same rule that split 7 out of 2 in wave 47
 #
 # Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
 # traps) and is NOT a kit verdict -- POSIX reports the signal, this table
@@ -199,6 +211,16 @@ fi
 
 ALL_CASES="$CASES"
 
+# Буквы удержавшихся случаев логической половины (задача #112). Список
+# логических случаев НЕ вшит буквами: он меняется фактом -- случай переезжает
+# через материальный гейт или добавляется новым, и вшитый список молча мерил
+# бы не то, что исполнилось. Счётчик растёт в обёртке каждого случая,
+# отработавшего ДО материального гейта, сразу после его зелёного возврата:
+# красный случай выходит кодом 1 раньше гейта, поэтому здесь оказываются
+# только удержавшиеся -- по построению, а не по списку. Материальные случаи
+# (a/b/c/d/u/r/x/p) гоняются ПОСЛЕ гейта и сюда не попадают.
+LOGICAL_HELD=
+
 # Значение принадлежит конвейеру: дубль здесь сделал бы случай (k) зелёным по
 # маркеру, которого исполняющийся конвейер уже не использует.
 TWEAKCC_PROBE_CFG_MARKER="$(sed -n "s/^TWEAKCC_PROBE_CFG_MARKER='\\(.*\\)'$/\\1/p" "$PIPELINE")"
@@ -287,6 +309,7 @@ PY_K_MUT
 
 if [[ "$CASES" == *k* ]]; then
   case_k || exit $?
+  LOGICAL_HELD="${LOGICAL_HELD}K"
   CASES="${CASES//k/}"
   if [[ -z "$CASES" ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
@@ -402,6 +425,7 @@ PY_LSOF
 
 if [[ "$CASES" == *l* ]]; then
   case_l || exit $?
+  LOGICAL_HELD="${LOGICAL_HELD}L"
   CASES="${CASES//l/}"
   if [[ -z "$CASES" ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
@@ -2302,6 +2326,7 @@ PY_LEVEL
 
 if [[ "$CASES" == *n* ]]; then
   case_n || exit $?
+  LOGICAL_HELD="${LOGICAL_HELD}N"
   CASES="${CASES//n/}"
   if [[ -z "$CASES" ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
@@ -2311,6 +2336,7 @@ fi
 
 if [[ "$CASES" == *m* ]]; then
   case_m || exit $?
+  LOGICAL_HELD="${LOGICAL_HELD}M"
   CASES="${CASES//m/}"
   if [[ -z "$CASES" ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
@@ -2493,17 +2519,38 @@ PRISTINE="$VERSIONS/$WANT_VER.orig"
 # прибор: вызывающий (предполёт свипа) не мог отличить «на этой машине нечего
 # мерить» от «механизм сломан», и любая политика по коду 3 была бы неверна для
 # одной из сторон. Материал -- 5, отказы остаются на 3.
+#
+# Расщепление кода 5 (задача #112): 5 нёс два состояния с разными
+# последствиями для сводки потребителя -- «не измерено ничего» и «логическая
+# половина измерена и держится, материальной на машине нет». Править только
+# текст ветви 5 у потребителя нельзя: при наборе из одних материальных букв
+# (--case a) код 5 действительно значит «не измерено ничего», и один текст на
+# оба состояния воспроизводит тот же дефект. Поэтому расщеплён КОД, по
+# правилу волны 47 общей таблицы: код, называющий несколько разных действий,
+# неисправен -- действие нельзя выбрать из кода, который называет два. Строки
+# SKIP ниже не меняются: причина отсутствия материала не изменилась, новая
+# строка добавляется рядом с ними.
+material_skip_exit() {   # выход материального гейта: 8, если логическая половина измерена; иначе вызывающий выходит 5
+  if [[ -z "$LOGICAL_HELD" ]]; then
+    return 0
+  fi
+  echo "SKIP+: логическая половина ИЗМЕРЕНА и держится -- случаев ${#LOGICAL_HELD}, буквы ${LOGICAL_HELD}; материальной половины на этой машине нет" >&2
+  exit 8
+}
 if [[ -z "$WANT_VER" || ! -f "$PATCHED" || ! -f "$PRISTINE" ]]; then
   echo "SKIP: need both $PATCHED and $PRISTINE" >&2
   echo "  (install a version with: bash claude-patch-all.sh --update <version>)" >&2
+  material_skip_exit
   exit 5
 fi
 if [[ "$(marks "$PATCHED")" == 0 ]]; then
   echo "SKIP: $PATCHED does not carry our patches, so case (a) has nothing to preserve" >&2
+  material_skip_exit
   exit 5
 fi
 if [[ "$(marks "$PRISTINE")" != 0 ]]; then
   echo "SKIP: $PRISTINE is not pristine -- it carries our marker" >&2
+  material_skip_exit
   exit 5
 fi
 

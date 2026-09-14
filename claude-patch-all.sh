@@ -39,6 +39,11 @@
 #      code carried three different ACTIONS (wait for upstream / fix this
 #      host's network / fix the instrument), and an action cannot be chosen
 #      from a code that names three.
+#   8  a probe's subject split in halves: its logical half WAS measured and
+#      held, its material half is absent on this machine -- a skip of the
+#      material half only, NOT "nothing was measured" and not a refusal
+#      (the pipeline never returns it; split out of 5 in task #112, see
+#      tools/build-path-probe.sh)
 #
 # Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
 # traps) and is NOT a kit verdict: POSIX reports the signal, the table above
