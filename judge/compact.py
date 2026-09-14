@@ -93,6 +93,60 @@ def _load_mod_record(path):
         return False
 
 
+def read_journal_lines(journal_path, existing):
+    """Разбор строк журнала с ИМЕНОВАНИЕМ непарсящихся.
+
+    Возвращает (rows, torn): rows -- список пар (строка, объект) по тем
+    строкам, что разобрались; torn -- сколько НЕ разобралось.
+
+    Образец поведения взят у соседа по этому же дереву: adjudicate.py на файле
+    меток печатает «ВНИМАНИЕ: <путь>:<номер> не разбирается (<exc>); строка
+    пропущена» и считает пропуск. Журнал был единственным читаемым файлом
+    набора, где этого не было: оба цикла ниже делали
+    `except json.JSONDecodeError: continue`, а счётчик `не прочитано` в их
+    итогах считает СОВСЕМ ДРУГОЕ -- нечитаемые файлы записей (fold mod) и
+    нечитаемый шард со своими строками (fold shards). На журнале с порванной
+    строкой итог печатал «не прочитано 0»: это не умолчание, а ЛОЖНОЕ ЧИСЛО о
+    журнале -- инструмент утверждал, что непрочитанного нет, глядя при этом на
+    непрочитанную строку. Строка шарда, порвавшаяся точно так же, считалась.
+
+    Почему счётчик отдельный, а не тот же `unread`: сущности разные (файл
+    записи против строки журнала), и сложение спрятало бы, ЧТО именно не
+    прочитано.
+
+    Номер строки -- от начала файла, ВКЛЮЧАЯ пустые: координата обязана
+    приводить к строке, иначе она хуже отсутствующей.
+
+    Одна порванная строка при полном проходе называется ДВАЖДЫ -- по разу от
+    каждой свёртки. Это не дубль под склейку: проходы независимы, и число в
+    итоге каждого описывает ЕГО чтение. Свести их в один голос значило бы
+    сделать одно из двух чисел ложным.
+
+    Длина и наличие NUL названы не для красоты: измеренный случай (журнал
+    судьи, строка 346) -- 271 байт данных плюс 11 NUL, подпись «файл вырос,
+    данные до диска не дошли». Она отличает оборванную запись от гонки
+    чтения-записи, которая теряет строку целиком и NUL не оставляет.
+    """
+    rows = []
+    torn = 0
+    for lineno, raw in enumerate(existing.splitlines(), 1):
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+        except ValueError as exc:
+            torn += 1
+            body = raw.encode('utf-8', 'surrogateescape')
+            has_nul = 'да' if b'\x00' in body else 'нет'
+            sys.stderr.write(
+                f'ВНИМАНИЕ: {journal_path}:{lineno} не разбирается ({exc}); '
+                f'длина {len(body)} байт, NUL: {has_nul}; строка пропущена\n')
+            continue
+        rows.append((s, obj))
+    return rows, torn
+
+
 def fold_mod_records(journal_path, records_dir, dry_run=False):
     """Insert missing journal index lines for records/mod-*.json{,.gz}.
 
@@ -102,7 +156,7 @@ def fold_mod_records(journal_path, records_dir, dry_run=False):
     Idempotent: a line whose rec field already names the file is left
     alone. Does not rewrite existing splice lines.
     """
-    added = skipped = unread = 0
+    added = skipped = unread = torn = 0
     if not os.path.isdir(records_dir):
         print(f'fold mod: записей нет ({records_dir})')
         return
@@ -120,13 +174,8 @@ def fold_mod_records(journal_path, records_dir, dry_run=False):
     except FileNotFoundError:
         existing = ''
     if existing:
-        for raw in existing.splitlines():
-            if not raw.strip():
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+        rows, torn = read_journal_lines(journal_path, existing)
+        for _s, obj in rows:
             rec = obj.get('rec')
             if isinstance(rec, str):
                 seen.add(rec)
@@ -159,7 +208,10 @@ def fold_mod_records(journal_path, records_dir, dry_run=False):
         os.makedirs(os.path.dirname(journal_path) or '.', exist_ok=True)
         with open(journal_path, 'a', encoding='utf-8') as fh:
             fh.write(pfx + '\n'.join(new_lines) + '\n')
+    # Ноль печатается тоже: отсутствие слова читатель принимает за отсутствие
+    # проблемы, и молчащее число ничем не лучше молчащего разбора.
     print(f'fold mod: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
+          f', строк журнала не разобрано {torn}'
           f'{" (dry-run)" if dry_run else ""}')
 
 
@@ -195,15 +247,9 @@ def fold_journal_shards(journal_path, dry_run=False):
             existing = fh.read()
     except FileNotFoundError:
         existing = ''
-    for raw in existing.splitlines():
-        s = raw.strip()
-        if not s:
-            continue
+    rows, torn = read_journal_lines(journal_path, existing)
+    for s, obj in rows:
         seen_line.add(s)
-        try:
-            obj = json.loads(s)
-        except json.JSONDecodeError:
-            continue
         rec = obj.get('rec')
         if isinstance(rec, str):
             seen_rec.add(rec)
@@ -264,7 +310,9 @@ def fold_journal_shards(journal_path, dry_run=False):
                 os.remove(path)
             except FileNotFoundError:
                 pass
+    # Тот же договор, что у fold mod: число называется всегда, включая ноль.
     print(f'fold shards: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
+          f', строк журнала не разобрано {torn}'
           f'{" (dry-run)" if dry_run else ""}')
 
 

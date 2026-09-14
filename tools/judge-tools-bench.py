@@ -46,11 +46,11 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 49
+EXPECTED_SCENARIOS = 50
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 58
+EXPECTED_MUTATIONS = 60
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -139,10 +139,51 @@ def run_compact(
     *,
     older_than_hours: float = 0,
     dry_run: bool = False,
+    home: Path | None = None,
+) -> tuple[dict[str, int], str]:
+    """Прогон compact.py в ИЗОЛИРОВАННОМ доме проб.
+
+    Лестница дома у compact.py (main, строки 323-324): CLAUDE_PROBES_DIR, затем
+    CLAUDE_CONFIG_DIR/probes, затем ~/.claude/probes. `--dir` задаёт только
+    каталог ЗАПИСЕЙ и на путь журнала не влияет вовсе. Стенд передавал лишь
+    `--dir`, поэтому journal_path КАЖДОГО прогона указывал в ЖИВОЙ
+    ~/.claude/probes/judge/journal.jsonl.
+
+    Замер 2026-09-14: обе свёртки на этом пути уходили в ранний возврат
+    («нечего вкладывать») -- mod-фикстур у стенда нет, шардов рядом с живым
+    журналом в тот момент не лежало. Вред был отложенный, а не нулевой: шард
+    пишет боевой носитель в любой момент, и тогда прогон стенда вложил бы его в
+    живой журнал и УДАЛИЛ шард (fold_journal_shards дописывает open(..., 'a') и
+    сносит шард после обратного чтения). Счёт порванных строк при этом
+    описывал бы огрызки ЖИВОГО журнала, а не фикстуру сценария.
+
+    Изоляция задаётся и флагом `--home`, и переменной CLAUDE_PROBES_DIR --
+    дублирование НАМЕРЕННОЕ, оба ведут в один и тот же временный каталог.
+    Снятие любого одного не выпускает прогон в живой дом, поэтому мутация этой
+    пары ненаблюдаема по построению: зуб есть у СЛЕДСТВИЯ (сценарий 50 читает
+    журнал по названному дому), а не у самого дублирования. Менять защиту
+    чужих данных на наблюдаемость мутации здесь нельзя -- цена промаха -- запись
+    в живой журнал пользователя.
+    """
+    if home is not None:
+        return _compact_once(home, directory, older_than_hours, dry_run)
+    # Дом без предмета: свой каталог на прогон, чтобы состояние не перетекало
+    # между сценариями и не оставалось после стенда.
+    with tempfile.TemporaryDirectory() as raw:
+        return _compact_once(Path(raw), directory, older_than_hours, dry_run)
+
+
+def _compact_once(
+    home: Path,
+    directory: Path,
+    older_than_hours: float,
+    dry_run: bool,
 ) -> tuple[dict[str, int], str]:
     command = [
         sys.executable,
         str(COMPACT),
+        "--home",
+        str(home),
         "--dir",
         str(directory),
         "--older-than-hours",
@@ -150,7 +191,11 @@ def run_compact(
     ]
     if dry_run:
         command.append("--dry-run")
-    result = subprocess.run(command, capture_output=True, text=True, errors="replace")
+    env = dict(os.environ)
+    env["CLAUDE_PROBES_DIR"] = str(home)
+    result = subprocess.run(
+        command, capture_output=True, text=True, errors="replace", env=env,
+    )
     output = result.stdout + result.stderr
     require(result.returncode == 0, f"compact.py rc={result.returncode}\n{output}")
     matches = list(SUMMARY_RE.finditer(result.stdout))
@@ -1767,6 +1812,102 @@ def scenario_49() -> None:
                     os.environ[name] = value
 
 
+def build_journal_home(base: Path, *, torn: bool) -> tuple[Path, Path]:
+    """Игрушечный дом проб с журналом, шардом и записью мода.
+
+    Обе свёртки журнала уходят в ранний возврат, если им нечего вкладывать:
+    fold_mod_records -- когда в каталоге записей нет mod-*.json,
+    fold_journal_shards -- когда рядом с журналом нет journal.jsonl.shard.*.
+    Не прочитав журнал, они и порванную строку назвать не могут, поэтому
+    фикстура обязана нести ОБА повода, иначе сценарий зелен по причине
+    «читатель не читал», а не «читатель назвал».
+
+    Порванная строка стоит ВТОРОЙ намеренно: координата обязана приводить к
+    строке, а строка первая совпала бы с номером при любой ошибке отсчёта.
+    Подпись взята с измеренного случая (журнал судьи, строка 346): данные
+    плюс NUL -- «файл вырос, данные до диска не дошли».
+    """
+    home = base / "home"
+    records = home / "judge" / "records"
+    records.mkdir(parents=True)
+    journal = home / "judge" / "journal.jsonl"
+
+    torn_line = '{"rec": "mod-torn.json", "t": "2026-09-14T00:00:00' + "\x00" * 11 + '"}'
+    lines = ['{"rec": "mod-a.json", "carrier": "mod"}']
+    if torn:
+        lines.append(torn_line)
+    else:
+        lines.append('{"rec": "mod-c.json", "carrier": "mod"}')
+    lines.append('{"rec": "mod-b.json", "carrier": "mod"}')
+    journal.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    (journal.parent / (journal.name + ".shard.mod-shard.json")).write_text(
+        '{"rec": "mod-shard.json", "carrier": "mod"}\n', encoding="utf-8",
+    )
+    (records / "mod-fold.json").write_text(
+        json.dumps({"kind": "OK", "tool": "Agent", "agent": "probe",
+                    "dtMs": 5, "used": True, "cls": "an-cause",
+                    "t0": 1757000000000}),
+        encoding="utf-8",
+    )
+    return home, records
+
+
+def scenario_50() -> None:
+    """Порванная строка журнала НАЗВАНА и СОЧТЕНА обеими свёртками.
+
+    Журнал во всём наборе инструментов читает только judge/compact.py, и оба
+    его цикла делали `except json.JSONDecodeError: continue` -- молча, без
+    счёта. Счётчик «не прочитано» в их итогах считает СОВСЕМ ДРУГОЕ: нечитаемые
+    файлы записей (fold mod) и нечитаемый шард со своими строками (fold
+    shards). На журнале с порванной строкой оба итога печатали «не прочитано
+    0» -- не умолчание, а ЛОЖНОЕ ЧИСЛО: инструмент утверждал, что
+    непрочитанного нет, глядя при этом на непрочитанную строку. Строка шарда,
+    порвавшаяся точно так же, считалась. Образец поведения уже жил рядом --
+    adjudicate.py на файле меток называет непарсящуюся строку и считает
+    пропуск; журнал был единственным отстающим читателем набора.
+
+    Сценарий заодно держит изоляцию прогона (см. run_compact): он утверждает,
+    что ВНИМАНИЕ называет журнал ИГРУШЕЧНОГО дома. Прогон, ушедший в живой дом
+    проб, назвал бы другой путь и упал бы здесь же.
+
+    Половина Б -- положительный контроль: та же фикстура без порванной строки
+    обязана дать ноль и НИ ОДНОГО ВНИМАНИЯ. Без неё «назвал 1» неотличимо от
+    «называет всегда».
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        home, records = build_journal_home(Path(raw), torn=True)
+        journal = home / "judge" / "journal.jsonl"
+        counters, output = run_compact(records, older_than_hours=24, home=home)
+
+        require(
+            f"{journal}:2 не разбирается" in output,
+            f"порванная строка не названа координатой {journal}:2\n{output}",
+        )
+        require("NUL: да" in output,
+                f"подпись оборванной записи (NUL) не названа\n{output}")
+        named = output.count("не разбирается")
+        require(named == 2,
+                f"порванную строку назвали {named} раз вместо 2 (по разу на "
+                f"свёртку: проходы независимы)\n{output}")
+        counted = output.count("строк журнала не разобрано 1")
+        require(counted == 2,
+                f"итог со счётом порванных строк напечатан {counted} раз "
+                f"вместо 2\n{output}")
+        require_counters(counters, done=0, skipped=1)
+
+    with tempfile.TemporaryDirectory() as raw:
+        home, records = build_journal_home(Path(raw), torn=False)
+        counters, output = run_compact(records, older_than_hours=24, home=home)
+        require("ВНИМАНИЕ" not in output,
+                f"целый журнал вызвал ВНИМАНИЕ\n{output}")
+        zeroed = output.count("строк журнала не разобрано 0")
+        require(zeroed == 2,
+                f"на целом журнале ноль напечатан {zeroed} раз вместо 2: "
+                f"молчащее число ничем не лучше молчащего разбора\n{output}")
+        require_counters(counters, done=0, skipped=1)
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -1820,6 +1961,7 @@ def run_scenarios() -> int:
         (47, scenario_47),
         (48, scenario_48),
         (49, scenario_49),
+        (50, scenario_50),
     ]
     mismatches = 0
     for number, case in cases:
@@ -2575,6 +2717,37 @@ def mutation_m58(root: Path) -> None:
     )
 
 
+def mutation_m59(root: Path) -> None:
+    """Вернуть молчаливый пропуск непарсящейся строки журнала."""
+    replace_once(
+        root / "judge" / "compact.py",
+        "        except ValueError as exc:\n"
+        "            torn += 1\n"
+        "            body = raw.encode('utf-8', 'surrogateescape')\n"
+        "            has_nul = 'да' if b'\\x00' in body else 'нет'\n"
+        "            sys.stderr.write(\n"
+        "                f'ВНИМАНИЕ: {journal_path}:{lineno} не разбирается ({exc}); '\n"
+        "                f'длина {len(body)} байт, NUL: {has_nul}; строка пропущена\\n')\n"
+        "            continue\n",
+        "        except ValueError:\n"
+        "            continue\n",
+        "M59",
+    )
+
+
+def mutation_m60(root: Path) -> None:
+    """Снять счёт порванных строк с итога fold mod, оставив сам счётчик."""
+    replace_once(
+        root / "judge" / "compact.py",
+        "    print(f'fold mod: добавлено {added}, уже в индексе {skipped},"
+        " не прочитано {unread}'\n"
+        "          f', строк журнала не разобрано {torn}'\n",
+        "    print(f'fold mod: добавлено {added}, уже в индексе {skipped},"
+        " не прочитано {unread}'\n",
+        "M60",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -2634,6 +2807,8 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M56", mutation_m56, 48, "проба вне дома не отвергнута кодом 2"),
     ("M57", mutation_m57, 49, "раскатанная раскладка не резолвится"),
     ("M58", mutation_m58, 49, "отказ назвал не оба кандидата раскладки"),
+    ("M59", mutation_m59, 50, "порванная строка не названа координатой"),
+    ("M60", mutation_m60, 50, "итог со счётом порванных строк напечатан"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно
