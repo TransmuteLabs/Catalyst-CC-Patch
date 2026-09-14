@@ -5151,6 +5151,128 @@ step('27 full-bypass mode keeps only the peer-machine immunity', () => {
 });
 
 
+// --------------------------------------------------------------------------
+// 28. Refusal fallback: the routes table reads the config seam, and the top
+//     of the lineup is reachable again.
+//     Upstream consults `e.routesOverride ?? <stock table>()` on both refusal
+//     lanes but ships the seam EMPTY (`function <seam>(){return}`), so the
+//     stock table always wins. And a firstParty-only predicate quietly swaps
+//     the armed model claude-opus-5 -> claude-opus-4-8 wherever it is asked
+//     for, keeping the top of the lineup out of the fallback chain.
+//
+//     BOTH edits below go through editModuleAt, never over the whole text.
+//     The predicate's minified name is ALSO a string constant of an
+//     unrelated chunk (on 2.1.270 `$On` is "Teammate prompt must not be a
+//     mailbox protocol frame..." in chunk-jb9wm99y.js, exported as
+//     PROTOCOL_FRAME_PROMPT_ERROR), and the seam's letters occur 16 times
+//     across the bundle with 3 of them in this module -- a whole-text edit
+//     would land on whichever chunk the minifier happened to spell the same.
+// --------------------------------------------------------------------------
+step('28 refusal fallback routes from config, top of lineup reachable', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+
+  // --- site A: bring the routesOverride seam to life -----------------------
+  // The seam's minified name is deliberately NOT pinned: both refusal lanes
+  // call it as `routesOverride:<name>()`, so the CALL SITES name the
+  // function (root #75 -- a locator that pins a minified name breaks on the
+  // next build for no structural reason). Two lanes, one name, or refuse.
+  const callSites = [...js.matchAll(new RegExp(`routesOverride:(${ID})\\(\\)`, 'g'))];
+  const seamNames = [...new Set(callSites.map((m) => m[1]))];
+  if (callSites.length !== 2 || seamNames.length !== 1) {
+    fail(
+      `routesOverride seam: expected exactly 2 call sites naming one ` +
+        `function, found ${callSites.length} call site(s) ` +
+        `(${seamNames.join(', ') || 'no name captured'})`,
+    );
+  }
+  const seam = seamNames[0];
+
+  // The empty definition must be found in the SAME module as the call sites:
+  // the same letters may mean something else a chunk away, so the count is
+  // taken on moduleTextAt, never on js.
+  const seamDef = `function ${rxEsc(seam)}\\(\\)\\{return\\}`;
+  const seamDefs = moduleTextAt(callSites[0].index).match(new RegExp(seamDef, 'g')) || [];
+  if (seamDefs.length !== 1) {
+    fail(
+      `шов routesOverride не найден в том же модуле, что и его вызов ` +
+        `(${seamDefs.length} определения по имени '${seam}')`,
+    );
+  }
+
+  // The replacement body uses NOT ONE captured name -- only `process.env`
+  // and `JSON`: a `$` inside a minified name spliced into a replacement is a
+  // group reference and into a pattern an anchor, so a body borrowing the
+  // seam's own name could silently edit a different function. The env key
+  // follows the mechanism's existing controls (CATCH_ALL / DISABLE /
+  // NO_MODEL_FALLBACK) rather than taste: the ~/.claude.json accessor is NOT
+  // PROVEN to be in scope at the seam, and a locator may not rest on an
+  // unproven scope. Nothing is ever WRITTEN anywhere on any path -- the
+  // config is only read.
+  //
+  // The config parse failure is CLOSED on purpose: any invalid value -- not
+  // an object, an array, a key whose value is neither a string nor a
+  // non-empty array of strings -- returns undefined, and the consumer takes
+  // the stock table WHOLE. A lenient reader could hand the consumer half a
+  // table, which is worse than no table: some routes would silently keep
+  // their stock destinations while the config claims to own them.
+  editModuleAt(callSites[0].index, (body) =>
+    body.replace(
+      new RegExp(seamDef),
+      `function ${repEsc(seam)}(){try{let r=JSON.parse(process.env.CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES||"null");if(r===null||typeof r!=="object"||Array.isArray(r))return;for(let k of Object.keys(r)){let v=r[k];if(typeof v==="string")continue;if(Array.isArray(v)&&v.length>0&&v.every((x)=>typeof x==="string"))continue;return}return r}catch{return}}`,
+    ),
+  );
+  applied.push(
+    `refusal-fallback routes from config (seam '${seam}', 2 call site(s), ` +
+      `env key 'CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES')`,
+  );
+
+  // --- site B: disarm the built-in top-of-lineup downgrade -----------------
+  // One point disarms both halves: the predicate is defined once and read
+  // exactly twice -- in the armed-model downgrade and in the exclusion of
+  // the top of the lineup from the descent. The constants and the predicate
+  // are captured by ONE expression so that every name arrives from its own
+  // site; the whole-text match must be exactly one.
+  const bundleRx =
+    `var (${ID})="claude-opus-4-8",(${ID})="claude-opus-5";` +
+    `function (${ID})\\((${ID})\\)\\{return (${ID})\\(\\)&&(${ID})\\(\\4\\)===\\2\\}`;
+  const bundles = js.match(new RegExp(bundleRx, 'g'));
+  if (!bundles || bundles.length !== 1) {
+    fail(
+      `downgrade predicate bundle: expected exactly 1 match over the whole ` +
+        `text, found ${bundles ? bundles.length : 0}`,
+    );
+  }
+  const bundle = js.match(new RegExp(bundleRx));
+  const [, F, M, A, v, U, C] = bundle;
+
+  // Structural pin instead of a pin on the written shape: within the SAME
+  // module the predicate must be READ exactly twice (every mention minus its
+  // own definition). A reader added upstream must fail here loudly rather
+  // than silently survive a dead predicate.
+  const mentions = [
+    ...moduleTextAt(bundle.index).matchAll(new RegExp(`(?<![\\w$])${rxEsc(A)}(?![\\w$])`, 'g')),
+  ].length;
+  const readers = mentions - 1;
+  if (readers !== 2) {
+    fail(`число читателей предиката понижения изменилось: ${readers}`);
+  }
+
+  editModuleAt(bundle.index, (body) =>
+    body.replace(
+      new RegExp(
+        `function ${rxEsc(A)}\\(${rxEsc(v)}\\)\\{return ${rxEsc(U)}\\(\\)&&` +
+          `${rxEsc(C)}\\(${rxEsc(v)}\\)===${rxEsc(M)}\\}`,
+      ),
+      `function ${repEsc(A)}(${repEsc(v)}){return!1}`,
+    ),
+  );
+  applied.push(
+    `top-of-lineup reachable as a refusal fallback (predicate '${A}', ` +
+      `2 reader(s), constants '${F}'/'${M}')`,
+  );
+});
+
+
 // The gate lives at the very END on purpose: it was once placed mid-file, and
 // the four steps written after it ran unguarded — a broken locator among them
 // was recorded and never read, so the build reported success while the patch

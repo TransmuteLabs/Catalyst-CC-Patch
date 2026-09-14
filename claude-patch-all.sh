@@ -1013,7 +1013,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 119 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 121 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -5034,7 +5034,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 119 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 121 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -6303,6 +6303,39 @@ def _claude_md_alternates_are_tried(d):
         return False
     return bool(re.search(rb'await ' + ID + rb'\$tw\(__sw\(__p,__n\),' + ID + rb','
                           rb'__c\?__sw\(__c,__n\):' + ID + rb',void 0\)', d))
+
+
+def _refusal_routes_read_the_config(d):
+    """Шов таблицы маршрутов отказа читает конфиг -- и читает его ОДИН раз.
+
+    Сток оставляет шов пустым (`function <seam>(){return}` отдаёт undefined
+    на обеих дорожках отказа), поэтому одного наличия env-ключа где-то в
+    образе мало: ключ обязан стоять в теле ТОЙ САМОЙ функции, которую зовут
+    обе дорожки. Требование «ровно два `routesOverride:<name>()` с одним
+    именем» -- вторая половина той же двери: дорожек две, имя одно, и любое
+    расхождение значит, что правка легла не на свой сайт.
+    """
+    calls = re.findall(rb'routesOverride:(' + ID + rb')\(\)', d)
+    if len(calls) != 2 or len(set(calls)) != 1:
+        return False
+    seam = calls[0]
+    return bool(re.search(rb'function ' + re.escape(seam) + rb'\(\)\{.{0,200}?'
+                          rb'CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES', d, re.S))
+
+
+def _top_of_lineup_is_reachable(d):
+    """Верх линейки достижим как маршрут отказа -- связка пинится ЦЕЛИКОМ.
+
+    Предикат понижения определён один раз и прочитан ровно дважды, поэтому
+    замена тела на `return!1` гасит оба читателя разом. Но тело без констант
+    ничего не доказывает: на образе, где площадка исчезла ВОВСЕ, ослабленная
+    форма сматчилась бы на чужое `function <f>(<e>){return!1}` -- проверка
+    зеленела бы, обещая несуществующее свойство. Константы понижения и верха
+    обязаны стоять в той же связке: это пол чувствительности, а не придирка.
+    """
+    return bool(re.search(
+        rb'var ' + ID + rb'="claude-opus-4-8",' + ID + rb'="claude-opus-5";'
+        rb'function ' + ID + rb'\(' + ID + rb'\)\{return!1\}', d))
 
 
 def _cancellation_rule_is_whole(d):
@@ -7804,6 +7837,12 @@ checks = {
     # back makes the loader serve CLAUDE.md's bytes under another name. Both are
     # pinned now.
     'CLAUDE.md alternates tried': _claude_md_alternates_are_tried(d),
+    # step 28: the refusal-fallback seam reads the config, and the built-in
+    # downgrade of the armed model is off. Both halves are anchored at their
+    # own site (the helpers say why the halves are shaped this way); each
+    # carries its own mutation, so neither may quietly become unfailable.
+    'refusal fallback routes come from the config': _refusal_routes_read_the_config(d),
+    'top of the lineup is a reachable fallback': _top_of_lineup_is_reachable(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -7812,7 +7851,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 119
+EXPECTED_CHECKS = 121
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -7828,7 +7867,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 119 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 121 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
