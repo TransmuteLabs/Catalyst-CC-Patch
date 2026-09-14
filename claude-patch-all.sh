@@ -1018,7 +1018,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 122 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 124 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -5039,7 +5039,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 122 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 124 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -6411,6 +6411,75 @@ def _armed_model_keeps_its_downgrade(d):
         return False
     return bool(re.search(rb'(?<![\w$])' + re.escape(reader.group(1))
                           + rb'\((' + ID + rb')\(\)\)', d))
+
+
+# Отказ мод-API по бюджету -- единственный дом имени потолка. Имя берётся ИЗ
+# охраняемого сравнения, а не вписывается буквами: на 2.1.270 оно `BSe` на
+# darwin и `eke` на linux (измерено), то есть вшитое имя промахнулось бы на
+# второй платформе СЕГОДНЯ. Обе проверки ниже ловят имя одной и той же иглой,
+# и потому не могут разъехаться между собой.
+_MOD_BUDGET_REFUSAL = (
+    rb'if\(\(' + ID + rb'\.get\((' + ID + rb')\)\?\?0\)\+' + ID + rb'>=(' + ID + rb')\)'
+    rb'throw new ' + ID + rb'\(`\$\{\1\}: \$\.model\.complete: '
+    rb"the session's model budget for this plugin is spent`\)"
+)
+
+
+def _mod_budget_ceiling_is_operator_set(d):
+    """Потолок бюджета мод-API, который читает отказ, объявлен НАШЕЙ формой.
+
+    Предмет -- не «в образе есть имя переменной окружения»: стоковый образ
+    объявляет потолок числом, и ключ, лежащий где угодно ещё, о потолке не
+    говорит ничего. Поэтому имя потолка захватывается из САМОГО сравнения,
+    которое бросает отказ, и объявление требуется у ЗАХВАЧЕННОГО имени.
+
+    Пинится тело нашей вставки целиком, включая обе ветки умолчания
+    (`Infinity` при отсутствующем/пустом значении и при негодном числе) И
+    ЛЕНИВУЮ ФОРМУ: `Symbol.toPrimitive` значит, что окружение читается на
+    КАЖДОМ обращении, а не один раз при загрузке модуля. Это не украшение --
+    шаг 28 уже платил за нетерпеливую форму ровно здесь: образ перекладывает
+    своё окружение по ходу процесса, и прочитанное при загрузке значение к
+    моменту сверки может быть чужим. Потеряй правка ленивость, ручка стала бы
+    мёртвой для всех, кто ставит её не до старта, -- и никакая другая дверь
+    этого не назвала бы.
+
+    Это НЕ тот случай, за который платил корень #75: там пинилась форма записи
+    АПСТРИМА, которая меняется без нашего ведома, здесь -- байты, которые
+    пишет наш же шаг 29, и их расхождение с этой иглой означает ровно то, что
+    игла обязана называть, -- правка легла не той формой.
+    """
+    site = re.search(_MOD_BUDGET_REFUSAL, d)
+    if not site:
+        return False
+    cap = site.group(2)
+    return bool(re.search(
+        rb'var ' + re.escape(cap) + rb'=\{\[Symbol\.toPrimitive\]\(\)\{let (' + ID + rb')='
+        rb'process\.env\.CLAUDE_CODE_MOD_MODEL_BUDGET;'
+        rb'if\(\1===void 0\|\|\1===""\)return Infinity;'
+        rb'let (' + ID + rb')=Number\(\1\);'
+        rb'return Number\.isFinite\(\2\)&&\2>0\?\2:Infinity\}\};', d))
+
+
+def _mod_budget_warning_derives_from_the_ceiling(d):
+    """Порог предупреждения ВЫВЕДЕН из потолка, а не записан своим числом.
+
+    Гарантия ОТДЕЛЬНАЯ от соседней и с другим предметом, поэтому и проверка
+    отдельная. Шаг 29 снимает потолок, но в том же модуле живёт второе число
+    -- порог, на котором образ печатает «N of M session tokens». Пока он
+    получается умножением ПОТОЛКА на долю, снятый потолок гасит и его:
+    `Infinity*0.8` = `Infinity`, и сообщение не выйдет никогда. Если апстрим
+    однажды запишет этот порог собственной константой, потолка не станет, а
+    сообщение о лимите останется -- продукт будет называть предел, которого
+    больше нет. Своего отказа у этого нет ни в одном другом доме.
+
+    Зелена на пристинном образе ПО ОПРЕДЕЛЕНИЮ: предмет -- стоковое свойство,
+    на которое опирается наш шаг. Она объявлена в списке пола по этой причине.
+    """
+    site = re.search(_MOD_BUDGET_REFUSAL, d)
+    if not site:
+        return False
+    cap = site.group(2)
+    return bool(re.search(rb'var ' + ID + rb'=' + re.escape(cap) + rb'\*' + ID + rb';', d))
 
 
 def _cancellation_rule_is_whole(d):
@@ -7925,6 +7994,16 @@ checks = {
     'refusal fallback routes come from the config': _refusal_routes_read_the_config(d),
     'top of the lineup is a reachable fallback': _top_of_lineup_is_reachable(d),
     'the armed model keeps its stock downgrade': _armed_model_keeps_its_downgrade(d),
+    # step 29: the mod-API per-process model budget. Stock refuses every
+    # `$.model.complete` call once a plugin has spent its ceiling, and the
+    # counter lives in PROCESS memory -- the judge, the idle watch and every
+    # other mod sharing that process go dark together until the user restarts,
+    # which is exactly what a whole fan of dispatches was cancelled by on
+    # 2026-09-14. With the handle unset the ceiling is Infinity, so no limit
+    # exists; the second record guards the premise that keeps the derived
+    # warning silent with it.
+    'the mod-API model budget ceiling is operator-set': _mod_budget_ceiling_is_operator_set(d),
+    'the mod-API budget warning derives from that ceiling': _mod_budget_warning_derives_from_the_ceiling(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -7933,7 +8012,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 122
+EXPECTED_CHECKS = 124
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -7949,7 +8028,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 122 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 124 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна

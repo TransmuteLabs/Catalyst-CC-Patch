@@ -5450,6 +5450,122 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
 });
 
 
+// --------------------------------------------------------------------------
+// 29. The mod API's per-plugin session model budget stops being a hardcoded
+//     ceiling and becomes an operator-set one -- with the handle unset there
+//     is NO cap at all.
+//
+//     Measured on 2.1.270 (live darwin image, offset 169291447):
+//       var <a>=0.8;var <b>=4;var <c>=256;var <CAP>=2000000;var <warn>=<CAP>*<a>;
+//       reserve:(r,s)=>{let d=<pend>.get(r)??0;
+//         if((<spent>.get(r)??0)+d>=<CAP>)
+//           throw new <E>(`${r}: $.model.complete: the session's model budget
+//                          for this plugin is spent`);<pend>.set(r,d+s)}
+//     The ceiling is 2 000 000 input+output tokens PER PLUGIN PER PROCESS and
+//     it is a bare literal: upstream ships no handle beside it. The counter
+//     only grows, so once it is reached EVERY later `$.model.complete` throws
+//     for the rest of the process.
+//
+//     Why that is not someone else's problem: a mechanism that asks the model
+//     on EVERY tool call spends the ceiling inside one working session. Our
+//     dispatch judge is exactly such a mechanism, and being enforce +
+//     fail_closed it converts its own resource exhaustion into a POLICY
+//     denial -- on 2026-09-14 the whole subagent fan-out went down until the
+//     process was restarted, with all three rungs refusing at once in 31 ms:
+//       err_<rung> = "$.model.complete: the session's model budget ... is spent"
+//     Restarting clears it because the counter lives in process memory; it is
+//     therefore a ceiling on how long ONE session may work, not on cost.
+//
+//     The edit does NOT delete the accounting and does NOT touch the refusal:
+//     it replaces only the ceiling's INITIALISER. With the handle unset the
+//     comparison `>= Infinity` is never true, and the 80% warning (whose
+//     threshold is derived as ceiling*0.8, i.e. Infinity too) never fires --
+//     so no message is left claiming a limit that no longer exists. With the
+//     handle set to a positive finite number the stock shape returns whole,
+//     ceiling and warning together; a garbage value is NOT silently taken as
+//     zero, it falls back to no cap.
+//
+//     The ceiling's minified name is NOT pinned (root #75): it is READ OUT of
+//     the comparison that the refusal guards, and the refusal itself is found
+//     by its own user-visible message. The declaration is then required to be
+//     unique INSIDE that refusal's module -- the same letters under another
+//     scope are a different variable, and the bundle is split into ~1400
+//     chunks.
+// --------------------------------------------------------------------------
+step('29 mod-API session model budget ceiling becomes operator-set', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+
+  const guard = new RegExp(
+    'if\\(\\(' + ID + '\\.get\\((' + ID + ')\\)\\?\\?0\\)\\+' + ID + '>=(' + ID + ')\\)' +
+    'throw new ' + ID + '\\(`\\$\\{\\1\\}: \\$\\.model\\.complete: ' +
+    "the session's model budget for this plugin is spent`\\)",
+    'g',
+  );
+  const sites = [...js.matchAll(guard)];
+  if (sites.length !== 1) {
+    fail(
+      `the mod-API budget refusal must occur exactly once, found ${sites.length} -- ` +
+      `more than one site would mean the ceiling is consulted where this edit does not reach`,
+    );
+  }
+  const cap = sites[0][2];
+  const at = sites[0].index;
+
+  // Uniqueness is required in the module that DEFINES the name, not in the
+  // whole bundle: a whole-text count would be the minifier's call, not ours.
+  const declSrc = 'var ' + rxEsc(cap) + '=(\\d+);';
+  const mod = moduleTextAt(at);
+  const decls = mod.match(new RegExp(declSrc, 'g')) || [];
+  if (decls.length !== 1) {
+    fail(
+      `the ceiling '${cap}' must be declared exactly once in the refusal's module, ` +
+      `found ${decls.length} -- the locator would rewrite an unrelated constant`,
+    );
+  }
+  const stock = new RegExp(declSrc).exec(mod)[1];
+
+  // The ceiling is read on EVERY consult, not once at module init. Step 28
+  // already paid for the eager form of exactly this: the image moves its own
+  // environment around while the process runs (settings, a warm restart, the
+  // plugin platform's env.set), so a value read at load time can be the wrong
+  // one by the time the guard consults it. An object with Symbol.toPrimitive
+  // keeps that one site and stays a drop-in for a number: every use of this
+  // name inside its module coerces it -- the guard's `>=`, the derived warning
+  // threshold's `*`, and the warning text's template slot -- measured on the
+  // 2.1.270 image, where the name occurs 4 times in this module (and 19 more
+  // times ELSEWHERE in the bundle as unrelated bindings, which is why the
+  // rewrite is scoped to the module and never to the image).
+  //
+  // Boundary, measured and deliberate: the derived warning threshold
+  // (`var <w>=<cap>*<f>`) coerces ONCE, at module init. With the handle unset
+  // -- the shipped default -- that freezes it at Infinity, so the 80 % notice
+  // can never fire and the image cannot announce a limit that does not exist.
+  // A handle set in the environment BEFORE the module loads is picked up by it
+  // too; one set later tightens the ceiling without moving the notice. The
+  // notice is informational, the ceiling is the guarantee, and only the
+  // ceiling is made live here.
+  editModuleAt(at, text =>
+    text.replace(new RegExp(declSrc), () =>
+      // ZERO IS NO CAP, and so is every other value that is not a usable
+      // positive ceiling: unset, empty, non-numeric, negative, NaN. The
+      // fall-through is Infinity in ALL of them on purpose -- an operator
+      // writing 0 means "no budget ceiling", never "a ceiling of nothing",
+      // and a value nobody can read must not quietly reintroduce the limit
+      // it was written to remove.
+      'var ' + cap + '={[Symbol.toPrimitive](){' +
+      'let v=process.env.CLAUDE_CODE_MOD_MODEL_BUDGET;' +
+      'if(v===void 0||v==="")return Infinity;' +
+      'let n=Number(v);' +
+      'return Number.isFinite(n)&&n>0?n:Infinity}};',
+    ),
+  );
+  applied.push(
+    `29 mod-API model budget: ceiling '${cap}' (stock ${stock}) now reads ` +
+    `CLAUDE_CODE_MOD_MODEL_BUDGET; unset or unusable = no cap`,
+  );
+});
+
+
 // The gate lives at the very END on purpose: it was once placed mid-file, and
 // the four steps written after it ran unguarded — a broken locator among them
 // was recorded and never read, so the build reported success while the patch

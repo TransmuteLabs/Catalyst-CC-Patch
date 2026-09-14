@@ -51,7 +51,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 24
+EXPECTED_MUTATIONS = 26
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.
@@ -166,7 +166,37 @@ def edits_v4(base: bytes) -> list[tuple[int, bytes]]:
     return [(optin.start() + off, b"===void 1&&")]
 
 
-DERIVED = {"C10": edits_c10, "V4": edits_v4}
+def edits_b2(base: bytes) -> list[tuple[int, bytes]]:
+    """Порог предупреждения о бюджете мод-API записан СВОИМ числом.
+
+    Литеральный зуб здесь невозможен по той же причине, по какой проверка
+    ловит имя из сравнения: и потолок, и множитель минифицированы, а имена
+    РАЗНЫЕ на darwin и linux одной версии (2.1.270: потолок `BSe` против
+    `eke`). Якорь с любым из них был бы зубом одной платформы.
+
+    Мутация идёт той же иглой, что проверка: имя потолка берётся из
+    охраняемого сравнения отказа, затем произведение `<потолок>*<доля>`
+    заменяется числовым литералом ТОЙ ЖЕ длины. Это и есть предмет: порог
+    перестаёт выводиться из потолка, снятый потолок больше его не гасит, и
+    образ снова печатает сообщение о пределе, которого нет.
+    """
+    site = re.search(
+        rb'if\(\(' + ID + rb'\.get\((' + ID + rb')\)\?\?0\)\+' + ID + rb'>=(' + ID + rb')\)'
+        rb'throw new ' + ID + rb'\(`\$\{\1\}: \$\.model\.complete: '
+        rb"the session's model budget for this plugin is spent`\)", base)
+    if not site:
+        raise Refusal("B2: отказ бюджета мод-API не найден -- потолок назвать нечем")
+    cap = site.group(2)
+    derived = re.search(rb'var ' + ID + rb'=(' + re.escape(cap) + rb'\*' + ID + rb');', base)
+    if not derived:
+        raise Refusal("B2: порог предупреждения не выводится из потолка уже в ИСХОДНОМ образе")
+    expr = derived.group(1)
+    # Литерал той же длины: ведущая единица и нули. Короче -- сместились бы
+    # все последующие байты образа, и покраснело бы всё подряд чужой причиной.
+    return [(derived.start(1), b"1" + b"0" * (len(expr) - 1))]
+
+
+DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2}
 
 
 def pipeline_lock_path() -> str:
