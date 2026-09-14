@@ -51,7 +51,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 22
+EXPECTED_MUTATIONS = 24
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.
@@ -136,7 +136,37 @@ def edits_c10(base: bytes) -> list[tuple[int, bytes]]:
     ]
 
 
-DERIVED = {"C10": edits_c10}
+def edits_v4(base: bytes) -> list[tuple[int, bytes]]:
+    """Опт-ин исключения верха линейки сломан в НАШЕЙ форме -- и только в ней.
+
+    Литеральный зуб здесь невозможен: `()===void 0&&` встречается в собранном
+    образе 12 раз при потолке прибора 8, и байтовая мутация выбила бы 11
+    чужих сайтов вместе с нашим -- покраснело бы лишнее, а причина покраснения
+    стала бы неназываемой. Поэтому мутация идёт ТОЙ ЖЕ цепочкой, что и сама
+    проверка (связка констант -> опт-ин форма исключения), и правит один
+    байт внутри найденной формы. Сравнение `===void 0` становится
+    всегда-ложным: исключение верха перестаёт зависеть от таблицы и живёт
+    всегда, то есть ровно та потеря, которую проверка обязана видеть.
+    """
+    bundle = re.search(
+        rb'var (' + ID + rb')="claude-opus-4-8",(' + ID + rb')="claude-opus-5";'
+        rb'function (' + ID + rb')\((' + ID + rb')\)\{return (' + ID + rb')\(\)&&(' + ID + rb')\(\4\)===\2\}',
+        base)
+    if not bundle:
+        raise Refusal("V4: связка констант понижения и верха не найдена")
+    optin = re.search(
+        rb'!\((' + ID + rb')\(\)===void 0&&' + re.escape(bundle.group(3)) + rb'\((' + ID + rb')\)\)',
+        base)
+    if not optin:
+        raise Refusal("V4: опт-ин форма исключения верха не найдена")
+    needle = b"===void 0&&"
+    off = optin.group(0).find(needle)
+    if off < 0:
+        raise Refusal("V4: в найденной опт-ин форме нет сравнения с void 0")
+    return [(optin.start() + off, b"===void 1&&")]
+
+
+DERIVED = {"C10": edits_c10, "V4": edits_v4}
 
 
 def pipeline_lock_path() -> str:

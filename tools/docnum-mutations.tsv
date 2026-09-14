@@ -33,7 +33,7 @@ D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuch
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение
 D11	claude-patch-all.sh	REACH = 8	REACH = 1	четыре слова между
-D12	scripts/kit-build.sh	 — docnum:historical)	)	объявлено «121 checks» (владелец pipeline)
+D12	scripts/kit-build.sh	 — docnum:historical)	)	объявлено «122 checks» (владелец pipeline)
 D13	claude-patch-all.sh	    if ext in ('.md', '.txt', ''):	    if True:	строковое значение в коде
 D14	claude-patch-all.sh	        lo, hi = sentence_span(at)	        lo, hi = max(0, at - 120), min(len(stream), at + 120)	пометка из соседнего предложения
 D15	claude-patch-all.sh	'стало', 'теперь', 'составляет', 'равно')	'теперь', 'составляет', 'равно')	связка «стало»
@@ -47,7 +47,7 @@ D22	claude-patch-all.sh	MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+|\[\^
 D23	claude-patch-all.sh	        if len(found) > 1:	        if False:	два владельца в предложении -- отказ
 D24	claude-patch-all.sh	    if ext == '.py':	    if ext == '.py-нет':	докстринг питона -- проза
 D25	claude-patch-all.sh	            elif re.match(r'(echo|say|printf)\b', stripped):	            elif False:	печатаемая строка -- проза
-D26	claude-patch-all.sh	    ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',	    ('pipeline', ('нетакогоимени', 'конвейера', 'конвейере',	## What the patches do (121 pipeline checks)
+D26	claude-patch-all.sh	    ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',	    ('pipeline', ('нетакогоимени', 'конвейера', 'конвейере',	## What the patches do (122 pipeline checks)
 D27	claude-patch-all.sh	        (('checks', 'проверок', 'проверки', 'проверкам', 'проверками',	        (('checks', 'проверок', 'проверки', 'проверками',	дательный падеж
 D28	claude-patch-all.sh	                if nxt_ch == '-' or prv_ch in ('~', '±'):	                if False:	составное число принадлежит своему слову
 D29	claude-patch-all.sh	            if not prev[:1].isalnum():	            if prev.casefold() not in WORDNUM:	числительное чужого предмета не женится
@@ -63,10 +63,10 @@ D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABL
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
 D36	README.md	probe-bench's 9 recorded mutations	probe-bench's 8 recorded mutations	объявлено «9 mutations» (владелец probe-bench)
-D37	README.md	checks-teeth's 22 recorded mutations	checks-teeth's 23 recorded mutations	объявлено «22 mutations» (владелец checks-teeth)
+D37	README.md	checks-teeth's 24 recorded mutations	checks-teeth's 25 recorded mutations	объявлено «24 mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
-D40	claude-patch-all.sh	все 121 проверок конвейера сошлись	все 121 сошлись	опущенным существительным
+D40	claude-patch-all.sh	все 122 проверок конвейера сошлись	все 122 сошлись	опущенным существительным
 D41	claude-patch-all.sh	# docnum:synthetic-block -- этот блок ЕСТЬ сам гейт	# этот блок ЕСТЬ сам гейт	the pipeline runs 999 checks
 D42	claude-patch-all.sh	    """Все питоновские heredoc'и одного файла	    """corpus-tools-bench has 12 scenarios. Питоновские heredoc'и одного файла	объявлено «221 scenarios» (владелец corpus-tools-bench)
 D43	README.md	build-path-probe has 94 scenarios	build-path-probe has 92 scenarios	объявлено «94 scenarios» (владелец build-path-probe)

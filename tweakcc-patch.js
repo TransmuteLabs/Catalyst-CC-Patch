@@ -5256,8 +5256,20 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   // The parse result -- including `undefined` -- is cached in the closure,
   // because site B now calls the seam on hot refusal-lane walks and a
   // JSON.parse per call would be a tax the stock image never pays. The
-  // price is deliberate: an env var changed mid-process is NOT picked up,
-  // which is the normal semantics of environment configuration.
+  // cache key is the RAW value of the variable, not the fact of a first
+  // read: the image itself rewrites the environment mid-process (it layers
+  // settings over `process.env`, a warm restart re-enters `main()` with
+  // `Object.assign(process.env,<e>.env)` in the same process, and the
+  // plugin surface's `env.set` writes `process.env[<name>]=<value>` with
+  // no allowlist), and the first seam call happens mid-session, so a cache
+  // keyed by first read would serve a stale table on live roads. The cache
+  // holds the PAIR (raw string, parsed value): the hot path is one property
+  // read and one string compare, and the parse reruns only when the string
+  // has CHANGED. An unset variable is normalized to "" so the key is
+  // comparable on every call. The rejection print is therefore exactly
+  // once per DISTINCT rejected value, not once per process: an operator
+  // who sets a wrong value twice must be told twice -- that is the correct
+  // behaviour, not a regression.
   //
   // The cache is `var`, not `let`: the seam is a function declaration and
   // hoists, so a call textually ABOVE the insertion point must already
@@ -5273,25 +5285,38 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
 
   // The config parse failure is CLOSED on purpose: any invalid value -- not
   // an object, an array, a key whose value is neither a string nor a
-  // non-empty array of strings -- returns undefined, and the consumer takes
-  // the stock table WHOLE. A lenient reader could hand the consumer half a
-  // table, which is worse than no table: some routes would silently keep
-  // their stock destinations while the config claims to own them. The
-  // rejection is announced exactly ONCE (the cache makes a second parse
-  // impossible) and only when the variable was non-empty -- whoever never
-  // set it sees nothing by construction.
+  // non-empty array of strings, or a string that is empty after trimming
+  // whitespace -- returns undefined, and the consumer takes the stock table
+  // WHOLE. A string that trims to nothing is not a route name: the consumer
+  // would resolve an empty target and silently lose that route while both
+  // site-B disarms are already live (measured by execution). The SAME test
+  // runs on every MEMBER of an array value, and it is not symmetry for its
+  // own sake: an array is a chain of hops, so an empty member is an empty
+  // hop -- the identical harm one level down. The first form of this reader
+  // tested members only for `typeof === "string"`, and execution over the
+  // value domain caught it: `{"k":["",""]}` was accepted whole while
+  // `{"k":""}` was already rejected. Rejecting the
+  // one key and keeping the rest would hand the consumer half a table,
+  // which is worse than no table: some routes would silently keep their
+  // stock destinations while the config claims to own them. The rejection
+  // is announced once per DISTINCT rejected value and only when the
+  // variable was non-empty -- whoever never set it sees nothing by
+  // construction.
   editModuleAt(callSites[0].index, (body) =>
     body.replace(
       new RegExp(seamDef),
-      `var ${repEsc(cache)};function ${repEsc(seam)}(){if(${repEsc(cache)})return ${repEsc(cache)}.v;` +
-        `let e=process.env.CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES;${repEsc(cache)}={v:void 0};` +
+      `var ${repEsc(cache)};function ${repEsc(seam)}(){` +
+        `let e=process.env.CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES??"";` +
+        `if(${repEsc(cache)}===void 0||${repEsc(cache)}.s!==e){` +
+        `let v=void 0;` +
         `if(e){try{let r=JSON.parse(e);` +
         `if(r!==null&&typeof r==="object"&&!Array.isArray(r)){` +
-        `let ok=!0;for(let k of Object.keys(r)){let v=r[k];` +
-        `if(typeof v==="string")continue;` +
-        `if(Array.isArray(v)&&v.length>0&&v.every((x)=>typeof x==="string"))continue;ok=!1;break}` +
-        `if(ok)${repEsc(cache)}.v=r}}catch{}` +
-        `if(${repEsc(cache)}.v===void 0)console.error("CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES is not a valid routes object; using the stock refusal fallback table")}` +
+        `let ok=!0;for(let k of Object.keys(r)){let x=r[k];` +
+        `if(typeof x==="string"){if(x.trim()!=="")continue;ok=!1;break}` +
+        `if(Array.isArray(x)&&x.length>0&&x.every((y)=>typeof y==="string"&&y.trim()!==""))continue;ok=!1;break}` +
+        `if(ok)v=r}}catch{}` +
+        `if(v===void 0)console.error("CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES is not a valid routes object; using the stock refusal fallback table")}` +
+        `${repEsc(cache)}={s:e,v:v}}` +
         `return ${repEsc(cache)}.v}`,
     ),
   );
@@ -5317,6 +5342,29 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   }
   const bundle = js.match(new RegExp(bundleRx));
   const [, F, M, A, v, U, C] = bundle;
+
+  // Site B is bound to the SEAM'S module before any of its forms is
+  // trusted: the opt-in shapes written below name the seam (`<S>()`), and a
+  // shape sitting in another chunk would turn the edit into a reference
+  // across a module boundary -- an unresolvable name at best, a FOREIGN
+  // same-named binding at worst. The seam's letters are not unique: on the
+  // 2.1.270 stock the whole image carries them 16 times on darwin and 23
+  // on linux, of which ours are the definition and the two call sites
+  // alone -- every other binding of those letters is foreign, so a
+  // whole-text match can sit on a foreign module. The constants bundle,
+  // the exclusion form and the ternary are therefore all searched
+  // (modText below) and edited (editModuleAt at the end of this step)
+  // inside this ONE module, exactly like site A.
+  const seamBounds = moduleSliceAround(js, callSites[0].index);
+  const bundleBounds = moduleSliceAround(js, bundle.index);
+  if (bundleBounds[0] !== seamBounds[0]) {
+    fail(
+      `site B forms have split from the seam's module: the constants bundle ` +
+        `sits at offset ${bundle.index} while the seam '${seam}' lives in ` +
+        `the module of the call site at offset ${callSites[0].index} -- the ` +
+        `edit would spawn a reference across a module boundary`,
+    );
+  }
 
   // Structural pin instead of a pin on the written shape: within the SAME
   // module the predicate must be READ exactly twice (every mention minus its

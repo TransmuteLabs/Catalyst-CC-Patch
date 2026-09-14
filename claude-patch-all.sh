@@ -1018,7 +1018,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 121 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 122 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -5039,7 +5039,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 121 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 122 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -6311,7 +6311,12 @@ def _claude_md_alternates_are_tried(d):
 
 
 def _refusal_routes_read_the_config(d):
-    """Шов таблицы маршрутов отказа читает конфиг -- и читает его ОДИН раз.
+    """Шов таблицы маршрутов отказа читает конфиг -- и ключ кэша разбора
+    есть ЗНАЧЕНИЕ переменной, а не факт первого чтения: образ сам
+    перекладывает окружение по ходу процесса (настройки, тёплый перезапуск,
+    env.set площадки плагинов), поэтому смена переменной обязана
+    подхватываться, и проверка ниже остаётся гарантией того, что чтение
+    вообще стоит в теле шва.
 
     Сток оставляет шов пустым (`function <seam>(){return}` отдаёт undefined
     на обеих дорожках отказа), поэтому одного наличия env-ключа где-то в
@@ -6365,6 +6370,47 @@ def _top_of_lineup_is_reachable(d):
         rb'(' + ID + rb')\(\)\?\(' + re.escape(seam) + rb'\(\)===void 0\?'
         rb'(' + ID + rb')\((' + ID + rb')\.id\):\3\.id\):(' + ID + rb')\(\3\.id\)',
         d))
+
+
+def _armed_model_keeps_its_downgrade(d):
+    """Вооружённая модель сохраняет своё СТОКОВОЕ понижение -- шаг 28 его не
+    снимает ни при каком значении ручки.
+
+    Это ОТДЕЛЬНАЯ проверка, а не ещё один конъюнкт соседней: гарантия другая
+    (соседняя держит опт-ин, эта -- сохранность защиты), а проверка,
+    называющая несколько свойств сразу, неисправна по тому же правилу, что и
+    код с несколькими действиями. Снятие этой защиты не ронило НИ ОДНУ из
+    прежних проверок шага -- обе пинят только опт-ин формы.
+
+    Проверяется структурное отношение: внутри функции вооружённой модели
+    читатель-понижатель применён к производителю вооружённой модели. Имена
+    идут группами, не буквами: связка констант даёт константу понижения и
+    предикат, читатель захватывается из СВОЕГО определения (как в соседней
+    проверке -- `function <B>(<x>){return <A>(<x>)?<F>:<x>}`), и затем
+    требуется применение читателя к вызову-производителю без аргументов
+    (`<B>(<P>())`). Вызов без аргументов -- единственный измеримый
+    различитель двух применений читателя: понижение НА ЦЕЛИ в тернаре
+    получает `.id`, а производитель вооружённой модели -- функцию. Маркеров
+    границ модулей в упакованном образе нет (измерено), поэтому отношение
+    ищется по всему образу, но читатель уже привязан к своей связке
+    констант -- чужое одноимённое связывание из другого чанка определением
+    с этими именами не станет.
+    """
+    bundle = re.search(
+        rb'var (' + ID + rb')="claude-opus-4-8",(' + ID + rb')="claude-opus-5";'
+        rb'function (' + ID + rb')\((' + ID + rb')\)\{return (' + ID + rb')\(\)&&(' + ID + rb')\(\4\)===\2\}',
+        d)
+    if not bundle:
+        return False
+    downgrade = bundle.group(1)
+    pred = bundle.group(3)
+    reader = re.search(
+        rb'function (' + ID + rb')\((' + ID + rb')\)\{return ' + re.escape(pred)
+        + rb'\(\2\)\?' + re.escape(downgrade) + rb':\2\}', d)
+    if not reader:
+        return False
+    return bool(re.search(rb'(?<![\w$])' + re.escape(reader.group(1))
+                          + rb'\((' + ID + rb')\(\)\)', d))
 
 
 def _cancellation_rule_is_whole(d):
@@ -7866,12 +7912,19 @@ checks = {
     # back makes the loader serve CLAUDE.md's bytes under another name. Both are
     # pinned now.
     'CLAUDE.md alternates tried': _claude_md_alternates_are_tried(d),
-    # step 28: the refusal-fallback seam reads the config, and the built-in
-    # downgrade of the armed model is off. Both halves are anchored at their
-    # own site (the helpers say why the halves are shaped this way); each
-    # carries its own mutation, so neither may quietly become unfailable.
+    # step 28: both site-B halves are OPT-IN -- with the handle set the
+    # mapped refusal target stops being downgraded to the family default and
+    # the top of the lineup stops being excluded from the fallback walk;
+    # with the handle unset (or the table rejected) the image behaves
+    # exactly like stock. The downgrade predicate itself and the armed
+    # model's own downgrade stay STOCK on purpose (the step header says why
+    # each half must), and the third record below guards exactly that
+    # preservation. Every record here has a mutation that reddens it: the
+    # armed-model record rides the constants mutation's second door,
+    # declared in that row, so none may quietly become unfailable.
     'refusal fallback routes come from the config': _refusal_routes_read_the_config(d),
     'top of the lineup is a reachable fallback': _top_of_lineup_is_reachable(d),
+    'the armed model keeps its stock downgrade': _armed_model_keeps_its_downgrade(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -7880,7 +7933,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 121
+EXPECTED_CHECKS = 122
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -7896,7 +7949,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 121 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 122 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
