@@ -38,8 +38,58 @@ const ENV_KEYS = [
   'CLAUDE_JUDGE_TIMEOUT_MS',
   'CLAUDE_FORM',
   'CLAUDE_FORM_DEBUG',
+  // Ручки НОСИТЕЛЯ. Предмет этого стенда -- вклеенный в образ блок, а не то,
+  // каким носителем вооружена машина сборщика. Каждый вызов пробы в образе
+  // обёрнут гейтом `return __c!=="mod"`, стоящим ВНЕ её try/catch: при
+  // carrier=mod проба не даёт ни журнала, ни исключения, ни вызова пула --
+  // молчание, неотличимое от поломки.
+  //
+  // Измерено 2026-09-14: эти три имени в списке отсутствовали, а машина несёт
+  // их в env-блоке настроек. Стенд, запущенный из живой сессии, мерил мир
+  // carrier=mod, где молчание ПРАВИЛЬНО, и выдал 119 расхождений из 124 на
+  // ИСПРАВНОМ образе. Тот же прогон на заведомо живом 2.1.267 дал те же 119, а
+  // со снятыми ручками -- ноль на обоих. Хуже отказа: 5 сценариев из того
+  // прогона (docnum:subset), чьё ожидание и есть «ничего не произошло»,
+  // оставались ЗЕЛЁНЫМИ вакуумно, так что заражённый прогон недействителен и
+  // как положительный контроль.
+  //
+  // Снимать их обязан САМ стенд, а не вызывающий: `env -u` на одной стадии
+  // конвейера не спасает того, кто запустит стенд рукой.
+  'CLAUDE_JUDGE_CARRIER',
+  'CLAUDE_IDLE_CARRIER',
+  'CLAUDE_FORM_CARRIER',
   'ANTHROPIC_BASE_URL',
 ];
+
+// Имена ручек носителя по пробе — нужны и для изоляции, и для сценариев,
+// которые гейт носителя проверяют НАМЕРЕННО.
+const CARRIER_KEY = {
+  judge: 'CLAUDE_JUDGE_CARRIER',
+  watch: 'CLAUDE_IDLE_CARRIER',
+  form: 'CLAUDE_FORM_CARRIER',
+};
+
+// Снимок и стирание -- на ЗАГРУЗКЕ МОДУЛЯ, а не при первом сценарии. Причин
+// две, и обе измерены:
+//   * к моменту печати ENV_KEYS эти имена уже стёр, и взять значение для
+//     объявления будет неоткуда;
+//   * самопроверка порождает КОПИИ стенда через spawnSync с `{...process.env}`.
+//     Ручка, дожившая в родителе до порождения, уехала бы в копию, и копия
+//     краснела бы по причине, которой в её собственном коде нет.
+// Стирание здесь не отменяет стирания в ENV_KEYS: сценарии ставят ручки сами,
+// и убирать их между сценариями обязан список.
+const AMBIENT_CARRIERS = Object.values(CARRIER_KEY)
+  .map((key) => [key, process.env[key]])
+  .filter(([, value]) => value !== undefined && String(value).trim() !== '');
+for (const [key] of AMBIENT_CARRIERS) delete process.env[key];
+
+function announceAmbientCarriers() {
+  if (AMBIENT_CARRIERS.length === 0) return;
+  console.log('probe-bench: ОБЕЗВРЕЖЕНЫ ручки носителя из окружения — '
+    + AMBIENT_CARRIERS.map(([k, v]) => `${k}=${v}`).join(', ')
+    + '; предмет стенда — вклеенный в образ блок, а не то, каким носителем '
+    + 'вооружена эта машина');
+}
 
 function failSetup(message) {
   console.error(`probe-bench: ${message}`);
@@ -441,6 +491,30 @@ const scenarios = [
     response: 'OK: бриф полон',
     expected: { passed: true, outcome: 'ok', sid: 'a1' },
   },
+  // ---- гейт НОСИТЕЛЯ: 3 сценария (docnum:subset), стоящие ЗДЕСЬ намеренно --
+  //
+  // Когда носитель -- мод, сплайс в образе обязан молчать: это его работа, а не
+  // поломка. До 2026-09-14 у этого гейта не было НИ ОДНОГО собственного
+  // сценария, и «покрытие» возникало случайно — при заражённом окружении
+  // зеленели те сценарии, что и так ждут молчания, то есть вакуумно.
+  //
+  // МЕСТО В МАССИВЕ -- часть механизма, а не вкусовщина. Сценарий ставит ручку
+  // носителя в общий process.env, и стереть её обязан СЛЕДУЮЩИЙ сценарий через
+  // ENV_KEYS. Стоя в голове, эта тройка делает утечку наблюдаемой: убери три
+  // имени из ENV_KEYS -- и весь хвост прогона уйдёт в молчание. Перенос их в
+  // конец массива обезоружит зуб carrier-isolation, не уронив ни одного теста.
+  { name: 'judge-carrier-mod', carrierValue: 'mod',
+    response: 'OK: не должно дойти -- носитель мод',
+    expected: { passed: true, outcome: null, poolCalls: 0, journalLines: 0,
+                recordCount: 0 } },
+  { name: 'watch-carrier-mod', probe: 'watch', toolName: 'Read', watchState: OLD,
+    carrierValue: 'mod',
+    response: 'NUDGE: не должно дойти -- носитель мод',
+    expected: { passed: true, outcome: null, poolCalls: 0, nudges: 0 } },
+  { name: 'form-carrier-mod', probe: 'form', carrierValue: 'mod',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    expected: { passed: true, journalLines: 0, poolCalls: 0 } },
   {
     // The model is named in the call — source is call; definitions are not
     // consulted.
@@ -1357,7 +1431,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 124;
+const EXPECTED_SCENARIOS = 127;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1365,7 +1439,7 @@ if (scenarios.length !== EXPECTED_SCENARIOS) {
 }
 // Режим --self-check сверяет длину таблицы мутаций с этим числом на каждом
 // своём запуске: правка таблицы без числа молча урезала бы перечень.
-const EXPECTED_MUTATIONS = 8;
+const EXPECTED_MUTATIONS = 9;
 // A scenario without `expected` used to run and be counted as conforming --
 // the comparator treated a missing specification as agreement (mismatchDetails
 // now returns one). The count above catches a hole in the ARRAY; this catches a
@@ -1440,6 +1514,17 @@ function setScenarioEnvironment(tempDir, scenario) {
   if (scenario.probe === 'watch') process.env.CLAUDE_IDLE = sw;
   else if (scenario.probe === 'form') process.env.CLAUDE_FORM = sw;
   else process.env.CLAUDE_JUDGE = sw;
+  // Значение НОСИТЕЛЯ -- свойство сценария, как и значение ручки. Только так
+  // гейт носителя можно проверить НАМЕРЕННО: до этого его единственным
+  // «покрытием» были сценарии молчания, случайно зеленевшие при заражённом
+  // окружении, то есть вакуумно.
+  //
+  // Ставится ПОСЛЕ стирания ENV_KEYS и потому переживает только один сценарий:
+  // следующий его сотрёт. На этом держится зуб -- см. мутацию
+  // carrier-isolation в таблице самопроверки.
+  if (scenario.carrierValue !== undefined) {
+    process.env[CARRIER_KEY[scenario.probe ?? 'judge']] = scenario.carrierValue;
+  }
 }
 
 // The second line: overriding HOME makes a leak impossible by construction,
@@ -2480,7 +2565,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 124;', to: 'EXPECTED_SCENARIOS = 123;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 127;', to: 'EXPECTED_SCENARIOS = 126;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },
@@ -2530,6 +2615,31 @@ const SELF_CHECK_MUTATIONS = [
     controlCause: 'as a literal',
     mutation: { from: 'if (spec.toolLiteral && bag.tool && bag.tool.name !== spec.toolLiteral) {',
                 to: 'if (false) {' },
+  },
+  {
+    name: 'carrier-isolation',
+    // ЕДИНСТВЕННАЯ запись ПРЯМОГО хода (`breaks`), и полярность тут не прихоть.
+    // Соседи выше стерегут ДВЕРЬ: дверь доказывается ослеплением, потому что
+    // сломанная дверь молчит. Здесь предмет -- ИЗОЛЯЦИЯ окружения, и сломанная
+    // изоляция не молчит, а красит: сценарии носителя стоят в ГОЛОВЕ массива
+    // и ставят свои ручки в process.env, а снимает их между сценариями
+    // только ENV_KEYS. Убери эти имена -- хвост поедет в мире carrier=mod, где
+    // вклеенный блок молчит законно, и разойдётся с ожиданиями.
+    //
+    // Втиснуть это в контракт отравы нельзя честно: отравить пришлось бы
+    // ожидания всего хвоста, а мутация обязана была бы вернуть прогон в ноль --
+    // чего заражение как раз не делает.
+    //
+    // Почему красноты хватает как доказательства: единственная правка -- снятие
+    // трёх имён из списка стирания, и покраснеть от неё может только то, что
+    // эти имена КТО-ТО ставит. Ставят их ровно сценарии носителя, и больше
+    // никто. Значит краснота => протечка носителя, другой дороги нет.
+    breaks: {
+      from: "  'CLAUDE_JUDGE_CARRIER',\n  'CLAUDE_IDLE_CARRIER',\n  'CLAUDE_FORM_CARRIER',\n",
+      to: '',
+    },
+    expectRc: 1,
+    expectCause: 'MISMATCH ',
   },
 ];
 /* __selfCheckTableEnd__ */
@@ -2584,46 +2694,83 @@ function runSelfCheck(options) {
     process.exitCode = 4;
     return;
   }
-  let blinded = 0;
+  // Счёт называется «доказали», а не «ослепили»: с появлением записи прямого
+  // хода (carrier-isolation) ослепление перестало быть единственной формой
+  // доказательства -- изоляция доказывается покраснением. Слово в сводке
+  // обязано покрывать обе.
+  let proven = 0;
   let broken = 0;
   for (const record of SELF_CHECK_MUTATIONS) {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-bench-self.'));
     let line;
     try {
       const scriptPath = path.join(workDir, 'probe-bench.js');
-      let source = replaceExactlyOnce(
-        benchSourceWithoutMutationTable(),
-        record.poison.from,
-        record.poison.to,
-        `${record.name}: отрава`,
-      );
-      fs.writeFileSync(scriptPath, source);
-      const control = runBenchCopy(scriptPath, options.binary);
-      if (control.rc !== record.controlRc || !control.output.includes(record.controlCause)) {
-        line = `probe-bench: МУТАЦИЯ ${record.name}: КОНТРОЛЬ ОТРАВЫ не сработал `
-          + `(код=${control.rc}, нужен ${record.controlRc}, причина «${record.controlCause}» не найдена)`;
+      if (record.breaks) {
+        // Прямой ход. Контроль здесь -- ЧИСТАЯ копия: она обязана быть зелёной
+        // и не нести признака. Без него краснота после мутации ничего не
+        // доказывает -- копия могла быть красной с самого начала, и мы бы
+        // засчитали зуб чужой болезни.
+        const clean = benchSourceWithoutMutationTable();
+        fs.writeFileSync(scriptPath, clean);
+        const control = runBenchCopy(scriptPath, options.binary);
+        const preContaminated = control.output.includes(record.expectCause);
+        if (control.rc !== 0 || preContaminated) {
+          line = `probe-bench: МУТАЦИЯ ${record.name}: КОНТРОЛЬ ЧИСТОТЫ не сработал `
+            + `(код=${control.rc}, нужен 0; признак «${record.expectCause}» `
+            + `${preContaminated ? 'найден ДО мутации' : 'отсутствует, как и должен'})`;
+        } else {
+          fs.writeFileSync(scriptPath, replaceExactlyOnce(
+            clean,
+            record.breaks.from,
+            record.breaks.to,
+            `${record.name}: мутация`,
+          ));
+          const after = runBenchCopy(scriptPath, options.binary);
+          const firstLine = after.output.split(/\r?\n/).find((l) => l.trim()) ?? '';
+          if (after.rc === record.expectRc && after.output.includes(record.expectCause)) {
+            proven += 1;
+            line = `probe-bench: МУТАЦИЯ ${record.name}: RED`;
+          } else {
+            line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ПОКРАСНЕЛА код=${after.rc} `
+              + `(нужен ${record.expectRc}) вывод=${clipCell(firstLine)}`;
+          }
+        }
       } else {
-        source = replaceExactlyOnce(
-          source,
-          record.mutation.from,
-          record.mutation.to,
-          `${record.name}: мутация`,
+        // Обратный ход: отрава красит, мутация обязана красноту СНЯТЬ.
+        let source = replaceExactlyOnce(
+          benchSourceWithoutMutationTable(),
+          record.poison.from,
+          record.poison.to,
+          `${record.name}: отрава`,
         );
         fs.writeFileSync(scriptPath, source);
-        const after = runBenchCopy(scriptPath, options.binary);
-        const firstLine = after.output.split(/\r?\n/).find((l) => l.trim()) ?? '';
-        if (after.rc === 0 && !after.output.includes(record.controlCause)) {
-          blinded += 1;
-          line = `probe-bench: МУТАЦИЯ ${record.name}: RED`;
+        const control = runBenchCopy(scriptPath, options.binary);
+        if (control.rc !== record.controlRc || !control.output.includes(record.controlCause)) {
+          line = `probe-bench: МУТАЦИЯ ${record.name}: КОНТРОЛЬ ОТРАВЫ не сработал `
+            + `(код=${control.rc}, нужен ${record.controlRc}, причина «${record.controlCause}» не найдена)`;
         } else {
-          line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ОСЛЕПИЛА код=${after.rc} вывод=${clipCell(firstLine)}`;
+          source = replaceExactlyOnce(
+            source,
+            record.mutation.from,
+            record.mutation.to,
+            `${record.name}: мутация`,
+          );
+          fs.writeFileSync(scriptPath, source);
+          const after = runBenchCopy(scriptPath, options.binary);
+          const firstLine = after.output.split(/\r?\n/).find((l) => l.trim()) ?? '';
+          if (after.rc === 0 && !after.output.includes(record.controlCause)) {
+            proven += 1;
+            line = `probe-bench: МУТАЦИЯ ${record.name}: RED`;
+          } else {
+            line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ОСЛЕПИЛА код=${after.rc} вывод=${clipCell(firstLine)}`;
+          }
         }
       }
     } catch (error) {
       // Круг 28, F-9: сорвавшееся применение -- измерение НЕ СОСТОЯЛОСЬ.
       // Прежде отказ печатался строкой, цикл ехал дальше, и хвост говорил
-      // «ослепили не все» единицей -- как будто каждая запись была измерена и
-      // не ослепила. Класс 2 доминирует над счётом: пока прибор чинят,
+      // «доказали не все» единицей -- как будто каждая запись была измерена и
+      // не доказала. Класс 2 доминирует над счётом: пока прибор чинят,
       // остальным числам этого прогона веры нет.
       broken += 1;
       line = `probe-bench: МУТАЦИЯ ${record.name}: ОТКАЗ — ${error?.message ?? error}`;
@@ -2632,14 +2779,14 @@ function runSelfCheck(options) {
     }
     console.log(line);
   }
-  console.log(`probe-bench: SELF-CHECK мутаций=${SELF_CHECK_MUTATIONS.length} ослепили=${blinded}`);
+  console.log(`probe-bench: SELF-CHECK мутаций=${SELF_CHECK_MUTATIONS.length} доказали=${proven}`);
   if (broken > 0) {
     console.error(`probe-bench: НЕ МЕРИЛ -- ${broken} мутаций не применились `
       + '(якорь уехал); счёт ослеплений не приговор');
     process.exitCode = 2;
     return;
   }
-  if (blinded !== SELF_CHECK_MUTATIONS.length) process.exitCode = 1;
+  if (proven !== SELF_CHECK_MUTATIONS.length) process.exitCode = 1;
 }
 
 async function main() {
@@ -2647,6 +2794,10 @@ async function main() {
   try {
     const benchVersion = assertRuntime();
     options = parseArgs(process.argv.slice(2));
+    // Раньше разбора аргументов печатать нельзя: неизвестный флаг обязан
+    // остаться отказом контракта, а не утонуть в объявлении. Позже -- поздно:
+    // все режимы ниже уже мерят.
+    announceAmbientCarriers();
     if (options.selfCheck) {
       runSelfCheck(options);
       return;

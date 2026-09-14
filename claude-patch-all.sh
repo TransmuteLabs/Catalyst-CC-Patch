@@ -4313,12 +4313,12 @@ fi
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-b9fc5ac35d29643f79671afe52c0ebaecdf792a6}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-1c2a665984c8f5831db203a02034cb31d89c51de}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "b9fc5ac35d29643f79671afe52c0ebaecdf792a6" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "1c2a665984c8f5831db203a02034cb31d89c51de" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -8341,7 +8341,7 @@ __interface_gate
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 124 scenarios through a throwaway probes home —
+# and drives probe-bench's 127 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #
@@ -8430,7 +8430,16 @@ else
     # ends the script before the next line -- so the one failure mode we cannot
     # classify (bun killed by a signal, a runtime crash with no MISMATCH line)
     # would print a bare FATAL and swallow the path to the log that explains it.
-    if ! grep -E 'MISMATCH|probe-bench:' "$BENCH_LOG" | sed 's/^/  /' >&2; then
+    # Третья ветвь `^ ` -- не украшение. Стенд печатает причину расхождения
+    # ОТДЕЛЬНЫМИ строками под своим `MISMATCH <имя>:`, с отступом в два пробела
+    # («outcome: ожидалось "ok", факт null»). Прежний фильтр знал только два
+    # первых слова, и объяснения выбрасывались: в лог конвейера уезжал столбик
+    # имён без единой причины -- ровно тот вид, из-за которого 119 расхождений
+    # на ИСПРАВНОМ образе пришлось разбирать веером, хотя причина стояла в
+    # выброшенных строках (замер 2026-09-14). Столбцы таблицы кладутся padEnd,
+    # с пробела не начинаются; под `^ ` попадают только эти объяснения и след
+    # стека упавшего рантайма -- оба нужны читателю.
+    if ! grep -E 'MISMATCH|probe-bench:|^ ' "$BENCH_LOG" | sed 's/^/  /' >&2; then
       echo "  (no MISMATCH or probe-bench line — the bench failed some other way)" >&2
       tail -n 15 "$BENCH_LOG" | sed 's/^/  /' >&2
     fi
