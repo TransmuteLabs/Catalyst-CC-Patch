@@ -216,9 +216,20 @@ function locateNames(carved, kind) {
   const title = /let __v=([A-Za-z_$][\w$]*)\(__i\)/.exec(carved);
   if (!title) throw new Error('free name not found: sessionTitle');
   const bind = (expr, source) => (isBindable(expr) ? { name: expr, source } : null);
+  const toolSlot = slots[1].trim();
+  // The THIRD shape of this slot, live since 2.1.269: the dispatch tool became a
+  // FACTORY, so `this` no longer carries the identity, and the splice writes the
+  // name as a LITERAL into the call record. A literal binds nothing — there is no
+  // free name to bind — but it must not pass in silence either: a block that
+  // names its tool STATICALLY ignores whatever tool the bench hands it, so the
+  // slot's shape decides whether a scenario's premise can reach the block at all.
+  const TOOL_LITERAL = /^\{\s*name\s*:\s*(["'])([A-Za-z_$][\w$]*)\1\s*\}$/;
+  const literal = TOOL_LITERAL.exec(toolSlot);
   const spec = {
     // `tool:this` means the block reads the tool off the call receiver.
-    usesThis: slots[1].trim() === 'this',
+    usesThis: toolSlot === 'this',
+    // The name the block hard-codes, or null when the tool arrives from outside.
+    toolLiteral: literal ? literal[2] : null,
     bindings: [
       bind(slots[1].trim(), 'tool'),
       bind(slots[2].trim(), 'input'),
@@ -230,8 +241,10 @@ function locateNames(carved, kind) {
       { name: title[1], source: 'sessionTitle' },
     ].filter(Boolean),
   };
-  if (!spec.usesThis && !isBindable(slots[1].trim())) {
-    throw new Error(`tool slot is neither a name nor \`this\`: ${slots[1].trim()}`);
+  if (!spec.usesThis && !spec.toolLiteral && !isBindable(toolSlot)) {
+    throw new Error(
+      `tool slot is none of a name, \`this\`, or a {name:"…"} literal: ${toolSlot}`,
+    );
   }
   if (kind === 'judge') return spec;
   // The form block's queue call sits behind verdict-kind dispatch (its own
@@ -276,7 +289,20 @@ function compileProbe(carved, spec) {
   } catch (error) {
     throw new Error(`cannot compile carved block: ${error.message}`);
   }
-  return (bag) => fn.apply(spec.usesThis ? bag.tool : undefined, params.map((entry) => bag[entry.source]));
+  return (bag) => {
+    // CONSTRAINT: the literal shape makes this gate TWO-SIDED. A block that
+    // hard-codes its tool never reads `bag.tool`, so a scenario that hands it a
+    // different tool is measuring a premise the block cannot see — and it would
+    // go GREEN on it. Declaring the literal without checking the scenario against
+    // it is exactly how a counter becomes decoration instead of a gate.
+    if (spec.toolLiteral && bag.tool && bag.tool.name !== spec.toolLiteral) {
+      throw new Error(
+        `scenario handed tool '${bag.tool.name}' but the carved block names ` +
+        `'${spec.toolLiteral}' as a literal -- the scenario premise never reaches it`,
+      );
+    }
+    return fn.apply(spec.usesThis ? bag.tool : undefined, params.map((entry) => bag[entry.source]));
+  };
 }
 
 // The form probe's rule table comes from the kit's OWN probes.toml: one data
@@ -1339,7 +1365,7 @@ if (scenarios.length !== EXPECTED_SCENARIOS) {
 }
 // Режим --self-check сверяет длину таблицы мутаций с этим числом на каждом
 // своём запуске: правка таблицы без числа молча урезала бы перечень.
-const EXPECTED_MUTATIONS = 7;
+const EXPECTED_MUTATIONS = 8;
 // A scenario without `expected` used to run and be counted as conforming --
 // the comparator treated a missing specification as agreement (mismatchDetails
 // now returns one). The count above catches a hole in the ARRAY; this catches a
@@ -2489,6 +2515,21 @@ const SELF_CHECK_MUTATIONS = [
     controlCause: 'replaySummary',
     mutation: { from: "{ key: 'replaySummary', ok: (r, e) => r.replaySummary === e.replaySummary,",
                 to: "{ key: 'replaySummary', ok: () => true," },
+  },
+  {
+    name: 'tool-literal-two-sided',
+    // Слот `tool:` судьи -- ЛИТЕРАЛ с 2.1.269 (инструмент диспатча стал
+    // фабрикой). Блок с литералом знает инструмент сам и поданный мешок на
+    // слот не смотрит, поэтому отрава даёт сценариям судьи ДРУГОЙ инструмент:
+    // без двери 55 сценариев probe-bench (docnum:subset) зеленели бы на посылке, которой блок не видел.
+    // Мутация обязана ослепить саму дверь -- ослепить компаратор здесь нечего,
+    // расхождение ловится не сравнением результата, а отказом на входе.
+    poison: { from: "const tool = { name: scenario.toolName || 'Agent' };",
+              to: "const tool = { name: scenario.toolName || 'Task' };" },
+    controlRc: 1,
+    controlCause: 'as a literal',
+    mutation: { from: 'if (spec.toolLiteral && bag.tool && bag.tool.name !== spec.toolLiteral) {',
+                to: 'if (false) {' },
   },
 ];
 /* __selfCheckTableEnd__ */

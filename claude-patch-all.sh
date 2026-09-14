@@ -3323,6 +3323,13 @@ OWNERS = (
      {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
     ('checks-teeth', ('checks-teeth',), ('tools', 'checks-teeth.py'),
      {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
+    # Имена различает ТОКЕНИЗАТОР, а не подстрока: TOKEN держит дефис внутри
+    # слова, поэтому «checks-teeth-corpus» -- отдельное имя, а не вхождение
+    # «checks-teeth». Иначе счёт зубов корпусного прибора сверялся бы с
+    # константой соседа.
+    ('checks-teeth-corpus', ('checks-teeth-corpus',),
+     ('tools', 'checks-teeth-corpus.py'),
+     {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
 )
 # Существительное -> величина. Единственного числа нет намеренно: «1 check» как
 # утверждение не пишут, а слово в единственном числе стоит в прозе на каждом шагу.
@@ -4306,12 +4313,12 @@ fi
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-b7546b8c3af7e07b186e4744a089e2b80d9fb234}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-b9fc5ac35d29643f79671afe52c0ebaecdf792a6}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "b7546b8c3af7e07b186e4744a089e2b80d9fb234" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "b9fc5ac35d29643f79671afe52c0ebaecdf792a6" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -5092,7 +5099,8 @@ ID = rb'[A-Za-z_$][\w$]*'
 def SWITCH(env, empty_off=True):
     """The typed on/off reader of one probe consumer, as a regexp.
 
-    CONSTRAINT: one home for a shape that five checks read. Before this builder
+    CONSTRAINT: one home for a shape that 5 checks read (docnum:subset -- a
+    slice of the pipeline's checks, not any bench's declared count). Before this builder
     each of them carried its own hand-written copy, and the carrier split
     (CLAUDE_*_CARRIER=mod stands a splice down) updated only some of them: the
     stragglers went on pinning a form that exists in NO image, so they could not
@@ -6741,7 +6749,7 @@ checks = {
                                               rb'\.streamingToolExecutor\.addTool\(' + ID + rb',' + ID + rb','
                                               # волна 31 (K-3): стэш гейтится тем же типизированным читателем --
                                               # CLAUDE_JUDGE=0 больше не наполняет карту хода. Написание читателя
-                                              # живёт в SWITCH(): пять проверок держали его СВОИМИ копиями, и
+                                              # живёт в SWITCH(): 5 проверок pipeline (docnum:subset) держали его СВОИМИ копиями, и
                                               # карьерное расщепление обновило не все -- отставшие пинили форму,
                                               # которой нет ни в одном образе.
                                               rb'\(' + SWITCH(b'CLAUDE_JUDGE') + rb'\?'
