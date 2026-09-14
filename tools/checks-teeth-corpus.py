@@ -19,8 +19,12 @@
 ни больше ни меньше. Лишняя красная -- мутация задела чужую дверь и зубом не
 является; отсутствие своей -- проверка не поднимается.
 
-Продукты прибор НЕ собирает. Готовятся они так (по одному на версию корпуса):
-    cp ~/.local/share/claude-patch/corpus/2.1.270.pristine /tmp/loop270.bin
+Продукты прибор НЕ собирает. Готовятся они так (по одному на версию корпуса).
+Имя файла корпуса берётся из ЕДИНСТВЕННОГО дома -- литерал суффикса здесь писать
+нельзя: стенд (сценарий 37) требует, чтобы суффикс жил в одном месте, иначе смена
+суффикса поедет только у одной стороны и прогон останется зелёным на старых байтах.
+    . tools/corpus-file-name.sh
+    cp ~/.local/share/claude-patch/corpus/"$(corpus_file_name 2.1.270)" /tmp/loop270.bin
     node <форк>/dist/index.mjs adhoc-patch --script @tweakcc-patch.js \\
         -p /tmp/loop270.bin --confirm-possible-dangerous-patch
     tools/checks-teeth-corpus.py /tmp/loop270.bin /tmp/loop267.bin
