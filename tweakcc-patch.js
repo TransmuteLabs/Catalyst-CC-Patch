@@ -5153,20 +5153,48 @@ step('27 full-bypass mode keeps only the peer-machine immunity', () => {
 
 // --------------------------------------------------------------------------
 // 28. Refusal fallback: the routes table reads the config seam, and the top
-//     of the lineup is reachable again.
+//     of the lineup is reachable again -- both ONLY while the operator has
+//     set CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES.
 //     Upstream consults `e.routesOverride ?? <stock table>()` on both refusal
 //     lanes but ships the seam EMPTY (`function <seam>(){return}`), so the
 //     stock table always wins. And a firstParty-only predicate quietly swaps
 //     the armed model claude-opus-5 -> claude-opus-4-8 wherever it is asked
 //     for, keeping the top of the lineup out of the fallback chain.
 //
-//     BOTH edits below go through editModuleAt, never over the whole text.
+//     The predicate itself stays STOCK: it has THREE consumers, not two, and
+//     they want different things. Applied to the MAPPED TARGET (the `DJ`
+//     ternary) it silently rewrites a configured {"bio":"claude-opus-5"}
+//     back to claude-opus-4-8 -- that reading is disarmed BY THE HANDLE.
+//     Applied to the ARMED model (`UOn`) the same downgrade is PROTECTION,
+//     not censorship: without it a firstParty user who configured nothing
+//     would trade "refusal of opus-5, recover through opus-4-8" for a
+//     self-retry of the very same model, because the catch-all lane is
+//     already gated by armedTargetIsRefusingModel -- a regression this
+//     patch must not introduce, so `UOn` is not touched in ANY case. And
+//     the lineup exclusion `!<pred>(<x>)` inside the find runs
+//     UNCONDITIONALLY on the walk_down_opus_lineup path (sticky-model
+//     selection and suppression), not only on refusals -- ungating it
+//     outright would let the most expensive top of the lineup be picked
+//     where nobody asked for it, with no switch to turn it off.
+//
+//     Hence opt-in: with the handle unset (or rejected by the parser) the
+//     image behaves exactly like stock; with the handle set the operator
+//     has asked for his targets to be respected, and both disarms come
+//     alive. The cloud-provider branch of the `DJ` ternary (`<L>`) is NOT
+//     measured and NOT touched: patching on unproven semantics is forbidden
+//     by the same rule that forbids a locator resting on an unproven scope.
+//
+//     ALL edits below go through editModuleAt, never over the whole text.
 //     The predicate's minified name is ALSO a string constant of an
 //     unrelated chunk (on 2.1.270 `$On` is "Teammate prompt must not be a
 //     mailbox protocol frame..." in chunk-jb9wm99y.js, exported as
-//     PROTOCOL_FRAME_PROMPT_ERROR), and the seam's letters occur 16 times
-//     across the bundle with 3 of them in this module -- a whole-text edit
-//     would land on whichever chunk the minifier happened to spell the same.
+//     PROTOCOL_FRAME_PROMPT_ERROR), and the seam's letters recur across the
+//     bundle under other scopes -- the total count is platform-dependent
+//     (the linux build renames the seam outright), so no whole-bundle
+//     number pins anything; the only occurrences inside the refusal module
+//     are the definition and the two call sites, which is why every edit
+//     here is scoped to that one module -- a whole-text edit would land on
+//     whichever chunk the minifier happened to spell the same.
 // --------------------------------------------------------------------------
 step('28 refusal fallback routes from config, top of lineup reachable', () => {
   const ID = '[A-Za-z_$][\\w$]*';
@@ -5190,8 +5218,9 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   // The empty definition must be found in the SAME module as the call sites:
   // the same letters may mean something else a chunk away, so the count is
   // taken on moduleTextAt, never on js.
+  const seamModule = moduleTextAt(callSites[0].index);
   const seamDef = `function ${rxEsc(seam)}\\(\\)\\{return\\}`;
-  const seamDefs = moduleTextAt(callSites[0].index).match(new RegExp(seamDef, 'g')) || [];
+  const seamDefs = seamModule.match(new RegExp(seamDef, 'g')) || [];
   if (seamDefs.length !== 1) {
     fail(
       `шов routesOverride не найден в том же модуле, что и его вызов ` +
@@ -5199,26 +5228,71 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
     );
   }
 
-  // The replacement body uses NOT ONE captured name -- only `process.env`
-  // and `JSON`: a `$` inside a minified name spliced into a replacement is a
-  // group reference and into a pattern an anchor, so a body borrowing the
-  // seam's own name could silently edit a different function. The env key
-  // follows the mechanism's existing controls (CATCH_ALL / DISABLE /
-  // NO_MODEL_FALLBACK) rather than taste: the ~/.claude.json accessor is NOT
-  // PROVEN to be in scope at the seam, and a locator may not rest on an
-  // unproven scope. Nothing is ever WRITTEN anywhere on any path -- the
-  // config is only read.
+  // BOTH call sites must sit in that same module. The whole-text pin above
+  // would still pass if the unpacker's module boundaries had split the two
+  // refusal lanes apart -- the edit would revive one lane's seam while the
+  // other kept calling the empty stock stub, and neither fail() nor the
+  // on-image check can see a lane they never look at.
+  const seamCalls = seamModule.match(new RegExp(`routesOverride:${rxEsc(seam)}\\(\\)`, 'g')) || [];
+  if (seamCalls.length !== 2) {
+    fail(
+      `routesOverride call sites have split across modules: expected both 2 ` +
+        `in the seam's module, found ${seamCalls.length} -- the edit would ` +
+        `cover only part of the refusal lanes`,
+    );
+  }
+
+  // The replacement body uses NOT ONE captured name -- only `process.env`,
+  // `JSON`, `Object`, `Array` and `console`: a `$` inside a minified name
+  // spliced into a replacement is a group reference and into a pattern an
+  // anchor, so a body borrowing the seam's own name could silently edit a
+  // different function. The env key follows the mechanism's existing
+  // controls (CATCH_ALL / DISABLE / NO_MODEL_FALLBACK) rather than taste:
+  // the ~/.claude.json accessor is NOT PROVEN to be in scope at the seam,
+  // and a locator may not rest on an unproven scope. Nothing is ever
+  // WRITTEN anywhere on any path -- the config is only read; the one stderr
+  // line below goes to the console, not to a user file.
   //
+  // The parse result -- including `undefined` -- is cached in the closure,
+  // because site B now calls the seam on hot refusal-lane walks and a
+  // JSON.parse per call would be a tax the stock image never pays. The
+  // price is deliberate: an env var changed mid-process is NOT picked up,
+  // which is the normal semantics of environment configuration.
+  //
+  // The cache is `var`, not `let`: the seam is a function declaration and
+  // hoists, so a call textually ABOVE the insertion point must already
+  // work; a `let` there would sit in the temporal dead zone and throw a
+  // ReferenceError exactly where the promise is "behaves like stock".
+  // `var` at module top level can collide with a foreign one in the glued
+  // bundle, so the name is required to be unused over the WHOLE image --
+  // measured on the 2.1.270 stock: 0 occurrences of '__rfr'.
+  const cache = '__rfr';
+  if (new RegExp(`(?<![\\w$])${rxEsc(cache)}(?![\\w$])`).test(js)) {
+    fail(`cache name '${cache}' is already used in the bundle`);
+  }
+
   // The config parse failure is CLOSED on purpose: any invalid value -- not
   // an object, an array, a key whose value is neither a string nor a
   // non-empty array of strings -- returns undefined, and the consumer takes
   // the stock table WHOLE. A lenient reader could hand the consumer half a
   // table, which is worse than no table: some routes would silently keep
-  // their stock destinations while the config claims to own them.
+  // their stock destinations while the config claims to own them. The
+  // rejection is announced exactly ONCE (the cache makes a second parse
+  // impossible) and only when the variable was non-empty -- whoever never
+  // set it sees nothing by construction.
   editModuleAt(callSites[0].index, (body) =>
     body.replace(
       new RegExp(seamDef),
-      `function ${repEsc(seam)}(){try{let r=JSON.parse(process.env.CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES||"null");if(r===null||typeof r!=="object"||Array.isArray(r))return;for(let k of Object.keys(r)){let v=r[k];if(typeof v==="string")continue;if(Array.isArray(v)&&v.length>0&&v.every((x)=>typeof x==="string"))continue;return}return r}catch{return}}`,
+      `var ${repEsc(cache)};function ${repEsc(seam)}(){if(${repEsc(cache)})return ${repEsc(cache)}.v;` +
+        `let e=process.env.CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES;${repEsc(cache)}={v:void 0};` +
+        `if(e){try{let r=JSON.parse(e);` +
+        `if(r!==null&&typeof r==="object"&&!Array.isArray(r)){` +
+        `let ok=!0;for(let k of Object.keys(r)){let v=r[k];` +
+        `if(typeof v==="string")continue;` +
+        `if(Array.isArray(v)&&v.length>0&&v.every((x)=>typeof x==="string"))continue;ok=!1;break}` +
+        `if(ok)${repEsc(cache)}.v=r}}catch{}` +
+        `if(${repEsc(cache)}.v===void 0)console.error("CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES is not a valid routes object; using the stock refusal fallback table")}` +
+        `return ${repEsc(cache)}.v}`,
     ),
   );
   applied.push(
@@ -5226,12 +5300,11 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
       `env key 'CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES')`,
   );
 
-  // --- site B: disarm the built-in top-of-lineup downgrade -----------------
-  // One point disarms both halves: the predicate is defined once and read
-  // exactly twice -- in the armed-model downgrade and in the exclusion of
-  // the top of the lineup from the descent. The constants and the predicate
-  // are captured by ONE expression so that every name arrives from its own
-  // site; the whole-text match must be exactly one.
+  // --- site B: the downgrade and the lineup exclusion become opt-in -------
+  // The predicate itself is left STOCK (see the step header): only its two
+  // harmful readings are gated by the handle. The constants and the
+  // predicate are captured by ONE expression so that every name arrives
+  // from its own site; the whole-text match must be exactly one.
   const bundleRx =
     `var (${ID})="claude-opus-4-8",(${ID})="claude-opus-5";` +
     `function (${ID})\\((${ID})\\)\\{return (${ID})\\(\\)&&(${ID})\\(\\4\\)===\\2\\}`;
@@ -5249,26 +5322,82 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   // module the predicate must be READ exactly twice (every mention minus its
   // own definition). A reader added upstream must fail here loudly rather
   // than silently survive a dead predicate.
+  const modText = moduleTextAt(bundle.index);
   const mentions = [
-    ...moduleTextAt(bundle.index).matchAll(new RegExp(`(?<![\\w$])${rxEsc(A)}(?![\\w$])`, 'g')),
+    ...modText.matchAll(new RegExp(`(?<![\\w$])${rxEsc(A)}(?![\\w$])`, 'g')),
   ].length;
   const readers = mentions - 1;
   if (readers !== 2) {
     fail(`число читателей предиката понижения изменилось: ${readers}`);
   }
 
+  // Reading 1 -- the lineup exclusion inside the find. On 2.1.270 the
+  // module reads `pFn().find((s)=>Vq(je(s))&&!$On(s)&&r(s))`, and this walk
+  // runs unconditionally on the walk_down_opus_lineup path (sticky-model
+  // selection and suppression), which is exactly why it may only open
+  // together with the handle. The `!` is part of the locator so the edit
+  // lands on the EXCLUSION, not on some other call of the predicate; the
+  // argument name is captured here, never borrowed from the bundle.
+  const exclRx = `!${rxEsc(A)}\\((${ID})\\)`;
+  const exclHits = modText.match(new RegExp(exclRx, 'g')) || [];
+  if (exclHits.length !== 1) {
+    fail(
+      `lineup exclusion site: expected exactly one !<pred>(<x>) in the ` +
+        `module, found ${exclHits.length}`,
+    );
+  }
+  const exclArg = modText.match(new RegExp(exclRx))[1];
+
+  // Reading 2 -- the mapped-target downgrade inside `DJ`. The reader's own
+  // definition (`function <B>(<x>){return <A>(<x>)?<F>:<x>}` on 2.1.270)
+  // names it, and the ternary is then located THROUGH that name:
+  // `<W>()?<B>(<x>.id):<L>(<x>.id)`. The `<L>` branch is deliberately NOT
+  // touched: its semantics (the cloud-provider family default) is not
+  // measured, and a locator may not rest on an unproven scope any more than
+  // an edit may rest on unproven semantics.
+  const readerRx =
+    `function (${ID})\\((${ID})\\)\\{return ${rxEsc(A)}\\(\\2\\)\\?${rxEsc(F)}:\\2\\}`;
+  const readerHits = modText.match(new RegExp(readerRx, 'g')) || [];
+  if (readerHits.length !== 1) {
+    fail(
+      `mapped-target downgrade reader: expected exactly one ` +
+        `function <B>(<x>){return <A>(<x>)?<F>:<x>} in the module, ` +
+        `found ${readerHits.length}`,
+    );
+  }
+  const B = modText.match(new RegExp(readerRx))[1];
+  const ternRx = `(${ID})\\(\\)\\?${rxEsc(B)}\\((${ID})\\.id\\):(${ID})\\(\\2\\.id\\)`;
+  const ternHits = modText.match(new RegExp(ternRx, 'g')) || [];
+  if (ternHits.length !== 1) {
+    fail(
+      `mapped-target downgrade ternary: expected exactly one ` +
+        `<W>()?<B>(<x>.id):<L>(<x>.id) in the module, found ${ternHits.length}`,
+    );
+  }
+  const [, W, t, L] = modText.match(new RegExp(ternRx));
+
+  // With the handle UNSET both forms collapse to the stock ones:
+  // `!(<S>()===void 0&&<A>(<x>))` is `!<A>(<x>)`, and
+  // `<W>()?(<S>()===void 0?<B>(<x>.id):<x>.id):<L>(<x>.id)` is
+  // `<W>()?<B>(<x>.id):<L>(<x>.id)`. With the handle SET both disarms are
+  // live: the exclusion is gone and the mapped target is no longer
+  // downgraded. The armed-model downgrade in `UOn` is NOT here on purpose.
   editModuleAt(bundle.index, (body) =>
-    body.replace(
-      new RegExp(
-        `function ${rxEsc(A)}\\(${rxEsc(v)}\\)\\{return ${rxEsc(U)}\\(\\)&&` +
-          `${rxEsc(C)}\\(${rxEsc(v)}\\)===${rxEsc(M)}\\}`,
+    body
+      .replace(
+        new RegExp(exclRx),
+        `!(${repEsc(seam)}()===void 0&&${repEsc(A)}(${repEsc(exclArg)}))`,
+      )
+      .replace(
+        new RegExp(ternRx),
+        `${repEsc(W)}()?(${repEsc(seam)}()===void 0?${repEsc(B)}(${repEsc(t)}.id):` +
+          `${repEsc(t)}.id):${repEsc(L)}(${repEsc(t)}.id)`,
       ),
-      `function ${repEsc(A)}(${repEsc(v)}){return!1}`,
-    ),
   );
   applied.push(
-    `top-of-lineup reachable as a refusal fallback (predicate '${A}', ` +
-      `2 reader(s), constants '${F}'/'${M}')`,
+    `top-of-lineup reachable as a refusal fallback, opt-in with the routes ` +
+      `config (predicate '${A}' kept stock, seam '${seam}', ` +
+      `constants '${F}'/'${M}')`,
   );
 });
 
