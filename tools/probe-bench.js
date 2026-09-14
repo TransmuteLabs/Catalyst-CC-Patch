@@ -1114,6 +1114,50 @@ const scenarios = [
     expected: { passed: true, outcome: 'ok', poolCalls: 0, requestMaxTokens: 1200,
                 recordCount: 1, journalLines: 1,
                 degExact: ['bad-setting:max_tokens=0 (need 1..inf), using 1200'] } },
+  // Перебивание литералов шаблона ГОДНОЙ настройкой. Механизм рождён из
+  // боевого провала -- комментарий сплайса записывает его дословно: «measured
+  // twice: first with the model, then with a 1200-token ceiling that truncated
+  // a cancel verdict into silence». При этом зуба у него не было ни одного:
+  // `defaults-overridden` идёт БЕЗ шаблона (чтение шаблона падает, тело строит
+  // ветка catch прямо из настроек -- строку перебивания она не проходит), а
+  // `max-tokens-zero-on-template` пинит ЗАПАСНОЙ путь и даёт 1200 одинаково с
+  // перебиванием и без него (ноль ложен и до __num не доходит). Снятие строки
+  // перебивания оставляло стенд зелёным, а судью -- на потолке 1200 и эффорте
+  // low. Здесь настройка годна, поэтому выиграть обязана она.
+  { name: 'template-overridden-by-setting', httpServer: true,
+    bodyTemplate: '{"model":"{{MODEL}}","max_tokens":1200,"reasoning_effort":"low",'
+      + '"messages":[{"role":"system","content":"{{PROMPT}}"},{"role":"user","content":'
+      + '"{{LABEL}}\\n\\n{{CONTEXT}}\\n\\n{{DISPATCH}}"}]}',
+    // Дома у величин РАЗНЫЕ, и это измерено, а не выведено: в сплайсе `__e` --
+    // СТУПЕНЬ лестницы моделей (`for(...){let __e=__mdls[__i]`), а `__cfg` --
+    // слитая таблица пробы с дефолтами. Поэтому бюджет берётся как
+    // `__e.max_tokens??__cfg.max_tokens` (годится и ступень, и таблица), а
+    // эффорт -- только `__e.effort`, то есть ТОЛЬКО со ступени; живой
+    // probes.toml так и написан: `effort` стоит в каждом `[[probe.judge.models]]`.
+    // Первая редакция этого сценария клала effort в таблицу пробы и получила
+    // low: образ отработал верно, ошибся стенд.
+    config: { max_tokens: 24000, models: [{ model: 'stub-model', effort: 'xhigh' }] },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 0,
+                requestMaxTokens: 24000, requestEffort: 'xhigh',
+                recordCount: 1, journalLines: 1 } },
+  // Положительный контроль соседа: БЕЗ настройки литералы шаблона остаются
+  // законно -- это объявленный запасной путь, а не дефект. Без этой половины
+  // «настройка выиграла» неотличимо от «в теле всегда стоит настройка»:
+  // сценарий выше зеленел бы и на образе, который литералы шаблона просто
+  // игнорирует. Таблица `[defaults]` здесь не пишется вовсе (её добавляет
+  // только defaultsConfig/defaultsOnly), поэтому `__cfg.max_tokens` тоже пуст
+  // -- иначе дефолт подменил бы отсутствие настройки и контроль стал бы
+  // вакуумным.
+  { name: 'template-kept-without-setting', httpServer: true,
+    bodyTemplate: '{"model":"{{MODEL}}","max_tokens":1200,"reasoning_effort":"low",'
+      + '"messages":[{"role":"system","content":"{{PROMPT}}"},{"role":"user","content":'
+      + '"{{LABEL}}\\n\\n{{CONTEXT}}\\n\\n{{DISPATCH}}"}]}',
+    config: { max_tokens: undefined },
+    response: 'OK: бриф полон',
+    expected: { passed: true, outcome: 'ok', poolCalls: 0,
+                requestMaxTokens: 1200, requestEffort: 'low',
+                recordCount: 1, journalLines: 1 } },
   // Волна 31, правка 4: Bun.TOML отдаёт чужой тип как есть, и enforce=1
   // выглядел включённым в файле, оставаясь выключенным по делу. Гейт идёт в
   // безопасную сторону (включён) и это объявлено.
@@ -1431,7 +1475,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 127;
+const EXPECTED_SCENARIOS = 129;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1697,6 +1741,7 @@ function expectationText(expected) {
   if (expected.degExact !== undefined) parts.push(`деградация=${JSON.stringify(expected.degExact)}`);
   if (expected.degPrefixes !== undefined) parts.push(`деградация начинается с ${JSON.stringify(expected.degPrefixes)}`);
   if (expected.requestMaxTokens !== undefined) parts.push(`бюджет запроса=${expected.requestMaxTokens}`);
+  if (expected.requestEffort !== undefined) parts.push(`эффорт запроса=${expected.requestEffort}`);
   if (expected.recordCount !== undefined) parts.push(`записей в каталоге=${expected.recordCount}`);
   if (expected.recordSeeds !== undefined) parts.push(`из них засеянных=${expected.recordSeeds}`);
   if (expected.dispatchExcludes !== undefined) parts.push(`нагрузка без «${expected.dispatchExcludes}»`);
@@ -1765,6 +1810,7 @@ const CHECKS = [
     },
     got: (r) => JSON.stringify(r.deg) },
   { key: 'requestMaxTokens', ok: (r, e) => r.requestMaxTokens === e.requestMaxTokens, got: (r) => String(r.requestMaxTokens) },
+  { key: 'requestEffort',  ok: (r, e) => r.requestEffort === e.requestEffort, got: (r) => String(r.requestEffort) },
   { key: 'recordCount',    ok: (r, e) => r.recordCount === e.recordCount, got: (r) => String(r.recordCount) },
   { key: 'recordSeeds',    ok: (r, e) => r.recordSeeds === e.recordSeeds, got: (r) => String(r.recordSeeds) },
   { key: 'dispatchExcludes', ok: (r, e) => !r.sentDispatch.includes(e.dispatchExcludes), got: (r) => r.sentDispatch },
@@ -2215,12 +2261,22 @@ async function runScenario(probes, scenario) {
     let sentUser = '';
     let sentSystem = '';
     let requestMaxTokens = null;
+    // Эффорт читается ТАМ ЖЕ, где бюджет, и по той же причине: настройка
+    // перебивает литерал живого шаблона body.json, и доказать это может
+    // только ОТПРАВЛЕННОЕ значение. До этой волны эффорт не читался ни на
+    // одной полосе -- перебивание `reasoning_effort` не пинил ни один
+    // сценарий, и снятие строки перебивания в сплайсе оставляло стенд
+    // зелёным. Дом у эффорта не один, потому что не одна и полоса вызова: на
+    // полосе пула он едет в options.effortValue (тело собирает клиент, оно
+    // не наше), на шаблонной -- полем reasoning_effort в теле запроса.
+    let requestEffort = null;
     let currentTick = 0;
     const pool = async (args) => {
       poolCalls += 1;
       sentUser = args?.messages?.[0]?.message?.content ?? '';
       sentSystem = args?.systemPrompt?.[0] ?? '';
       requestMaxTokens = args?.options?.maxOutputTokensOverride ?? null;
+      requestEffort = args?.options?.effortValue ?? null;
       if (scenario.poolError) throw scenario.poolError;
       // Whole-tick channel failure: every pool call of the named ticks
       // throws, so the ladder's retry rung cannot accidentally rescue the
@@ -2312,8 +2368,11 @@ async function runScenario(probes, scenario) {
     if (httpBodies.length > 0) {
       // Первое тело -- первая попытка первой ступени: там бюджет, который
       // ядро решило отправить. Читается ЧТО ОТПРАВЛЕНО, а не что вернулось.
-      try { requestMaxTokens = JSON.parse(httpBodies[0]).max_tokens ?? null; }
-      catch { requestMaxTokens = null; }
+      try {
+        const sent = JSON.parse(httpBodies[0]);
+        requestMaxTokens = sent.max_tokens ?? null;
+        requestEffort = sent.reasoning_effort ?? null;
+      } catch { requestMaxTokens = null; requestEffort = null; }
     }
     const journalFile = path.join(probeDir, 'journal.jsonl');
     const journalRaw = fs.existsSync(journalFile) ? fs.readFileSync(journalFile, 'utf8') : '';
@@ -2390,6 +2449,7 @@ async function runScenario(probes, scenario) {
       sentDispatchLen: sentDispatch.length,
       sentDispatch,
       requestMaxTokens,
+      requestEffort,
       recordCount: fs.existsSync(path.join(probeDir, 'records'))
         ? fs.readdirSync(path.join(probeDir, 'records')).length
         : 0,
@@ -2565,7 +2625,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 127;', to: 'EXPECTED_SCENARIOS = 126;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 129;', to: 'EXPECTED_SCENARIOS = 128;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },

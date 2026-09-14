@@ -31,6 +31,33 @@ literal written into `body.json` by hand will be overridden — otherwise the
 documented override would silently stop working whenever a template exists
 (which is exactly what happened before 2026-08-20).
 
+The budget and the effort are overridden the same way, and their homes are NOT
+the same one — measured 2026-09-14, recorded here because reading `body.json`
+as the canon of either is how the edit goes silently nowhere:
+
+| value | home that rules | what the `body.json` literal is |
+|---|---|---|
+| `max_tokens` | a rung of `[[probe.<name>.models]]`, else the probe table, else `[defaults]` | fallback, used only when the setting is absent or refused as a bad value |
+| `reasoning_effort` | `effort` on a rung of `[[probe.<name>.models]]` — ONLY there | fallback, used only when no rung names an effort |
+
+`effort` written into the probe table instead of a rung is not read by
+anything: each rung pins its own effort because each rung is its own model.
+A bad `max_tokens` VALUE is loud (`bad-setting:max_tokens=0 (need 1..inf),
+using 1200`, in the journal line's `deg` list); `effort` has no value check at
+all — whatever the rung says goes to the provider verbatim, so a bad effort
+surfaces as a REFUSED ATTEMPT, not as a degradation line. A setting in the
+wrong TABLE is silent either way, so put it on the rung.
+
+What was actually SENT is readable per attempt, and that is the way to check an
+override instead of trusting either file: the journal line points at its record
+through `rec`, and the record's `attempts[]` carries `model`, `effort`,
+`max_tokens`, `ctx_chars`, `timeout_ms` and `via` for every rung tried. The
+journal line itself carries none of them. The override is pinned by the pair
+`template-overridden-by-setting` / `template-kept-without-setting` in
+`tools/probe-bench.js`: before them a build that dropped the override stayed
+green, and the judge would have silently returned to the 1200-token ceiling
+that once truncated a cancel verdict into silence.
+
 Debug files (written only under `CLAUDE_JUDGE_DEBUG=1`):
 `last-request.<pid>.<seq>.json` and `last-verdict.<pid>.<seq>.txt`. The pid is
 in the name because two sessions used to write both files under one name and the
