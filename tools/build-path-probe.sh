@@ -40,6 +40,12 @@
 #   u  the installer's own `--update` path, offline and in seconds: it must
 #      build BESIDE the target and swap by rename, never download over the live
 #      file. Its control is a copy of claude_patch.py with the staging removed.
+#   v  the activation announce: `--activation` must say what the launcher
+#      resolves to and whether that is the build (a dangling symlink is a
+#      divergence, not an unknown), and the pipeline stage that announces it
+#      must refuse when the repoint was promised and only announce when it was
+#      not. Its controls: an unconditionally-yes MATCH, and a stage copy with
+#      the promised-repoint refusal removed.
 #   k  another probe owns the probe-only ccVersion now, or SIGKILL left it behind
 #      -> must refuse before snapshotting or writing anything. Its control removes
 #      that startup guard and must let the same toy HOME reach a fast case.
@@ -115,7 +121,7 @@
 # invisible to every check in the pipeline, and a tool nobody calls has been
 # dead three times in this kit.
 #
-# Usage:  bash tools/build-path-probe.sh [--case abcdurxplkmn] [--version 2.1.247]
+# Usage:  bash tools/build-path-probe.sh [--case abcdurxplkmnv] [--version 2.1.247]
 # Cost:   one full run per BUILD case (tweakcc + our patches + the pipeline's 129
 #         checks + the interface gate + the bench), so a few minutes each; cases
 #         (r), (x), (l), (k), (m) and (n) build nothing and answer in
@@ -168,7 +174,7 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdurxplkmn
+CASES=abcdurxplkmnv
 # Owner totals across the self-checking cases. Раньше эти два числа стояли
 # ГОЛЫМИ объявлениями: их читал только гейт чисел в прозе, а сам прибор их не
 # сверял ни с чем -- правка таблицы случая без правки числа проходила молча,
@@ -180,13 +186,14 @@ CASE_K_SCENARIOS=1; CASE_K_MUTATIONS=1
 CASE_L_SCENARIOS=4; CASE_L_MUTATIONS=4
 CASE_M_SCENARIOS=9; CASE_M_MUTATIONS=11
 CASE_N_SCENARIOS=80; CASE_N_MUTATIONS=87
-EXPECTED_SCENARIOS=94
-EXPECTED_MUTATIONS=103
-if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS
-      || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS )); then
+CASE_V_SCENARIOS=8; CASE_V_MUTATIONS=3
+EXPECTED_SCENARIOS=102
+EXPECTED_MUTATIONS=106
+if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS + CASE_V_SCENARIOS
+      || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS + CASE_V_MUTATIONS )); then
   echo "build-path-probe: ОТКАЗ -- объявленная сумма разошлась со вкладами случаев:" >&2
-  echo "  сценариев $EXPECTED_SCENARIOS против $((CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS))," \
-       "мутаций $EXPECTED_MUTATIONS против $((CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS))" >&2
+  echo "  сценариев $EXPECTED_SCENARIOS против $((CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS + CASE_V_SCENARIOS))," \
+       "мутаций $EXPECTED_MUTATIONS против $((CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS + CASE_V_MUTATIONS))" >&2
   exit 4
 fi
 WANT_VER=
@@ -3223,6 +3230,231 @@ MUT
   fi
 }
 
+__v_field() {   # вывод прибора, имя поля -> значение строки ИМЯ=...
+  printf '%s\n' "$1" | sed -n "s/^$2=//p"
+}
+
+# --- case v: активация объявляется и проверяется -------------------------------
+# Без сборок: подкоманда мерит игрушечный лаунчер в игрушечном HOME (подкоманда
+# читает Path.home(), и прогон в настоящем доме смотрел бы на живой лаунчер
+# оператора), а bash-стадия конвейера гоняется ВЫРЕЗКОЙ именованной функции --
+# тем же способом, каким tools/corpus-tools-bench.sh гоняет вырезанную стадию
+# гейта интерфейса.
+case_v() {
+  local d home kit built other out rc mrc __rp_rc=0 __rp_out __v5a __exp_active
+  local __v_scn=0 __v_mut=0
+  echo "case v: --activation measures the launcher; the stage announces or refuses"
+  d="$ROOT/activation"; rm -rf "$d"
+  home="$d/home"; kit="$d/kit"; built="$d/built"; other="$d/other"
+  mkdir -p "$home/.local/bin" "$d/tmp" "$kit"
+  # --repoint отказывает образу без маркера, а сценарий ниже зовёт именно его:
+  # игрушечная сборка несёт маркер.
+  printf 'prefix %s suffix\n' "$OUR_MARKER" > "$built"
+  printf 'foreign pristine image\n' > "$other"
+
+  ln -s "$other" "$home/.local/bin/claude"
+  __exp_active="$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).resolve())' "$other")"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == no && "$(__v_field "$out" ACTIVE)" == "$__exp_active" ]]; then
+    ok 'v1 a launcher pointed at another file answers MATCH=no and names it in ACTIVE'
+  else
+    bad "v1 the foreign symlink answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  __rp_out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --repoint "$built" 2>&1)" || __rp_rc=$?
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == yes ]]; then
+    ok 'v2 after --repoint onto the built file the answer is MATCH=yes'
+  elif [[ $__rp_rc -ne 0 ]]; then
+    bad "v2 the toy repoint failed (rc=$__rp_rc): $(printf '%s' "$__rp_out" | tr '\n' '|')"
+  else
+    bad "v2 the repointed launcher did not answer MATCH=yes (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  rm -f "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCHER_KIND)" == missing && "$(__v_field "$out" MATCH)" == unknown ]]; then
+    ok 'v3 no launcher at all answers LAUNCHER_KIND=missing and MATCH=unknown'
+  else
+    bad "v3 the absent launcher answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  ln -s "$d/gone" "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCHER_KIND)" == symlink && "$(__v_field "$out" MATCH)" == no ]]; then
+    ok 'v4 a dangling launcher answers MATCH=no, not unknown'
+  else
+    bad "v4 the dangling launcher answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  rm -f "$home/.local/bin/claude"
+  cp "$built" "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
+  __v5a=no
+  [[ $rc -eq 0 && "$(__v_field "$out" LAUNCHER_KIND)" == copy && "$(__v_field "$out" MATCH)" == yes ]] && __v5a=yes
+  printf 'prefiy %s suffix\n' "$OUR_MARKER" > "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
+  if [[ $__v5a == yes && $rc -eq 0 && "$(__v_field "$out" MATCH)" == no ]]; then
+    ok 'v5 a copy launcher compares by digest: equal bytes yes, one byte at equal size no'
+  else
+    bad "v5 the copy comparison answered wrong (equal=$__v5a, rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  # Зуб на bash-стадию: вырезка именованной функции из конвейера и прогон в
+  # вырезке. Голое имя -- как в конвейере: под `||` `set -e` не действует во
+  # всём теле стадии, и зуб мерил бы стадию под другой оболочкой.
+  mkdir -p "$d/frag"
+  awk -v h='__activation_announce() {' \
+      'index($0, h) == 1 {on=1} on {print} on && $0 == "}" {exit}' \
+      "$PIPELINE" > "$d/frag/__activation_announce.sh"
+  cat > "$d/stage-drv.sh" <<'DRV_V'
+set -euo pipefail
+source "$1"
+HERE="$2"; BIN="$3"; DO_UPDATE="$4"
+__activation_announce
+DRV_V
+  rm -f "$home/.local/bin/claude"; ln -s "$other" "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" bash "$d/stage-drv.sh" "$d/frag/__activation_announce.sh" "$HERE" "$built" 0 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$out" == *"--repoint"* ]]; then
+    ok 'v6 an unpromised divergence (DO_UPDATE=0) prints the activation command and survives'
+  else
+    bad "v6 the DO_UPDATE=0 divergence killed the run or stayed silent (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  out="$(HOME="$home" TMPDIR="$d/tmp" bash "$d/stage-drv.sh" "$d/frag/__activation_announce.sh" "$HERE" "$built" 1 2>&1)"; rc=$?
+  if [[ $rc -ne 0 && "$out" == *ОБЕЩАН* ]]; then
+    ok 'v7 a promised repoint (DO_UPDATE=1) that did not happen reddens the run'
+  else
+    bad "v7 the DO_UPDATE=1 divergence did not refuse by its own cause (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  # Прибор отвечает словом, которого стадия не знает. Заглушка, а не мутация
+  # настоящей подкоманды: предмет сценария -- СТАДИЯ, и заглушка не зависит от
+  # якоря в чужом файле, который может уехать.
+  mkdir -p "$d/weird"
+  cat > "$d/weird/claude_patch.py" <<'WEIRD_V'
+import sys
+print("LAUNCHER=/toy/claude")
+print("LAUNCHER_KIND=symlink")
+print("ACTIVE=/toy/other")
+print("BUILT=" + (sys.argv[2] if len(sys.argv) > 2 else ""))
+print("MATCH=perhaps")
+WEIRD_V
+  out="$(HOME="$home" TMPDIR="$d/tmp" bash "$d/stage-drv.sh" "$d/frag/__activation_announce.sh" "$d/weird" "$built" 0 2>&1)"; rc=$?
+  if [[ $rc -ne 0 && "$out" == *"MATCH=perhaps"* && "$out" == *"НЕ ИЗМЕРЕНА"* ]]; then
+    ok 'v8 an unknown MATCH refuses by its own cause instead of passing as agreement'
+  else
+    bad "v8 the unknown MATCH did not refuse (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  # Отрицательный контроль подкоманды: копия кита с безусловным MATCH=yes.
+  # Кит копии ПОЛНЫЙ: main() требует patch_claude_routing.py рядом с собой, и
+  # копия из одного файла краснела бы с чужой причиной.
+  cp "$HERE/claude_patch.py" "$HERE/patch_claude_routing.py" "$kit/"
+  python3 - "$kit/claude_patch.py" <<'MUT_V1'
+import sys
+p = sys.argv[1]
+t = open(p, encoding='utf-8').read()
+NEEDLE = 'print(f"MATCH={match}")'
+if t.count(NEEDLE) != 1:
+    sys.stderr.write('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: якорь вывода MATCH найден %d раз\n' % t.count(NEEDLE))
+    sys.exit(2)
+open(p, 'w', encoding='utf-8').write(t.replace(NEEDLE, 'print("MATCH=yes")', 1))
+MUT_V1
+  mrc=$?
+  if [[ $mrc -ne 0 ]]; then
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- якорь мутации подкоманды уехал" >&2
+    __DONE=1; exit 2
+  fi
+  victim_parses "$kit/claude_patch.py" || {
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- замена сломала разбор жертвы ($kit/claude_patch.py)" >&2
+    __DONE=1; exit 2
+  }
+  rm -f "$home/.local/bin/claude"; ln -s "$other" "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$kit/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == yes ]]; then
+    ok 'the control reddens v1 by its own cause: an unconditional MATCH=yes on a foreign target'
+  elif [[ $rc -ne 0 ]]; then
+    bad "the v1 control reddened by a FOREIGN cause: $(printf '%s' "$out" | grep -m1 'ERROR\|ПРОВАЛ')"
+  else
+    bad 'the v1 control did NOT redden: v1 does not assert on the computed MATCH'
+  fi
+  __v_mut=$((__v_mut+1))
+
+  # Отрицательный контроль bash-стадии: копия вырезки без ветки отказа.
+  python3 - "$d/frag/__activation_announce.sh" "$d/mut-frag.sh" <<'MUT_V2'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+t = open(src, encoding='utf-8').read()
+NEEDLE = '$DO_UPDATE -eq 1 ]]'
+if t.count(NEEDLE) != 1:
+    sys.stderr.write('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: якорь ветки отказа найден %d раз\n' % t.count(NEEDLE))
+    sys.exit(2)
+open(dst, 'w', encoding='utf-8').write(t.replace(NEEDLE, '0 -eq 1 ]]', 1))
+MUT_V2
+  mrc=$?
+  if [[ $mrc -ne 0 ]]; then
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- якорь ветки отказа стадии уехал" >&2
+    __DONE=1; exit 2
+  fi
+  victim_parses "$d/mut-frag.sh" || {
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- мутация сломала разбор вырезки" >&2
+    __DONE=1; exit 2
+  }
+  out="$(HOME="$home" TMPDIR="$d/tmp" bash "$d/stage-drv.sh" "$d/mut-frag.sh" "$HERE" "$built" 1 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$out" == *"--repoint"* ]]; then
+    ok 'the control reddens v7 by its own cause: the refusal branch gone, the stage only announces'
+  elif [[ $rc -eq 0 ]]; then
+    bad "the v7 control reddened silently: rc=0 without the announcement: $(printf '%s' "$out" | tr '\n' '|')"
+  else
+    bad "the v7 control reddened by a FOREIGN cause: $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_mut=$((__v_mut+1))
+
+  # Отрицательный контроль ветки неизвестного значения: метка `*)` уведена в
+  # имя, которого ни один ответ не носит. Без ветки `case` возвращает ноль, и
+  # стадия молча пропускает прогон.
+  python3 - "$d/frag/__activation_announce.sh" "$d/mut-frag-star.sh" <<'MUT_V3'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+t = open(src, encoding='utf-8').read()
+NEEDLE = '\n    *)\n'
+if t.count(NEEDLE) != 1:
+    sys.stderr.write('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: якорь ветки неизвестного значения найден %d раз\n' % t.count(NEEDLE))
+    sys.exit(2)
+open(dst, 'w', encoding='utf-8').write(t.replace(NEEDLE, '\n    __no_answer_carries_this)\n', 1))
+MUT_V3
+  mrc=$?
+  if [[ $mrc -ne 0 ]]; then
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- якорь ветки неизвестного значения уехал" >&2
+    __DONE=1; exit 2
+  fi
+  victim_parses "$d/mut-frag-star.sh" || {
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- мутация сломала разбор вырезки" >&2
+    __DONE=1; exit 2
+  }
+  out="$(HOME="$home" TMPDIR="$d/tmp" bash "$d/stage-drv.sh" "$d/mut-frag-star.sh" "$d/weird" "$built" 0 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$out" != *"НЕ ИЗМЕРЕНА"* ]]; then
+    ok 'the control reddens v8 by its own cause: the unknown-value branch gone, the stage stays silent'
+  else
+    bad "the v8 control did NOT redden (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_mut=$((__v_mut+1))
+
+  if (( __v_scn != CASE_V_SCENARIOS || __v_mut != CASE_V_MUTATIONS )); then
+    echo "build-path-probe V: ОТКАЗ -- таблица случая разошлась с объявленным вкладом" >&2
+    __DONE=1; exit 4
+  fi
+}
+
 case_r() {   # возврат заимствованного файла: обе стороны и уборка полуфайла
   # Сборок нет: зуб бьёт по ТОЙ ЖЕ функции, которой cleanup возвращает живое
   # состояние tweakcc. Половина «невозможный возврат» и есть та ветка, которая
@@ -3465,6 +3697,7 @@ for c in $(echo "$CASES" | grep -o .); do
     c) case_c ;;
     d) case_d ;;
     u) case_u ;;
+    v) case_v ;;
     r) case_r ;;
     x) case_x ;;
     p) case_p ;;
@@ -3477,10 +3710,10 @@ if [[ $FAILED -eq 0 ]]; then
   # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d), (u) и
   # (x) -- мутационные контроли, и без них зелёная строка обещала бы
   # доказательство, которого прогон не получал (раунд 18, H-2).
-  if [[ "$ALL_CASES" == *c* || "$ALL_CASES" == *d* || "$ALL_CASES" == *u* || "$ALL_CASES" == *x* || "$ALL_CASES" == *r* || "$ALL_CASES" == *p* || "$ALL_CASES" == *l* || "$ALL_CASES" == *k* || "$ALL_CASES" == *m* ]]; then
+  if [[ "$ALL_CASES" == *c* || "$ALL_CASES" == *d* || "$ALL_CASES" == *u* || "$ALL_CASES" == *v* || "$ALL_CASES" == *x* || "$ALL_CASES" == *r* || "$ALL_CASES" == *p* || "$ALL_CASES" == *l* || "$ALL_CASES" == *k* || "$ALL_CASES" == *m* ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
   else
-    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/x/r/p/l/k/m) не гонялся -- зубы не доказаны"
+    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/v/x/r/p/l/k/m) не гонялся -- зубы не доказаны"
   fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2

@@ -620,6 +620,21 @@ def has_marker(path: Path, marker: bytes) -> bool:
     return False
 
 
+def _same_bytes(a: Path, b: Path) -> bool:
+    """Content equality under the never-slurp rule of has_marker: size first,
+    then sha256 in chunks — launcher copies are images of ~250 MB too."""
+    if a.stat().st_size != b.stat().st_size:
+        return False
+    da, db = hashlib.sha256(), hashlib.sha256()
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        while True:
+            ca, cb = fa.read(8 << 20), fb.read(8 << 20)
+            da.update(ca)
+            db.update(cb)
+            if not ca and not cb:
+                return da.digest() == db.digest()
+
+
 def _replace_backup(src: Path, backup: Path) -> None:
     """Write `backup` from `src` atomically.
 
@@ -865,6 +880,39 @@ def main(argv: list[str]) -> None:
         if not has_marker(target, ROUTING_MARKER):
             die(f"refusing to repoint the launcher at an unpatched binary: {target}")
         repoint_launcher(target)
+        return
+
+    if argv and argv[0] == "--activation":
+        if len(argv) < 2:
+            die("--activation needs the built binary to compare the launcher against")
+        built = Path(argv[1]).expanduser().resolve()
+        if not built.is_file():
+            die(f"binary not found: {built}")
+        link = launcher_path()
+        if link.is_symlink():
+            # A dangling launcher stays symlink/no: "points nowhere" is a
+            # divergence to announce, not a "cannot measure".
+            kind = "symlink"
+            active = str(link.resolve())
+            match = "yes" if link.resolve() == built else "no"
+        elif link.is_file():
+            kind = "copy"
+            active = str(link)
+            match = "yes" if _same_bytes(link, built) else "no"
+        else:
+            kind = "missing"
+            active = ""
+            match = "unknown"
+        print(f"LAUNCHER={link}")
+        print(f"LAUNCHER_KIND={kind}")
+        print(f"ACTIVE={active}")
+        print(f"BUILT={built}")
+        # MATCH=no never reddens here: whether it is a fault depends on the run
+        # MODE (--update promises the activation, --target does not), and only
+        # the caller knows its mode. Exiting non-zero would fail a legal
+        # --target run; the announcing stage in claude-patch-all.sh owns the
+        # refusal.
+        print(f"MATCH={match}")
         return
 
     if argv and argv[0] == "--update":
