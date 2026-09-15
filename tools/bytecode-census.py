@@ -22,6 +22,7 @@ import argparse
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 
@@ -203,6 +204,50 @@ def strip_staging(path):
     return os.path.join(d, base) if d else base
 
 
+def corpus_root():
+    return os.environ.get('CLAUDE_PATCH_CORPUS') or os.path.join(
+        os.path.expanduser('~'), '.local', 'share', 'claude-patch', 'corpus')
+
+
+def corpus_name_from_home(version):
+    """Имя файла корпуса для версии — спрашивается у единственного дома.
+
+    Дом tools/corpus-file-name.sh подключается и зовётся той же формой, что и
+    у потребителей в оболочке (sweep.sh, fetch-corpus.sh): source, затем
+    corpus_file_name <версия>.
+    """
+    home = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'corpus-file-name.sh')
+    # КОНСТРЕЙНТ: имя корпуса имеет ОДИН дом — смена суффикса обязана
+    # доезжать до всех потребителей разом; отказ дома не легализуется
+    # догадкой (запасного литерала здесь нет ни в каком виде).
+    if not os.path.isfile(home):
+        raise InstrumentError(
+            'ПРИБОР: дом имени корпуса не найден: {} — имя не разрешить'.format(home))
+    proc = subprocess.run(
+        ['bash', '-c', '. "$1" && corpus_file_name "$2"', 'corpus-name-home',
+         home, version],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise InstrumentError(
+            'ПРИБОР: дом имени корпуса отказал (rc={}) для версии {}: {}'.format(
+                proc.returncode, version,
+                proc.stderr.decode('utf-8', 'replace').strip()))
+    name = proc.stdout.decode('utf-8', 'replace').strip()
+    if not name or '\n' in name:
+        raise InstrumentError(
+            'ПРИБОР: дом имени корпуса ответил не одним именем для версии {} '
+            '({!r})'.format(version, proc.stdout[:200]))
+    return name
+
+
+def corpus_path(version):
+    # Единственная точка разрешения: и рабочий поиск корпуса (resolve_stock),
+    # и самоотчёт --print-corpus-name обязаны идти через неё, иначе зуб
+    # самопроверки меряет не тот путь, которым живёт конвейер.
+    return os.path.join(corpus_root(), corpus_name_from_home(version))
+
+
 def resolve_stock(args):
     """Пристинный образ: явный --stock, затем близнец .orig, затем корпус."""
     if args.stock:
@@ -212,10 +257,12 @@ def resolve_stock(args):
     twin = strip_staging(args.built) + '.orig'
     if os.path.isfile(twin):
         return twin
-    root = os.environ.get('CLAUDE_PATCH_CORPUS') or os.path.join(
-        os.path.expanduser('~'), '.local', 'share', 'claude-patch', 'corpus')
-    corpus = os.path.join(root, '{}.pristine'.format(args.version or '<нет --version>'))
-    if args.version and os.path.isfile(corpus):
+    if not args.version:
+        raise InstrumentError(
+            'ПРИБОР: пристинного близнеца нет ({}) и нет --version — '
+            'имя корпуса спросить не у кого'.format(twin))
+    corpus = corpus_path(args.version)
+    if os.path.isfile(corpus):
         return corpus
     raise InstrumentError(
         'ПРИБОР: пристинного близнеца нет — проверены {} и {}'.format(twin, corpus))
@@ -351,13 +398,22 @@ def self_check(stock, built):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description='Ценз байткода изменённых модулей собранного образа claude.')
-    ap.add_argument('--built', required=True, help='путь к собранному образу')
+    ap.add_argument('--built', help='путь к собранному образу')
     ap.add_argument('--stock', help='явный пристинный образ; побеждает оба автопоиска')
     ap.add_argument('--version', help='версия образа, для корпуса, когда близнеца .orig нет')
+    ap.add_argument('--print-corpus-name', metavar='ВЕРСИЯ',
+                    help='самоотчёт: напечатать ПУТЬ файла корпуса для версии и выйти нулём')
     ap.add_argument('--self-check', action='store_true',
                     help='собственный зуб: мутация обязана краснить стенд')
     args = ap.parse_args(argv)
+    if args.print_corpus_name is not None and not args.print_corpus_name:
+        ap.error('--print-corpus-name требует непустую версию')
+    if args.print_corpus_name is None and not args.built:
+        ap.error('без --print-corpus-name обязателен --built')
     try:
+        if args.print_corpus_name is not None:
+            print(corpus_path(args.print_corpus_name))
+            return 0
         stock = resolve_stock(args)
         if args.self_check:
             return self_check(stock, args.built)
