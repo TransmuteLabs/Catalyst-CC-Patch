@@ -99,10 +99,30 @@ for f in "$ROOT/tools"/*; do
   [ -f "$f" ] || continue
   cp "$f" "$STAGE/tools/$(basename "$f")"
 done
-for f in README.md NOTES.md replay.py compact.py validate.py \
-         channel.py adjudicate.py; do
-  [ -f "$JUDGE/$f" ] && cp "$JUDGE/$f" "$STAGE/judge/$f"
+# The NAME list fell behind the tree a THIRD time: recstore.py and fresh-runs.py
+# entered the set on 15.09 and this build refused on 16.09 — the guard below
+# caught them, the list did not. judge/ is now placed by WALKING the directory,
+# exactly like tools/ above. A list living next to its home must either be read
+# from the home or not exist at all.
+for f in "$JUDGE"/*; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$b" in *.pyc) continue;; esac
+  cp "$f" "$STAGE/judge/$b"
 done
+# judge/bench/ carries the judge tools' own teeth, and it is a SUBDIRECTORY:
+# both the copy above and the completeness guard below walk only the top level,
+# so the teeth were invisible to either — the same blindness one level down.
+# Run records (*.jsonl) are machine data, not source, and stay out.
+if [ -d "$JUDGE/bench" ]; then
+  mkdir -p "$STAGE/judge/bench"
+  for f in "$JUDGE/bench"/*; do
+    [ -f "$f" ] || continue
+    b="$(basename "$f")"
+    case "$b" in *.jsonl|*.pyc) continue;; esac
+    cp "$f" "$STAGE/judge/bench/$b"
+  done
+fi
 # The probes home: one settings file for all probes plus an artifacts
 # directory for each.
 mkdir -p "$STAGE/probes"
@@ -176,6 +196,16 @@ for home in judge idle-watch; do
     case "$SKIP" in *" $b "*) continue;; esac
     [ -f "$STAGE/$home/$b" ] || { echo "ОШИБКА: $home/$b живёт на диске, но в комплект не кладётся" >&2; miss=1; }
   done
+done
+# The guard walks the TOP level only, so a file one directory down was outside
+# its sight entirely: judge/bench/ (the tools' teeth) could vanish from the kit
+# without a word. Run records are machine data and are excluded on both sides —
+# the copy above skips them too, so the two rules must not drift apart.
+for f in "$ROOT/judge/bench"/*; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$b" in *.jsonl|*.pyc) continue;; esac
+  [ -f "$STAGE/judge/bench/$b" ] || { echo "ОШИБКА: judge/bench/$b живёт на диске, но в комплект не кладётся" >&2; miss=1; }
 done
 [ "$miss" = 0 ] || exit 1
 

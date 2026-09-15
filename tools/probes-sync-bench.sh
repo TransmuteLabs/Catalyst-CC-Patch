@@ -15,8 +15,8 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=10
-EXPECTED_MUTATIONS=11
+EXPECTED_SCENARIOS=11
+EXPECTED_MUTATIONS=12
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -28,7 +28,7 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11)
 # Улика, по которой признаётся СВОЯ причина покраснения: подстрока LAST_EVID
 # сценария. Дом перечня мутаций ОДИН -- EXPECTED_MUTATIONS; и обход
 # self_check, и эта таблица, и MUT_SCENARIO обязаны сойтись с ним длиной.
@@ -37,7 +37,7 @@ MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10)
 # а строки о ней не было НИ ОДНОЙ (перечень = проекция, четвёртый случай).
 MUT_EVID=(x 'второй=0' 'diff_rc=0' 'B=3' 'НЕ_НАЗВАНА' 'rc=1' 'rc=0' \
           'ПУТЬ_ОТКАЗА_ЗАВИС' 'СИРОТА_ЗАГЛУШКИ' 'ОДНО_НАПРАВЛЕНИЕ' 'исходник=0' \
-          'вне_истории=0')
+          'вне_истории=0' 'СЛОВО_РАЗОШЛОСЬ_С_ДЕЛОМ')
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -89,34 +89,33 @@ mk_kit() {
   # отказа: мутация правит копию, а сценарий исполняет её, а не работающий файл.
   mkdir -p "$dst/tools"
   cp "$BENCH" "$dst/tools/probes-sync-bench.sh"
-  printf 'probe config\n' > "$dst/probes/probes.toml"
-  printf 'judge prompt\n' > "$dst/probes/judge/prompt.md"
-  printf '{}\n' > "$dst/probes/judge/body.json"
-  printf 'idle prompt\n' > "$dst/probes/idle-watch/prompt.md"
-  # CONSTRAINT: игрушечный канон строится ПО ПЕРЕЧНЮ САМОГО СКРИПТА, а не по
-  # его копии здесь. Своя копия списка -- второй экземпляр той же проекции:
-  # 15.09 перечень раскатки пополнился (recstore.py, fresh-runs.py, зубы), а
-  # этот список остался прежним, и 8 сценариев (docnum:subset -- замер
-  # 15.09 на тогдашнем наборе) покраснели «исходная раскатка отказала»,
-  # не найдя канонной стороны новых пар.
-  local __names
-  __names=$(sed -n 's/^TOOL_FILES=(\(.*\))$/\1/p;s/^TOOL_BENCH_FILES=(\(.*\))$/\1/p' \
-              "$dst/scripts/probes-sync.sh")
-  # Положительный контроль: пустой перечень означает, что разбор промахнулся
-  # мимо объявления, и игрушечный канон вышел бы пустым МОЛЧА.
-  if [[ -z "$__names" ]]; then
-    say "probes-sync-bench: ОТКАЗ -- перечень инструментов не разобран из scripts/probes-sync.sh"
+  # Образец plist кладётся ДО опроса набора: пара plist добавляется условно
+  # (по наличию плейсхолдера), и на отсутствующем файле скрипт назвал бы её
+  # частью набора -- игрушечный канон получил бы ЗАПОЛНЕННЫЙ plist и поехал
+  # бы в каталог агентов.
+  printf '/Users/YOUR-USER\n' > "$dst/judge/com.transmutelabs.judge-compact.plist"
+  # CONSTRAINT: игрушечный канон строится ПО НАБОРУ, КОТОРЫЙ НАЗЫВАЕТ САМ
+  # СКРИПТ (--list), а не по копии перечня здесь. Копия -- второй экземпляр
+  # той же проекции: 15.09 перечень раскатки пополнился (recstore.py,
+  # fresh-runs.py, зубы), а список здесь остался прежним, и 8 сценариев
+  # (docnum:subset -- замер 15.09 на тогдашнем наборе) покраснели «исходная
+  # раскатка отказала», не найдя канонной стороны новых пар. Прежняя правка
+  # разбирала объявления sed'ом -- это знало про TOOL_FILES, но не про
+  # PROBE_FILES и не про пару дома словарей: те так и лежали копиями ниже.
+  local __names __list_rc __err="$(dirname "$dst")/list-err"
+  __names=$(bash "$dst/scripts/probes-sync.sh" --list 2>"$__err"); __list_rc=$?
+  # Положительный контроль: молчащий или отказавший опрос означает, что
+  # игрушечный канон вышел бы пустым МОЛЧА.
+  if [[ $__list_rc -ne 0 || -z "$__names" ]]; then
+    say "probes-sync-bench: ОТКАЗ -- скрипт не назвал набор (--list rc=$__list_rc): $(cat "$__err" 2>&1)"
     exit 2
   fi
-  for f in $__names; do
-    mkdir -p "$(dirname "$dst/judge/$f")"
-    printf 'canon %s\n' "$f" > "$dst/judge/$f"
-  done
-  printf '/Users/YOUR-USER\n' > "$dst/judge/com.transmutelabs.judge-compact.plist"
-  # Дом словарей вердиктов лежит в КОРНЕ кита, а не в judge/: раскатка
-  # везёт его отдельной парой, и без него игрушечный канон неполон --
-  # сторона канона отсутствует, и раскатка отказывает названно.
-  printf 'canon tweakcc-patch.js\n' > "$dst/tweakcc-patch.js"
+  local __rel
+  while IFS= read -r __rel; do
+    [[ -n "$__rel" ]] || continue
+    mkdir -p "$(dirname "$dst/$__rel")"
+    printf 'canon %s\n' "$__rel" > "$dst/$__rel"
+  done <<< "$__names"
 }
 
 make_env() {
@@ -533,6 +532,63 @@ scenario_10() {
   fi
 }
 
+# НАБОР НАЗЫВАЕТ САМ ИНСТРУМЕНТ (`--list`). Потребителям перечня -- стенду
+# инструментов судьи и mk_kit этого стенда -- запрещено держать свою копию:
+# копия разошлась с набором в первый же день пополнения (#193), и стенд судьи
+# покраснел на СВОЕЙ неполноте, а не на предмете (#195). Сценарий сводит СЛОВО
+# и ДЕЛО: названное сверяется с РАЗЛОЖЕННЫМ, а не с другим списком. Поэтому
+# же тут не пишется ожидаемое число -- любое число здесь было бы седьмой
+# копией перечня.
+scenario_11() {
+  local root script out rc rel named home_files missing made err
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s11.XXXXXX")
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  err="$root/find-err"
+
+  out=$(bash "$script" --list 2>&1); rc=$?
+  named=$(printf '%s\n' "$out" | grep -c .) || true
+
+  # Перечисление -- ЧТЕНИЕ: make_env создаёт только корень конфига и каталог
+  # агентов, а дома проб и инструментов рождаются лишь раскаткой.
+  made=нет
+  [[ -e "$CLAUDE_PROBES_DIR" || -e "$CLAUDE_JUDGE_TOOLS_DIR" ]] && made=ДА
+
+  # Каждое названное имя обязано разрешаться в файл КАНОНА.
+  missing=0
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    [[ -f "$root/kit/$rel" ]] || missing=$((missing + 1))
+  done <<< "$out"
+
+  bash "$script" --to-home >/dev/null 2>&1
+  home_files=$(find "$CLAUDE_PROBES_DIR" "$CLAUDE_JUDGE_TOOLS_DIR" -type f 2>"$err" | grep -c .) || true
+
+  LAST_EVID="list_rc=$rc названо=$named разложено=$home_files нет_в_каноне=$missing дома_создал=$made"
+  if [[ -s "$err" ]]; then
+    LAST_EVID="ОТКАЗ_ОБХОДА_ДОМОВ :: $(head -2 "$err") :: $LAST_EVID"
+  fi
+  local walk_failed=0
+  [[ -s "$err" ]] && walk_failed=1
+  rm -rf "$root"
+  if [[ $walk_failed -eq 1 ]]; then
+    bad '11 набор: обход домов отказал -- прибор не мерил, а не «сошлось»'
+  elif [[ $rc -ne 0 ]]; then
+    bad "11 набор: --list отказал (rc=$rc)"
+  elif [[ $named -eq 0 ]]; then
+    bad '11 набор: --list назвал ПУСТО'
+  elif [[ "$made" == 'ДА' ]]; then
+    bad '11 набор: --list создал дома -- перечисление обязано быть чтением'
+  elif [[ $missing -ne 0 ]]; then
+    bad "11 набор: названо $missing имён, которых в каноне нет"
+  elif [[ $named -ne $home_files ]]; then
+    LAST_EVID="СЛОВО_РАЗОШЛОСЬ_С_ДЕЛОМ :: $LAST_EVID"
+    bad "11 набор: слово и дело разошлись -- названо $named, разложено $home_files"
+  else
+    ok "11 набор: инструмент называет ровно то, что раскатывает, и ничего не трогает"
+  fi
+}
+
 scenario_6() {
   local root script live live_start other_start stage owner out rc stage_left owner_left
   root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s6.XXXXXX")
@@ -722,6 +778,16 @@ elif number == 11:
     old = ('    elif [[ "$TRACK_CENSUS" == \'да\' ]] \\\n'
            '         && [[ -z "$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" ]]; then\n')
     new = '    elif false; then  # mutation: repo census blinded\n'
+elif number == 12:
+    # Перечень начинает ПЕРЕсчитывать набор: последняя пара называется дважды.
+    # Мутация выбрана так, чтобы бить ТОЛЬКО сверку слова с делом: канон
+    # строится по этому же перечню, и мутация, роняющая --list в отказ, убила
+    # бы саму подготовку (прибор перестал бы мерить вместо того, чтобы
+    # покраснеть). Дубль перезаписывает свой же файл -- канон остаётся полон,
+    # а названное расходится с разложенным ровно на единицу.
+    old = ('  for ((__i=0; __i<__pairs; __i++)); do printf \'%s\\n\' "${PAIR_N[$__i]}"; done\n')
+    new = ('  for ((__i=0; __i<__pairs; __i++)); do printf \'%s\\n\' "${PAIR_N[$__i]}"; done\n'
+           '  printf \'%s\\n\' "${PAIR_N[$((__pairs-1))]}"  # mutation: set over-reported\n')
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)

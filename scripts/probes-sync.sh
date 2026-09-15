@@ -6,6 +6,15 @@
 #   --to-home    canon -> home  (roll out an edit)
 #   --from-home  home  -> canon (pick up an edit made in place)
 #   --diff       show divergences, touching nothing (default)
+#   --list       name the SET, one canon-relative path per line, touch nothing
+#
+# --list exists so that no consumer has to keep its own copy of the set. The
+# judge-tools bench used to carry one (a hard-coded list of seven names plus
+# the number 11) and it went stale the same day four tools entered the set
+# (#193): the bench then reddened on ITS OWN incompleteness while claiming to
+# measure the roll-out. A list living next to its home must either be read from
+# the home or not exist. --list runs BEFORE the lock is taken: naming the set
+# writes nothing, and a reader must not be refused because a writer is busy.
 #
 # Exit codes (a subset of the kit-wide table -- see the claude-patch-all.sh
 # header): 0 -- in sync (or the copy went through); 1 -- divergences found in
@@ -76,7 +85,7 @@ PLIST_NAME=com.transmutelabs.judge-compact.plist
 PLIST_HOME="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 
 MODE="${1:---diff}"
-case "$MODE" in --to-home|--from-home|--diff) ;; *) echo "не понял режим: $MODE" >&2; __DONE=1; exit 2 ;; esac
+case "$MODE" in --to-home|--from-home|--diff|--list) ;; *) echo "не понял режим: $MODE" >&2; __DONE=1; exit 2 ;; esac
 
 # Отсутствие исходной стороны -- НАЗВАННЫЙ отказ, а не тихий пропуск.
 #
@@ -375,6 +384,21 @@ else
 fi
 
 __pairs=${#PAIR_A[@]}
+
+# Набор назван ЗДЕСЬ и только здесь: место выбрано после пары plist -- она
+# добавляется условно, и перечень, снятый раньше, соврал бы на машине с
+# заполненным образцом.
+if [[ "$MODE" == "--list" ]]; then
+  if [[ "$__pairs" -eq 0 ]]; then
+    echo "ОТКАЗ: набор пуст -- перечислять нечего" >&2
+    __DONE=1
+    exit 1
+  fi
+  for ((__i=0; __i<__pairs; __i++)); do printf '%s\n' "${PAIR_N[$__i]}"; done
+  __DONE=1
+  exit 0
+fi
+
 if [[ "$MODE" == "--diff" ]]; then
   report_sync_stages
   for ((__i=0; __i<__pairs; __i++)); do

@@ -761,26 +761,28 @@ def scenario_27() -> None:
 def toy_kit(base: Path) -> Path:
     """Игрушечная копия кита: раскатку надо ЛОМАТЬ, а живой кит трогать нельзя.
 
-    Копируется ровно то, что читает scripts/probes-sync.sh, и копируется ИЗ
-    ROOT -- то есть из дерева, которое правит мутация. Иначе зуб применился бы
-    к копии, а сценарий мерил бы живой кит (круг 18, §6).
+    Копируется ИЗ ROOT -- то есть из дерева, которое правит мутация. Иначе зуб
+    применился бы к копии, а сценарий мерил бы живой кит (круг 18, §6).
+
+    CONSTRAINT: каталоги канона копируются ЦЕЛИКОМ -- перечня имён здесь нет и
+    быть не должно. Перечень, живущий рядом со своим домом, обязан либо
+    читаться из дома, либо не существовать; здесь выбрано второе, потому что
+    judge/ и probes/ целиком дешевле любого перечня. Следствие, на которое
+    опираются сценарии набора: опечатка в TOOL_FILES краснит стенд (в ките
+    такого файла нет), тогда как своя копия перечня её скрывала бы.
     """
     kit = base / "kit"
     (kit / "scripts").mkdir(parents=True)
-    (kit / "judge").mkdir()
     shutil.copy2(ROOT / "scripts" / "probes-sync.sh", kit / "scripts" / "probes-sync.sh")
     # Дом словарей вердиктов лежит в КОРНЕ кита, а не в judge/, и раскатка
     # везёт его отдельной парой: без него сторона канона отсутствует и
     # probes-sync отказывает названно, роняя сценарий на своей же полноте.
     shutil.copy2(ROOT / "tweakcc-patch.js", kit / "tweakcc-patch.js")
-    for name in ("replay.py", "compact.py", "validate.py", "channel.py",
-                 "adjudicate.py", "README.md", "com.transmutelabs.judge-compact.plist"):
-        shutil.copy2(ROOT / "judge" / name, kit / "judge" / name)
-    for rel in ("probes.toml", "judge/prompt.md", "judge/body.json",
-                "idle-watch/prompt.md"):
-        dst = kit / "probes" / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / "probes" / rel, dst)
+    # records/labelled -- записи прогонов живого дома, а не канон; __pycache__
+    # -- продукт машины. В каноне их быть не должно, но prune дешевле веры.
+    skip = shutil.ignore_patterns("__pycache__", "records", "labelled", "*.pyc")
+    shutil.copytree(ROOT / "judge", kit / "judge", ignore=skip)
+    shutil.copytree(ROOT / "probes", kit / "probes", ignore=skip)
     return kit
 
 
@@ -811,6 +813,23 @@ def home_bytes(home: Path, tools: Path) -> dict[Path, bytes]:
     return out
 
 
+def canon_set(kit: Path, home: Path, tools: Path, agents: Path) -> list[str]:
+    """Набор раскатки -- со слов САМОГО инструмента (`--list`).
+
+    CONSTRAINT: ожидаемое число файлов не пишется здесь числом. Прежняя
+    редакция держала `11` с комментарием «10, а не 11, с волны 40b» -- то
+    есть счёт набора переезжал в стенд руками при каждом пополнении и
+    разошёлся на первом же, которого никто не сопроводил (#193). Число живёт
+    там же, где набор: в scripts/probes-sync.sh.
+    """
+    done = run_sync(kit, "--list", home, tools, agents)
+    require(done.returncode == 0,
+            f"--list отказал rc={done.returncode}: {done.stderr}")
+    names = [line for line in done.stdout.splitlines() if line.strip()]
+    require(bool(names), "--list назвал ПУСТОЙ набор")
+    return names
+
+
 def scenario_28() -> None:
     """Раскатка ставится НАБОРОМ и не сталкивается со стадией чужого прогона."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -819,16 +838,24 @@ def scenario_28() -> None:
         home, tools, agents = base / "p", base / "t", base / "la"
         agents.mkdir()
 
+        # Перечень снимается ДО раскатки: --list обязан работать на пустых
+        # домах -- он называет канон, а не то, что уже разложено.
+        named = canon_set(kit, home, tools, agents)
+        require(not home.exists() and not tools.exists(),
+                "--list создал дома -- режим перечисления обязан не трогать ничего")
+        # plist едет в ТРЕТИЙ каталог (агентов), которого home_bytes не мерит;
+        # в каноне он образец с плейсхолдерами и в набор не входит вовсе --
+        # исключение оставлено на случай машины с заполненным образцом.
+        expected = len([n for n in named if not n.endswith(".plist")])
+
         done = run_sync(kit, "--to-home", home, tools, agents)
         if done.returncode == 3:
             raise CannotMeasureNow(
                 f"замок дома держит другой писатель: {done.stderr.strip()}")
         require(done.returncode == 0, f"раскатка в игрушечный дом провалилась: {done.stderr}")
         before = home_bytes(home, tools)
-        # 11, а не 10, с волны 40b: раскатка везёт ещё и дом словарей
-        # вердиктов (tweakcc-patch.js) -- он лежит в корне кита, поэтому
-        # едет отдельной парой, а не строкой TOOL_FILES.
-        require(len(before) == 11, f"в доме {len(before)} файлов, ожидалось 11")
+        require(len(before) == expected,
+                f"в доме {len(before)} файлов, а инструмент назвал набором {expected}")
 
         # Пропал ОДИН исходник -- дом не трогается ВООБЩЕ. Правка prompt.md
         # делает «тронут» наблюдаемым: без неё дом совпал бы с собой и на
@@ -2621,12 +2648,19 @@ def mutation_m50(root: Path) -> None:
 def mutation_m51(root: Path) -> None:
     # Существующий target снова принимается по имени: усечённая прежняя
     # копия остаётся в доказательной базе, повторный label её не чинит.
+    # CONSTRAINT: якорь запинен на ОТСТУП, и отступ уехал -- строка вышла из
+    # вложенного блока на уровень функции, а якорь остался восьмипробельным и
+    # перестал встречаться (корень #75, «локатор пинит форму записи»). Дефект
+    # прожил невидимо: контроль самопроверки падал ДО мутаций (пристинная копия
+    # была красной, #195), и M51 не исполнялась вовсе. Правится на текущую
+    # форму; устойчивее было бы искать по структуре, но у replace_once контракт
+    # -- ровно одно текстовое вхождение, и «0 раз» он называет вслух.
     replace_once(
         root / "judge" / "validate.py",
-        "        if os.path.exists(target) and _same_bytes(candidate, target):\n"
-        "            return target",
-        "        if os.path.exists(target):\n"
-        "            return target",
+        "    if os.path.exists(target) and _same_bytes(candidate, target):\n"
+        "        return target",
+        "    if os.path.exists(target):\n"
+        "        return target",
         "M51",
     )
 
@@ -2864,14 +2898,17 @@ def copy_tree(root: Path) -> None:
     # не доказывают ничего.
     shutil.copy2(ROOT / "tweakcc-patch.js", root / "tweakcc-patch.js")
     shutil.copy2(ROOT / "scripts" / "probes-sync.sh", root / "scripts" / "probes-sync.sh")
-    for name in ("replay.py", "validate.py", "channel.py", "adjudicate.py",
-                 "README.md", "com.transmutelabs.judge-compact.plist"):
-        shutil.copy2(ROOT / "judge" / name, root / "judge" / name)
-    for rel in ("probes.toml", "judge/prompt.md", "judge/body.json",
-                "idle-watch/prompt.md"):
-        dst = root / "probes" / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / "probes" / rel, dst)
+    # CONSTRAINT: каталоги канона копируются ЦЕЛИКОМ -- перечня имён здесь нет
+    # по той же причине, что и в toy_kit. Прежняя редакция держала шесть имён
+    # judge/ и четыре файла probes/; пополнение набора (#193) обошло её
+    # стороной, и ПРИСТИННАЯ копия вышла красной -- контроль самопроверки
+    # отказал целиком («мутации ничего не докажут»), то есть зубы стенда
+    # перестали мерить вовсе, а причина выглядела дефектом инструментов.
+    # judge/compact.py уже скопирован выше из COMPACT (мутации правят именно
+    # его) -- dirs_exist_ok позволяет лечь поверх, не затирая.
+    skip = shutil.ignore_patterns("__pycache__", "records", "labelled", "*.pyc")
+    shutil.copytree(ROOT / "judge", root / "judge", ignore=skip, dirs_exist_ok=True)
+    shutil.copytree(ROOT / "probes", root / "probes", ignore=skip, dirs_exist_ok=True)
 
 
 def run_copy(root: Path) -> subprocess.CompletedProcess[str]:
