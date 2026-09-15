@@ -5675,6 +5675,139 @@ step('30 mod-API per-call maxTokens ceiling becomes operator-set', () => {
 });
 
 
+// Third door of the same room. Steps 29 and 30 removed two CEILINGS; this one
+// removes a LOSS -- three parameters a mod sends and the mod-API silently drops.
+//
+// MEASURED, 2026-09-14/15, on this machine's judge records (6894 of them,
+// including the .gz ones -- a first census that read only the 385 uncompressed
+// files was invalid and is not the basis here):
+//
+//   carrier PATCH (our own splice transport): 0 empty answers out of 6358
+//     attempts; the FIRST rung of the ladder serves 96% of verdicts, which is
+//     the design -- one model works, the rest are fallback.
+//   carrier MOD ($.model.complete): deepseek-flash 83% empty, glm-5.3 80%
+//     empty, and the ladder walks to its LAST and dearest rung in 69% of
+//     verdicts against a designed ~0%.
+//
+// The difference is not the models and not the prompt. The mod-API entry
+// destructures exactly `{model, prompt, system, maxTokens}` and its validator
+// announces "takes { model, prompt }", so `effort`, `timeoutMs` and the
+// snake_case `max_tokens` are dropped without a word. The judge sends all
+// three. Absent `timeoutMs` there is no time bound at all on that road: a
+// probe hung for 24 minutes and the records hold a 19-minute attempt.
+//
+// Nothing new has to be built for this -- the downstream call already takes
+// every one of them, `iMt` just never hands them over:
+//
+//   LR({... ,max_tokens:v=1024, timeout:P, thinking:V, extraBodyParams:me, ...})
+//     extraBodyParams flows into the BODY:  {...thinking, ...betas, metadata, ...me, ...}
+//     timeout flows into the SDK:  create(body,{signal, ...P!==void 0&&{timeout:P}, ...})
+//
+// So the edit is a pass-through at one site, in the shape the image already
+// uses for optional members (`...cond&&{key:value}`).
+//
+// The alias is deliberate, not sloppiness: `max_tokens` is the name our own
+// splice reads on the patch carrier, so every mod already written for that
+// road keeps working when it is run as a mod. `maxTokens` wins when both are
+// present -- the documented name outranks the alias -- and the alias is
+// assigned BEFORE the ceiling guard so it cannot slip past the check that
+// step 30 governs.
+//
+// `effort` travels verbatim, exactly as the splice sends it on the other road
+// (`__obj.reasoning_effort=__e.effort`). Validating the vocabulary here would
+// invent a rule the other road does not enforce, and the two roads disagreeing
+// about which efforts exist is a worse defect than a typo reaching a provider
+// (that typo is #141 and belongs to both roads at once).
+step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+
+  // Both needles are name-free: minified identifiers differ across PLATFORMS
+  // and across versions. Measured on three images -- darwin 2.1.270 stock and
+  // patched name the parts `iMt/LR/s/m/S/C/D/P`, linux 2.1.268 names the same
+  // parts `hTt/cR/o/p/_/A/D/P`, and both needles still matched exactly once
+  // with the call sitting 483 bytes inside the head on every one of them.
+  const head = new RegExp(
+    'async function (' + ID + ')\\(\\{model:(' + ID + '),prompt:(' + ID + '),system:(' + ID +
+    '),maxTokens:(' + ID + ')\\},\\{plugin:(' + ID + '),budget:(' + ID + ')\\},(' + ID + ')\\)\\{',
+    'g',
+  );
+  const heads = [...js.matchAll(head)];
+  if (heads.length !== 1) {
+    fail(
+      `the mod-API entry must occur exactly once, found ${heads.length} -- ` +
+      `a second entry would take calls this edit never reaches`,
+    );
+    return;
+  }
+  const h = heads[0];
+  const [hWhole, fn, aMdl, aPrm, aSys, aMax, aPlg, aBud, aSig] = h;
+
+  const call = new RegExp(
+    'await (' + ID + ')\\(\\{querySource:"hook_prompt",model:(' + ID + '),max_tokens:(' + ID +
+    '),thinking:(' + ID + '),skipSystemPromptPrefix:!0,',
+    'g',
+  );
+  const calls = [...js.matchAll(call)];
+  if (calls.length !== 1) {
+    fail(
+      `the mod-API provider call must occur exactly once, found ${calls.length} -- ` +
+      `the forwarded fields would reach only one of several call sites`,
+    );
+    return;
+  }
+  const c = calls[0];
+  const [cWhole, cFn, cMdl, cTok, cThk] = c;
+
+  // The call has to live INSIDE the entry, or the names this step introduces
+  // are out of scope there and the edit produces a ReferenceError at runtime
+  // instead of a missed patch -- a failure that the registry, which reads
+  // bytes, would not catch.
+  const delta = c.index - h.index;
+  if (delta < 0 || delta > 2000) {
+    fail(
+      `the mod-API provider call sits ${delta} bytes from its entry -- outside the ` +
+      `entry the forwarded names are not in scope`,
+    );
+    return;
+  }
+
+  // Our own names must not already exist anywhere in the bundle: a collision
+  // would silently rebind someone else's identifier.
+  for (const name of ['__mcEff', '__mcTmo', '__mcAlias']) {
+    if (js.indexOf(name) !== -1) {
+      fail(`the name '${name}' already occurs in the image -- this step would rebind it`);
+      return;
+    }
+  }
+
+  editModuleAt(h.index, text =>
+    text
+      .replace(
+        hWhole,
+        'async function ' + fn + '({model:' + aMdl + ',prompt:' + aPrm + ',system:' + aSys +
+        ',maxTokens:' + aMax + ',effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias},' +
+        '{plugin:' + aPlg + ',budget:' + aBud + '},' + aSig + '){' +
+        // Before the ceiling guard on purpose -- see the header.
+        'if(' + aMax + '===void 0&&__mcAlias!==void 0)' + aMax + '=__mcAlias;',
+      )
+      .replace(
+        cWhole,
+        'await ' + cFn + '({querySource:"hook_prompt",model:' + cMdl + ',max_tokens:' + cTok +
+        ',thinking:' + cThk + ',skipSystemPromptPrefix:!0,' +
+        // A non-finite or non-positive timeout means NO bound, never a bound of
+        // zero: a mod asking for an unusable value must not have its call cut
+        // instantly. Same reading of unusable values as steps 29 and 30.
+        '...Number.isFinite(__mcTmo)&&__mcTmo>0&&{timeout:__mcTmo},' +
+        '...typeof __mcEff==="string"&&__mcEff!==""&&{extraBodyParams:{reasoning_effort:__mcEff}},',
+      ),
+  );
+  applied.push(
+    `31 mod-API forwards effort (as reasoning_effort), timeoutMs (as timeout) and ` +
+    `max_tokens (alias of maxTokens) through '${fn}' into '${cFn}'`,
+  );
+});
+
+
 // The gate lives at the very END on purpose: it was once placed mid-file, and
 // the four steps written after it ran unguarded — a broken locator among them
 // was recorded and never read, so the build reported success while the patch

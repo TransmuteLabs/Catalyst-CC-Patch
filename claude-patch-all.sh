@@ -1018,7 +1018,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 126 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 129 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -4318,12 +4318,12 @@ fi
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-1c2a665984c8f5831db203a02034cb31d89c51de}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-970fc30e03605d47cb873d0fd595a6623210d579}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "1c2a665984c8f5831db203a02034cb31d89c51de" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "970fc30e03605d47cb873d0fd595a6623210d579" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -5039,7 +5039,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 126 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 129 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -6552,6 +6552,103 @@ def _mod_maxtokens_default_is_not_the_ceiling(d):
     if not use:
         return False
     return use.group(1) != lim
+
+
+# --- шаг 31: три поля, которые мод-API терял -----------------------------
+#
+# Голова мод-API ПОСЛЕ нашей правки. Игла без вшитых минифицированных имён:
+# на 2.1.270 darwin части зовутся `iMt/e/n/r/s/d/m/S`, на 2.1.268 linux --
+# `hTt/e/n/r/o/d/p/_` (измерено), и обе платформы ловятся одной формой.
+#
+# ВАЖНО ПРО ФОРМУ ПРОВЕРОК НИЖЕ. Шаг 31 ДОПИСЫВАЕТ к якорю, а не переписывает
+# его: новая строка НАЧИНАЕТСЯ со старой. Поэтому проверка вида «стоковой формы
+# больше нет» здесь ВСЕГДА красна и не значит ничего -- измерено 2026-09-15 на
+# собственном стенде шага. Все 3 проверки шага (docnum:subset -- счёт
+# подмножества реестра, а не его размер) пинят НАЛИЧИЕ новой структуры.
+_MOD_ENTRY_PATCHED = (
+    rb'async function (' + ID + rb')\(\{model:(' + ID + rb'),prompt:(' + ID + rb'),system:(' + ID +
+    rb'),maxTokens:(' + ID + rb'),effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias\},'
+    rb'\{plugin:(' + ID + rb'),budget:(' + ID + rb')\},(' + ID + rb')\)\{'
+)
+
+# Вызов провайдера ПОСЛЕ правки, вместе с обоими пробросами. Окно от головы, а
+# не весь образ: `querySource:"hook_prompt"` больше нигде не встречается, но
+# привязка к голове держит проверку честной и тогда, когда апстрим заведёт
+# второй такой вызов в другом чанке.
+def _mod_entry_window(d, span=1400):
+    site = re.search(_MOD_ENTRY_PATCHED, d)
+    if not site:
+        return None, None
+    return site, d[site.end():site.end() + span]
+
+
+def _mod_api_forwards_effort(d):
+    """Эффорт мода доезжает до тела запроса как `reasoning_effort`.
+
+    Предмет -- ПОТЕРЯ, а не потолок. Мод-API деструктурировал ровно
+    `{model, prompt, system, maxTokens}`, и `effort` падал на пол молча.
+    Измерено на живых записях судьи: на дороге сплайса, где эффорт уходит,
+    первая ступень лестницы выносит 96% вердиктов; на мод-дороге, где он
+    терялся, -- 15%, а последняя и самая дорогая ступень 69%.
+
+    Пинятся ОБА конца одной иглой: приём поля в голове и его проброс в вызов.
+    Половина правки хуже целой -- принятое и никуда не отданное поле выглядит
+    как работающая ручка.
+
+    Пустой эффорт обязан НЕ уезжать: `typeof ...==="string"&&...!==""` -- это
+    не украшение, а разница между «эффорт не задан» и «задан пустым», которая
+    у провайдера означает разные вещи.
+    """
+    site, win = _mod_entry_window(d)
+    if not site:
+        return False
+    return bool(re.search(
+        rb'\.\.\.typeof __mcEff==="string"&&__mcEff!==""&&'
+        rb'\{extraBodyParams:\{reasoning_effort:__mcEff\}\},', win))
+
+
+def _mod_api_forwards_timeout(d):
+    """Таймаут мода доезжает до вызова SDK как `timeout`.
+
+    Без этого на мод-дороге границы времени НЕТ ВООБЩЕ: замер 2026-09-15
+    провисел на одном вызове 24 минуты, а в записях судьи лежит попытка на
+    19 минут. Поле `timed_out` встречается только у носителя-сплайса, где
+    таймаут делаем мы сами.
+
+    Негодное значение (ноль, отрицательное, NaN, Infinity) означает ОТСУТСТВИЕ
+    границы, а не границу в ноль: иначе мод, попросивший нечитаемое, получил бы
+    вызов, обрываемый мгновенно. То же прочтение негодного, что у шагов 29 и 30.
+    """
+    site, win = _mod_entry_window(d)
+    if not site:
+        return False
+    return bool(re.search(
+        rb'\.\.\.Number\.isFinite\(__mcTmo\)&&__mcTmo>0&&\{timeout:__mcTmo\},', win))
+
+
+def _mod_api_alias_is_resolved_before_the_guard(d):
+    """Алиас `max_tokens` разрешается ДО сторожа предела, а не после.
+
+    Порядок здесь -- сама гарантия, а не стиль. Сторож шага 30 проверяет
+    переменную `maxTokens`; присвой алиас ПОСЛЕ него -- и значение, пришедшее
+    под snake_case именем, проедет мимо проверки целиком: ни `Number.isInteger`,
+    ни `<1`, ни операторский предел его не увидят. Проверка на наличие
+    присваивания где-нибудь в функции такого разворота НЕ ловит, поэтому
+    пинится соседство: присваивание стоит ВПЛОТНУЮ к открывающей скобке головы,
+    то есть раньше любого другого выражения.
+
+    Алиас нужен потому, что `max_tokens` -- имя, которое читает наш собственный
+    сплайс на дороге патча; мод, написанный для той дороги, обязан работать и
+    запущенный как мод. Документированное `maxTokens` при этом старше: присваивание
+    срабатывает только когда оно не задано.
+    """
+    site, win = _mod_entry_window(d, 200)
+    if not site:
+        return False
+    arg = site.group(5)
+    return bool(re.match(
+        rb'if\(' + re.escape(arg) + rb'===void 0&&__mcAlias!==void 0\)'
+        + re.escape(arg) + rb'=__mcAlias;', win))
 
 
 def _cancellation_rule_is_whole(d):
@@ -8085,6 +8182,18 @@ checks = {
     # ceiling would silently turn that default into Infinity.
     'the mod-API per-call maxTokens ceiling is operator-set': _mod_maxtokens_ceiling_is_operator_set(d),
     'the mod-API per-call maxTokens default is not the ceiling': _mod_maxtokens_default_is_not_the_ceiling(d),
+    # Третья дверь той же комнаты, и предмет у неё другой: не ПОТОЛОК, а ПОТЕРЯ.
+    # Мод-API принимал ровно `{model, prompt, system, maxTokens}` и молча ронял
+    # `effort`, `timeoutMs` и snake_case `max_tokens` -- все три судья шлёт.
+    # Цена измерена на его же записях: на дороге сплайса первая ступень лестницы
+    # выносит 96% вердиктов, на мод-дороге -- 15%, а последняя и самая дорогая
+    # 69%. Ниже по течению всё нужное уже принималось (`timeout`, `extraBodyParams`),
+    # так что правка сквозная; проверки стерегут оба её конца и ПОРЯДОК, в
+    # котором алиас встречается со сторожем предела.
+    'the mod-API forwards a per-call effort': _mod_api_forwards_effort(d),
+    'the mod-API forwards a per-call timeout': _mod_api_forwards_timeout(d),
+    'the mod-API token alias is resolved before the ceiling guard':
+        _mod_api_alias_is_resolved_before_the_guard(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -8093,7 +8202,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 126
+EXPECTED_CHECKS = 129
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -8109,7 +8218,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 126 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 129 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
