@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=221
-EXPECTED_MUTATIONS=301
+EXPECTED_SCENARIOS=225
+EXPECTED_MUTATIONS=305
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -759,6 +759,29 @@ print('stub checks-teeth rc=%d' % rc)
 sys.exit(rc)
 TEETHSTUB
   chmod +x "$dir/tools/checks-teeth.py"
+  mv "$dir/tools/checks-teeth-corpus.py" "$dir/tools/checks-teeth-corpus.real.py"
+  # Корпусный прибор зубов -- тоже ЗАГЛУШКА, по той же причине, что и прибор
+  # реестра: настоящему нужны собранные продукты зелёных версий, а стенд
+  # меряет ДВЕРЬ свипа -- позвали ли, на тех ли путях, как прочитан класс
+  # ответа, объявлен ли пропуск. Отметка «звался» ДОПИСЫВАЕТСЯ, а не
+  # перезаписывается: прибор зовётся на КАЖДОЙ зелёной версии, и запись
+  # «w» стирала бы все вызовы, кроме последнего, -- стадия звалась бы
+  # «один раз» по построению заглушки, и это была бы ложная зелень.
+  cat > "$dir/tools/checks-teeth-corpus.py" <<'TEETHCORPUSSTUB'
+#!/usr/bin/env python3
+import os
+import sys
+
+mark = os.environ.get('STUB_TEETH_CORPUS_MARK', '')
+if mark:
+    with open(mark, 'a', encoding='utf-8') as fh:
+        fh.write('корпусный прибор звался\n')
+        fh.write('argv=%s\n' % ' '.join(sys.argv[1:]))
+rc = int(os.environ.get('STUB_TEETH_CORPUS_RC', '0') or 0)
+print('stub checks-teeth-corpus rc=%d' % rc)
+sys.exit(rc)
+TEETHCORPUSSTUB
+  chmod +x "$dir/tools/checks-teeth-corpus.py"
   # И САМ СТЕНД -- заглушка, по той же причине. Предполёт свипа зовёт стенд
   # корпусных инструментов; свип здесь запускается ИЗ стенда, то есть настоящий
   # стенд позвал бы сам себя, упёрся в собственный замок и встал на бюджете
@@ -861,6 +884,9 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
+    STUB_TEETH_CORPUS_RC="${STUB_TEETH_CORPUS_RC:-0}" \
+    STUB_TEETH_CORPUS_MARK="${STUB_TEETH_CORPUS_MARK:-}" \
+    SWEEP_SKIP_CHECKS_TEETH_CORPUS="${BENCH_SKIP_TEETH_CORPUS:-}" \
     TWEAKCC_CONFIG_DIR="${BENCH_TW_HOME:-$TW_FIXTURE}" \
     bash "$kit/tools/sweep.sh" "$@" 2>&1 9>&-
 }
@@ -2059,6 +2085,10 @@ run_all() {
   # #117: дверь пина -- тот же класс «задано пустым ≠ не задано», чинена раньше,
   # но без зуба.
   scenario_221
+  # #147/#144: внутрицикловая стадия корпусных зубов -- позвали ли на продукт
+  # каждой зелёной версии прогона, прочитан ли класс ответа, объявлен ли
+  # пропуск; одноверсионный прогон -- стадия ИЗМЕРЕНА, прогон зелёный.
+  scenario_222; scenario_223; scenario_224; scenario_225
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -2575,6 +2605,9 @@ launch_sweep() {   # логфайл, аргументы свипа...
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
+    STUB_TEETH_CORPUS_RC="${STUB_TEETH_CORPUS_RC:-0}" \
+    STUB_TEETH_CORPUS_MARK="${STUB_TEETH_CORPUS_MARK:-}" \
+    SWEEP_SKIP_CHECKS_TEETH_CORPUS="${BENCH_SKIP_TEETH_CORPUS:-}" \
     TWEAKCC_CONFIG_DIR="${BENCH_TW_HOME:-$TW_FIXTURE}" \
     bash "$K/tools/sweep.sh" "$@" > "$log" 2>&1 9>&- &
 }
@@ -3085,6 +3118,9 @@ scenario_98() {   # волна 26, D-2: ребёнок форк-запаски, 
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
+    STUB_TEETH_CORPUS_RC="${STUB_TEETH_CORPUS_RC:-0}" \
+    STUB_TEETH_CORPUS_MARK="${STUB_TEETH_CORPUS_MARK:-}" \
+    SWEEP_SKIP_CHECKS_TEETH_CORPUS="${BENCH_SKIP_TEETH_CORPUS:-}" \
     TWEAKCC_CONFIG_DIR="${BENCH_TW_HOME:-$TW_FIXTURE}" \
     perl -e 'use POSIX (); my $sid = POSIX::setsid();
              defined($sid) && $sid >= 0 or do { print STDERR "s98: обёртке не стать лидером группы\n"; exit 9 };
@@ -3602,6 +3638,7 @@ scenario_109() {   # env-ручки читаются одной строгой �
   for pair in "tools/sweep.sh SWEEP_SKIP_BUILD_PROBE" \
               "tools/sweep.sh SWEEP_SKIP_TOOLS_BENCH" \
               "tools/sweep.sh SWEEP_SKIP_CHECKS_TEETH" \
+              "tools/sweep.sh SWEEP_SKIP_CHECKS_TEETH_CORPUS" \
               "claude-patch-all.real CLAUDE_PATCH_SKIP_MODELS" \
               "tools/lock-probe.sh KEEP_ROOT" \
               "tools/build-path-probe.real.sh KEEP_ROOT"; do
@@ -3622,15 +3659,15 @@ printf ДОШЛИ" 2>&1)
     LAST_EVID="ИСТИННОСТЬ_РАЗОШЛАСЬ helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout выжили=$survived"
     bad "109 env-ручки: true/false/неизвестное у читателей не сошлись"; return
   fi
-  if [[ "$found" != 6 ]]; then
-    LAST_EVID="САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ найдено=$found из 6 :: sweep=$out patch=$pout lock=$lout build=$bout"
+  if [[ "$found" != 7 ]]; then
+    LAST_EVID="САЙТ_ЧИТАТЕЛЯ_ПРОПАЛ найдено=$found из 7 :: sweep=$out patch=$pout lock=$lout build=$bout"
     bad "109 env-ручки: у потребителя не стало сайта чтения ручки"; return
   fi
-  if [[ "$survived" != 6 ]]; then
-    LAST_EVID="ОБРЫВ_НА_СНЯТОЙ_РУЧКЕ выжили=$survived из 6 :: sweep=$out patch=$pout lock=$lout build=$bout"
+  if [[ "$survived" != 7 ]]; then
+    LAST_EVID="ОБРЫВ_НА_СНЯТОЙ_РУЧКЕ выжили=$survived из 7 :: sweep=$out patch=$pout lock=$lout build=$bout"
     bad "109 env-ручки: сайт вызова обрывается под set -e, когда ручка не выставлена"; return
   fi
-  ok "109 env-ручки: true/false/invalid едины; все 6 сайтов переживают снятую ручку под set -e"
+  ok "109 env-ручки: true/false/invalid едины; каждый сайт списка переживает снятую ручку под set -e"
 }
 
 
@@ -4557,7 +4594,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 301 мутации corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 305 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -5998,6 +6035,113 @@ scenario_221() {   # дверь --expect-sha: пустой пин -- это ЗА
   ok "221 дверь пина: пустой --expect-sha отказан своим текстом, годный пропущен"
 }
 
+scenario_222() {   # внутрицикловая стадия корпусных зубов: позвали, зелёный класс объявлен
+  # Прибор меряет имена минифицированных сущностей -- они живут только в своей
+  # версии, поэтому стадия зовёт его на ПРОДУКТЕ КАЖДОЙ зелёной версии по
+  # одному пути за вызов. Проверяется не прибор (он заглушен), а ДВЕРЬ свипа:
+  # прибор позван столько раз, сколько зелёных версий в прогоне, каждый вызов
+  # получил ровно один путь продукта стадии, а вердикт зелёного класса
+  # объявлен и в потоке, и в сводке.
+  local out rc mark sum calls npaths
+  mark="$C/teeth-corpus.called"; rm -f "$mark"
+  out=$(STUB_TEETH_CORPUS_MARK="$mark" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900 901); rc=$?
+  sum="$S/log/sweep-summary.txt"
+  calls=$(grep -a -c 'корпусный прибор звался' "$mark" 2>/dev/null)
+  npaths=$(tr ' ' '\n' < "$mark" 2>/dev/null | grep -c 'bin/.*\.wave\.bin$')
+  LAST_EVID="rc=$rc :: mark=$([[ -e "$mark" ]] && echo есть || echo НЕТ) :: вызовов=$calls путей=$npaths :: $(cat "$mark" 2>/dev/null | tr '\n' '|') :: $out"
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    bad "222 стадия корпусных зубов: прогон отказал ($rc) -- дверь не измерена"; return
+  fi
+  if [[ ! -e "$mark" ]]; then
+    LAST_EVID="ПРИБОР_НЕ_ЗВАЛСЯ :: $out"
+    bad "222 стадия корпусных зубов: прибор не звался"; return
+  fi
+  if [[ "$calls" != 2 ]]; then
+    LAST_EVID="ВЫЗОВОВ_НЕ_ПО_ВЕРСИЯМ вызовов=$calls :: $(cat "$mark" | tr '\n' '|')"
+    bad "222 стадия корпусных зубов: прибор звался не на каждой зелёной версии"; return
+  fi
+  if [[ "$npaths" != 2 ]]; then
+    LAST_EVID="АРГУМЕНТЫ_НЕ_ПРОДУКТЫ_СТАДИИ путей=$npaths :: $(cat "$mark" | tr '\n' '|')"
+    bad "222 стадия корпусных зубов: прибор получил не по одному продукту стадии за вызов"; return
+  fi
+  if [[ "$out" != *"корпусные зубы: ЗЕЛЁНО"* ]]; then
+    LAST_EVID="ВЕРДИКТ_НЕ_ОБЪЯВЛЕН :: $out"
+    bad "222 стадия корпусных зубов: зелёный класс не объявлен в потоке"; return
+  fi
+  if ! grep -q '^# корпусные зубы: .* ЗЕЛЁНО' "$sum" 2>/dev/null; then
+    LAST_EVID="СВОДКА_МОЛЧИТ :: $(cat "$sum" 2>/dev/null | tr '\n' '|')"
+    bad "222 стадия корпусных зубов: сводка не называет вердикт"; return
+  fi
+  ok "222 внутрицикловая стадия зовёт прибор по одному продукту на каждую зелёную версию и объявляет зелёный класс"
+}
+
+scenario_223() {   # красный класс ответа прибора роняет прогон
+  # Зуб прибора, прошедший молча либо покрасневший чужой дверью, обязан делать
+  # прогон НЕПОЛНЫМ: предупреждение о красном приборе -- это молчаливое
+  # разрешение не замечать потерянное покрытие.
+  local out rc
+  out=$(STUB_TEETH_CORPUS_RC=1 run_sweep "$K" "$C/corpus" "$C/versions.txt" 900 901); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )) || [[ "$out" == *"SWEEP DONE"* ]]; then
+    LAST_EVID="КРАСНЫЙ_НЕ_ОСТАНОВИЛ :: $out"
+    bad "223 красный корпусный прибор: свип не остановлен (rc=$rc)"; return
+  fi
+  if [[ "$out" != *"корпусные зубы -- промах"* ]]; then
+    LAST_EVID="ПРИЧИНА_НЕ_НАЗВАНА :: $out"
+    bad "223 красный корпусный прибор: класс ответа не назван своим текстом"; return
+  fi
+  ok "223 красный класс ответа корпусного прибора останавливает свип"
+}
+
+scenario_224() {   # выключатель стадии ОБЪЯВЛЯЕТСЯ
+  # Ручка существует для разбора руками, но молчаливый возврат -- ровно то
+  # состояние, против которого стадия заведена (эталон -- выключатель зубов
+  # реестра).
+  local out rc mark
+  mark="$C/teeth-corpus.called"; rm -f "$mark"
+  out=$(BENCH_SKIP_TEETH_CORPUS=1 STUB_TEETH_CORPUS_MARK="$mark" \
+        run_sweep "$K" "$C/corpus" "$C/versions.txt" 900 901); rc=$?
+  LAST_EVID="rc=$rc :: mark=$([[ -e "$mark" ]] && echo ЗВАЛСЯ_ВОПРЕКИ || echo не_звался) :: $out"
+  if (( rc != 0 )); then
+    bad "224 выключатель корпусных зубов: прогон отказал ($rc)"; return
+  fi
+  if [[ -e "$mark" ]]; then
+    bad "224 выключатель корпусных зубов: прибор всё равно звался"; return
+  fi
+  if [[ "$out" != *"корпусные зубы ПРОПУЩЕНЫ по ручке"* ]]; then
+    LAST_EVID="ПРОПУСК_НЕ_ОБЪЯВЛЕН :: $out"
+    bad "224 выключатель корпусных зубов: пропуск не объявлен"; return
+  fi
+  ok "224 выключатель стадии корпусных зубов объявляет пропуск"
+}
+
+scenario_225() {   # одноверсионный прогон: стадия ИЗМЕРЕНА, прогон зелёный
+  # Одной версии достаточно: прибор зовётся на продукт каждой зелёной версии
+  # ПО ОТДЕЛЬНОСТИ, и одноверсионный прогон -- законный полный прогон; стадия
+  # обязана объявить измерение и в потоке, и в сводке -- молчание было бы
+  # ложным отсутствием покрытия. Продукт зелёной версии не переживает прогон
+  # ни в каком исходе: он удаляется внутри цикла, стадия его не задерживает.
+  local out rc sum
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  sum="$S/log/sweep-summary.txt"
+  LAST_EVID="rc=$rc :: стадия-продукт=$([[ -e "$S/bin/900.wave.bin" ]] && echo ОСТАЛСЯ || echo убран) :: $out"
+  if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
+    bad "225 одноверсионный прогон: не зелёный без причины ($rc)"; return
+  fi
+  if [[ "$out" != *"корпусные зубы: ЗЕЛЁНО на 900"* ]]; then
+    LAST_EVID="НЕ_ИЗМЕРЕНО_НЕ_ОБЪЯВЛЕНО :: $out"
+    bad "225 одноверсионный прогон: стадия не объявила измерение на единственной версии"; return
+  fi
+  if ! grep -q '^# корпусные зубы: 900 ЗЕЛЁНО' "$sum" 2>/dev/null; then
+    LAST_EVID="СВОДКА_МОЛЧИТ :: $(cat "$sum" 2>/dev/null | tr '\n' '|')"
+    bad "225 одноверсионный прогон: сводка не называет вердикт стадии"; return
+  fi
+  if [[ -e "$S/bin/900.wave.bin" ]]; then
+    bad "225 одноверсионный прогон: продукт зелёной версии пережил прогон"; return
+  fi
+  ok "225 одноверсионный прогон: стадия ИЗМЕРЕНА, прогон зелёный, продукт убран"
+}
+
 scenario_153() {   # ветка «вышел без отрисовки» ДОСТИЖИМА
   gate_prepare s153
   gate_carved_or_bad 153 || return
@@ -7411,7 +7555,11 @@ MUT_FILE=(x
   claude-patch-all.real claude-patch-all.real claude-patch-all.real
   claude-patch-all.real claude-patch-all.real
   # #117: дверь пина -- форма, текст отказа и пропуск годного значения.
-  claude-patch-all.real claude-patch-all.real claude-patch-all.real)
+  claude-patch-all.real claude-patch-all.real claude-patch-all.real
+  # Волна #144/#147: по мутации на каждое утверждение внутрицикловой стадии
+  # корпусных зубов -- аргумент-продукт (222), останов на красном (223),
+  # объявление пропуска (224), объявление измерения (225).
+  tools/sweep.sh tools/sweep.sh tools/sweep.sh tools/sweep.sh)
 
 MUT_PAT=(x
   'if \(\( \$\{#MISSING\[\@\]\} \)\); then'
@@ -7804,7 +7952,13 @@ MUT_PAT=(x
   # дверь-отказывающая-всему проходила бы два первых утверждения.
   '\[\[ "\$1" =~ \^\[0-9a-f\]\{64\}\$ \]\] \|\| \{'
   'a 64-character lowercase sha256 digest'
-  '\^\[0-9a-f\]\{64\}\$')
+  '\^\[0-9a-f\]\{64\}\$'
+  # Волна #144/#147: аргумент стадии, останов на красном, объявление пропуска,
+  # объявление измерения.
+  'python3 "\$TEETH_CORPUS_PY" "\$STATE/bin/\$v\.wave\.bin" 8>&-'
+  '       sum_line "# корпусные зубы: КРАСНЫЕ \(код 1\)"\n       exit 1 ;;'
+  '  echo "SWEEP корпусные зубы ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH_CORPUS=\$\{SWEEP_SKIP_CHECKS_TEETH_CORPUS\}"'
+  '    0\) echo "SWEEP корпусные зубы: ЗЕЛЁНО на \$v \(лог \$TEETH_CORPUS_LOG\)"')
 
 MUT_REP=(x
   'if false; then'
@@ -8152,7 +8306,13 @@ MUT_REP=(x
   'TWEAKCC_NO_SYSTEM_PROMPTS=${TWEAKCC_NO_SYSTEM_PROMPTS} задан'
   '[[ 1 == 1 ]] || {'
   'a proper digest'
-  '^nomatchpossible$')
+  '^nomatchpossible$'
+  # Волна #144/#147: замены держат свип исполнимым, каждая ломает ровно одно
+  # обещание стадии.
+  'python3 "$TEETH_CORPUS_PY" "$STATE/bin" 8>&-'
+  $'       sum_line "# корпусные зубы: КРАСНЫЕ (код 1)"\n       ;;'
+  '  : "SWEEP корпусные зубы ПРОПУЩЕНЫ по ручке SWEEP_SKIP_CHECKS_TEETH_CORPUS=${SWEEP_SKIP_CHECKS_TEETH_CORPUS}"'
+  '    0) : "SWEEP корпусные зубы: ЗЕЛЁНО на $v (лог $TEETH_CORPUS_LOG)"')
 
 # Мутация N краснит сценарий MUT_SCENARIO[N], и обязана оставить в его следе
 # подстроку MUT_CAUSE[N]. Второе поле -- защита от «покраснел по чужой
@@ -8257,7 +8417,9 @@ MUT_SCENARIO=(x 2 4 8 9 11 7 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 
   # Волна 53 (доработка): по зубу на КАЖДОЕ утверждение новых сценариев --
   # покрытие по сценарию слепо к утверждению, у которого своего зуба нет.
   215 215 216 216 217 217 218 218 218 219 219 219 220 220
-  221 221 221)
+  221 221 221
+  # Волна #144/#147: внутрицикловая стадия корпусных зубов.
+  222 223 224 225)
 MUT_CAUSE=(x
   'корпус не сходится с пином'
   'копия не сходится с пином'
@@ -8606,7 +8768,12 @@ MUT_CAUSE=(x
   # подмножества, а не объявление стенда).
   'ПУСТОЙ_ПИН_ПРОШЁЛ'
   'ОТКАЗ_НЕ_НАЗВАН'
-  'ГОДНЫЙ_ПИН_ОТКАЗАН')
+  'ГОДНЫЙ_ПИН_ОТКАЗАН'
+  # Волна #144/#147: причины -- метки LAST_EVID сценариев стадии.
+  'АРГУМЕНТЫ_НЕ_ПРОДУКТЫ_СТАДИИ'
+  'КРАСНЫЙ_НЕ_ОСТАНОВИЛ'
+  'ПРОПУСК_НЕ_ОБЪЯВЛЕН'
+  'НЕ_ИЗМЕРЕНО_НЕ_ОБЪЯВЛЕН')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь
