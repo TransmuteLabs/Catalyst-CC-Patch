@@ -27,6 +27,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import channel
+import recstore
 import replay
 
 # The probes home is one for all probes; settings come from the shared
@@ -600,25 +601,26 @@ def keep_labelled(name):
     (validate.py run, adjudicate.py): промежуточное имя принадлежит писателю.
     """
     os.makedirs(LABELLED_HOME, exist_ok=True)
-    for candidate in (os.path.join(DEFAULT_RECORDS, name),
-                      os.path.join(DEFAULT_RECORDS, name + '.gz')):
-        if not os.path.isfile(candidate):
-            continue
-        target = os.path.join(LABELLED_HOME, os.path.basename(candidate))
-        if os.path.exists(target) and _same_bytes(candidate, target):
-            return target
-        tmp = target + f'.new.{os.getpid()}'
-        try:
-            shutil.copy2(candidate, tmp)
-            os.replace(tmp, target)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+    # Порядок кандидатов (точное имя, затем имя + '.gz') и предикат
+    # isfile -- те же, что у прежнего цикла по двум кандидатам: перевод на
+    # общий разрешитель не меняет ни выбор источника, ни имя target.
+    candidate = recstore.resolve(name, DEFAULT_RECORDS)
+    if candidate is None:
+        return None
+    target = os.path.join(LABELLED_HOME, os.path.basename(candidate))
+    if os.path.exists(target) and _same_bytes(candidate, target):
         return target
-    return None
+    tmp = target + f'.new.{os.getpid()}'
+    try:
+        shutil.copy2(candidate, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target
 
 
 def command_label(args):

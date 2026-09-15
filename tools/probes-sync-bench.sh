@@ -15,8 +15,8 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=8
-EXPECTED_MUTATIONS=9
+EXPECTED_SCENARIOS=10
+EXPECTED_MUTATIONS=11
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -28,7 +28,16 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10)
+# Улика, по которой признаётся СВОЯ причина покраснения: подстрока LAST_EVID
+# сценария. Дом перечня мутаций ОДИН -- EXPECTED_MUTATIONS; и обход
+# self_check, и эта таблица, и MUT_SCENARIO обязаны сойтись с ним длиной.
+# Волна 190: обход жил собственным литеральным перечнем `for n in 1..9`, и
+# десятая мутация не запускалась вовсе -- счётчик расходился с объявлением,
+# а строки о ней не было НИ ОДНОЙ (перечень = проекция, четвёртый случай).
+MUT_EVID=(x 'второй=0' 'diff_rc=0' 'B=3' 'НЕ_НАЗВАНА' 'rc=1' 'rc=0' \
+          'ПУТЬ_ОТКАЗА_ЗАВИС' 'СИРОТА_ЗАГЛУШКИ' 'ОДНО_НАПРАВЛЕНИЕ' 'исходник=0' \
+          'вне_истории=0')
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -45,6 +54,15 @@ check_mut_tables() {
     say "probes-sync-bench: ОТКАЗ -- в MUT_SCENARIO записей $(( ${#MUT_SCENARIO[@]} - 1 )), а мутаций $EXPECTED_MUTATIONS"
     return 1
   fi
+  if (( ${#MUT_EVID[@]} != EXPECTED_MUTATIONS + 1 )); then
+    say "probes-sync-bench: ОТКАЗ -- в MUT_EVID записей $(( ${#MUT_EVID[@]} - 1 )), а мутаций $EXPECTED_MUTATIONS"
+    return 1
+  fi
+  for n in $(seq 1 $EXPECTED_MUTATIONS); do
+    [[ -n "${MUT_EVID[$n]}" ]] && continue
+    say "probes-sync-bench: ОТКАЗ -- у мутации $n не объявлена своя улика покраснения"
+    return 1
+  done
   for n in $(seq 1 $EXPECTED_SCENARIOS); do
     printf '%s\n' "${MUT_SCENARIO[@]}" | grep -qx "$n" || missing="$missing $n"
   done
@@ -75,7 +93,23 @@ mk_kit() {
   printf 'judge prompt\n' > "$dst/probes/judge/prompt.md"
   printf '{}\n' > "$dst/probes/judge/body.json"
   printf 'idle prompt\n' > "$dst/probes/idle-watch/prompt.md"
-  for f in replay.py compact.py validate.py channel.py adjudicate.py README.md; do
+  # CONSTRAINT: игрушечный канон строится ПО ПЕРЕЧНЮ САМОГО СКРИПТА, а не по
+  # его копии здесь. Своя копия списка -- второй экземпляр той же проекции:
+  # 15.09 перечень раскатки пополнился (recstore.py, fresh-runs.py, зубы), а
+  # этот список остался прежним, и 8 сценариев (docnum:subset -- замер
+  # 15.09 на тогдашнем наборе) покраснели «исходная раскатка отказала»,
+  # не найдя канонной стороны новых пар.
+  local __names
+  __names=$(sed -n 's/^TOOL_FILES=(\(.*\))$/\1/p;s/^TOOL_BENCH_FILES=(\(.*\))$/\1/p' \
+              "$dst/scripts/probes-sync.sh")
+  # Положительный контроль: пустой перечень означает, что разбор промахнулся
+  # мимо объявления, и игрушечный канон вышел бы пустым МОЛЧА.
+  if [[ -z "$__names" ]]; then
+    say "probes-sync-bench: ОТКАЗ -- перечень инструментов не разобран из scripts/probes-sync.sh"
+    exit 2
+  fi
+  for f in $__names; do
+    mkdir -p "$(dirname "$dst/judge/$f")"
     printf 'canon %s\n' "$f" > "$dst/judge/$f"
   done
   printf '/Users/YOUR-USER\n' > "$dst/judge/com.transmutelabs.judge-compact.plist"
@@ -393,8 +427,17 @@ scenario_8() {
   ok '8 отказ сверки называет оба направления и потерю каждого'
 }
 
+# Принимает номер СЦЕНАРИЯ (не мутации): отображение мутация -> сценарий
+# живёт в MUT_SCENARIO и нигде больше. Прежняя редакция несла собственный
+# case по номеру МУТАЦИИ -- пятая копия того же перечня, и номер 10 в ней
+# отсутствовал: десятая мутация «проходила молча», не запустив ничего.
+# Код возврата означает РОВНО одно -- есть ли такая функция (2 = нет).
+# Вердикт сценария едет через FAILED/LAST_EVID: сценарий, кончившийся
+# ненулевой командой, иначе читался бы как «сценария не существует».
 run_scenario() {
-  case "$1" in 1) scenario_1 ;; 2) scenario_2 ;; 3) scenario_3 ;; 4) scenario_4 ;; 5) scenario_5 ;; 6) scenario_6 ;; 7) scenario_7 ;; 8) scenario_7 ;; 9) scenario_8 ;; *) return 2 ;; esac
+  declare -F "scenario_$1" >/dev/null || return 2
+  "scenario_$1"
+  return 0
 }
 
 # Круг 25, E-3: тела heredoc'ов .sh-жертвы, поданные питону, по правилу гейта
@@ -404,6 +447,91 @@ run_scenario() {
 # probes-sync.sh таких тел нет, но страж пишется по ПРАВИЛУ, а не по факту
 # сегодняшнего файла: первая же мутация в питонье тело потребует этой
 # проверки, а не случайности (решение контроллера, волна 25).
+
+# ЦЕНЗ ДОМА. Пары раскатки -- проекция канона, и то, чего в перечне нет, для
+# них не существует: recstore.py, fresh-runs.py и два зуба прожили только в
+# доме, не попав в репозиторий вовсе (измерено 15.09). Сценарий держит ОБА
+# конца: исходник мимо канона обязан НАЗЫВАТЬСЯ и краснить, а данные машины
+# (записи, метки, личный config.json) в ценз попадать НЕ имеют права -- иначе
+# дверь кричала бы на каждом живом доме и её бы отключили.
+scenario_9() {
+  local root script out rc out2 rc2 out3 rc3
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s9.XXXXXX")
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '9 ценз дома: исходная раскатка отказала'; return; }
+
+  out=$(bash "$script" --diff 2>&1); rc=$?
+
+  mkdir -p "$CLAUDE_JUDGE_TOOLS_DIR/records" "$CLAUDE_JUDGE_TOOLS_DIR/labelled"
+  printf '{}' > "$CLAUDE_JUDGE_TOOLS_DIR/records/mod-1.json"
+  printf 'x'  > "$CLAUDE_JUDGE_TOOLS_DIR/labelled/rec.md"
+  printf '{}' > "$CLAUDE_JUDGE_TOOLS_DIR/config.json"
+  out2=$(bash "$script" --diff 2>&1); rc2=$?
+
+  printf 'print(1)\n' > "$CLAUDE_JUDGE_TOOLS_DIR/newtool.py"
+  out3=$(bash "$script" --diff 2>&1); rc3=$?
+
+  LAST_EVID="чистый=$rc данные=$rc2 исходник=$rc3 :: назван=$(printf '%s' "$out3" | grep -c 'не занесён в канон')"
+  rm -rf "$root"
+  if [[ $rc -ne 0 || $rc2 -ne 0 ]]; then
+    bad "9 ценз дома: чистый дом или данные машины покрасили сверку ($rc/$rc2)"
+  elif [[ $rc3 -eq 0 ]]; then
+    bad '9 ценз дома: исходник мимо канона НЕ покрасил сверку'
+  elif ! printf '%s' "$out3" | grep -q 'не занесён в канон: judge/newtool.py'; then
+    bad '9 ценз дома: покраснело, но имя исходника мимо канона не названо'
+  else
+    ok '9 ценз дома: исходник мимо канона назван и красит, данные машины -- нет'
+  fi
+}
+
+# ЦЕНЗ РЕПОЗИТОРИЯ. «Лежит в каталоге канона» и «живёт в репозитории» -- не
+# одно и то же, и ценз по первому даёт ложное зелёное в том самом случае,
+# ради которого написан: строка `judge/bench/` в .gitignore (её целью были
+# записи прогонов) прятала от git положенные рядом зубы, и find их видел, а
+# клон репозитория -- нет. Сценарий держит ТРИ состояния: канона вне git
+# нет вовсе -- НЕ ИЗМЕРЕНО и молчания быть не должно; часть под индексом, а
+# один файл вне -- красное с ИМЕНЕМ; всё под индексом -- зелёное.
+scenario_10() {
+  local root script out1 rc1 out2 rc2 out3 rc3 victim
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s10.XXXXXX")
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  victim='judge/replay.py'
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '10 ценз репозитория: исходная раскатка отказала'; return; }
+
+  out1=$(bash "$script" --diff 2>&1); rc1=$?
+
+  # Индекс получает ЧАСТЬ judge/: положительный контроль цензa требует хотя бы
+  # одного отслеживаемого файла, иначе слепота неотличима от чистоты.
+  (cd "$root/kit" && git init -q && git add judge/compact.py) >/dev/null 2>&1 || {
+    LAST_EVID='ПРИБОР: git init/add отказал'; rm -rf "$root"
+    bad '10 ценз репозитория: подготовка индекса отказала'; return; }
+  out2=$(bash "$script" --diff 2>&1); rc2=$?
+
+  (cd "$root/kit" && git add judge) >/dev/null 2>&1
+  out3=$(bash "$script" --diff 2>&1); rc3=$?
+
+  LAST_EVID="без_git=$rc1 вне_истории=$rc2 всё_в_индексе=$rc3 :: назван=$(printf '%s' "$out2" | grep -c "вне репозитория: $victim")"
+  rm -rf "$root"
+  if [[ $rc1 -ne 0 ]]; then
+    bad "10 ценз репозитория: канон вне git обязан быть НЕ ИЗМЕРЕНО, а не расхождением (rc=$rc1)"
+  elif ! printf '%s' "$out1" | grep -q 'ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО'; then
+    bad '10 ценз репозитория: канон вне git промолчал вместо НЕ ИЗМЕРЕНО'
+  elif [[ $rc2 -eq 0 ]]; then
+    bad '10 ценз репозитория: файл вне истории НЕ покрасил сверку'
+  elif ! printf '%s' "$out2" | grep -q "вне репозитория: $victim"; then
+    bad '10 ценз репозитория: покраснело, но имя файла вне истории не названо'
+  elif [[ $rc3 -ne 0 ]]; then
+    bad "10 ценз репозитория: всё под индексом, а сверка всё равно красная (rc=$rc3)"
+  else
+    ok '10 ценз репозитория: вне истории назван и красит, вне git -- НЕ ИЗМЕРЕНО, под индексом -- зелено'
+  fi
+}
 
 scenario_6() {
   local root script live live_start other_start stage owner out rc stage_left owner_left
@@ -581,6 +709,19 @@ elif number == 9:
            '    echo "    bash $0 --from-home   дом -> канон  (потеряет правки, сделанные В КАНОНЕ)" >&2\n'
            '    echo "  Стороны: канон $ROOT, дом проб $PROBES_HOME, дом инструментов $TOOLS_HOME" >&2\n')
     new = '    echo "ИТОГ: расходится файлов: $DIFFERS$__also (раскатать: bash $0 --to-home)" >&2\n'
+elif number == 10:
+    # Ценз со стороны дома выключается: исходник, живущий только в доме,
+    # снова невидим -- ровно состояние, в котором четыре инструмента судьи
+    # прожили вне репозитория.
+    old, new = ('    if [[ ! -f "$ROOT/judge/$__rel" ]]; then\n',
+                '    if false; then  # mutation: home census blinded\n')
+elif number == 11:
+    # Нога отслеживаемости выключается ЦЕЛИКОМ: файл, лежащий в каталоге
+    # канона, но не попавший в индекс, снова читается как занесённый --
+    # ровно ложное зелёное, которое дала строка `judge/bench/` в .gitignore.
+    old = ('    elif [[ "$TRACK_CENSUS" == \'да\' ]] \\\n'
+           '         && [[ -z "$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" ]]; then\n')
+    new = '    elif false; then  # mutation: repo census blinded\n'
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)
@@ -604,27 +745,21 @@ PY
 
 self_check() {
   local n root before reddened=0
-  for n in 1 2 3 4 5 6 7 8 9; do
+  for ((n = 1; n <= EXPECTED_MUTATIONS; n++)); do
     root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-mut.XXXXXX")
     mk_kit "$root/kit"
     if ! mutate "$root" "$n"; then rm -rf "$root"; return 2; fi
     local saved_kit="$KIT"
     KIT="$root/kit"; before=$FAILED; LAST_EVID=''
-    run_scenario "$n"
+    run_scenario "${MUT_SCENARIO[$n]}" || { say "  ОТКАЗ ПРИБОРА: сценария ${MUT_SCENARIO[$n]} нет (мутация $n)"; rm -rf "$root"; return 2; }
     KIT="$saved_kit"
     if (( FAILED > before )); then
-      case "$n:$LAST_EVID" in
-        1:*"второй=0"*) reddened=$((reddened + 1)); say '  ok     мутация 1 покраснила сценарий 1 своей причиной' ;;
-        2:*"diff_rc=0"*) reddened=$((reddened + 1)); say '  ok     мутация 2 покраснила сценарий 2 своей причиной' ;;
-        3:*"B=3"*) reddened=$((reddened + 1)); say '  ok     мутация 3 покраснила сценарий 3 своей причиной' ;;
-        4:*"НЕ_НАЗВАНА"*) reddened=$((reddened + 1)); say '  ok     мутация 4 покраснила сценарий 4 своей причиной' ;;
-        5:*"rc=1"*) reddened=$((reddened + 1)); say '  ok     мутация 5 покраснила сценарий 5 своей причиной' ;;
-        6:*"rc=0"*) reddened=$((reddened + 1)); say '  ok     мутация 6 покраснила сценарий 6 своей причиной' ;;
-        7:*"ПУТЬ_ОТКАЗА_ЗАВИС"*) reddened=$((reddened + 1)); say '  ok     мутация 7 покраснила сценарий 7 своей причиной' ;;
-        8:*"СИРОТА_ЗАГЛУШКИ"*) reddened=$((reddened + 1)); say '  ok     мутация 8 покраснила сценарий 7 своей причиной' ;;
-        9:*"ОДНО_НАПРАВЛЕНИЕ"*) reddened=$((reddened + 1)); say '  ok     мутация 9 покраснила сценарий 8 своей причиной' ;;
-        *) say "  ПРОВАЛ мутация $n покраснила чужой причиной: $LAST_EVID" ;;
-      esac
+      if [[ "$LAST_EVID" == *"${MUT_EVID[$n]}"* ]]; then
+        reddened=$((reddened + 1))
+        say "  ok     мутация $n покраснила сценарий ${MUT_SCENARIO[$n]} своей причиной"
+      else
+        say "  ПРОВАЛ мутация $n покраснила чужой причиной: $LAST_EVID"
+      fi
       FAILED=$before
     else
       say "  ПРОВАЛ мутация $n прошла молча"
@@ -638,7 +773,14 @@ self_check() {
 case "${1:-}" in
   '')
     check_mut_tables || exit 4
-    scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6; scenario_7; scenario_8
+    # Обход -- по объявленному числу, не по литеральному перечню: дописанный
+    # scenario_N, забытый в перечне, иначе молча не исполняется, а RUN всё
+    # равно сходится с EXPECTED_SCENARIOS, если число тоже забыли поднять.
+    for __s in $(seq 1 "$EXPECTED_SCENARIOS"); do
+      run_scenario "$__s" || {
+        say "probes-sync-bench: ОТКАЗ -- объявлено сценариев $EXPECTED_SCENARIOS, а scenario_$__s не определён"
+        exit 4; }
+    done
     say "probes-sync-bench: ИТОГ сценариев=$RUN расхождений=$FAILED"
     [[ $RUN -eq $EXPECTED_SCENARIOS ]] || exit 4
     [[ $FAILED -eq 0 ]] || exit 1

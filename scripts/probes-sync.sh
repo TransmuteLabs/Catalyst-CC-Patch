@@ -53,7 +53,16 @@ LAUNCH_AGENTS_DIR="${CLAUDE_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
 # pairs of "path in the canon : path in the home", the home is filled in by group
 PROBE_FILES=(probes.toml judge/prompt.md judge/body.json idle-watch/prompt.md)
-TOOL_FILES=(replay.py compact.py validate.py channel.py adjudicate.py README.md)
+# CONSTRAINT: перечень -- ПРОЕКЦИЯ, и всё, чего в нём нет, для раскатки не
+# существует вовсе. Измерено 15.09: recstore.py, fresh-runs.py и два зуба
+# (bench/) прожили в доме, НЕ попав в репозиторий, потому что имён не было
+# здесь; гейт раскатки молчал -- он сверяет только перечисленное. Ценз
+# «есть в доме, нет в каноне» ниже закрывает ту же дыру со стороны дома:
+# новый инструмент теперь называется, а не оседает молча.
+TOOL_FILES=(replay.py compact.py validate.py channel.py adjudicate.py recstore.py fresh-runs.py README.md)
+# Зубы инструментов -- свой набор: они живут подкаталогом, и без них правка
+# инструмента уезжает в дом без того, что её краснит.
+TOOL_BENCH_FILES=(bench/test_recstore.py bench/test_line_from_mod.py)
 
 # The plist has its own home: launchd reads it from ~/Library/LaunchAgents,
 # not the probe. Comparing it against a nonexistent file in the probes home is
@@ -184,6 +193,7 @@ stage_one() {  # $1 canon, $2 home, $3 display name
 
 for f in "${PROBE_FILES[@]}";  do add_pair "$ROOT/probes/$f" "$PROBES_HOME/$f" "probes/$f"; done
 for f in "${TOOL_FILES[@]}";   do add_pair "$ROOT/judge/$f"  "$TOOLS_HOME/$f"  "judge/$f";  done
+for f in "${TOOL_BENCH_FILES[@]}"; do add_pair "$ROOT/judge/$f" "$TOOLS_HOME/$f" "judge/$f"; done
 
 # Дом словарей вердиктов едет ОТДЕЛЬНОЙ парой, а не строкой TOOL_FILES:
 # тот список задан относительно $ROOT/judge, а этот файл лежит в корне
@@ -423,7 +433,64 @@ if [[ "$MODE" == "--diff" ]]; then
   if [[ "$__agents" -eq 0 ]]; then
     echo "(агента launchd *judge-compact.plist нет — сжатие журналов не заведено)"
   fi
-  echo "(журналы, записи, метки и bench не синхронизируются — они данные машины, а не исходник)"
+  echo "(журналы, записи и метки не синхронизируются — они данные машины, а не исходник)"
+fi
+
+# ЦЕНЗ СО СТОРОНЫ ДОМА. Пары выше -- ПРОЕКЦИЯ канона: инструмент, которого в
+# перечне нет, для них не существует, и «расхождений 0» ничего о нём не
+# говорит. Измерено 15.09: recstore.py, fresh-runs.py и два зуба прожили
+# только в доме, не попав в репозиторий вовсе, -- потеря машины унесла бы их,
+# а раскатка --to-home снесла бы. Ценз идёт от ДОМА и называет исходники,
+# которых канон не знает. Данные машины (журналы, записи, метки, кэш, снимки
+# запросов и личный config.json) исходником не являются и в ценз не входят.
+#
+# «Лежит в каталоге канона» и «живёт в репозитории» -- РАЗНЫЕ утверждения, и
+# ценз по первому даёт ложное зелёное ровно в том случае, ради которого он
+# написан: `.gitignore` нёс строку `judge/bench/` (под записи прогонов), и
+# положенные рядом зубы были невидимы git, оставаясь видимыми find. Поэтому
+# вторая нога спрашивает git. Ответа git нет (кит, распакованный вне
+# репозитория) -- это НЕ ИЗМЕРЕНО и говорится вслух, а не молчаливое зелёное.
+HOME_ONLY=0
+UNTRACKED=0
+if [[ "$MODE" == "--diff" && -d "$TOOLS_HOME" ]]; then
+  # `|| true` ОБЯЗАТЕЛЕН обеим пробам: под `set -e` код командной подстановки
+  # становится кодом присваивания, и «канон не в репозитории» (git отдаёт 128)
+  # ронял бы весь скрипт вместо честного НЕ ИЗМЕРЕНО; grep -c отдаёт 1 на нуле
+  # совпадений -- ровно тот случай, ради которого написан положительный контроль.
+  __git_probe=$( (cd "$ROOT" && git rev-parse --is-inside-work-tree) 2>&1 ) || true
+  __tracked_seen=$( (cd "$ROOT" && git ls-files -- judge) 2>&1 | grep -c . ) || true
+  TRACK_CENSUS='да'
+  if [[ "$__git_probe" != "true" ]]; then
+    TRACK_CENSUS='нет'
+    echo "ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО -- канон не в рабочем дереве git ($__git_probe)"
+  elif [[ "$__tracked_seen" -eq 0 ]]; then
+    # ПУСТО != НОЛЬ: ценз, которому git не назвал НИ ОДНОГО отслеживаемого
+    # файла под judge/, ничего не доказывает -- он слеп, а не чист.
+    TRACK_CENSUS='нет'
+    echo "ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО -- git не назвал ни одного отслеживаемого файла под judge/"
+  fi
+  while IFS= read -r __rel; do
+    [[ -z "$__rel" ]] && continue
+    if [[ ! -f "$ROOT/judge/$__rel" ]]; then
+      echo "не занесён в канон: judge/$__rel (живёт только в доме инструментов)"
+      HOME_ONLY=$((HOME_ONLY+1))
+    elif [[ "$TRACK_CENSUS" == 'да' ]] \
+         && [[ -z "$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" ]]; then
+      echo "лежит в каноне, но вне репозитория: judge/$__rel (git его не отслеживает)"
+      UNTRACKED=$((UNTRACKED+1))
+    fi
+  done < <(cd "$TOOLS_HOME" && find . \( -name records -o -name labelled -o -name __pycache__ -o -name fixtures \) -prune -o \
+             -type f \( -name '*.py' -o -name '*.md' -o -name '*.sh' \) -print 2>&1 | sed 's|^\./||' | sort)
+  if [[ "$HOME_ONLY" -ne 0 ]]; then
+    echo "ЦЕНЗ ДОМА: исходников мимо канона: $HOME_ONLY -- занести их в репозиторий"
+    echo "  (иначе следующая раскатка --to-home снесёт их, а другая машина их не получит)"
+    DIFFERS=$((DIFFERS+HOME_ONLY))
+  fi
+  if [[ "$UNTRACKED" -ne 0 ]]; then
+    echo "ЦЕНЗ РЕПОЗИТОРИЯ: исходников вне истории: $UNTRACKED -- добавить их в git"
+    echo "  (файл на диске канона, но не в коммитах: клон репозитория его не несёт)"
+    DIFFERS=$((DIFFERS+UNTRACKED))
+  fi
 fi
 
 # --diff отвечает КЛАССОМ, а не одним «не сошлось»: раскатки нет вовсе (5,

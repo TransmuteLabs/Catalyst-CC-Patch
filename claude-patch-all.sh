@@ -1018,7 +1018,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 129 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 130 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -5062,7 +5062,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 129 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 130 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -6621,7 +6621,8 @@ def _mod_maxtokens_default_is_not_the_ceiling(d):
 # подмножества реестра, а не его размер) пинят НАЛИЧИЕ новой структуры.
 _MOD_ENTRY_PATCHED = (
     rb'async function (' + ID + rb')\(\{model:(' + ID + rb'),prompt:(' + ID + rb'),system:(' + ID +
-    rb'),maxTokens:(' + ID + rb'),effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias\},'
+    rb'),maxTokens:(' + ID + rb'),effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias'
+    rb',detail:__mcDetail\},'
     rb'\{plugin:(' + ID + rb'),budget:(' + ID + rb')\},(' + ID + rb')\)\{'
 )
 
@@ -6703,6 +6704,36 @@ def _mod_api_alias_is_resolved_before_the_guard(d):
     return bool(re.match(
         rb'if\(' + re.escape(arg) + rb'===void 0&&__mcAlias!==void 0\)'
         + re.escape(arg) + rb'=__mcAlias;', win))
+
+
+def _mod_api_returns_detail_on_request(d):
+    """Причина пустого ответа доезжает до мода, когда он её ПРОСИТ.
+
+    Предмет -- неразличимость, а не нехватка удобства. Мод-API отдаёт
+    `xut(content,"")` -- склейку ТОЛЬКО текстовых блоков, поэтому «модель
+    промолчала», «всё ушло в блоки размышления» и «ответ обрезан по
+    max_tokens» приходят одной и той же пустой строкой, а `stop_reason`,
+    типы блоков и `usage` лежат в том же объекте ответа и выбрасываются.
+    Именно поэтому молчание нижних ступеней судьи не диагностировалось
+    ничем (#153, #190).
+
+    Пинятся ОБА конца одной иглой: приём флага в голове (он в
+    `_MOD_ENTRY_PATCHED`, общем для всех проверок шага) и ветка возврата.
+    Половина правки хуже целой: принятый и никуда не влияющий флаг
+    выглядит как работающая ручка.
+
+    УСЛОВНОСТЬ ветки -- сама гарантия, а не стиль: без флага возврат обязан
+    остаться СТРОКОЙ. Мод, написанный против стоковой поверхности (наш и
+    чужой), полагается в том числе на ЛОЖНОСТЬ пустой строки в `if (!answer)`;
+    объект истинен всегда, и безусловный возврат объекта развернул бы такую
+    ветку наизнанку молча.
+    """
+    site, win = _mod_entry_window(d)
+    if not site:
+        return False
+    return bool(re.search(
+        rb'__mcDetail===true\?\{text:(' + ID + rb'),stopReason:(' + ID + rb')\.stop_reason\?\?null,'
+        rb'blocks:\(Array\.isArray\(\2\.content\)\?\2\.content:\[\]\)\.map\(', win))
 
 
 def _cancellation_rule_is_whole(d):
@@ -8248,6 +8279,8 @@ checks = {
     'the mod-API forwards a per-call timeout': _mod_api_forwards_timeout(d),
     'the mod-API token alias is resolved before the ceiling guard':
         _mod_api_alias_is_resolved_before_the_guard(d),
+    'the mod-API returns the cause of an empty answer on request':
+        _mod_api_returns_detail_on_request(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -8256,7 +8289,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 129
+EXPECTED_CHECKS = 130
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -8272,7 +8305,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 129 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 130 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна

@@ -6164,7 +6164,7 @@ scenario_226() {   # ценз байткода разрешает имя кор�
   local d out rc base
   d="$C/s226"; rm -rf "$d"; mkdir -p "$d"
   rm -rf "$d/tools"; cp -R "$K/tools" "$d/tools"
-  out=$(python3 "$d/tools/bytecode-census.py" --print-corpus-name 2.1.272 2>&1); rc=$?
+  out=$(python3 "$d/tools/bytecode-census.py" --print-corpus-name 2.1.272 2>&1 9>&-); rc=$?
   base="${out##*/}"
   LAST_EVID="контроль rc=$rc basename=[$base]"
   if (( rc != 0 )) || [[ "$base" != *".pristine" ]]; then
@@ -6172,7 +6172,7 @@ scenario_226() {   # ценз байткода разрешает имя кор�
     bad "226 имя корпуса у ценза: нетронутая копия дома не дала штатного имени (rc=$rc)"; return
   fi
   perl -0pi -e 's/\.pristine/.NEUTRALISED/' "$d/tools/corpus-file-name.sh"
-  out=$(python3 "$d/tools/bytecode-census.py" --print-corpus-name 2.1.272 2>&1); rc=$?
+  out=$(python3 "$d/tools/bytecode-census.py" --print-corpus-name 2.1.272 2>&1 9>&-); rc=$?
   base="${out##*/}"
   LAST_EVID="$LAST_EVID :: после смены суффикса rc=$rc basename=[$base]"
   if (( rc != 0 )) || [[ "$base" != *".NEUTRALISED" ]]; then

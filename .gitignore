@@ -2,7 +2,11 @@
 # not in the canon: they are machine data, not project source
 judge/records/
 judge/journal.jsonl
-judge/bench/
+# CONSTRAINT: judge/bench/ хранит ОБА рода файлов -- записи прогонов (*.jsonl,
+# данные машины) и сами зубы (*.py, исходник). Игнор по КАТАЛОГУ хоронил и то
+# и другое: test_recstore.py и test_line_from_mod.py прожили вне репозитория,
+# и ни одна дверь этого не назвала (#193). Игнорируются только записи.
+judge/bench/*.jsonl
 judge/labels.jsonl
 __pycache__/
 *.pyc

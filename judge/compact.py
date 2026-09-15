@@ -67,6 +67,7 @@ def _line_from_mod(rec, filename):
         't': t,
         'tool': rec.get('tool'),
         'agent': rec.get('agent'),
+        'sid': rec.get('sid'),
         'ms': rec.get('dtMs') if rec.get('dtMs') is not None else 0,
         'outcome': _outcome_of(kind),
         'verdict': verdict,

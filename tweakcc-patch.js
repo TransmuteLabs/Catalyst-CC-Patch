@@ -5771,9 +5771,51 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
     return;
   }
 
+  // The RETURN of the same entry, where the answer loses its cause. The image
+  // hands the mod `xut(content,"")` -- a join of the text blocks ONLY:
+  //
+  //   var xut=(e,n)=>e.flatMap((r)=>r.type==="text"&&r.text!==void 0?[r.text]:[]).join(n);
+  //
+  // so "the model stayed silent", "everything went into thinking blocks" and
+  // "the answer was cut at max_tokens" all arrive as the same empty string,
+  // while `stop_reason`, the block types and `usage` sit RIGHT THERE in the
+  // response object and are dropped (measured 2026-09-15, offsets 171707700
+  // and 168695607 of the patched darwin 2.1.272; the provider call returns the
+  // full API message -- its tail reads `...stop_reason:to.stop_reason...`, so
+  // the field exists at this point). That indistinguishability is the whole
+  // reason the judge's lower rungs could not be diagnosed: they report "empty"
+  // and nothing else (#153, #190).
+  //
+  // The needle is name-free and anchors the tail as ONE unit: the binding, the
+  // log template and the return of that same binding, tied by a backreference.
+  const tail = new RegExp(
+    'let (' + ID + ')=(' + ID + ')\\((' + ID + ')\\.content,""\\);return (' + ID +
+    ')\\((`[^`]*`)\\),\\1\\}',
+    'g',
+  );
+  const tails = [...js.matchAll(tail)];
+  if (tails.length !== 1) {
+    fail(
+      `the mod-API return must occur exactly once, found ${tails.length} -- ` +
+      `the detail channel would reach only one of several returns`,
+    );
+    return;
+  }
+  const tl = tails[0];
+  const [tWhole, tXe, tJoin, tRes, tLog, tTpl] = tl;
+
+  const tDelta = tl.index - h.index;
+  if (tDelta < 0 || tDelta > 2000) {
+    fail(
+      `the mod-API return sits ${tDelta} bytes from its entry -- outside the ` +
+      `entry the detail flag is not in scope`,
+    );
+    return;
+  }
+
   // Our own names must not already exist anywhere in the bundle: a collision
   // would silently rebind someone else's identifier.
-  for (const name of ['__mcEff', '__mcTmo', '__mcAlias']) {
+  for (const name of ['__mcEff', '__mcTmo', '__mcAlias', '__mcDetail', '__mcBlk']) {
     if (js.indexOf(name) !== -1) {
       fail(`the name '${name}' already occurs in the image -- this step would rebind it`);
       return;
@@ -5785,10 +5827,25 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
       .replace(
         hWhole,
         'async function ' + fn + '({model:' + aMdl + ',prompt:' + aPrm + ',system:' + aSys +
-        ',maxTokens:' + aMax + ',effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias},' +
+        ',maxTokens:' + aMax + ',effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias' +
+        ',detail:__mcDetail},' +
         '{plugin:' + aPlg + ',budget:' + aBud + '},' + aSig + '){' +
         // Before the ceiling guard on purpose -- see the header.
         'if(' + aMax + '===void 0&&__mcAlias!==void 0)' + aMax + '=__mcAlias;',
+      )
+      .replace(
+        tWhole,
+        // The default road is untouched: without the flag the entry still
+        // returns the plain string, so every mod written against the stock
+        // surface -- ours and anyone else's -- keeps its contract, INCLUDING
+        // the falsiness of "" that an `if (!answer)` depends on. Only a caller
+        // that asks for detail gets an object, and it asks by a name that
+        // cannot exist in a stock image (checked above).
+        'let ' + tXe + '=' + tJoin + '(' + tRes + '.content,"");return ' + tLog + '(' + tTpl +
+        '),__mcDetail===true?{text:' + tXe + ',stopReason:' + tRes + '.stop_reason??null,' +
+        'blocks:(Array.isArray(' + tRes + '.content)?' + tRes + '.content:[]).map((__mcBlk)=>' +
+        '({type:__mcBlk&&__mcBlk.type,len:typeof(__mcBlk&&__mcBlk.text)==="string"' +
+        '?__mcBlk.text.length:0})),usage:' + tRes + '.usage??null}:' + tXe + '}',
       )
       .replace(
         cWhole,
@@ -5803,7 +5860,8 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
   );
   applied.push(
     `31 mod-API forwards effort (as reasoning_effort), timeoutMs (as timeout) and ` +
-    `max_tokens (alias of maxTokens) through '${fn}' into '${cFn}'`,
+    `max_tokens (alias of maxTokens) through '${fn}' into '${cFn}', and returns ` +
+    `{text, stopReason, blocks, usage} when the caller passes detail:true`,
   );
 });
 

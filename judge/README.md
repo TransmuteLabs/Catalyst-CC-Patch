@@ -948,6 +948,20 @@ plist sits in the kit next to this file — edit the paths for yourself in
 it, and `launchctl bootstrap gui/$UID
 ~/Library/LaunchAgents/<file>.plist` installs it.
 
+`recstore.py` — the resolver from the journal's `rec` field to the record
+file: the journal writes the name without `.gz`, while most records sit
+compressed, so the pointer alone does not name a file. Tries the exact
+name, then the `.gz` sibling; a bare pointer prints the resolved path,
+`--cat` also the contents, `--census` re-checks every pointer of the
+journal and names the misses (exit 1), an absent or empty records home is
+a separate exit (2) — the instrument cannot measure, which is not the
+same as "not found".
+
+`bench/test_recstore.py` — the tooth of the resolver: resolve/load on the
+plain and the compressed form, None on a missing record, a census run
+over the live journal, and a negative control — a naive exact-name-only
+resolve substituted for the real one must turn the tooth red.
+
 ## A full record of every judging
 
 A journal line is a pointer, not a proof: the verdict in it is truncated,
