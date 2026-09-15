@@ -69,12 +69,22 @@ JUDGE="$ROOT/judge"
 
 mkdir -p "$STAGE/judge" "$STAGE/idle-watch" "$STAGE/docs" "$STAGE/tools"
 
-for f in claude-patch-all.sh tweakcc-patch.js claude_patch.py set-model-costs.py \
-         patch-claude-routing.sh patch-claude-routing.ps1 patch_claude_routing.py; do
-  cp "$ROOT/$f" "$STAGE/$f"
+# The kit ROOT is placed by walking the top level, not by a name list — the
+# list here had already fallen behind the tree: LICENSE lived in the root and
+# never reached the archive, and no door said so. A list living next to its
+# home must either be read from the home or not exist.
+#
+# Exceptions are declared HERE, by name, in ROOT_SKIP; the guard below refuses
+# on an exception whose file is gone, because a stale declaration hides exactly
+# what a stale list hides. Hidden entries (dotfiles) are outside the glob by
+# construction and are not part of the kit.
+ROOT_SKIP=""
+for f in "$ROOT"/*; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$ROOT_SKIP" in *" $b "*) continue;; esac
+  cp "$f" "$STAGE/$b"
 done
-cp "$ROOT/README.md"                        "$STAGE/README.md"
-cp "$ROOT/AGENTS.md"                        "$STAGE/AGENTS.md"
 # Documents are placed by ENUMERATING the directory, not by a name list: a
 # list falls behind the tree silently. It happened — the new probe registry
 # spec did not make it into the kit while the build still succeeded. Task
@@ -180,6 +190,27 @@ grep -qE "$N checks?" "$STAGE/README.md" || {
 # archive.
 SKIP=" fixtures "
 miss=0
+# Каждое ОБЪЯВЛЕННОЕ исключение обязано существовать: объявление, которому
+# нечего исключать, прячет ровно то же, что прячет отставший список -- оно
+# переживает свой повод и молча снимает сторожа с имени, которое однажды
+# вернётся. То же правило уже действует в tools/orphan-stand-gate.py.
+for b in $SKIP; do
+  [ -e "$ROOT/judge/$b" ] || [ -e "$ROOT/idle-watch/$b" ] || {
+    echo "ОШИБКА: исключение '$b' объявлено, а ни в judge/, ни в idle-watch/ его нет -- устаревшее объявление" >&2; miss=1; }
+done
+for b in $ROOT_SKIP; do
+  [ -e "$ROOT/$b" ] || {
+    echo "ОШИБКА: исключение корня '$b' объявлено, а файла нет -- устаревшее объявление" >&2; miss=1; }
+done
+# Ценз полноты КОРНЯ: файл верхнего уровня обязан либо ехать в комплект, либо
+# быть названным в ROOT_SKIP. Без этой стороны обход можно молча вернуть к
+# списку имён, и всё начнётся сначала.
+for f in "$ROOT"/*; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$ROOT_SKIP" in *" $b "*) continue;; esac
+  [ -f "$STAGE/$b" ] || { echo "ОШИБКА: $b живёт в корне, но в комплект не кладётся" >&2; miss=1; }
+done
 # The docs directory is checked by the same rule as the probe homes: a file
 # on disk missing from the kit is a build error, not a trifle. Without this
 # branch the list falling behind the tree was not noticed at all.

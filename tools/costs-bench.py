@@ -43,6 +43,11 @@ COSTS = ROOT / "set-model-costs.py"
 PATCHER = ROOT / "claude_patch.py"
 CORPUS = ROOT / "tools" / "corpus-list.py"
 PIPELINE = ROOT / "claude-patch-all.sh"
+# CONSTRAINT: no scenario reads this file -- it is a dependency of the product
+# under test (claude_patch.py refuses when its byte-level half is not beside
+# it), and it has a name here so that the copy list stays derived from the
+# path constants instead of repeating them.
+ROUTING = ROOT / "patch_claude_routing.py"
 EXPECTED_SCENARIOS = 13
 EXPECTED_MUTATIONS = 20
 
@@ -846,14 +851,47 @@ def check_tables() -> int:
     return 0
 
 
+# CONSTRAINT: the pristine copy is a SUBSET of the tree (the repository root
+# also holds image corpora and build output, which no scenario reads), so the
+# whole-directory remedy used by judge-tools-bench does not apply here. What
+# must not exist is a SECOND spelling of these paths: the copy list is derived
+# from the same constants the scenarios read, and the roster of VICTIMS --
+# which lives in the mutation bodies, spelled against the copy root -- is read
+# back from the bench source by check_copy_list. A hand-kept list would drift
+# the moment a mutation aimed at a file nobody copied: the copy would be
+# missing it, and the mutation would count as a bench failure instead of a
+# product verdict. Entries with no mutation are dependencies of the product
+# under test, so the census is one-way by design.
+COPIED: tuple[str, ...] = tuple(
+    str(path.relative_to(ROOT)) for path in (COSTS, PATCHER, CORPUS, PIPELINE, BENCH, ROUTING))
+
+_COPY_SITE = re.compile(r'root\s*/\s*"([^"]+)"(?:\s*/\s*"([^"]+)")?')
+
+
+def check_copy_list() -> int:
+    bad: list[str] = []
+    for rel in COPIED:
+        if not (ROOT / rel).exists():
+            bad.append(f"объявлен к копированию «{rel}», а в дереве его нет "
+                       f"-- устаревшее объявление")
+    dirs = {str(Path(rel).parent) for rel in COPIED}
+    for head, tail in _COPY_SITE.findall(BENCH.read_text(encoding="utf-8")):
+        rel = f"{head}/{tail}" if tail else head
+        if rel not in COPIED and rel not in dirs:
+            bad.append(f"сценарии обращаются к «{rel}» внутри копии, "
+                       f"а перечень копирования его не несёт")
+    if bad:
+        for line in sorted(set(bad)):
+            print(f"costs-bench: ОТКАЗ -- {line}")
+        return 4
+    return 0
+
+
 def copy_tree(root: Path) -> None:
-    (root / "tools").mkdir(parents=True)
-    shutil.copy2(COSTS, root / "set-model-costs.py")
-    shutil.copy2(PATCHER, root / "claude_patch.py")
-    shutil.copy2(CORPUS, root / "tools" / "corpus-list.py")
-    shutil.copy2(PIPELINE, root / "claude-patch-all.sh")
-    shutil.copy2(BENCH, root / "tools" / "costs-bench.py")
-    shutil.copy2(ROOT / "patch_claude_routing.py", root / "patch_claude_routing.py")
+    for rel in COPIED:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, target)
 
 
 def run_copy(root: Path) -> subprocess.CompletedProcess[str]:
@@ -932,6 +970,10 @@ def main() -> int:
     # corpus-tools-bench): a silent table drift re-aims the mutations at
     # other people's rules, and an uncovered scenario cannot be proven at all.
     if check_tables():
+        return 4
+    # Same placement as the table check, and for the same reason: a copy list
+    # that lost a victim makes every mutation aimed at it a bench artefact.
+    if check_copy_list():
         return 4
     return run_self_check() if args.self_check else run_scenarios()
 

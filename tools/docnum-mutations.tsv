@@ -62,7 +62,7 @@ D32	claude-patch-all.sh	        return blocks(FENCE_LINE.sub(BREAK, text), BLOCK
 D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABLE_SEP.match(line):	        if False:	ячейка таблицы ловит расхождение по шапке
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
-D36	README.md	probe-bench's 9 recorded mutations	probe-bench's 8 recorded mutations	объявлено «9 mutations» (владелец probe-bench)
+D36	README.md	probe-bench's 12 recorded mutations	probe-bench's 11 recorded mutations	объявлено «12 mutations» (владелец probe-bench)
 D37	README.md	checks-teeth's 31 recorded mutations	checks-teeth's 32 recorded mutations	объявлено «31 mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден

@@ -93,6 +93,29 @@ CASES=(
   "consult|agent.spawn settled in|ALPHA"
 )
 
+# CONSTRAINT: таблица выше -- ПРОЕКЦИЯ веток модуля, и сверяется с их домом
+# (plugin/hooks/register.ts) с ОБЕИХ сторон. Ветка, заведённая в модуле и
+# забытая здесь, не гонялась бы вовсе, а строка, пережившая свою ветку, мерила
+# бы штатный путь под чужим именем -- и оба вида расхождения молчат. Штатный
+# путь «pass» ветки не имеет по замыслу: модуль на нём ничего не возвращает.
+__reg="$PLUGIN/hooks/register.ts"
+__branches=$(grep -oE 'kase === "[a-z]+"' "$__reg" | sed 's/.*"\(.*\)"/\1/' | sort -u || true)
+if [[ -z "$__branches" ]]; then
+  die "в $__reg не нашлось ни одной ветки случая: форма записи сменилась, таблицу сверять не с чем"
+fi
+__listed=$(printf '%s\n' "${CASES[@]}" | cut -d'|' -f1 | grep -v '^pass$' | sort -u || true)
+if [[ -z "$__listed" ]]; then
+  die "таблица случаев пуста помимо штатного пути -- сверять нечего"
+fi
+__only_home=$(comm -23 <(printf '%s\n' "$__branches") <(printf '%s\n' "$__listed") | tr '\n' ' ')
+__only_here=$(comm -13 <(printf '%s\n' "$__branches") <(printf '%s\n' "$__listed") | tr '\n' ' ')
+if [[ -n "${__only_home// /}" || -n "${__only_here// /}" ]]; then
+  echo "spawn-site-probe: ОТКАЗ -- таблица случаев разошлась с домом веток:" >&2
+  [[ -n "${__only_home// /}" ]] && echo "  в модуле есть, в таблице нет: $__only_home" >&2
+  [[ -n "${__only_here// /}" ]] && echo "  в таблице есть, в модуле нет: $__only_here" >&2
+  exit 2
+fi
+
 WANT="${CLAUDE_SPAWNPROBE_CASES:-}"
 LOADED=0; RED=0; RAN=0
 ACCEPT='hooks module spawnprobe loaded'

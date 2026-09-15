@@ -134,6 +134,42 @@ def tool_names(kit):
                   and os.path.isfile(os.path.join(tools, name)))
 
 
+# CONSTRAINT: у двери описания знаменатель ШИРЕ, чем у двери сироты. Сирота --
+# про исполнителя, и файлы данных туда не входят: у таблицы мутаций
+# исполнителя не бывает по природе. Состав же в README описывает и данные,
+# и первый замер этой двери показал ровно такой пробел.
+DESCRIBED_EXTS = TOOL_EXTS + ('.txt', '.tsv')
+
+
+def described_names(kit):
+    tools = os.path.join(kit, 'tools')
+    if not os.path.isdir(tools):
+        return []
+    return sorted(name for name in os.listdir(tools)
+                  if name.endswith(DESCRIBED_EXTS)
+                  and os.path.isfile(os.path.join(tools, name)))
+
+
+def described(kit, names):
+    """Две стороны описания: (не названные в README, названные без файла).
+
+    CONSTRAINT: таблица состава в README -- ПРОЕКЦИЯ каталога инструментов, и
+    без читателя она расходится молча в обе стороны. Измерено на живом дереве:
+    два прибора (checks-mutations.tsv и checks-teeth-corpus.py) не были
+    названы в README вовсе. Отсутствие README -- «не с чем сверять», то есть
+    отказ прибора, а не пустая перепись.
+    """
+    readme = os.path.join(kit, 'README.md')
+    if not os.path.isfile(readme):
+        return None, None, 'нет %s: состав сверять не с чем' % readme
+    text = io.open(readme, encoding='utf-8').read()
+    silent = [n for n in described_names(kit)
+              if ('tools/' + n) not in text]
+    ghost = sorted({m for m in re.findall(r'`(tools/[A-Za-z0-9_./-]+)`', text)
+                    if not os.path.isfile(os.path.join(kit, m))})
+    return silent, ghost, None
+
+
 def find_callers(kit, names, self_path):
     """Вызывающие каждого инструмента: имя -> [(файл, строка, форма)]."""
     regexes = {name: form_regexes(name) for name in names}
@@ -174,7 +210,7 @@ def measure(kit, self_path=None):
     Возвращает словарь: code, refusals, orphans, tools, manual, callers.
     """
     result = {'code': 2, 'refusals': [], 'orphans': [], 'tools': [],
-              'manual': [], 'callers': {}}
+              'manual': [], 'callers': {}, 'silent': [], 'ghost': []}
     owners, why = owners_from_pipeline(kit)
     if owners is None:
         result['refusals'].append(why)
@@ -203,11 +239,16 @@ def measure(kit, self_path=None):
                 'объявленный ручным %s не существует -- устаревшее объявление '
                 'прячет сироту' % name)
             return result
+    silent, ghost, why = described(kit, names)
+    if why is not None:
+        result['refusals'].append(why)
+        return result
     callers = find_callers(kit, names, self_path)
     orphans = [name for name in names
                if name not in MANUAL and not callers[name]]
-    result.update(code=1 if orphans else 0, orphans=orphans, tools=names,
-                  manual=manual, callers=callers)
+    result.update(code=1 if (orphans or silent or ghost) else 0,
+                  orphans=orphans, tools=names, manual=manual,
+                  callers=callers, silent=silent, ghost=ghost)
     return result
 
 
@@ -231,10 +272,18 @@ def report(result, verbose=False):
     for name in result['orphans']:
         print('ОТКАЗ: сирота -- %s: исполнителей нет ни в одной форме вызова'
               % name)
+    for name in result['silent']:
+        print('ОТКАЗ: прибор вне описания -- tools/%s: в README о нём ни слова'
+              % name)
+    for rel in result['ghost']:
+        print('ОТКАЗ: описание без прибора -- README называет %s, которого в '
+              'дереве нет' % rel)
     if result['code'] == 0:
-        print('инструментов %d, из них объявлено ручными %d, без исполнителя %d'
+        print('инструментов %d, из них объявлено ручными %d, без исполнителя %d,'
+              ' вне описания %d, описаний без файла %d'
               % (len(result['tools']), len(result['manual']),
-                 len(result['orphans'])))
+                 len(result['orphans']), len(result['silent']),
+                 len(result['ghost'])))
 
 
 def self_check():
@@ -251,6 +300,10 @@ def self_check():
               ")\n" + END)
         io.open(os.path.join(kit, 'run.sh'), 'w', encoding='utf-8').write(
             '#!/usr/bin/env bash\nbash tools/called-one.sh\n')
+        readme = os.path.join(kit, 'README.md')
+        io.open(readme, 'w', encoding='utf-8').write(
+            'toy contents\n`tools/called-one.sh`\n`tools/zz-fake-orphan.sh`\n'
+            + ''.join('`tools/%s`\n' % name for name in MANUAL))
         io.open(os.path.join(kit, 'tools', 'called-one.sh'), 'w',
                 encoding='utf-8').write('#!/usr/bin/env bash\nexit 0\n')
         for name in MANUAL:
@@ -266,6 +319,12 @@ def self_check():
             return 2
         print('ПРИБОР: контроль с фиктивной сиротой -- покраснен, названа по имени')
         os.remove(fake)
+        # Строка описания снимается ВМЕСТЕ с файлом: иначе дверь описания
+        # законно краснит зелёный контроль «описанием без прибора», и зуб
+        # сироты мерил бы уже красное дерево.
+        io.open(readme, 'w', encoding='utf-8').write(
+            'toy contents\n`tools/called-one.sh`\n'
+            + ''.join('`tools/%s`\n' % name for name in MANUAL))
         green = measure(kit)
         if green['code'] != 0:
             print('ОТКАЗ: без мутации перепись не зеленеет: code=%d '
@@ -273,6 +332,36 @@ def self_check():
                   % (green['code'], green['refusals'], green['orphans']))
             return 2
         print('ПРИБОР: контроль без мутации -- зелен')
+
+        # Зубы ВТОРОЙ двери. Каждая мутация ставится на ЗЕЛЁНОМ дереве и
+        # снимается после замера: краснота на уже красном не доказывала бы
+        # ничего (круг 28 -- красный контроль зубов не мерит).
+        quiet = os.path.join(kit, 'tools', 'zz-undocumented.tsv')
+        io.open(quiet, 'w', encoding='utf-8').write('id\tчто\n')
+        silent = measure(kit)
+        if silent['code'] != 1 or silent['silent'] != ['zz-undocumented.tsv']:
+            print('ОТКАЗ: дверь описания не назвала прибор вне README: '
+                  'code=%d silent=%r' % (silent['code'], silent['silent']))
+            return 2
+        print('ПРИБОР: контроль с неописанным прибором -- покраснен, назван по имени')
+        os.remove(quiet)
+
+        io.open(readme, 'a', encoding='utf-8').write('`tools/zz-no-such.py`\n')
+        ghost = measure(kit)
+        if ghost['code'] != 1 or ghost['ghost'] != ['tools/zz-no-such.py']:
+            print('ОТКАЗ: дверь описания не назвала описание без файла: '
+                  'code=%d ghost=%r' % (ghost['code'], ghost['ghost']))
+            return 2
+        print('ПРИБОР: контроль с описанием без файла -- покраснен, назван по пути')
+
+        os.remove(readme)
+        blind = measure(kit)
+        if blind['code'] != 2 or not any('состав сверять не с чем' in r
+                                         for r in blind['refusals']):
+            print('ОТКАЗ: без README дверь описания не отказала прибором: '
+                  'code=%d refusals=%r' % (blind['code'], blind['refusals']))
+            return 2
+        print('ПРИБОР: без README -- отказ прибора, а не пустая перепись')
         return 0
     finally:
         shutil.rmtree(work, ignore_errors=True)

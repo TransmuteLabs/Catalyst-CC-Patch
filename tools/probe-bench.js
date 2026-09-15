@@ -22,6 +22,84 @@ const { spawnSync } = require('node:child_process');
 
 const START_MARKER = '/*__ccProbe0*/';
 const END_MARKER = '/*__ccProbe1*/';
+
+// Имена ручек носителя по пробе — нужны и для изоляции, и для сценариев,
+// которые гейт носителя проверяют НАМЕРЕННО.
+// CONSTRAINT: дом этих имён — вставки tweakcc-patch.js: ручка существует ровно
+// потому, что в образ вклеен гейт, который её читает. Здесь живёт не список, а
+// СВЯЗКА «проба → ручка», которую из дома вывести нельзя; сам набор имён
+// сверяется с домом цензом ниже, и расхождение — отказ прибора, не вердикт.
+const CARRIER_KEY = {
+  judge: 'CLAUDE_JUDGE_CARRIER',
+  watch: 'CLAUDE_IDLE_CARRIER',
+  form: 'CLAUDE_FORM_CARRIER',
+};
+
+// CONSTRAINT: дом ручек разрешается ТЕМ ЖЕ приёмом, что и probes.toml кита
+// (resolveKitToml ниже): подъёмом от каталога стенда, а для копии, которую
+// самопроверка пишет во временный каталог, -- явным путём из окружения.
+// Копия кита по __dirname не находит, и без явной передачи ценз отказал бы в
+// КАЖДОЙ копии: контроль чистоты не срабатывает, и зубы стенда перестают
+// мерить вовсе -- измерено на этом самом стенде: мутаций 9, доказали 0
+// (docnum:historical -- счёт таблицы ДО этой правки). Не найдено нигде -- отказ
+// прибора, а не пропуск ценза.
+function resolveCarrierHome() {
+  let d = __dirname;
+  for (let i = 0; i < 6; i += 1) {
+    const p = path.join(d, 'tweakcc-patch.js');
+    if (fs.existsSync(p)) return p;
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  const fromEnv = process.env.PROBE_BENCH_CARRIER_HOME;
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  return null;
+}
+const CARRIER_HOME = resolveCarrierHome();
+
+function carrierKeysAtHome() {
+  if (CARRIER_HOME === null) return null;
+  let text;
+  try {
+    text = fs.readFileSync(CARRIER_HOME, 'utf8');
+  } catch (error) {
+    return null;
+  }
+  const found = new Set();
+  for (const m of text.matchAll(/process\.env\.(CLAUDE_[A-Z0-9_]*_CARRIER)/g)) {
+    found.add(m[1]);
+  }
+  return [...found].sort();
+}
+
+(function censusCarrierKeys() {
+  const home = carrierKeysAtHome();
+  if (home === null) {
+    console.error(`probe-bench: ОТКАЗ — нет дома ручек носителя (${CARRIER_HOME});`
+      + ' сверить перечень не с чем');
+    process.exit(2);
+  }
+  // Пусто не ноль: дом без единой ручки — смена формы вставок, а не мир без
+  // носителей, и молчаливый пропуск сделал бы ценз декоративным.
+  if (home.length === 0) {
+    console.error(`probe-bench: ОТКАЗ — в ${CARRIER_HOME} не нашлось ни одной ручки`
+      + ' носителя: форма чтения в доме сменилась, перечень недействителен');
+    process.exit(2);
+  }
+  const mine = Object.values(CARRIER_KEY).slice().sort();
+  const missing = home.filter((key) => !mine.includes(key));
+  const extra = mine.filter((key) => !home.includes(key));
+  if (missing.length || extra.length) {
+    console.error('probe-bench: ОТКАЗ — перечень ручек носителя разошёлся с домом'
+      + ` ${CARRIER_HOME}:`
+      + (missing.length ? ` в доме есть, у стенда нет: ${missing.join(', ')};` : '')
+      + (extra.length ? ` у стенда есть, в доме нет: ${extra.join(', ')};` : '')
+      + ' стенд не изолировал бы то, чем образ управляется');
+    process.exit(2);
+  }
+})();
+
 const ENV_KEYS = [
   'CLAUDE_PROBES_DIR',
   'CLAUDE_JUDGE',
@@ -55,19 +133,9 @@ const ENV_KEYS = [
   //
   // Снимать их обязан САМ стенд, а не вызывающий: `env -u` на одной стадии
   // конвейера не спасает того, кто запустит стенд рукой.
-  'CLAUDE_JUDGE_CARRIER',
-  'CLAUDE_IDLE_CARRIER',
-  'CLAUDE_FORM_CARRIER',
+  ...Object.values(CARRIER_KEY),
   'ANTHROPIC_BASE_URL',
 ];
-
-// Имена ручек носителя по пробе — нужны и для изоляции, и для сценариев,
-// которые гейт носителя проверяют НАМЕРЕННО.
-const CARRIER_KEY = {
-  judge: 'CLAUDE_JUDGE_CARRIER',
-  watch: 'CLAUDE_IDLE_CARRIER',
-  form: 'CLAUDE_FORM_CARRIER',
-};
 
 // Снимок и стирание -- на ЗАГРУЗКЕ МОДУЛЯ, а не при первом сценарии. Причин
 // две, и обе измерены:
@@ -1483,7 +1551,7 @@ if (scenarios.length !== EXPECTED_SCENARIOS) {
 }
 // Режим --self-check сверяет длину таблицы мутаций с этим числом на каждом
 // своём запуске: правка таблицы без числа молча урезала бы перечень.
-const EXPECTED_MUTATIONS = 9;
+const EXPECTED_MUTATIONS = 12;
 // A scenario without `expected` used to run and be counted as conforming --
 // the comparator treated a missing specification as agreement (mismatchDetails
 // now returns one). The count above catches a hole in the ARRAY; this catches a
@@ -2677,6 +2745,59 @@ const SELF_CHECK_MUTATIONS = [
                 to: 'if (false) {' },
   },
   {
+    name: 'carrier-census-no-home',
+    // Дверь «дома нет». Отрава отнимает у КОПИИ единственную дорогу к дому:
+    // подъёмом от временного каталога кит не находится, дом приезжает только
+    // явным путём из окружения. Мутация гасит ценз целиком, потому что
+    // поточечно эту дверь ослепить нельзя честно: пропустив null дальше,
+    // прибор упал бы на чтении длины -- то есть краснел бы по-прежнему, но
+    // уже своей поломкой, а не измерением.
+    poison: {
+      from: 'const fromEnv = process.env.PROBE_BENCH_CARRIER_HOME;',
+      to: "const fromEnv = '';",
+    },
+    controlRc: 2,
+    controlCause: 'нет дома ручек носителя',
+    mutation: {
+      from: '(function censusCarrierKeys() {',
+      to: '(function censusCarrierKeys() { if (true) return;',
+    },
+  },
+  {
+    name: 'carrier-census-empty-home',
+    // Дверь «ПУСТО ≠ НОЛЬ»: дом читается, но форма записи ручек в нём
+    // сменилась, и перечень стенда сверять не с чем. Отрава уводит образец
+    // мимо всех вхождений -- ровно то, чем выглядела бы смена формы.
+    poison: {
+      from: '/process\\.env\\.(CLAUDE_[A-Z0-9_]*_CARRIER)/g',
+      to: '/process\\.env\\.(CLAUDE_[A-Z0-9_]*_CARRIERZZ)/g',
+    },
+    controlRc: 2,
+    controlCause: 'не нашлось ни одной ручки',
+    mutation: {
+      from: '(function censusCarrierKeys() {',
+      to: '(function censusCarrierKeys() { if (true) return;',
+    },
+  },
+  {
+    name: 'carrier-census-mismatch',
+    // Дверь расхождения. Отрава добавляет стенду ручку, которой в доме нет:
+    // именно так выглядит перечень, переживший свой дом. Ослепляется здесь
+    // сама сверка -- лишнее имя в списке стирания никто не ставит, поэтому
+    // прогон после мутации обязан стать зелёным, и краснота до неё доказана
+    // цензом, а не побочным вредом отравы.
+    poison: {
+      from: "  form: 'CLAUDE_FORM_CARRIER',",
+      to: "  form: 'CLAUDE_FORM_CARRIER',\n  ghost: 'CLAUDE_GHOST_CARRIER',",
+    },
+    controlRc: 2,
+    controlCause: 'у стенда есть, в доме нет',
+    mutation: {
+      from: 'if (missing.length || extra.length) {',
+      to: 'if (false) {',
+    },
+  },
+  {
     name: 'carrier-isolation',
     // ЕДИНСТВЕННАЯ запись ПРЯМОГО хода (`breaks`), и полярность тут не прихоть.
     // Соседи выше стерегут ДВЕРЬ: дверь доказывается ослеплением, потому что
@@ -2695,7 +2816,7 @@ const SELF_CHECK_MUTATIONS = [
     // эти имена КТО-ТО ставит. Ставят их ровно сценарии носителя, и больше
     // никто. Значит краснота => протечка носителя, другой дороги нет.
     breaks: {
-      from: "  'CLAUDE_JUDGE_CARRIER',\n  'CLAUDE_IDLE_CARRIER',\n  'CLAUDE_FORM_CARRIER',\n",
+      from: '  ...Object.values(CARRIER_KEY),\n',
       to: '',
     },
     expectRc: 1,
@@ -2739,7 +2860,15 @@ function runBenchCopy(scriptPath, binaryPath) {
   const run = spawnSync('bun', [scriptPath, '--binary', binaryPath], {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, PROBE_BENCH_KIT_TOML: KIT_TOML },
+    env: {
+      ...process.env,
+      PROBE_BENCH_KIT_TOML: KIT_TOML,
+      // CONSTRAINT: дом ручек носителя передаётся копии ЯВНО по той же причине,
+      // что и probes.toml: копия живёт во временном каталоге и подъёмом кит не
+      // находит. Без этой строки ценз ручек отказывает в каждой копии, и ни
+      // один зуб стенда не меряет.
+      PROBE_BENCH_CARRIER_HOME: CARRIER_HOME ?? '',
+    },
   });
   return {
     rc: run.status,

@@ -59,8 +59,28 @@ KIT = os.path.dirname(HERE)
 # кит произвольный каталог и копирует его: у соседнего стенда это замерено --
 # KIT стал корнем файловой системы и 3.8 ГБ уехали в tmp до ручной остановки.
 # Ошибка вывода корня ОБЪЯВЛЯЕТСЯ кодом 2 («прибор не может мерить»), а не
-# исполняется. Подпись кита -- три его файла; проверка стоит ДО первой копии.
-KIT_SIGNATURE = ('claude-patch-all.sh', 'tools/sweep.sh', 'tools/corpus-versions.txt')
+# исполняется. Проверка стоит ДО первой копии.
+# CONSTRAINT: имён подписи здесь НЕТ -- их дом tools/kit-signature.txt, общий
+# для трёх инструментов, которые копируют кит целиком. Своя копия перечня
+# расходилась бы молча, и слабейшее из трёх опознаний решало бы, какой чужой
+# каталог будет скопирован.
+SIGNATURE_HOME = os.path.join('tools', 'kit-signature.txt')
+
+
+def kit_signature(kit):
+    """Перечень из дома; None -- дом нечитаем. Пустой список -- дом пуст.
+
+    CONSTRAINT: пустой список и None -- РАЗНЫЕ отказы и называются по-разному.
+    Пусто не ноль: подпись без имён означает смену формы дома, а не «проверять
+    нечего», и слить их значило бы отвечать на второй случай диагнозом первого.
+    """
+    try:
+        with open(os.path.join(kit, SIGNATURE_HOME), encoding='utf-8') as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    return [line.strip() for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith('#')]
 
 
 def require_kit_root():
@@ -71,7 +91,21 @@ def require_kit_root():
     обязаны работать откуда угодно -- ставить страж в шапку значит запрещать и
     их. Отсутствие подписи -- код 2 «прибор не может мерить».
     """
-    missing = [n for n in KIT_SIGNATURE if not os.path.isfile(os.path.join(KIT, n))]
+    names = kit_signature(KIT)
+    if names is None:
+        sys.stderr.write(
+            'docnum-bench: КОРЕНЬ НЕ КИТ -- в «%s» нет читаемой подписи %s.\n'
+            '  Стенд копирует кит целиком; запускать только как\n'
+            '  tools/docnum-bench.py внутри кита.\n'
+            % (KIT, SIGNATURE_HOME))
+        sys.exit(2)
+    if not names:
+        sys.stderr.write(
+            'docnum-bench: подпись «%s» пуста -- форма дома сменилась,\n'
+            '  опознание недействительно.\n'
+            % os.path.join(KIT, SIGNATURE_HOME))
+        sys.exit(2)
+    missing = [n for n in names if not os.path.isfile(os.path.join(KIT, n))]
     if missing:
         sys.stderr.write(
             'docnum-bench: КОРЕНЬ НЕ КИТ -- в «%s» нет %s.\n'

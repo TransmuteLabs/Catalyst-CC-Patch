@@ -2877,38 +2877,71 @@ def fail_segment(output: str, scenario: int) -> str | None:
     return rest if end < 0 else rest[:end]
 
 
-def copy_tree(root: Path) -> None:
-    # Копия несёт РОВНО то, что читают сценарии: мутации правят её, а не живое
-    # дерево. Со сценариями 19-20 в неё вошли сверка раскатки и конвейер --
-    # мутация, которой не во что примениться, «проходит» молча (круг 18, §6).
-    (root / "judge").mkdir()
-    (root / "tools").mkdir()
-    (root / "scripts").mkdir()
-    shutil.copy2(COMPACT, root / "judge" / "compact.py")
-    shutil.copy2(PATCHER, root / "claude_patch.py")
-    shutil.copy2(ROOT / "set-model-costs.py", root / "set-model-costs.py")
-    shutil.copy2(BENCH, root / "tools" / "judge-tools-bench.py")
-    shutil.copy2(ROOT / "tools" / "probe-bench.js", root / "tools" / "probe-bench.js")
-    # Сценарий 41 гоняет checks-teeth.py сабпроцессом: без копии мутация по
-    # нему применлялась бы к живому дереву, а сценарий мерил бы нетронутый файл.
-    shutil.copy2(ROOT / "tools" / "checks-teeth.py", root / "tools" / "checks-teeth.py")
-    shutil.copy2(ROOT / "claude-patch-all.sh", root / "claude-patch-all.sh")
+# Копия несёт РОВНО то, что читают сценарии: мутации правят её, а не живое
+# дерево. Со сценариями 19-20 в неё вошли сверка раскатки и конвейер --
+# мутация, которой не во что примениться, «проходит» молча (круг 18, §6).
+# CONSTRAINT: каталоги канона копируются ЦЕЛИКОМ -- перечня имён внутри них
+# здесь нет по той же причине, что и в toy_kit. Прежняя редакция держала шесть
+# имён judge/ и четыре файла probes/; пополнение набора (#193) обошло её
+# стороной, и ПРИСТИННАЯ копия вышла красной -- контроль самопроверки отказал
+# целиком («мутации ничего не докажут»), то есть зубы стенда перестали мерить
+# вовсе, а причина выглядела дефектом инструментов. Остальные файлы лежат в
+# каталогах, которые целиком копировать нельзя (корень несёт образы и сборки),
+# поэтому они названы поимённо -- и ровно поэтому рядом стоит check_copy_list:
+# перечень, живущий рядом со своим домом, обязан читаться из дома. Дом здесь --
+# текст сценариев и мутаций, где путь внутри копии пишется формой ниже.
+COPIED_FILES: tuple[str, ...] = (
+    "claude_patch.py",
+    "set-model-costs.py",
+    "claude-patch-all.sh",
     # Дом словарей вердиктов (волна 40b): без него копия отказывает кодом 2 на
     # первом же чтении словаря, и контроль без мутации красен -- мутации тогда
     # не доказывают ничего.
-    shutil.copy2(ROOT / "tweakcc-patch.js", root / "tweakcc-patch.js")
-    shutil.copy2(ROOT / "scripts" / "probes-sync.sh", root / "scripts" / "probes-sync.sh")
-    # CONSTRAINT: каталоги канона копируются ЦЕЛИКОМ -- перечня имён здесь нет
-    # по той же причине, что и в toy_kit. Прежняя редакция держала шесть имён
-    # judge/ и четыре файла probes/; пополнение набора (#193) обошло её
-    # стороной, и ПРИСТИННАЯ копия вышла красной -- контроль самопроверки
-    # отказал целиком («мутации ничего не докажут»), то есть зубы стенда
-    # перестали мерить вовсе, а причина выглядела дефектом инструментов.
-    # judge/compact.py уже скопирован выше из COMPACT (мутации правят именно
-    # его) -- dirs_exist_ok позволяет лечь поверх, не затирая.
-    skip = shutil.ignore_patterns("__pycache__", "records", "labelled", "*.pyc")
-    shutil.copytree(ROOT / "judge", root / "judge", ignore=skip, dirs_exist_ok=True)
-    shutil.copytree(ROOT / "probes", root / "probes", ignore=skip, dirs_exist_ok=True)
+    "tweakcc-patch.js",
+    "tools/judge-tools-bench.py",
+    "tools/probe-bench.js",
+    # Сценарий 41 гоняет checks-teeth.py сабпроцессом: без копии мутация по
+    # нему применялась бы к живому дереву, а сценарий мерил бы нетронутый файл.
+    "tools/checks-teeth.py",
+    "scripts/probes-sync.sh",
+)
+COPIED_DIRS: tuple[str, ...] = ("judge", "probes")
+COPY_SKIP = ("__pycache__", "records", "labelled", "*.pyc")
+
+_COPY_SITE = re.compile(
+    r'root\s*/\s*"([^"]+)"(?:\s*/\s*"([^"]+)")?(?:\s*/\s*"([^"]+)")?')
+
+
+def check_copy_list() -> int:
+    bad: list[str] = []
+    for rel in COPIED_FILES + COPIED_DIRS:
+        if not (ROOT / rel).exists():
+            bad.append(f"объявлен к копированию «{rel}», а в дереве его нет "
+                       f"-- устаревшее объявление")
+    dirs = {str(Path(rel).parent) for rel in COPIED_FILES} | set(COPIED_DIRS)
+    for parts in _COPY_SITE.findall(BENCH.read_text(encoding="utf-8")):
+        rel = "/".join(part for part in parts if part)
+        if rel in COPIED_FILES or rel in dirs:
+            continue
+        if rel.split("/", 1)[0] in COPIED_DIRS:
+            continue
+        bad.append(f"сценарии обращаются к «{rel}» внутри копии, "
+                   f"а перечень копирования его не несёт")
+    if bad:
+        for line in sorted(set(bad)):
+            print(f"judge-tools-bench: ОТКАЗ -- {line}")
+        return 4
+    return 0
+
+
+def copy_tree(root: Path) -> None:
+    for rel in COPIED_FILES:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, target)
+    skip = shutil.ignore_patterns(*COPY_SKIP)
+    for rel in COPIED_DIRS:
+        shutil.copytree(ROOT / rel, root / rel, ignore=skip, dirs_exist_ok=True)
 
 
 def run_copy(root: Path) -> subprocess.CompletedProcess[str]:
@@ -2998,6 +3031,10 @@ def main() -> int:
     # у corpus-tools-bench): рассинхрон таблиц сдвигает причины мутаций молча,
     # а непокрытый сценарий стенд доказывать не может в принципе.
     if check_tables():
+        return 4
+    # Там же и по той же причине: перечень копирования, потерявший жертву,
+    # превращает мутацию по ней в дефект стенда, а не в вердикт о продукте.
+    if check_copy_list():
         return 4
     return run_self_check() if args.self_check else run_scenarios()
 

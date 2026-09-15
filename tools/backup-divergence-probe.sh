@@ -194,12 +194,18 @@ mkcfg() { printf '{"ccVersion":"%s"}\n' "$1" > "$2"; }
 
 FAILED=0
 BADCASE=0
+# CONSTRAINT: счётчики ИСПОЛНЕННОГО. Объявленные числа выше до этой правки
+# только печатались в строке успеха, и четырнадцатый случай (или выпавший
+# тринадцатый) уезжал молча: прибор объявлял размер таблицы, но не мерил его.
+RUN_CASES=0
+RUN_MUTATIONS=0
 # $7 -- ПРИЧИНА, по которой обязан сработать страж. Без неё случай зачитывался
 # по родовому «FATAL:» (раунд 18, E-4): случай «цель не называет версию» прошёл
 # бы и тогда, когда страж отказал по расхождению с бэкапом, то есть проверял не
 # ту дверь. Для passed-случаев причина не нужна: их след -- GUARD-PASSED.
 run_case() {  # $1 имя, $2 исход, $3 цель, $4 бэкап, $5 конфиг, $6 хук, $7 причина, $8 заём, $9 объявление
   local name="$1" want="$2" cause="${7:-}" loan="${8:-}" notice="${9:-}" out rc got
+  RUN_CASES=$(( RUN_CASES + 1 ))
   if [[ "$want" == fired && -z "$cause" ]]; then
     echo "  КРАСНО $name: случай ждёт отказа, но не назвал причину" >&2
     BADCASE=1
@@ -302,6 +308,7 @@ MUT_OUT="$(BIN="$WORK/diverged" TWEAKCC_BACKUP="$WORK/backup" TWEAKCC_CFG="$CFG_
            TWEAKCC_RESTORE_PINNED="" CLAUDE_PATCH_PROBE_CFG_LOAN="" STAGE_HOOK="" \
            bash "$WORK/guard-no-probe-marker.sh" 2>&1)"; MUT_RC=$?
 set -e
+RUN_MUTATIONS=$(( RUN_MUTATIONS + 1 ))
 if [[ $MUT_RC -eq 0 && "$MUT_OUT" == *"GUARD-PASSED"* ]]; then
   echo "  RED   мутация без ветки probe-marker пропускает её собственный случай"
 else
@@ -327,6 +334,7 @@ LOAN_MUT_OUT="$(BIN="$WORK/diverged" TWEAKCC_BACKUP="$WORK/backup" TWEAKCC_CFG="
                 TWEAKCC_RESTORE_PINNED="" CLAUDE_PATCH_PROBE_CFG_LOAN="1" STAGE_HOOK="" \
                 bash "$WORK/guard-ignore-loan.sh" 2>&1)"; LOAN_MUT_RC=$?
 set -e
+RUN_MUTATIONS=$(( RUN_MUTATIONS + 1 ))
 if [[ $LOAN_MUT_RC -eq 1 && "$LOAN_MUT_OUT" == *"FATAL:"* \
       && "$LOAN_MUT_OUT" == *"has two possible meanings"* ]]; then
   echo "  RED   мутация, игнорирующая заём, отказывает собственному случаю займа"
@@ -334,6 +342,28 @@ else
   echo "  КРАСНО мутация займа дала ЧУЖУЮ причину (rc=$LOAN_MUT_RC)" >&2
   echo "$LOAN_MUT_OUT" | sed 's/^/        /' >&2
   FAILED=1
+fi
+
+# CONSTRAINT: перечень читается из ТЕКСТА самого прибора и из ФАКТА прогона,
+# и оба обязаны сойтись с объявлением. Одной стороны мало: счётчик прогона
+# слеп к случаю, который забыли позвать, а ценз текста -- к случаю, который
+# позвали, но он не доехал до сравнения. Пусто -- отказ, а не ноль: нулевой
+# ценз означает, что сменилась форма записи вызовов, и сверять стало нечем.
+__declared_cases=$(grep -cE '^run_case ' "$0" || true)
+__declared_muts=$(grep -cE '^python3 - "\$WORK/guard\.sh"' "$0" || true)
+if [[ -z "$__declared_cases" || "$__declared_cases" -eq 0 \
+      || -z "$__declared_muts" || "$__declared_muts" -eq 0 ]]; then
+  echo "backup-divergence-probe: ОТКАЗ -- в тексте прибора не нашлось ни одного" >&2
+  echo "  вызова случая (${__declared_cases:-0}) или блока мутации (${__declared_muts:-0}):" >&2
+  echo "  форма записи сменилась, перечень сверять не с чем" >&2
+  exit 2
+fi
+if (( __declared_cases != EXPECTED_SCENARIOS || RUN_CASES != EXPECTED_SCENARIOS \
+      || __declared_muts != EXPECTED_MUTATIONS || RUN_MUTATIONS != EXPECTED_MUTATIONS )); then
+  echo "backup-divergence-probe: ОТКАЗ -- таблица разошлась с объявлением:" >&2
+  echo "  случаев объявлено $EXPECTED_SCENARIOS, в тексте $__declared_cases, исполнено $RUN_CASES" >&2
+  echo "  мутаций объявлено $EXPECTED_MUTATIONS, в тексте $__declared_muts, исполнено $RUN_MUTATIONS" >&2
+  exit 2
 fi
 
 __DONE=1   # таблица пройдена целиком; дальше только вердикт

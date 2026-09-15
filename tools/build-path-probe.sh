@@ -174,7 +174,12 @@ OUR_MARKER='baseURL:/^claude/i.test('
 TWEAKCC_BACKUP="$HOME/.tweakcc/native-binary.backup"
 
 VERSIONS="$HOME/.local/share/claude/versions"
-CASES=abcdurxplkmnv
+CASES_DEFAULT=abcdurxplkmnv
+CASES="$CASES_DEFAULT"
+# Буквы случаев, которые ДОКАЗЫВАЮТ зубы (мутационные контроли): зелёная строка
+# прогона без единого из них обещала бы доказательство, которого не было.
+# Читаются и условием вердикта, и текстом его отказа -- дом один.
+CONTROL_CASES=cduvxrplkm
 # Owner totals across the self-checking cases. Раньше эти два числа стояли
 # ГОЛЫМИ объявлениями: их читал только гейт чисел в прозе, а сам прибор их не
 # сверял ни с чем -- правка таблицы случая без правки числа проходила молча,
@@ -216,6 +221,51 @@ if [[ -z "$CASES" ]]; then
 fi
 
 
+# CONSTRAINT: набор случаев живёт в ТРЁХ местах -- в строке по умолчанию выше,
+# в объявлениях функций и в ветвях, которые их зовут (ранние, до материального
+# гейта, и общий диспетчер в конце). Перечень рядом со своим домом уже стоил
+# зуба: в CASES не было буквы `n`, и случай, объявленный README, гонялся лишь
+# по ручному --case. Ценз ниже читает все три множества из ТЕКСТА этого файла
+# и требует их совпадения; расхождение -- отказ прибора (код 2), а не вердикт
+# о ветке сборки. Пустой результат любого из трёх замеров -- смена формы
+# объявления, тот же отказ: пусто не ноль.
+__cases_declared=$(grep -oE '^case_[a-z]\(\) \{' "$0" | sed 's/^case_\(.\)().*/\1/' | sort -u | tr -d '\n' || true)
+__cases_early=$(grep -oE '^if \[\[ "\$CASES" == \*[a-z]\* \]\]; then' "$0" | sed 's/.*== \*\(.\)\*.*/\1/' | sort -u | tr -d '\n' || true)
+__cases_disp=$(grep -oE '^ +[a-z]\) case_[a-z] ;;' "$0" | sed 's/^ *\(.\)).*/\1/' | sort -u | tr -d '\n' || true)
+__cases_called=$(printf '%s%s' "$__cases_early" "$__cases_disp" | grep -o . | sort -u | tr -d '\n' || true)
+__cases_listed=$(printf '%s' "$CASES_DEFAULT" | grep -o . | sort -u | tr -d '\n' || true)
+if [[ -z "$__cases_declared" || -z "$__cases_called" || -z "$__cases_listed" ]]; then
+  echo "build-path-probe: ОТКАЗ -- перечень случаев не читается из текста прибора" >&2
+  echo "  объявлено «${__cases_declared}», зовётся «${__cases_called}», в наборе «${__cases_listed}»" >&2
+  echo "  Форма объявления случая или его вызова сменилась: ценз недействителен." >&2
+  exit 2
+fi
+if [[ "$__cases_declared" != "$__cases_called" || "$__cases_declared" != "$__cases_listed" ]]; then
+  echo "build-path-probe: ОТКАЗ -- набор случаев разошёлся с прибором" >&2
+  echo "  функций: $__cases_declared" >&2
+  echo "  зовётся: $__cases_called" >&2
+  echo "  в наборе по умолчанию: $__cases_listed" >&2
+  exit 2
+fi
+for __c in $(printf '%s' "$CASES" | grep -o .); do
+  case "$__cases_declared" in
+    *"$__c"*) ;;
+    *) echo "build-path-probe: ОТКАЗ -- запрошен случай «${__c}», которого прибор не несёт" >&2
+       exit 2 ;;
+  esac
+done
+# Контроли -- подмножество случаев: буква, объявленная доказывающей зубы, но не
+# существующая как случай, никогда не совпала бы с набором прогона, и вердикт
+# молча уехал бы в ветвь «зубы не доказаны».
+for __c in $(printf '%s' "$CONTROL_CASES" | grep -o .); do
+  case "$__cases_declared" in
+    *"$__c"*) ;;
+    *) echo "build-path-probe: ОТКАЗ -- контроль «${__c}» объявлен, а случая с такой буквой нет" >&2
+       exit 2 ;;
+  esac
+done
+unset __c
+
 ALL_CASES="$CASES"
 
 # Буквы удержавшихся случаев логической половины (задача #112). Список
@@ -239,6 +289,11 @@ fi
 
 case_k() {   # чужой probe-marker: отказ до снимка, игрушечный HOME
   local d home cfg before after out rc self kit mut mout mrc ver patched pristine f discrepancies=0
+  # CONSTRAINT: вклад случая мерится ФАКТОМ, как у соседей (l/m/n/v).
+  # «По построению» здесь уже стояло, и это было объявление без прибора:
+  # выпавший сценарий или мутация уехали бы молча, а сумма EXPECTED_*
+  # продолжала бы сходиться с объявленным вкладом.
+  local __k_scn=0 __k_mut=0
   d="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe-k.XXXXXX")"
   home="$d/home"; cfg="$home/.tweakcc/config.json"
   ver=9.9.9
@@ -269,6 +324,7 @@ case_k() {   # чужой probe-marker: отказ до снимка, игруш
     return 1
   fi
   echo "  ok     K: marker config is refused with code 2 before the file changes"
+  __k_scn=$((__k_scn+1))
 
   # Контроль исполняет тот же вход по копии зонда без одной ветки стража. Он
   # обязан потерять ИМЕННО текст отказа; код ребёнка не используется как зуб,
@@ -304,6 +360,7 @@ PY_K_MUT
   if [[ "$mout" != *"ccVersion is the build-path probe marker"* \
         && -n "$before" && "$before" == "$after" ]]; then
     echo "  RED    K mutation: removing the startup guard removes its own refusal text (child rc=$mrc)"
+    __k_mut=$((__k_mut+1))
   else
     echo "  FAIL   K mutation kept the guard text or changed the toy config (rc=$mrc)" >&2
     printf '%s\n' "$mout" | sed 's/^/        /' >&2
@@ -311,6 +368,11 @@ PY_K_MUT
     return 1
   fi
   rm -rf "$d"
+  if (( __k_scn != CASE_K_SCENARIOS || __k_mut != CASE_K_MUTATIONS )); then
+    echo "  ОТКАЗ: случай (k) исполнил сценариев $__k_scn при объявленных $CASE_K_SCENARIOS," \
+         "мутаций $__k_mut при объявленных $CASE_K_MUTATIONS" >&2
+    return 2
+  fi
   echo "build-path-probe K: case held and its control showed teeth"
 }
 
@@ -3710,10 +3772,19 @@ if [[ $FAILED -eq 0 ]]; then
   # Фраза про зубы принадлежит контролю, а не набору: случаи (c), (d), (u) и
   # (x) -- мутационные контроли, и без них зелёная строка обещала бы
   # доказательство, которого прогон не получал (раунд 18, H-2).
-  if [[ "$ALL_CASES" == *c* || "$ALL_CASES" == *d* || "$ALL_CASES" == *u* || "$ALL_CASES" == *v* || "$ALL_CASES" == *x* || "$ALL_CASES" == *r* || "$ALL_CASES" == *p* || "$ALL_CASES" == *l* || "$ALL_CASES" == *k* || "$ALL_CASES" == *m* ]]; then
+  # CONSTRAINT: буквы контролей объявлены ОДИН раз (CONTROL_CASES, у своего
+  # дома выше); прежде их перечисляли и условие, и текст отказа, и перечень в
+  # тексте расходился бы с условием молча -- оператор читал бы список, по
+  # которому прибор уже не судит.
+  __control_ran=0
+  for __cc in $(printf '%s' "$CONTROL_CASES" | grep -o .); do
+    case "$ALL_CASES" in *"$__cc"*) __control_ran=1 ;; esac
+  done
+  if [[ $__control_ran -eq 1 ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
   else
-    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (c/d/u/v/x/r/p/l/k/m) не гонялся -- зубы не доказаны"
+    __control_list=$(printf '%s' "$CONTROL_CASES" | sed 's/./&\//g; s/\/$//')
+    echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (${__control_list}) не гонялся -- зубы не доказаны"
   fi
 else
   echo "build path: $FAILED assertion(s) failed; logs under $ROOT (kept)" >&2

@@ -27,7 +27,29 @@ if [[ -z "$IMG" || ! -x "$IMG" ]]; then
   exit 2
 fi
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
-export CLAUDE_JUDGE_CARRIER="${CLAUDE_JUDGE_CARRIER:-mod}"
-export CLAUDE_FORM_CARRIER="${CLAUDE_FORM_CARRIER:-mod}"
-export CLAUDE_IDLE_CARRIER="${CLAUDE_IDLE_CARRIER:-mod}"
+# CONSTRAINT: имена ручек носителя здесь НЕ ПЕРЕЧИСЛЯЮТСЯ. Их дом -- вставки
+# tweakcc-patch.js: каждая ручка существует ровно потому, что в образ вписан
+# сплайс, который её читает, и любой список рядом был бы проекцией этого дома.
+# Проекция уже стоила бы молча: четвёртая ручка, добавленная сплайсом, здесь
+# осталась бы невыставленной, мод не стал бы носителем своей пробы, а патч
+# продолжил бы работать -- расхождение без единого отказа. Форма чтения в доме
+# устойчива (сплайс обязан спросить окружение), поэтому перечень берётся
+# ОТТУДА. Пустой результат -- НЕ ноль ручек, а смена формы в доме: отказ.
+HOME_SRC="$KIT/tweakcc-patch.js"
+if [[ ! -f "$HOME_SRC" ]]; then
+  echo "claude-mods: нет дома ручек носителя ($HOME_SRC) -- перечень взять неоткуда" >&2
+  exit 2
+fi
+# CONSTRAINT: `|| true` здесь обязателен -- под `set -euo pipefail` код
+# командной подстановки становится кодом ПРИСВАИВАНИЯ, и ноль совпадений
+# (именно тот случай, который обязан назваться) убил бы скрипт до отказа ниже.
+CARRIERS="$(grep -oE 'process\.env\.CLAUDE_[A-Z0-9_]*_CARRIER' "$HOME_SRC" \
+            | sed 's/^process\.env\.//' | sort -u || true)"
+if [[ -z "$CARRIERS" ]]; then
+  echo "claude-mods: в $HOME_SRC не нашлось ни одной ручки носителя -- форма чтения в доме сменилась, перечень недействителен" >&2
+  exit 2
+fi
+for name in $CARRIERS; do
+  export "$name=${!name:-mod}"
+done
 exec "$IMG" --plugin-dir "$PLUGIN" "$@"
