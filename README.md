@@ -6,8 +6,8 @@ installs three mechanisms in it: multi-provider model routing, the
 brief ready, is the model proportionate, is a fan-out warranted), and the
 **fleet idle watcher** (it catches the case of "the main loop is working
 while the subagents sit idle" — a case that no dispatch statistics can see
-by design). Both mechanisms share one core and are configured by a single
-`probes.toml` file.
+by design). The latter two share one core and are configured by a single
+`probes.toml` file; provider routing is configured elsewhere.
 
 The patch lives in the image itself, not in a hook: a hook does not see
 everything and can be worked around, an injection cannot. Nothing is
