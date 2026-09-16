@@ -14,6 +14,11 @@
 set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# CONSTRAINT: путь к инструментам стенда снимается ЗДЕСЬ, один раз: self_check
+# ниже переназначает KIT на игрушечный кит (копию, которую сам же мутирует),
+# и инструмент, взятый из $KIT, читался бы из мутируемой копии -- мутация
+# прибора стала бы невидимой.
+REAL_KIT=$KIT
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
 EXPECTED_SCENARIOS=11
 EXPECTED_MUTATIONS=12
@@ -658,27 +663,15 @@ scenario_7() {   # путь отказа обязан КОНЧАТЬСЯ, а н�
   ok '7 первый писатель не вошёл в cp: путь отказа кончился в бюджете и не бросил сироту'
 }
 
+# Правило открытия -- ЕДИНСТВЕННЫЙ дом tools/heredoc-anchor.py (у этой копии
+# никогда не было ни отсева стаба, ни якоря мутации); инструмент берётся из
+# НАСТОЯЩЕГО кита (REAL_KIT), а не из переназначаемого KIT. Отказ инструмента
+# (код 2) -- «прибор не может мерить», а не «тел нет».
 python_heredoc_bodies() {   # файл-жертва, каталог для тел; печатает число тел
-  local f="$1" out="$2" line pre rest mid tag n=0
-  local OPEN_RE="<<'([A-Za-z_][A-Za-z0-9_]*)'[[:space:]]*\$"
-  tag=''
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ -n "$tag" ]]; then
-      if [[ "$line" == "$tag" ]]; then tag=''; continue; fi
-      printf '%s\n' "$line" >> "$out/body.$n.py"
-      continue
-    fi
-    pre=${line%%#*}
-    [[ "$pre" == *python3* ]] || continue
-    [[ "$pre" =~ (^|[^A-Za-z0-9_])python3([^A-Za-z0-9_]|$) ]] || continue
-    rest=${pre#*python3}
-    mid=${rest%<<*}
-    [[ "$mid" == *[\|\;\&]* ]] && continue
-    [[ "$pre" =~ $OPEN_RE ]] || continue
-    tag=${BASH_REMATCH[1]}
-    n=$((n+1)); : > "$out/body.$n.py"
-  done < "$f"
-  printf '%s\n' "$n"
+  local __n __rc
+  __n=$(python3 "$REAL_KIT/tools/heredoc-anchor.py" --bodies "$1" "$2"); __rc=$?
+  (( __rc == 0 )) || return 2
+  printf '%s\n' "$__n"
 }
 
 # Страж разбираемости жертвы: bash -n плюс py_compile каждого питоньего тела.
@@ -688,7 +681,7 @@ sh_victim_parses() {   # файл-жертва
   local f="$1" dir n i
   bash -n "$f" 2>/dev/null || return 2
   dir=$(mktemp -d "${TMPDIR:-/tmp}/heredoc.XXXXXX") || return 2
-  n=$(python_heredoc_bodies "$f" "$dir")
+  n=$(python_heredoc_bodies "$f" "$dir") || return 2
   # BSD seq при пустом диапазоне (seq 1 0) печатает «1 0» ВНИЗ, а не пустоту:
   # без этой проверки страж гонял бы py_compile по несуществующим файлам
   # и краснел на жертвах без питоньих тел (замерено на этой машине).

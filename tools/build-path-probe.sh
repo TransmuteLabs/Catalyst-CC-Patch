@@ -3236,34 +3236,15 @@ case_d() {
 # проверяемого механизма, а испорченный прибор (та же дыра, что полоса E
 # закрыла у пяти стендов). Форма стража переиспользована из
 # tools/corpus-tools-bench.sh (python_heredoc_bodies + sh_victim_parses),
-# второй экземпляр правила не изобретался. Правило открытия -- то же, что у
-# гейта PYCOMPILE конвейера: часть строки до первого '#' содержит python3
-# границей слова, между python3 и открытием нет '|' ';' '&', строка КОНЧАЕТСЯ
-# открытием <<'ТЕГ'; тело -- до строки, равной ТЕГУ дословно. Хвост после
-# тега отсекает упоминания в комментариях и примерах -- иначе строка-пример
-# проглотила бы хвост файла как «тело». Провал любого звена -- ненулевой
+# второй экземпляр правила не изобретался: правило открытия живёт в
+# единственном доме tools/heredoc-anchor.py, отказ инструмента (код 2) --
+# «прибор не может мерить», а не «тел нет». Провал любого звена -- ненулевой
 # возврат; вызывающий переводит его в код 2 «прибор не может мерить».
 python_heredoc_bodies() {   # файл-жертва, каталог для тел; печатает число тел
-  local f="$1" out="$2" line pre rest mid tag n=0
-  local OPEN_RE="<<'([A-Za-z_][A-Za-z0-9_]*)'[[:space:]]*\$"
-  tag=''
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ -n "$tag" ]]; then
-      if [[ "$line" == "$tag" ]]; then tag=''; continue; fi
-      printf '%s\n' "$line" >> "$out/body.$n.py"
-      continue
-    fi
-    pre=${line%%#*}
-    [[ "$pre" == *python3* ]] || continue
-    [[ "$pre" =~ (^|[^A-Za-z0-9_])python3([^A-Za-z0-9_]|$) ]] || continue
-    rest=${pre#*python3}
-    mid=${rest%<<*}
-    [[ "$mid" == *[\|\;\&]* ]] && continue
-    [[ "$pre" =~ $OPEN_RE ]] || continue
-    tag=${BASH_REMATCH[1]}
-    n=$((n+1)); : > "$out/body.$n.py"
-  done < "$f"
-  printf '%s\n' "$n"
+  local __n __rc
+  __n=$(python3 "$HERE/tools/heredoc-anchor.py" --bodies "$1" "$2"); __rc=$?
+  (( __rc == 0 )) || return 2
+  printf '%s\n' "$__n"
 }
 
 victim_parses() {   # файл-жертва: .py -- py_compile; .sh -- bash -n и тела heredoc
@@ -3276,7 +3257,7 @@ victim_parses() {   # файл-жертва: .py -- py_compile; .sh -- bash -n �
   esac
   bash -n "$f" 2>/dev/null || return 2
   dir=$(mktemp -d "${TMPDIR:-/tmp}/heredoc.XXXXXX") || return 2
-  n=$(python_heredoc_bodies "$f" "$dir")
+  n=$(python_heredoc_bodies "$f" "$dir") || return 2
   # BSD seq при пустом диапазоне (seq 1 0) печатает «1 0» ВНИЗ, а не пустоту:
   # без этой проверки страж гонял бы py_compile по несуществующим файлам и
   # краснел на жертвах без питоньих тел (замерено на этой машине).

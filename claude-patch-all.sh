@@ -2852,6 +2852,22 @@ if (( __rc != 0 )); then
   exit 1
 fi
 
+# Зубы якоря heredoc'ов -- ДО разбора: правило «строка открывает питоновский
+# heredoc» вынесено в единственный дом tools/heredoc-anchor.py, и его форма
+# обязана держаться на синтетике раньше, чем по нему что-либо размечается.
+echo "==> Зубы якоря heredoc'ов"
+python3 "$(dirname "$0")/tools/heredoc-anchor.py" --self-check 9>&- || {
+  __rc=$?
+  case $__rc in
+    2) echo "ЯКОРЬ HEREDOC'ОВ НЕ ИЗМЕРЯЛ: прибор не может мерить (rc=2)" >&2
+       exit 2 ;;
+    1) echo "ЯКОРЬ HEREDOC'ОВ БЕЗ ЗУБОВ: сужение правила не покраснело" >&2
+       exit 1 ;;
+    *) echo "ЯКОРЬ HEREDOC'ОВ УПАЛ: сценарий не сошёлся (rc=$__rc)" >&2
+       exit 1 ;;
+  esac
+}
+
 # The verify block is a python heredoc, and NOTHING was looking inside it:
 # `bash -n` treats a heredoc as data and `node --check` has no opinion about
 # python. So a stray parenthesis in a check was found only AFTER the patch stage
@@ -2861,7 +2877,7 @@ fi
 # that cannot run is not a lenient gate, it is an absent one.
 echo "==> Разбор блока проверок"
 python3 - "$0" <<'PYCOMPILE'
-import glob, io, os, re, sys, warnings
+import glob, importlib.util, io, os, sys, warnings
 
 path = sys.argv[1]
 here = os.path.dirname(os.path.abspath(path))
@@ -2889,202 +2905,30 @@ def check(src, name):
 # (Круг 28, F-13: прежде перечислялись heredoc'и ТОЛЬКО самого конвейера,
 # а питоньи тела остальных .sh -- зонда пути, стенда корпусных инструментов --
 # гейт не видел никогда, при целом объявлении «ВСЕ heredoc'и».)
-# Якорь: строка ОТКРЫВАЕТ питоновский heredoc. Круг 28, F-13 держал этот
-# признак закрытым списком ХВОСТОВ (конец строки плюс `; then|do|fi|else|done|
-# esac`), и список молча отставал от кита: живые формы `python3 - "$p" <<'PY' &`,
-# `out=$(python3 - "$c" 2>&1 <<'WRAP'`, `out=$(... <<'TAG' 2>&1` и гейт имён
-# переменных `python3 - ... <<'SHVARS' || { ...; }` под него не подходили ВООБЩЕ
-# -- ЧЕТЫРЕ питоновских тела не компилировал никто, и слепота выглядела ровно
-# как исправность. Белый список хвостов ошибается МОЛЧА, поэтому он заменён на
-# признак самого языка: открытие `<<'TAG'` стоит вне кавычек и вне комментария
-# (только так отсекается упоминание `echo "python3 - <<'PY'"`), слово python3 --
-# КОМАНДА своего сегмента (после ключевых слов и присваиваний окружения), между
-# ними нет разделителя команд. Хвост после тега не разбирается: в bash он на
-# открытие не влияет. Ошибка в обратную сторону -- ложное открытие -- краснеет
-# ВСЛУХ («HEREDOC НЕ ЗАКРЫТ»), а не молча, и это единственное направление
-# ошибки, допустимое для гейта.
-heredoc_open = re.compile(r"<<'([A-Za-z_][A-Za-z0-9_]*)'")
-shell_lead = ('if', '!', 'then', 'else', 'elif', 'do', 'while', 'until',
-              'time', '{', '(')
-shell_assign = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
-
-
-def _shell_cells(line):
-    """Индексы символов строки ВНЕ кавычек и ДО начала комментария.
-
-    Кавычки и решают, упоминание перед нами или команда, поэтому разбор идёт по
-    символам: `#` внутри кавычек комментария не открывает, `'` внутри двойных
-    кавычек строки не открывает, а `$(` восстанавливает НЕЗАКАВЫЧЕННЫЙ контекст
-    внутри двойных -- без этого живая форма `BIN="$(python3 - <<'PY'` читалась
-    бы как текст в кавычках.
-    """
-    cells, stack, quote, i, n = [], [], None, 0, len(line)
-    while i < n:
-        c = line[i]
-        if quote in (None, '"') and c == '$' and i + 1 < n and line[i + 1] == '(':
-            stack.append(quote)
-            quote = None
-            cells.extend((i, i + 1))
-            i += 2
-            continue
-        if quote is None and c == ')' and stack:
-            quote = stack.pop()
-            cells.append(i)
-            i += 1
-            continue
-        if quote is None:
-            if c == '\\':
-                i += 2
-                continue
-            if c in '"\'':
-                quote = c
-                i += 1
-                continue
-            if c == '#' and (i == 0 or line[i - 1] in ' \t;&|(<>'):
-                break
-            cells.append(i)
-        elif quote == '"' and c == '\\':
-            i += 2
-            continue
-        elif c == quote:
-            quote = None
-        i += 1
-    return cells
-
-
-def _words(text, base, cells):
-    """Слова текста с их индексами; границей служит пробел ВНЕ кавычек."""
-    out, i, n = [], 0, len(text)
-    while i < n:
-        while i < n and text[i] in ' \t' and base + i in cells:
-            i += 1
-        if i >= n:
-            break
-        start = i
-        while i < n and not (text[i] in ' \t' and base + i in cells):
-            i += 1
-        out.append((start, i))
-    return out
-
-
-def _is_command_word(line, at, cells):
-    """Слово с python3 на позиции at -- КОМАНДА своего сегмента.
-
-    `cat > "$1/python3" <<'TAG'` -- питон тут не запускается, он ПИШЕТСЯ: тело
-    heredoc'а башовое, и компиляция его как Python краснит гейт на исправном
-    ките (измерено на волне pty: STUBPTY@4823 в corpus-tools-bench.sh). Правило
-    «python3 в конце пути» для этого негодно: оно погасило бы и НАСТОЯЩИЙ вызов
-    `/usr/bin/python3 - <<'PY'`, то есть закрыло бы гейту глаза на живое тело.
-    Различает их позиция слова: у стаба команда -- `cat`, питон стоит аргументом
-    редиректа. Тот же вопрос решают копии `python_heredoc_bodies` в стендах кита
-    (corpus-tools-bench.sh, build-path-probe.sh, probes-sync-bench.sh) -- правилом
-    грубее и в РАЗНЫХ редакциях (только первая отсеивает хвост пути), якоря
-    мутации у них нет; сведение их к одному дому идёт отдельной задачей (#220).
-    """
-    start = 0
-    for i in range(at):
-        # `>|` и `>&` -- РЕДИРЕКТЫ, а не разделители: приняв их за границу
-        # сегмента, гейт сделал бы цель редиректа «командой» и снова принял
-        # башовый стаб `cat >| "$d/python3"` за вызов питона.
-        if i in cells and line[i] in ';|&({`' and not (
-                i and line[i - 1] in '<>' and line[i] in '|&'):
-            start = i + 1
-    for ws, we in _words(line[start:], start, cells):
-        word = line[start + ws:start + we]
-        if word in shell_lead or shell_assign.match(word):
-            if start + ws <= at < start + we:
-                return False    # python3 внутри присваивания -- не команда
-            continue
-        return start + ws <= at < start + we
-    return False
-
-
-def _opener_match(line):
-    """Открытие питоновского heredoc'а в строке, либо None."""
-    cells = set(_shell_cells(line))
-    for m in heredoc_open.finditer(line):
-        if m.start() not in cells:
-            continue            # упоминание внутри кавычек -- не открытие
-        head = line[:m.start()]
-        # ВСЕ вхождения, а не первое: строка `cat > "$d/python3" && python3 -
-        # <<'PY'` несёт и имя файла, и вызов -- открытие принадлежит тому, до
-        # которого от него нет разделителя команд.
-        at = head.find("python3")
-        while at >= 0:
-            end = at + len("python3")
-            edge = ((at == 0 or not (head[at - 1].isalnum() or head[at - 1] == '_'))
-                    and (end >= len(head)
-                         or not (head[end].isalnum() or head[end] == '_')))
-            if edge and _is_command_word(line, at, cells) and not any(
-                    head[k] in ';|' or (head[k] == '&' and head[k - 1] not in '<>')
-                    for k in range(end, len(head)) if k in cells):
-                return m
-            at = head.find("python3", at + 1)
-    return None
-
-# ЗУБЫ НА ЯКОРЬ (круг 28, F-13). Сужение якоря -- например, возврат к «кончается
-# открытием без хвостов» -- снова оставило бы форму `; then` невидимой, и
-# никакой прогон этого не заметил бы: гейт, не видящий тела, выглядит ровно
-# как гейт, который его проверил. Синтетика с известным ответом краснит
-# такое сужение сама, ДО всякого обращения к дереву.
-for _line, _want in (
-    ('if ! python3 - "$PIPELINE" "$mut" <<\'MUTX\'; then', True),
-    ('  python3 - "$X" <<\'PY\'', True),
-    ('BIN="$(python3 - <<\'PY\'', True),
-    ('# пример: python3 - <<\'PY\' и текст', False),
-    ('    # python3 - <<\'PY\' с отступом', False),
-    # Комментарий обязан гаситься САМ, а не по счастью: скобка в прозе открыла
-    # бы новый сегмент, и python3 стал бы в нём первым словом.
-    ('# и тогда (python3 - <<\'PY\') упадёт', False),
-    ('#python3 - <<\'PY\'', False),
-    # Открытие принадлежит СЛЕДУЮЩЕЙ команде: разделитель стоит ДО тега.
-    ('python3 -c pass; cat <<\'DATA\'', False),
-    ('python3 -c pass & cat <<\'DATA\'', False),
-    ('echo "python3 - <<\'PY\'"', False),
-    ('grep -n "python3 - <<\'PY\'" kit.sh', False),
-    # УПОМИНАНИЕ решают кавычки, а не хвост строки: `; echo done` открытие не
-    # отменяет (тело начинается со следующей строки и кончается тегом), и
-    # прежний отказ на этой форме был слепотой, а не строгостью.
-    ('python3 - <<\'X\'; echo done', True),
-    # Четыре живые формы кита, которых прежний якорь не видел ВООБЩЕ.
-    ('python3 - "$(dirname "$0")" <<\'SHVARS\' || { echo "упал" >&2; exit 1; }', True),
-    ('  out=$(python3 - "$carved" "$list" 0.0.900 "$h900" 2>&1 <<\'WRAP\'', True),
-    ('  out=$(CPK="$K" CPH="$home" python3 - <<\'DLONLY40C\' 2>&1', True),
-    ('  python3 - "$path" <<\'PY\' &', True),
-    # `#` внутри кавычек комментария не открывает -- прежний якорь (`^[^#]*`)
-    # на этой форме терял тело молча.
-    ('python3 - "$d#tag" <<\'PY\'', True),
-    # А вот python3 АРГУМЕНТОМ чужой команды тело не открывает: компилировать
-    # башовый ввод grep как Python -- та же краснота на исправном ките.
-    ('grep python3 "$f" <<\'DATA\'', False),
-    # ИМЯ ФАЙЛА, не интерпретатор: цель редиректа. Форма измерена на волне pty.
-    ('  cat > "$1/python3" <<\'STUBPTY\'', False),
-    ('cat >> "$d/python3" <<\'T\'', False),
-    # Пробел вокруг скобки НЕОБЯЗАТЕЛЕН -- эти три формы гейт раньше принимал
-    # за вызов и кормил компилятор башовым телом (найдено аудитом 16.09).
-    ('cat >"$d/python3" <<\'T\'', False),
-    ('cat >>"$d/python3" <<\'T\'', False),
-    ('cat >| "$d/python3" <<\'T\'', False),
-    ('cat >|"$d/python3" <<\'T\'', False),
-    # А вот ВЫЗОВ по абсолютному пути обязан остаться видимым: правило по форме
-    # пути («хвост /python3») погасило бы эту строку вместе со стабом.
-    ('/usr/bin/python3 - <<\'PY\'', True),
-    ('"$VENV/bin/python3" - <<\'PY\'', True),
-    # Смешанная строка: якорь жадный и цепляется за ПОСЛЕДНЕЕ вхождение, поэтому
-    # запись файла рядом с вызовом не имеет права погасить тело heredoc'а.
-    ('cat > "$d/python3" && python3 - <<\'PY\'', True),
-):
-    if bool(_opener_match(_line)) is not _want:
-        print("ЯКОРЬ HEREDOC ПОТЕРЯЛ ФОРМУ: ожидалось "
-              + ("принять" if _want else "отвергнуть") + f": {_line!r}")
-        sys.exit(1)
+# Правило «строка открывает питоновский heredoc» живёт в ЕДИНСТВЕННОМ доме --
+# tools/heredoc-anchor.py: прежняя местная копия расходилась с копиями
+# стендов кита, и ошибка каждой молчала. Зубы формы гоняет стадия выше; здесь
+# правило только загружается, и отказ загрузки -- отказ стадии, а не откат к
+# собственной редакции.
+_anchor_spec = importlib.util.spec_from_file_location(
+    'heredoc_anchor', os.path.join(here, 'tools/heredoc-anchor.py'))
+if _anchor_spec is None or _anchor_spec.loader is None:
+    print("ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: нет tools/heredoc-anchor.py")
+    sys.exit(2)
+_anchor = importlib.util.module_from_spec(_anchor_spec)
+try:
+    _anchor_spec.loader.exec_module(_anchor)
+except Exception as _e:    # отказ загрузки -- не откат к своей копии правила
+    print(f"ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: {_e}")
+    sys.exit(2)
+opener_match = _anchor.opener_match
 
 
 def scan_heredocs(lines, where):
     """Все питоновские heredoc'и одного файла; (число, виден ли блок проверок)."""
     count, saw, i = 0, False, 0
     while i < len(lines):
-        m = _opener_match(lines[i])
+        m = opener_match(lines[i])
         if not m:
             i += 1
             continue
