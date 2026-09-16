@@ -69,6 +69,6 @@ D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL
 D40	claude-patch-all.sh	все 130 проверок конвейера сошлись	все 130 сошлись	опущенным существительным
 D41	claude-patch-all.sh	# docnum:synthetic-block -- этот блок ЕСТЬ сам гейт	# этот блок ЕСТЬ сам гейт	the pipeline runs 999 checks
 D42	claude-patch-all.sh	    """Все питоновские heredoc'и одного файла	    """corpus-tools-bench has 12 scenarios. Питоновские heredoc'и одного файла	объявлено «227 scenarios» (владелец corpus-tools-bench)
-D43	README.md	build-path-probe has 102 scenarios	build-path-probe has 92 scenarios	объявлено «102 scenarios» (владелец build-path-probe)
-D44	README.md	102 scenarios and 106 mutations	102 scenarios and 107 mutations	объявлено «106 mutations» (владелец build-path-probe)
+D43	README.md	build-path-probe has 104 scenarios	build-path-probe has 92 scenarios	объявлено «104 scenarios» (владелец build-path-probe)
+D44	README.md	104 scenarios and 107 mutations	104 scenarios and 108 mutations	объявлено «107 mutations» (владелец build-path-probe)
 D45	tools/corpus-tools-bench.sh	EXPECTED_SCENARIOS=236	EXPECTED_SCENARIO_COUNT=200	не объявляет свою величину
