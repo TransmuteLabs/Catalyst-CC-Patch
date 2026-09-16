@@ -5,9 +5,10 @@ Exit codes (subset of the kit-wide table in claude-patch-all.sh):
   0  every scenario passed; in --self-check every mutation reddened its owner
   1  a scenario failed, or a mutation did not redden its owning scenario
   2  the bench cannot measure: invocation is invalid, the pristine copy is red,
-     or a replacement BROKE THE VICTIM'S PARSE (circle 25, E-3) -- a scenario
+     a replacement BROKE THE VICTIM'S PARSE (circle 25, E-3) -- a scenario
      reddened by a parse error proves nothing, and the run stops BEFORE the
-     reddening count
+     reddening count -- or the kit's single-home heredoc rule
+     (tools/heredoc-anchor.py) refused to load
   4  the declared scenario or mutation count differs from the tables below,
      or some scenario has NO mutation of its own (circle 25, E-4: an uncovered
      scenario is a door without teeth)
@@ -48,8 +49,30 @@ PIPELINE = ROOT / "claude-patch-all.sh"
 # it), and it has a name here so that the copy list stays derived from the
 # path constants instead of repeating them.
 ROUTING = ROOT / "patch_claude_routing.py"
+# CONSTRAINT: the "this line opens a python heredoc" rule is loaded from the
+# kit's SINGLE home, tools/heredoc-anchor.py (wave 229): the local copy of
+# the rule was rougher and silently undercounted bodies, and a body the guard
+# never saw compiled exactly like a checked one. No scenario reads the file;
+# the bench itself does -- the copy list carries it as a dependency, for the
+# same one-way-census reason as ROUTING above.
+ANCHOR = ROOT / "tools" / "heredoc-anchor.py"
 EXPECTED_SCENARIOS = 13
 EXPECTED_MUTATIONS = 20
+
+# Load form mirrors the pipeline's PYCOMPILE stage: a load failure is a named
+# bench refusal (code 2, "cannot measure"), not a fallback to a local edition
+# of the rule and not an empty "no bodies" verdict.
+_anchor_spec = importlib.util.spec_from_file_location("heredoc_anchor", str(ANCHOR))
+if _anchor_spec is None or _anchor_spec.loader is None:
+    print("costs-bench: ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: нет tools/heredoc-anchor.py")
+    sys.exit(2)
+_anchor = importlib.util.module_from_spec(_anchor_spec)
+try:
+    _anchor_spec.loader.exec_module(_anchor)
+except Exception as _error:    # load refusal -- no fallback to a local rule copy
+    print(f"costs-bench: ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: {_error}")
+    sys.exit(2)
+opener_match = _anchor.opener_match
 
 
 class BenchFailure(AssertionError):
@@ -625,20 +648,18 @@ def run_scenarios() -> int:
 def shell_python_heredocs(text: str) -> list[str]:
     """Bodies of .sh-victim heredocs fed to python.
 
-    Same rule as the pipeline's PYCOMPILE gate (claude-patch-all.sh): the part
-    of the line before the first '#' contains python3 on a word boundary, no
-    '|' ';' '&' between python3 and the opening, and the line ENDS with the
-    <<'TAG' opening; the body runs to the line equal to TAG verbatim. The
-    end-of-line requirement keeps comment mentions out -- otherwise an example
-    line would swallow the rest of the file as a "body" and the guard would
-    redden a healthy victim.
+    The opening rule lives in its single home, tools/heredoc-anchor.py
+    (loaded at the top of this file); this wrapper only walks the lines and
+    collects each body between an opener line and the verbatim tag line. An
+    unclosed heredoc is a parse refusal (UnparsableVictim), not a silent
+    tail-to-EOF swallow: a body the guard never saw is indistinguishable
+    from a body it checked.
     """
     bodies: list[str] = []
-    opener = re.compile(r"^[^#]*\bpython3\b[^|;&]*<<'([A-Za-z_][A-Za-z0-9_]*)'\s*$")
     lines = text.split("\n")
     i = 0
     while i < len(lines):
-        match = opener.match(lines[i])
+        match = opener_match(lines[i])
         if match is None:
             i += 1
             continue
@@ -863,7 +884,8 @@ def check_tables() -> int:
 # product verdict. Entries with no mutation are dependencies of the product
 # under test, so the census is one-way by design.
 COPIED: tuple[str, ...] = tuple(
-    str(path.relative_to(ROOT)) for path in (COSTS, PATCHER, CORPUS, PIPELINE, BENCH, ROUTING))
+    str(path.relative_to(ROOT)) for path in
+    (COSTS, PATCHER, CORPUS, PIPELINE, BENCH, ROUTING, ANCHOR))
 
 _COPY_SITE = re.compile(r'root\s*/\s*"([^"]+)"(?:\s*/\s*"([^"]+)")?')
 
