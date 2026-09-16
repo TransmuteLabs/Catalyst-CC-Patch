@@ -19,11 +19,13 @@ tweakcc восстанавливает свой бэкап поверх назв
 
 Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
   0  каждая мутация покраснела СВОЮ проверку и только её
-  1  мутация прошла молча либо покрасила чужую дверь
+  1  мутация прошла молча либо покрасила чужую дверь; сюда же зуб входа,
+     который не поймал нарушенный контракт вызова раннера
   2  прибор не может мерить: якорь пропал/слишком широк, замена длиннее якоря,
      либо КОНТРОЛЬ провален -- названный образ красен ещё до мутаций; сюда же
      относится нарушенный контракт вызова: --jobs < 1 (круг 26, K-14)
   4  длина таблицы разошлась с объявленной (EXPECTED_MUTATIONS)
+     либо число зубов входа разошлось с EXPECTED_ENTRY_TEETH
   3  замок конвейера держит живая сборка -- НЕ МЕРИЛИ, повтор поможет
   5  мерить нечего: на этой машине нет собранного образа
   6  сломано окружение либо машинерия замка: нет bash, нет
@@ -52,6 +54,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 31
+# Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
+EXPECTED_ENTRY_TEETH = 2
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.
@@ -355,6 +359,45 @@ def run_one(args) -> tuple[str, str, list[str], list[str]]:
     return mid, check, red, want
 
 
+def _run_runner_floor(patch_src: Path) -> subprocess.CompletedProcess:
+    """Настоящий раннер, крошечный файл вместо образа: дверь стоит выше работы с образом."""
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-entry.") as td:
+        stub = Path(td) / "stub-image"
+        stub.write_bytes(b"stub\n")
+        return subprocess.run(
+            ["bash", str(RUNNER), "--floor", str(stub), str(patch_src)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+
+
+def _tooth_wrong_patch_src() -> str | None:
+    """Отказ двери на заведомо не том исходнике. None -- зуб зелёный."""
+    kit = ROOT / "claude-patch-all.sh"
+    done = _run_runner_floor(kit)
+    err = done.stderr or ""
+    if done.returncode != 2:
+        return f"код {done.returncode}, ждали 2"
+    if "ЯКОРЬ ПРОПАЛ" not in err:
+        return "в stderr нет «ЯКОРЬ ПРОПАЛ»"
+    if "вызван неверно" not in err:
+        return "в stderr нет «вызван неверно»"
+    if str(kit) not in err:
+        return "в stderr нет пути исходника"
+    return None
+
+
+def _tooth_real_patch_src() -> str | None:
+    """Дверь пропускает настоящий tweakcc-patch.js. None -- зуб зелёный."""
+    src = ROOT / "tweakcc-patch.js"
+    done = _run_runner_floor(src)
+    err = done.stderr or ""
+    if "вызван неверно" in err or "в исходнике патча нет" in err:
+        return "дверь отказала настоящему tweakcc-patch.js"
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="зубы реестра проверок")
     ap.add_argument("--image", help="собранный образ (по умолчанию -- цель ~/.local/bin/claude)")
@@ -371,6 +414,30 @@ def main() -> int:
     if opts.jobs < 1:
         print("checks-teeth: --jobs должен быть не меньше 1", file=sys.stderr)
         return 2
+
+    # Контракт вызова раннера. Стоит ДО поисков раннера и образа: нарушенный
+    # контракт вызова не зависит от того, есть ли на машине образ, и зуб не
+    # имеет права пропадать вместе с ним.
+    entry_teeth = (
+        ("wrong-patch-src", _tooth_wrong_patch_src),
+        ("real-patch-src", _tooth_real_patch_src),
+    )
+    if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
+        print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
+              f"объявлено {EXPECTED_ENTRY_TEETH}", file=sys.stderr)
+        return 4
+    entry_bad = 0
+    for name, fn in entry_teeth:
+        reason = fn()
+        if reason:
+            entry_bad += 1
+            print(f"checks-teeth: ВХОД {name}: ПРОШЛА МОЛЧА -- {reason}", flush=True)
+        else:
+            print(f"checks-teeth: ВХОД {name}: OK", flush=True)
+    if entry_bad:
+        print(f"checks-teeth: ИТОГ вход={len(entry_teeth)} молча/неверно={entry_bad}",
+              flush=True)
+        return 1
 
     if not RUNNER.is_file():
         print("checks-teeth: нет tools/checks-on-image.sh -- мерить нечем", file=sys.stderr)
