@@ -50,6 +50,40 @@ DEFAULT_MIN_SIZE_MB=100
 die2() { printf '%s\n' "$*" >&2; exit 2; }
 die3() { printf '%s\n' "$*" >&2; exit 3; }
 
+# Часовой завершения обязателен для КАЖДОГО EXIT-трапа: bash 3.2 отдаёт код 0,
+# когда скрипт с трапом умирает на фатальной ошибке подстановки (unbound
+# variable под `set -u`, bad substitution) -- трап исполняется, `$?` внутри
+# него ноль, и вызывающий видит успех вместо оборванного прогона. Штатный
+# конец объявляет себя сам (__DONE=1), трап без объявления краснит.
+# Уборка временного каталога и держателя живёт ЗДЕСЬ, а не отдельным трапом
+# внутри self_check: `trap` в bash глобален, и трап функции затёр бы часового.
+# Сигнальные трапы переводят сигнал в КОД (130/143) и стоят отдельными
+# строками -- войдя в общий гвард, точечный TERM пришёлся бы на последнюю
+# УДАВШУЮСЯ команду и был бы объявлен «ошибкой оболочки».
+__DONE=0
+WORK=''
+HOLDER_PID=
+stop_holder() {
+  if [[ -n "${HOLDER_PID:-}" ]]; then
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=
+  fi
+}
+__reap_heavy_guard() {
+  __rc=$?
+  stop_holder
+  [[ -n "${WORK:-}" ]] && rm -rf "$WORK"
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "ОТКАЗ: reap-heavy оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 2
+  fi
+  exit "$__rc"
+}
+trap '__reap_heavy_guard' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 usage() {
   cat <<EOF
 usage: bash tools/reap-heavy.sh [--apply] [--older-than-hours N] [--min-size-mb N]
@@ -104,12 +138,14 @@ require_lsof() {
   LSOF=$(command -v lsof || true)
   if [[ -z "$LSOF" ]]; then
     printf '%s\n' "ОТКАЗ: нет lsof — прибор недоступен (открытые файлы нечем мерить)" >&2
+    __DONE=1
     exit 2
   fi
   local pc
   pc=$("$LSOF" -p $$ -Fn) || true
   if [[ -z "$pc" ]]; then
     printf '%s\n' "ОТКАЗ: lsof не видит файлов своего процесса — прибор недоступен" >&2
+    __DONE=1
     exit 2
   fi
 }
@@ -139,7 +175,7 @@ parse_args() {
         MIN_SIZE_MB=$2
         shift 2
         ;;
-      -h|--help) usage; exit 0 ;;
+      -h|--help) usage; __DONE=1; exit 0 ;;
       *) die2 "ОТКАЗ: неизвестный аргумент $1" ;;
     esac
   done
@@ -848,6 +884,7 @@ elif n == 5:
   LSOF=$(command -v lsof || true)
   if [[ -z "$LSOF" ]]; then
     printf '%s\\n' "ОТКАЗ: нет lsof — прибор недоступен (открытые файлы нечем мерить)" >&2
+    __DONE=1
     exit 2
   fi'''
     new = '''require_lsof() {
@@ -855,6 +892,7 @@ elif n == 5:
   return 0
   if [[ -z "$LSOF" ]]; then
     printf '%s\\n' "ОТКАЗ: нет lsof — прибор недоступен (открытые файлы нечем мерить)" >&2
+    __DONE=1
     exit 2
   fi'''
 elif n == 6:
@@ -910,14 +948,6 @@ PY
   done
   say "self-check: ОТКАЗ прибора — держатель не открыл $path"
   return 2
-}
-
-stop_holder() {
-  if [[ -n "${HOLDER_PID:-}" ]]; then
-    kill "$HOLDER_PID" 2>/dev/null || true
-    wait "$HOLDER_PID" 2>/dev/null || true
-    HOLDER_PID=
-  fi
 }
 
 # Списки мусора/защищённых фикстуры живут в self_check: имя файла корпуса
@@ -1395,7 +1425,6 @@ bin/claude
   kill "$DEADPID" 2>/dev/null || true
   wait "$DEADPID" 2>/dev/null || true
   HOLDER_PID=
-  trap 'stop_holder; rm -rf "$WORK"' EXIT
 
   local n green=0 redctl=0
   say "reap-heavy --self-check: зубы=10 (зелёная сторона на исходном тексте)"
@@ -1446,7 +1475,9 @@ if (( SELF_CHECK )); then
   fi
   export REAP_SELF_CHECK_RUNNING=1
   self_check
-  exit $?
+  __rc=$?
+  __DONE=1
+  exit "$__rc"
 fi
 
 require_python
@@ -1454,4 +1485,6 @@ require_lsof
 load_corpus_suffix
 resolve_roots
 run_census
-exit $?
+__rc=$?
+__DONE=1
+exit "$__rc"

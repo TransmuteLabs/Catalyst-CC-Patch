@@ -21,7 +21,43 @@ if [[ -z "${TREE_CENSUS:-}" && -f "$HERE/bytecode-census.py" ]]; then
   export TREE_CENSUS="$HERE/bytecode-census.py"
 fi
 
+# Единственный дом перечня зубов — этот массив: циклы self-check идут ТОЛЬКО
+# по нему, литерального перечня нет. EXPECTED_TEETH — отдельная запись-контракт;
+# сторож сверяет её с фактической длиной перечня и числом прогнанных зубов,
+# рассинхрон = rc=4 с причиной словами.
+TEETH_LIST=(1 2 3 4 5 6 7 8 9 10)
+EXPECTED_TEETH=10
+DRIFT_MATCH_PRINTS_MATCH=1  # MUT_DRIFT_MATCH
+DRIFT_DIVERGE_PRINTS_BOTH=1  # MUT_DRIFT_DIVERGE
+DRIFT_CODE2_IS_UNMEASURED=1  # MUT_DRIFT_UNMEAS
+DRIFT_CODE4_EXITS_2=1  # MUT_DRIFT_CODE4
+
 die2() { printf '%s\n' "$*" >&2; exit 2; }
+
+# Часовой завершения обязателен для КАЖДОГО EXIT-трапа: bash 3.2 отдаёт код 0,
+# когда скрипт с трапом умирает на фатальной ошибке подстановки (unbound
+# variable под `set -u`, bad substitution) -- трап исполняется, `$?` внутри
+# него ноль, и вызывающий видит успех вместо оборванного прогона. Штатный
+# конец объявляет себя сам (__DONE=1), трап без объявления краснит.
+# Уборка временного каталога живёт ЗДЕСЬ, а не отдельным трапом внутри
+# self_check: `trap` в bash глобален, и трап функции затёр бы часового.
+# Сигнальные трапы переводят сигнал в КОД (130/143) и стоят отдельными
+# строками -- войдя в общий гвард, точечный TERM пришёлся бы на последнюю
+# УДАВШУЮСЯ команду и был бы объявлен «ошибкой оболочки».
+__DONE=0
+WORK=''
+__tree_run_guard() {
+  __rc=$?
+  [[ -n "${WORK:-}" ]] && rm -rf "$WORK"
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "ОТКАЗ: tree-run оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 2
+  fi
+  exit "$__rc"
+}
+trap '__tree_run_guard' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 usage() {
   cat <<EOF
@@ -53,6 +89,9 @@ print_boundary() {  # MUT_BOUNDARY_PRINT
   local tree="${1:-}"
   local img="${2:-}"
   local local_ver stub
+  local drift drift_rc drift_all line
+  local drift_stand drift_image drift_reason
+  local match_ver s i
   local_ver=$(bun --version) || die2 "ПРИБОР: bun --version отказал"
   stub="неизвестен"
   if [[ -n "$tree" && -f "$tree/.tree-meta" ]]; then
@@ -61,6 +100,94 @@ print_boundary() {  # MUT_BOUNDARY_PRINT
     stub=$(python3 "$EXTRACT" stub-version --image "$img") || stub="неизвестен"
   fi
   printf 'ГРАНИЦА: bun локальный=%s стаб-образа=%s; это не продукт — законен A/B внутри одного механизма, не абсолютное «работает в продукте»\n' "$local_ver" "$stub" >&2
+
+  drift="${TREE_BUN_DRIFT:-$HERE/bun-drift.sh}"
+  drift_rc=0
+  drift_all=""
+  if [[ ! -f "$drift" ]]; then
+    drift_rc=2
+    drift_all="ПРИБОР: нет bun-drift.sh ($drift)"
+  elif [[ -n "$tree" && -f "$tree/.tree-meta" ]]; then
+    drift_all=$(TREE_EXTRACT="$EXTRACT" bash "$drift" --tree "$tree" 2>&1) || drift_rc=$?
+  elif [[ -n "$img" && -f "$img" ]]; then
+    drift_all=$(TREE_EXTRACT="$EXTRACT" bash "$drift" --image "$img" 2>&1) || drift_rc=$?
+  else
+    drift_rc=2
+    drift_all="ПРИБОР: нет дерева с .tree-meta и нет образа — рантайм мерить нечем"
+  fi
+
+  drift_stand=""
+  drift_image=""
+  drift_reason=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      *стенд=*)
+        drift_stand="${line#*стенд=}"
+        drift_stand="${drift_stand%% *}"
+        ;;
+    esac
+    case "$line" in
+      *образ=*)
+        drift_image="${line#*образ=}"
+        drift_image="${drift_image%% *}"
+        ;;
+    esac
+    case "$line" in
+      ПРИБОР:*)
+        if [[ -z "$drift_reason" ]]; then
+          drift_reason="$line"
+        fi
+        ;;
+    esac
+  done <<< "$drift_all"
+
+  case "$drift_rc" in
+    0)
+      match_ver="$drift_stand"
+      [[ -n "$match_ver" ]] || match_ver="$local_ver"
+      if [[ "$DRIFT_MATCH_PRINTS_MATCH" -eq 1 ]]; then
+        printf 'рантайм совпал: %s\n' "$match_ver" >&2
+      else
+        printf 'рантайм РАСХОДИТСЯ: стенд=%s образ=%s — A/B внутри одного механизма остаётся законным, заявления о продукте нет\n' "$match_ver" "$match_ver" >&2
+      fi
+      ;;
+    1)
+      s="$drift_stand"
+      i="$drift_image"
+      [[ -n "$s" ]] || s="$local_ver"
+      [[ -n "$i" ]] || i="$stub"
+      if [[ "$DRIFT_DIVERGE_PRINTS_BOTH" -eq 1 ]]; then
+        printf 'рантайм РАСХОДИТСЯ: стенд=%s образ=%s — A/B внутри одного механизма остаётся законным, заявления о продукте нет\n' "$s" "$i" >&2
+      else
+        printf 'рантайм РАСХОДИТСЯ: стенд=%s — A/B внутри одного механизма остаётся законным, заявления о продукте нет\n' "$s" >&2
+      fi
+      ;;
+    2)
+      if [[ -z "$drift_reason" ]]; then
+        drift_reason="$drift_all"
+        [[ -n "$drift_reason" ]] || drift_reason="прибор вернул код 2 без причины"
+      fi
+      if [[ "$DRIFT_CODE2_IS_UNMEASURED" -eq 1 ]]; then
+        printf 'рантайм НЕ ИЗМЕРЕН: %s\n' "$drift_reason" >&2
+      else
+        printf 'рантайм совпал: %s\n' "$local_ver" >&2
+      fi
+      ;;
+    4)
+      # КОНСТРЕЙНТ: код 4 значит, что сам прибор себе не верит — мерить им
+      # нельзя, и «не измерено» здесь честнее любого вердикта.
+      printf 'рантайм НЕ ИЗМЕРЕН: прибор себе не верит (сторож перечня, код 4) — мерить им нельзя\n' >&2
+      if [[ "$DRIFT_CODE4_EXITS_2" -eq 1 ]]; then
+        exit 2
+      fi
+      ;;
+    *)
+      if [[ -z "$drift_reason" ]]; then
+        drift_reason="неожиданный код прибора $drift_rc"
+      fi
+      printf 'рантайм НЕ ИЗМЕРЕН: %s\n' "$drift_reason" >&2
+      ;;
+  esac
 }
 
 meta_get() {
@@ -128,6 +255,7 @@ cmd_extract() {
   else
     print_boundary "" "$IMAGE"
   fi
+  __DONE=1
   exit "$rc"
 }
 
@@ -138,7 +266,9 @@ cmd_update() {
   [[ -n "$FROM" ]] || die2 "ПРИБОР: update нужен --from"
   print_boundary "$TREE" ""
   python3 "$EXTRACT" update --tree "$TREE" --from "$FROM"
-  exit $?
+  local urc=$?
+  __DONE=1
+  exit "$urc"
 }
 
 cmd_run() {
@@ -155,6 +285,7 @@ cmd_run() {
   cat "$out"
   cat "$err" >&2
   rm -f "$out" "$err"
+  __DONE=1
   exit "$rc"
 }
 
@@ -198,6 +329,7 @@ cmd_ab() {
   if [[ "$lrc" -eq "$rrc" ]] && cmp -s "$lout" "$rout"; then
     printf '%s\n' "ВЕРДИКТ: совпали"
     rm -f "$lout" "$lerr" "$rout" "$rerr"
+    __DONE=1
     exit 0
   fi
   printf '%s\n' "ВЕРДИКТ: разошлись"
@@ -258,17 +390,20 @@ JS
       python3 "$EXTRACT" update-from-stitch --tree "$TREE" --orig "$in" --new "$out"
       local urc=$?
       rm -rf "$work"
+      __DONE=1
       exit "$urc"
     fi
     cp "$out" "$cli"
     rm -rf "$work"
     printf 'patched %s\n' "$cli"
+    __DONE=1
     exit 0
   fi
   cat "$err" >&2
   if grep -q -F 'could not be applied (nothing written)' "$err"; then
     # MUT_PATCH_PROPAGATE
     rm -rf "$work"
+    __DONE=1
     exit 1
   fi
   rm -rf "$work"
@@ -279,7 +414,7 @@ JS
 }
 
 # ---------------------------------------------------------------------------
-# --self-check: шесть зубов, у каждого свой названный красный.
+# --self-check: зубы по TEETH_LIST, у каждого свой названный красный.
 # Мутации правят КОПИЮ; оригинал не трогается. Снимок + sha256, не git.
 # ---------------------------------------------------------------------------
 
@@ -543,6 +678,184 @@ tooth_6() {
   tooth_fail "нет строки границы в stderr: $(cat "$err")"
 }
 
+rewrite_stub() {
+  local meta="$1" stub="$2"
+  python3 - "$meta" "$stub" <<'PY'
+import sys
+p, stub = sys.argv[1], sys.argv[2]
+lines = []
+saw = 0
+for line in open(p, encoding='utf-8'):
+    if line.startswith('stub='):
+        lines.append('stub=%s\n' % stub)
+        saw = 1
+    else:
+        lines.append(line)
+if not saw:
+    lines.append('stub=%s\n' % stub)
+open(p, 'w', encoding='utf-8').writelines(lines)
+PY
+}
+
+write_fake_drift() {
+  local dest="$1" rc="$2" msg="$3"
+  cat > "$dest" <<EOF
+#!/bin/sh
+printf '%s\\n' '$msg' >&2
+exit $rc
+EOF
+  chmod +x "$dest"
+}
+
+# ЗУБ 7: bun-drift код 0 → «рантайм совпал», код tree-run не меняется.
+# Красный: ветка совпадения печатает расхождение (совпал без кода 0).
+tooth_7() {
+  TOOTH_N=7 TOOTH_NAME='рантайм-совпал' TOOTH_RC=0
+  local fx img tree out err rc ver
+  fx=$(mktemp -d "$WORK/fx7.XXXXXX")
+  img="$fx/img"
+  tree="$fx/tree"
+  out=$WORK/t7.out; err=$WORK/t7.err
+  python3 "$EXTRACT" emit-fixture --out "$img" >"$fx/emit.out" 2>"$fx/emit.err" || {
+    tooth_fail "emit-fixture rc=$? $(cat "$fx/emit.err")"
+    return 0
+  }
+  run_tool "$out" "$err" extract --image "$img" --out "$tree"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    tooth_fail "extract rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+    return 0
+  fi
+  ver=$(bun --version) || {
+    tooth_fail "bun --version отказал"
+    return 0
+  }
+  rewrite_stub "$tree/.tree-meta" "bun-v$ver"
+  run_tool "$out" "$err" run --tree "$tree" -- --version
+  rc=$?
+  if grep -q -F "рантайм совпал: $ver" "$err" && [[ $rc -eq 0 ]]; then
+    if grep -q -F 'рантайм НЕ ИЗМЕРЕН' "$err" || grep -q -F 'рантайм РАСХОДИТСЯ' "$err"; then
+      tooth_fail "совпал смешан с другим исходом rc=$rc stderr=$(cat "$err")"
+      return 0
+    fi
+    tooth_pass
+    return 0
+  fi
+  tooth_fail "ждали совпал rc=0, получили rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+}
+
+# ЗУБ 8: bun-drift код 1 → громкая строка с ОБЕИМИ версиями, код tree-run не меняется.
+# Красный: печатать только стенд, без образа.
+tooth_8() {
+  TOOTH_N=8 TOOTH_NAME='рантайм-расходятся' TOOTH_RC=0
+  local fx img tree out err rc ver verdict
+  fx=$(mktemp -d "$WORK/fx8.XXXXXX")
+  img="$fx/img"
+  tree="$fx/tree"
+  out=$WORK/t8.out; err=$WORK/t8.err
+  python3 "$EXTRACT" emit-fixture --out "$img" >"$fx/emit.out" 2>"$fx/emit.err" || {
+    tooth_fail "emit-fixture rc=$? $(cat "$fx/emit.err")"
+    return 0
+  }
+  run_tool "$out" "$err" extract --image "$img" --out "$tree"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    tooth_fail "extract rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+    return 0
+  fi
+  ver=$(bun --version) || {
+    tooth_fail "bun --version отказал"
+    return 0
+  }
+  rewrite_stub "$tree/.tree-meta" "bun-v0.0.0"
+  run_tool "$out" "$err" run --tree "$tree" -- --version
+  rc=$?
+  verdict=$(grep -F 'рантайм РАСХОДИТСЯ:' "$err" || true)
+  if [[ $rc -eq 0 ]] && printf '%s\n' "$verdict" | grep -q -F "стенд=$ver" \
+    && printf '%s\n' "$verdict" | grep -q -F 'образ=0.0.0'; then
+    if grep -q -F 'рантайм совпал' "$err"; then
+      tooth_fail "расхождение объявлено совпадением rc=$rc stderr=$(cat "$err")"
+      return 0
+    fi
+    tooth_pass
+    return 0
+  fi
+  tooth_fail "ждали РАСХОДИТСЯ с обеими версиями rc=0, получили rc=$rc вердикт=${verdict:-нет} stdout=$(cat "$out") stderr=$(cat "$err")"
+}
+
+# ЗУБ 9: bun-drift код 2 → «рантайм НЕ ИЗМЕРЕН» с причиной, код tree-run не меняется.
+# Красный: код 2 печатает «совпал» (пусто не ноль).
+tooth_9() {
+  TOOTH_N=9 TOOTH_NAME='рантайм-не-измерен' TOOTH_RC=0
+  local fx img tree out err rc
+  fx=$(mktemp -d "$WORK/fx9.XXXXXX")
+  img="$fx/img"
+  tree="$fx/tree"
+  out=$WORK/t9.out; err=$WORK/t9.err
+  python3 "$EXTRACT" emit-fixture --out "$img" >"$fx/emit.out" 2>"$fx/emit.err" || {
+    tooth_fail "emit-fixture rc=$? $(cat "$fx/emit.err")"
+    return 0
+  }
+  run_tool "$out" "$err" extract --image "$img" --out "$tree"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    tooth_fail "extract rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+    return 0
+  fi
+  write_fake_drift "$fx/fake-drift.sh" 2 'ПРИБОР: зуб-не-измерен синтетический отказ'
+  TREE_BUN_DRIFT="$fx/fake-drift.sh" run_tool "$out" "$err" run --tree "$tree" -- --version
+  rc=$?
+  if [[ $rc -eq 0 ]] && grep -q -F 'рантайм НЕ ИЗМЕРЕН' "$err" \
+    && grep -q -F 'зуб-не-измерен синтетический отказ' "$err" \
+    && grep -q -F '2.1.273 (Claude Code)' "$out"; then
+    if grep -q -F 'рантайм совпал' "$err"; then
+      tooth_fail "код 2 объявлен совпадением rc=$rc stderr=$(cat "$err")"
+      return 0
+    fi
+    tooth_pass
+    return 0
+  fi
+  tooth_fail "ждали НЕ ИЗМЕРЕН rc=0 с причиной прибора, получили rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+}
+
+# ЗУБ 10: bun-drift код 4 (сторож перечня) → громкая строка + tree-run отдаёт 2.
+# Красный: код 4 не останавливает прогон (cli всё же едет, rc ребёнка).
+tooth_10() {
+  TOOTH_N=10 TOOTH_NAME='сторож-прибора-код4' TOOTH_RC=0
+  local fx img tree out err rc
+  fx=$(mktemp -d "$WORK/fx10.XXXXXX")
+  img="$fx/img"
+  tree="$fx/tree"
+  out=$WORK/t10.out; err=$WORK/t10.err
+  python3 "$EXTRACT" emit-fixture --out "$img" >"$fx/emit.out" 2>"$fx/emit.err" || {
+    tooth_fail "emit-fixture rc=$? $(cat "$fx/emit.err")"
+    return 0
+  }
+  run_tool "$out" "$err" extract --image "$img" --out "$tree"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    tooth_fail "extract rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+    return 0
+  fi
+  write_fake_drift "$fx/fake-drift.sh" 4 'объявлено зубов=8, в перечне=9'
+  TREE_BUN_DRIFT="$fx/fake-drift.sh" run_tool "$out" "$err" run --tree "$tree" -- --version
+  rc=$?
+  if [[ $rc -eq 2 ]] && grep -q -F 'рантайм НЕ ИЗМЕРЕН' "$err" \
+    && grep -q -F 'себе не верит' "$err"; then
+    if grep -q -F 'рантайм совпал' "$err"; then
+      tooth_fail "код 4 объявлен совпадением rc=$rc stderr=$(cat "$err")"
+      return 0
+    fi
+    if grep -q -F '2.1.273 (Claude Code)' "$out"; then
+      tooth_fail "cli запустился при коде 4 прибора rc=$rc stdout=$(cat "$out")"
+      return 0
+    fi
+    tooth_pass
+    return 0
+  fi
+  tooth_fail "ждали НЕ ИЗМЕРЕН rc=2 на стороже прибора, получили rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+}
+
 run_one_tooth() {
   case "$1" in
     1) tooth_1 ;;
@@ -551,6 +864,10 @@ run_one_tooth() {
     4) tooth_4 ;;
     5) tooth_5 ;;
     6) tooth_6 ;;
+    7) tooth_7 ;;
+    8) tooth_8 ;;
+    9) tooth_9 ;;
+    10) tooth_10 ;;
     *) say "нет зуба $1"; return 2 ;;
   esac
 }
@@ -563,7 +880,7 @@ n = int(sys.argv[1])
 extract, sh = sys.argv[2], sys.argv[3]
 if n in (1, 2, 3):
     path = extract
-elif n in (4, 5, 6):
+elif n in (4, 5, 6, 7, 8, 9, 10):
     path = sh
 else:
     sys.stderr.write('unknown mutation %d\n' % n)
@@ -594,13 +911,33 @@ elif n == 4:
     ]
 elif n == 5:
     pairs = [
-        ('    # MUT_PATCH_PROPAGATE\n    rm -rf "$work"\n    exit 1\n',
-         '    # MUT_PATCH_PROPAGATE\n    rm -rf "$work"\n    exit 0\n'),
+        ('    # MUT_PATCH_PROPAGATE\n    rm -rf "$work"\n    __DONE=1\n    exit 1\n',
+         '    # MUT_PATCH_PROPAGATE\n    rm -rf "$work"\n    __DONE=1\n    exit 0\n'),
     ]
 elif n == 6:
     pairs = [
         ('print_boundary() {  # MUT_BOUNDARY_PRINT\n  local tree="${1:-}"\n',
          'print_boundary() {  # MUT_BOUNDARY_PRINT\n  return 0\n  local tree="${1:-}"\n'),
+    ]
+elif n == 7:
+    pairs = [
+        ('DRIFT_MATCH_PRINTS_MATCH=1  # MUT_DRIFT_MATCH\n',
+         'DRIFT_MATCH_PRINTS_MATCH=0  # MUT_DRIFT_MATCH\n'),
+    ]
+elif n == 8:
+    pairs = [
+        ('DRIFT_DIVERGE_PRINTS_BOTH=1  # MUT_DRIFT_DIVERGE\n',
+         'DRIFT_DIVERGE_PRINTS_BOTH=0  # MUT_DRIFT_DIVERGE\n'),
+    ]
+elif n == 9:
+    pairs = [
+        ('DRIFT_CODE2_IS_UNMEASURED=1  # MUT_DRIFT_UNMEAS\n',
+         'DRIFT_CODE2_IS_UNMEASURED=0  # MUT_DRIFT_UNMEAS\n'),
+    ]
+elif n == 10:
+    pairs = [
+        ('DRIFT_CODE4_EXITS_2=1  # MUT_DRIFT_CODE4\n',
+         'DRIFT_CODE4_EXITS_2=0  # MUT_DRIFT_CODE4\n'),
     ]
 for old, new in pairs:
     c = text.count(old)
@@ -620,6 +957,7 @@ self_check() {
   WORK=$(mktemp -d "${TREE_SELF_WORK:-${TMPDIR:-/tmp}}/tree-run-self.XXXXXX")
   cp "$orig_here/tree-run.sh" "$WORK/tree-run.sh"
   cp "$orig_here/tree-extract.py" "$WORK/tree-extract.py"
+  cp "$orig_here/bun-drift.sh" "$WORK/bun-drift.sh" || return 2
   TOOL=$WORK/tree-run.sh
   EXTRACT=$WORK/tree-extract.py
   SNAP_SH=$WORK/tree-run.sh.snap
@@ -628,24 +966,32 @@ self_check() {
   cp "$EXTRACT" "$SNAP_PY"
   SNAP_SH_HASH=$(sha256_of "$SNAP_SH")
   SNAP_PY_HASH=$(sha256_of "$SNAP_PY")
-  trap 'rm -rf "$WORK"' EXIT
 
-  local n green=0 redctl=0
-  say "tree-run --self-check: зубы=6 (зелёная сторона на исходном тексте)"
-  for n in 1 2 3 4 5 6; do
+  local n list_len=${#TEETH_LIST[@]} green=0 redctl=0 ran=0
+  if [[ "$list_len" -ne "$EXPECTED_TEETH" ]]; then
+    say "tree-run --self-check: ОТКАЗ — объявлено зубов=$EXPECTED_TEETH, в перечне=$list_len (rc=4)"
+    return 4
+  fi
+  say "tree-run --self-check: зубы=$EXPECTED_TEETH (зелёная сторона на исходном тексте)"
+  for n in "${TEETH_LIST[@]}"; do
+    ran=$((ran + 1))
     TOOTH_RC=0
     run_one_tooth "$n" || return 2
     if [[ "$TOOTH_RC" -eq 0 ]]; then
       green=$((green + 1))
     fi
   done
-  if [[ "$green" -ne 6 ]]; then
-    say "tree-run --self-check: ОТКАЗ — зелёных $green из 6"
+  if [[ "$ran" -ne "$EXPECTED_TEETH" ]]; then
+    say "tree-run --self-check: ОТКАЗ — объявлено зубов=$EXPECTED_TEETH, прогнано=$ran (rc=4)"
+    return 4
+  fi
+  if [[ "$green" -ne "$EXPECTED_TEETH" ]]; then
+    say "tree-run --self-check: ОТКАЗ — зелёных $green из $EXPECTED_TEETH"
     return 1
   fi
 
   say "tree-run --self-check: красный контроль (мутация → именной красный → снимок)"
-  for n in 1 2 3 4 5 6; do
+  for n in "${TEETH_LIST[@]}"; do
     cp "$SNAP_SH" "$TOOL"
     cp "$SNAP_PY" "$EXTRACT"
     if ! mutate_copy "$n"; then
@@ -674,8 +1020,11 @@ self_check() {
     fi
     redctl=$((redctl + 1))
   done
-  say "tree-run --self-check: ИТОГ зубов=6 зелёных=$green красный-контроль=$redctl"
-  [[ "$green" -eq 6 && "$redctl" -eq 6 ]]
+  say "tree-run --self-check: ИТОГ зубов=$EXPECTED_TEETH зелёных=$green красный-контроль=$redctl"
+  if [[ "$green" -eq "$EXPECTED_TEETH" && "$redctl" -eq "$EXPECTED_TEETH" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # --- argv ---
@@ -733,7 +1082,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die2 "ПРИБОР: --stitch нужен путь"
       STITCH=$2; shift 2
       ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) usage; __DONE=1; exit 0 ;;
     --) shift; RUN_ARGS=("$@"); break ;;
     *)
       if [[ "$CMD" == "run" || "$CMD" == "ab" ]]; then
@@ -751,7 +1100,9 @@ if [[ $SELF_CHECK -eq 1 ]]; then
   fi
   export TREE_SELF_CHECK_RUNNING=1
   self_check
-  exit $?
+  __sc_rc=$?
+  __DONE=1
+  exit "$__sc_rc"
 fi
 
 if [[ -z "$CMD" ]]; then
@@ -767,3 +1118,4 @@ case "$CMD" in
   patch) cmd_patch ;;
   *) die2 "ПРИБОР: неизвестная команда $CMD" ;;
 esac
+__DONE=1

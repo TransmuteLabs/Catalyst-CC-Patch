@@ -4,6 +4,7 @@
 # сборки. Отказ прибора (не смог измерить) — другой код.
 #
 #   bash tools/bun-drift.sh --tree TREE
+#   bash tools/bun-drift.sh --image PATH
 #   bash tools/bun-drift.sh --self-check
 #
 # Коды (подмножество таблицы кита — шапка claude-patch-all.sh):
@@ -17,8 +18,10 @@
 #
 # Версию спрашивает у ИСПОЛНЯЕМОГО бинаря (which -a + --version каждой копии),
 # не у менеджера пакетов: brew объявлял 1.4.2 при исполняемом 1.3.14 (симлинк
-# мимо Cellar). Образ — поле stub в .tree-meta извлечённого дерева; без дерева
-# прибор отказывает, а не пропускает замер.
+# мимо Cellar). Образ — поле stub в .tree-meta извлечённого дерева (--tree)
+# либо python3 tools/tree-extract.py stub-version --image PATH (--image).
+# --tree и --image взаимоисключающие. Ни одного — отказ прибора (код 2),
+# не пропуск замера.
 set -u
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -27,8 +30,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # по нему, литерального перечня нет. EXPECTED_TEETH — отдельная запись-контракт;
 # сторож (GUARD_TEETH_LIST) сверяет её с фактической длиной перечня и числом
 # прогнанных зубов, рассинхрон = rc=4 с причиной словами.
-TEETH_LIST=(1 2 3 4 5 6 7 8)
-EXPECTED_TEETH=8
+TEETH_LIST=(1 2 3 4 5 6 7 8 9)
+EXPECTED_TEETH=9
 COMPARE_EQUAL_IS_MATCH=1  # MUT_COMPARE
 PRINT_BOTH_VERSIONS=1  # MUT_VERDICT_BOTH
 FAIL_CLOSED_MISSING=1  # MUT_FAIL_CLOSED
@@ -37,15 +40,44 @@ GUARD_TEETH_LIST=1  # MUT_GUARD_LIST
 META_MUST_BE_READABLE=1  # MUT_META_READABLE
 REFUSE_STUB_EMPTY=1  # MUT_STUB_EMPTY
 REFUSE_VER_EMPTY=1  # MUT_VER_EMPTY
+USE_IMAGE_KEY=1  # MUT_IMAGE_KEY
 
 die2() { printf '%s\n' "$*" >&2; exit 2; }
+
+# Часовой завершения обязателен для КАЖДОГО EXIT-трапа: bash 3.2 отдаёт код 0,
+# когда скрипт с трапом умирает на фатальной ошибке подстановки (unbound
+# variable под `set -u`, bad substitution) -- трап исполняется, `$?` внутри
+# него ноль, и вызывающий видит успех вместо оборванного прогона. Штатный
+# конец объявляет себя сам (__DONE=1), трап без объявления краснит.
+# Уборка временного каталога живёт ЗДЕСЬ, а не отдельным трапом внутри
+# self_check: `trap` в bash глобален, и трап функции затёр бы часового.
+# Сигнальные трапы переводят сигнал в КОД (130/143) и стоят отдельными
+# строками -- войдя в общий гвард, точечный TERM пришёлся бы на последнюю
+# УДАВШУЮСЯ команду и был бы объявлен «ошибкой оболочки».
+__DONE=0
+WORK=''
+__bun_drift_guard() {
+  __rc=$?
+  [[ -n "${WORK:-}" ]] && rm -rf "$WORK"
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "ОТКАЗ: bun-drift оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 2
+  fi
+  exit "$__rc"
+}
+trap '__bun_drift_guard' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 usage() {
   cat <<EOF
 usage: bash tools/bun-drift.sh --tree TREE
+       bash tools/bun-drift.sh --image PATH
        bash tools/bun-drift.sh --self-check
 
   --tree TREE   извлечённое дерево (каталог с .tree-meta, ключ stub)
+  --image PATH  stub образа: python3 tools/tree-extract.py stub-version --image PATH
+                --tree и --image взаимоисключающие; ни одного — код 2
   --self-check  зубы по перечню TEETH_LIST; мутации правят копию, снимок+sha256, не git
 
 коды: 0 совпадают / 1 расходятся (объявлено) / 2 прибор не может мерить /
@@ -57,9 +89,11 @@ refuse_missing() {
   local msg="$1"
   if [[ "$FAIL_CLOSED_MISSING" -eq 1 ]]; then
     printf '%s\n' "$msg" >&2
+    __DONE=1
     exit 2
   fi
   printf 'ВЕРДИКТ: совпадают\n'
+  __DONE=1
   exit 0
 }
 
@@ -122,6 +156,34 @@ read_stub() {
     refuse_missing "ПРИБОР: ключ stub в мета пуст ($meta) — пусто не ноль"
   fi
   STUB_RAW="$found"
+}
+
+read_stub_from_image() {
+  local image="$1" extract_py py out rc
+  if [[ ! -f "$image" ]]; then
+    refuse_missing "ПРИБОР: нет образа: $image"
+  fi
+  extract_py="${TREE_EXTRACT:-$HERE/tree-extract.py}"
+  if [[ ! -f "$extract_py" ]]; then
+    refuse_missing "ПРИБОР: нет tree-extract.py ($extract_py) — stub образа мерить нечем"
+  fi
+  py="${PYTHON3:-}"
+  if [[ -z "$py" ]]; then
+    py=$(command -v python3) || py=""
+  fi
+  if [[ -z "$py" ]]; then
+    refuse_missing "ПРИБОР: нет python3 — stub образа мерить нечем"
+  fi
+  rc=0
+  out=$("$py" "$extract_py" stub-version --image "$image") || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    refuse_missing "ПРИБОР: stub-version отказал для образа $image (rc=$rc)"
+  fi
+  out=$(trim "$out")
+  if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$out" ]]; then
+    refuse_missing "ПРИБОР: stub-version дал пусто ($image) — пусто не ноль"
+  fi
+  STUB_RAW="$out"
 }
 
 measure_one() {
@@ -202,6 +264,7 @@ collect_which() {
 
 measure() {
   local tree="$1"
+  local image="${2:-}"
   local meta stub_n exec_path exec_ver exec_n
   local line path real rc nver others n
   STUB_RAW=
@@ -211,16 +274,31 @@ measure() {
   MEASURE_VER=
   MEASURE_RC=0
 
-  [[ -n "$tree" ]] || refuse_missing "ПРИБОР: нужен --tree (извлечённое дерево с .tree-meta) — без него bun образа мерить нечем"
-  [[ -d "$tree" ]] || refuse_missing "ПРИБОР: нет дерева: $tree"
-  meta="$tree/.tree-meta"
-  read_stub "$meta"
-  stub_n=$(normalize_ver "$STUB_RAW")
-  if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$stub_n" ]]; then
-    refuse_missing "ПРИБОР: stub не нормализуется: $STUB_RAW"
+  if [[ -n "$tree" && -n "$image" ]]; then
+    die2 "ПРИБОР: --tree и --image вместе не допускаются"
   fi
 
-  printf 'ОБРАЗ stub=%s version=%s tree=%s\n' "$STUB_RAW" "$stub_n" "$tree"
+  if [[ -n "$image" ]]; then
+    if [[ "$USE_IMAGE_KEY" -ne 1 ]]; then
+      refuse_missing "ПРИБОР: нужен --tree (извлечённое дерево с .tree-meta) — без него bun образа мерить нечем"
+    fi
+    read_stub_from_image "$image"
+    stub_n=$(normalize_ver "$STUB_RAW")
+    if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$stub_n" ]]; then
+      refuse_missing "ПРИБОР: stub не нормализуется: $STUB_RAW"
+    fi
+    printf 'ОБРАЗ stub=%s version=%s image=%s\n' "$STUB_RAW" "$stub_n" "$image"
+  else
+    [[ -n "$tree" ]] || refuse_missing "ПРИБОР: нужен --tree (извлечённое дерево с .tree-meta) — без него bun образа мерить нечем"
+    [[ -d "$tree" ]] || refuse_missing "ПРИБОР: нет дерева: $tree"
+    meta="$tree/.tree-meta"
+    read_stub "$meta"
+    stub_n=$(normalize_ver "$STUB_RAW")
+    if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$stub_n" ]]; then
+      refuse_missing "ПРИБОР: stub не нормализуется: $STUB_RAW"
+    fi
+    printf 'ОБРАЗ stub=%s version=%s tree=%s\n' "$STUB_RAW" "$stub_n" "$tree"
+  fi
 
   collect_which
   if [[ -z "$(trim "${WHICH_LIST:-}")" ]]; then
@@ -303,6 +381,7 @@ measure() {
 
   if [[ "$COMPARE_EQUAL_IS_MATCH" -eq 1 && "$exec_n" == "$stub_n" ]]; then
     printf 'ВЕРДИКТ: совпадают стенд=%s образ=%s\n' "$exec_n" "$stub_n"
+    __DONE=1
     exit 0
   fi
   if [[ "$PRINT_BOTH_VERSIONS" -eq 1 ]]; then
@@ -310,6 +389,7 @@ measure() {
   else
     printf 'ВЕРДИКТ: расходятся стенд=%s\n' "$exec_n"
   fi
+  __DONE=1
   exit 1
 }
 
@@ -344,7 +424,13 @@ BASEPATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 run_measure() {
   local path="$1" tree="$2" out="$3" err="$4"
-  env PATH="$path" bash "$TOOL" --tree "$tree" >"$out" 2>"$err"
+  env PATH="$path" TREE_EXTRACT="$TREE_EXTRACT" bash "$TOOL" --tree "$tree" >"$out" 2>"$err"
+  return $?
+}
+
+run_measure_image() {
+  local path="$1" image="$2" out="$3" err="$4"
+  env PATH="$path" TREE_EXTRACT="$TREE_EXTRACT" bash "$TOOL" --image "$image" >"$out" 2>"$err"
   return $?
 }
 
@@ -492,8 +578,8 @@ tooth_5() {
 import sys
 p = sys.argv[1]
 t = open(p, encoding='utf-8').read()
-old = "TEETH_LIST=(1 2 3 4 5 6 7 8)\n"
-new = "TEETH_LIST=(1 2 3 4 5 6 7 8 99)\n"
+old = "TEETH_LIST=(1 2 3 4 5 6 7 8 9)\n"
+new = "TEETH_LIST=(1 2 3 4 5 6 7 8 9 99)\n"
 c = t.count(old)
 if c != 1:
     sys.stderr.write('anchor count=%d\n' % c)
@@ -507,7 +593,7 @@ PY
   out=$WORK/t5.out; err=$WORK/t5.err
   BUN_DRIFT_GUARD_PROBE=1 env -u BUN_DRIFT_SELF_CHECK_RUNNING bash "$copy" --self-check >"$out" 2>"$err"
   rc=$?
-  if [[ $rc -eq 4 ]] && grep -q -F "объявлено зубов=$EXPECTED_TEETH" "$out" && grep -q -F 'в перечне=9' "$out"; then
+  if [[ $rc -eq 4 ]] && grep -q -F "объявлено зубов=$EXPECTED_TEETH" "$out" && grep -q -F "в перечне=$((EXPECTED_TEETH + 1))" "$out"; then
     tooth_pass
     return 0
   fi
@@ -564,6 +650,31 @@ tooth_7() {
   tooth_pass
 }
 
+# ЗУБ 9: --image PATH берёт stub тем же способом, что print_boundary
+# (python3 tools/tree-extract.py stub-version --image PATH), без --tree.
+# Красный: USE_IMAGE_KEY=0 — путь «только образ» снова отказывает «нужен --tree».
+tooth_9() {
+  TOOTH_N=9 TOOTH_NAME='image-ключ' TOOTH_RC=0
+  local fx img out err rc path
+  fx=$(mktemp -d "$WORK/fx9.XXXXXX")
+  write_fake_bun "$fx/bin/bun" "1.4.2"
+  printf 'bun-v1.4.2\n' > "$fx/img"
+  img="$fx/img"
+  path="$fx/bin:$BASEPATH"
+  out=$WORK/t9.out; err=$WORK/t9.err
+  run_measure_image "$path" "$img" "$out" "$err"
+  rc=$?
+  if grep -q -F 'ВЕРДИКТ: совпадают стенд=1.4.2 образ=1.4.2' "$out" && [[ $rc -eq 0 ]]; then
+    if grep -q -F 'ВЕРДИКТ: расходятся' "$out"; then
+      tooth_fail "совпадение и расхождение в одном выводе rc=$rc stdout=$(cat "$out")"
+      return 0
+    fi
+    tooth_pass
+    return 0
+  fi
+  tooth_fail "ждали --image совпадают rc=0, получили rc=$rc stdout=$(cat "$out") stderr=$(cat "$err")"
+}
+
 # ЗУБ 8: пустой --version у bun при валидном stub → отказ (rc=2, «не дал
 # --version»), а не пустой стенд в вердикте.
 tooth_8() {
@@ -598,6 +709,7 @@ run_one_tooth() {
     6) tooth_6 ;;
     7) tooth_7 ;;
     8) tooth_8 ;;
+    9) tooth_9 ;;
     *) say "нет зуба $1"; return 2 ;;
   esac
 }
@@ -654,6 +766,11 @@ elif n == 8:
         ('REFUSE_VER_EMPTY=1  # MUT_VER_EMPTY\n',
          'REFUSE_VER_EMPTY=0  # MUT_VER_EMPTY\n'),
     ]
+elif n == 9:
+    pairs = [
+        ('USE_IMAGE_KEY=1  # MUT_IMAGE_KEY\n',
+         'USE_IMAGE_KEY=0  # MUT_IMAGE_KEY\n'),
+    ]
 else:
     sys.stderr.write('unknown mutation %d\n' % n)
     raise SystemExit(2)
@@ -672,12 +789,13 @@ self_check() {
   local orig="$HERE/bun-drift.sh"
   [[ -f "$orig" ]] || orig="${BASH_SOURCE[0]}"
   WORK=$(mktemp -d "${BUN_DRIFT_SELF_WORK:-${TMPDIR:-/tmp}}/bun-drift-self.XXXXXX")
+  TREE_EXTRACT="${TREE_EXTRACT:-$HERE/tree-extract.py}"
+  export TREE_EXTRACT
   cp "$orig" "$WORK/bun-drift.sh"
   TOOL=$WORK/bun-drift.sh
   SNAP=$WORK/bun-drift.sh.snap
   cp "$TOOL" "$SNAP"
   SNAP_HASH=$(sha256_of "$SNAP")
-  trap 'rm -rf "$WORK"' EXIT
 
   local n list_len=${#TEETH_LIST[@]} green=0 redctl=0 ran=0
   if [[ "$GUARD_TEETH_LIST" -eq 1 && "$list_len" -ne "$EXPECTED_TEETH" ]]; then
@@ -739,6 +857,7 @@ self_check() {
 }
 
 TREE=
+IMAGE=
 SELF_CHECK=0
 
 while [[ $# -gt 0 ]]; do
@@ -748,8 +867,13 @@ while [[ $# -gt 0 ]]; do
       TREE=$2
       shift 2
       ;;
+    --image)
+      [[ $# -ge 2 ]] || die2 "ПРИБОР: --image нужен путь"
+      IMAGE=$2
+      shift 2
+      ;;
     --self-check) SELF_CHECK=1; shift ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) usage; __DONE=1; exit 0 ;;
     *)
       die2 "ПРИБОР: неизвестный аргумент $1"
       ;;
@@ -760,12 +884,21 @@ if [[ $SELF_CHECK -eq 1 ]]; then
   if [[ -n "${BUN_DRIFT_SELF_CHECK_RUNNING:-}" ]]; then
     die2 "ПРИБОР: вложенный --self-check"
   fi
-  if [[ -n "$TREE" ]]; then
-    die2 "ПРИБОР: --self-check и --tree вместе не допускаются"
+  if [[ -n "$TREE" || -n "$IMAGE" ]]; then
+    die2 "ПРИБОР: --self-check и --tree/--image вместе не допускаются"
   fi
   export BUN_DRIFT_SELF_CHECK_RUNNING=1
   self_check
-  exit $?
+  __rc=$?
+  __DONE=1
+  exit "$__rc"
 fi
 
-measure "$TREE"
+if [[ -n "$TREE" && -n "$IMAGE" ]]; then
+  die2 "ПРИБОР: --tree и --image вместе не допускаются"
+fi
+
+measure "$TREE" "$IMAGE"
+__rc=$?
+__DONE=1
+exit "$__rc"
