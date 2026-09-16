@@ -20,12 +20,17 @@
 2. Логическая строка: текст до перевода строки ВНЕ кавычек; `\\`-перенос
    склеивает; `#`-комментарий (на границе слова, вне кавычек) отрезается;
    тела heredoc (`<<TAG` ... `TAG`) пропускаются целиком -- это данные.
-3. Логическая строка режется на сегменты по `&&`, `||`, `;`, `|`, `&`
-   (вне кавычек; `&` после `>` или `<` -- перенаправление, не оператор).
-   Скобки подоболочек сегмент не режут: `( ... ) 9>&- &` -- один сегмент,
-   и закрытие на закрывающей скобке действует на всё внутри.
+3. Сегменты разделяются переводами логических строк, `&&`, `||`, `;`,
+   `|`, `&` вне кавычек (`&` после `>`/`<` -- часть перенаправления).
+   Подоболочки `( ... )` и группы `{ ...; }` образуют вложенные области,
+   независимо от числа строк. Перенаправление `N>&-` на ЗАКРЫВАЮЩЕЙ
+   границе применяется при входе в тело, включая вложенные области,
+   но не к соседним командам. Повторное `exec N>` в теле открывает fd снова.
+   Скобки присваивания `ИМЯ=( ... )`, раскрытия параметров и арифметики
+   не являются границами подоболочки. Кавычки/экранирование сохраняются:
+   текст `N>&-` внутри аргумента закрытием не считается.
 4. Вызов инструмента кита: командное слово сегмента (после снятия
-   присваиваний и обёртки `env`/`command`) -- интерпретатор
+   присваиваний и обёртки `exec`/`env`/`command`/`builtin`) -- интерпретатор
    (python3|python|node|bash|sh|dash|zsh|perl), и среди аргументов есть
    путь `(tools|scripts)/<имя>.(py|js|sh)` или `claude-patch-all*.sh`.
    Исключения: форма с встроенным кодом (`-c`, `-e`, `-E`, `-`, `-m`,
@@ -35,9 +40,21 @@
    не только со встроенным кодом: в ките он встречается ТОЛЬКО встроенным
    кодом, а его слитные ключи (`-0ne`, `-0pi -e`) грамматикой ключей не
    разобраны, поэтому сегмент с `perl` пропускается, а не судится наугад.
-5. Требование: на сегменте вызова инструмента присутствует токен `N>&-`
-   для КАЖДОГО открытого в этой точке файла fd. Пропуск -- отказ с
-   файлом и номером ПЕРВОЙ физической строки логической строки.
+   Присваивание `ИМЯ=( ... )` само не порождает процесс. Его содержимое
+   проверяется тем же правилом интерпретатора/пути/встроенного кода.
+   Сегмент с `${ИМЯ[@]}` или `${ИМЯ[*]}` (без кавычек либо в двойных)
+   считается вызовом, если ранее массив нёс инструмент. Закрытие на
+   присваивании не переносится на раскрытие. Учёт текстуальный: прежняя
+   метка инструмента не стирается последующим присваиванием, поскольку
+   оно может находиться в неисполненной ветке. Неизвестный массив на
+   командной позиции и неразобранное содержимое с путём инструмента
+   считаются неоднозначными вызовами, а не доказательством отсутствия вызова.
+5. Требование: для КАЖДОГО открытого в этой точке fd есть отдельное
+   закрытие на сегменте вызова либо на границе объемлющей области.
+   Пропуск -- отказ с файлом и первой физической строкой сегмента;
+   для массива -- со строкой раскрытия и строкой исходного присваивания.
+   Неразобранная граница не даёт доказательства закрытия: тело проверяется
+   без него. Незакрытое присваивание с инструментом также даёт отказ.
 6. Строки-ДАННЫЕ (в таблицах `tools/corpus-tools-bench*.sh`: строка
    начинается с двух пробелов и одиночной кавычки) кодом не считаются --
    то же правило, что у переписи замков в tools/lock-probe.sh (утверждение
@@ -48,6 +65,11 @@
 прозрачность обязательна): вызовы через переменные-пути (`bash "$PROBE_SH"`),
 встроенный код (`-c`/`-e`), тела heredoc'ов, функции, ОПРЕДЕЛЁННЫЕ до
 открытия замка и вызванные после (правило текстуальное, не потоковое).
+Подстановки команд и скалярные командные переменные не вычисляются;
+вычисление массива через eval/nameref/поэлементные записи не моделируется.
+Эти ограничения действуют и при классификации содержимого массива;
+неизвестное раскрытие массива на командной позиции даёт отказ по пункту 4,
+а уже известная метка инструмента сохраняется консервативно.
 
 Коды выхода (таблица кита):
   0  нарушений нет
@@ -58,6 +80,7 @@
 грамматика, чья собственная разметка не проверена, -- не прибор.
 """
 
+from dataclasses import dataclass
 import glob
 import os
 import re
@@ -135,7 +158,7 @@ def strip_comments_split(lines):
                 continue
             cur.append(c)
             j += 1
-        cur.append("\n" if (sq or dq) else " ")
+        cur.append("\n" if (sq or dq or cont) else " ")
         if sq or dq or cont:
             continue
         text = "".join(cur)
@@ -155,66 +178,180 @@ def strip_comments_split(lines):
     return out
 
 
-def segments(text):
-    """Логическая строка -> сегменты по операторам (вне кавычек)."""
-    segs = []
-    cur = []
-    sq = dq = False
+@dataclass
+class Token:
+    kind: str
+    text: str
+    line: int
+
+
+@dataclass
+class Group:
+    kind: str
+    body: list
+    suffix: list
+
+
+ARRAY_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=$")
+ARRAY_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\[[@*]\]\}")
+
+
+def shell_tokens(logical):
+    """Кавычки и раскрытия принадлежат слову, не структуре составной команды."""
+    result = []
+    for line, text in logical:
+        i = 0
+        while i < len(text):
+            if text[i].isspace():
+                line += text[i] == "\n"
+                i += 1
+                continue
+            start = i
+            token_line = line
+            c = text[i]
+            if c in "();|&" or (c in "{}" and
+                    (i + 1 == len(text) or text[i + 1].isspace() or text[i + 1] in ";&|")):
+                i += 1
+                if text[start:i] in (";", "|", "&") and text[i:i + 1] == c:
+                    i += 1
+                result.append(Token("op", text[start:i], line))
+                continue
+            quote = None
+            expansion = []
+            while i < len(text):
+                c = text[i]
+                if c == "\\" and quote != "'":
+                    line += text[i:i + 2].count("\n")
+                    i += min(2, len(text) - i)
+                    continue
+                if quote:
+                    if c == quote:
+                        quote = None
+                    line += c == "\n"
+                    i += 1
+                    continue
+                if c in "'\"`":
+                    quote = c
+                    i += 1
+                    continue
+                if text[i:i + 2] in ("${", "$("):
+                    expansion.append("}" if text[i + 1] == "{" else ")")
+                    i += 2
+                    continue
+                if expansion:
+                    if c == "(" and expansion[-1] == ")":
+                        expansion.append(")")
+                    elif c == expansion[-1]:
+                        expansion.pop()
+                    line += c == "\n"
+                    i += 1
+                    continue
+                if c.isspace() or c in "();|" or (c == "&" and
+                        (i == start or text[i - 1] not in "><")):
+                    break
+                i += 1
+            result.append(Token("word", text[start:i], token_line))
+        result.append(Token("op", "\n", line))
+    return result
+
+
+def command_tree(tokens):
+    """Граница замыкается до обхода тела; незамкнутая область не даёт закрытий."""
+    pos = 0
+
+    def parse(end=None):
+        nonlocal pos
+        nodes, current, cases = [], [], []
+
+        def flush():
+            if current:
+                nodes.append(current[:])
+                current.clear()
+
+        while pos < len(tokens):
+            tok = tokens[pos]
+            nxt = tokens[pos + 1] if pos + 1 < len(tokens) else None
+            if tok.kind == "word" and ARRAY_ASSIGN.fullmatch(tok.text) and nxt and nxt.text == "(":
+                begin = pos
+                pos += 2
+                depth = 1
+                while pos < len(tokens) and depth:
+                    part = tokens[pos]
+                    if part.kind == "op":
+                        depth += (part.text == "(") - (part.text == ")")
+                    pos += 1
+                value = " ".join(t.text for t in tokens[begin + 2:pos - (not depth)])
+                current.append(Token("bad-array" if depth else "array", tok.text + "(" + value + ")", tok.line))
+                continue
+            if tok.kind == "word":
+                if tok.text == "case" and (not current or current[-1].text in ("then", "do", "else")):
+                    cases.append(False)
+                elif tok.text == "in" and cases:
+                    cases[-1] = True
+                elif tok.text == "esac" and cases:
+                    cases.pop()
+                current.append(tok)
+                pos += 1
+                continue
+            if cases and cases[-1] and tok.text in ("(", ")"):
+                if tok.text == ")":
+                    cases[-1] = False
+                    flush()
+                pos += 1
+                continue
+            if tok.text == end:
+                flush()
+                pos += 1
+                suffix = []
+                while pos < len(tokens) and tokens[pos].kind == "word":
+                    suffix.append(tokens[pos])
+                    pos += 1
+                return nodes, suffix
+            if tok.text == "(" and nxt and nxt.text == ")" and current:
+                # Скобки объявления функции не создают подоболочку.
+                pos += 2
+                continue
+            if tok.text in ("(", "{"):
+                flush()
+                pos += 1
+                body, suffix = parse(")" if tok.text == "(" else "}")
+                nodes.append(Group(tok.text, body, suffix))
+                continue
+            if tok.text == ";;" and cases:
+                cases[-1] = True
+            flush()
+            pos += 1
+        flush()
+        return nodes, []
+
+    return parse()[0]
+
+
+def array_refs(text, with_lines=False):
+    """Одиночные кавычки и экранированный доллар не раскрывают массив."""
     i = 0
+    quote = None
     while i < len(text):
         c = text[i]
-        if sq:
-            cur.append(c)
-            if c == "'":
-                sq = False
-            i += 1
-            continue
-        if dq:
-            cur.append(c)
-            if c == "\\" and i + 1 < len(text):
-                cur.append(text[i + 1])
-                i += 2
-                continue
-            if c == '"':
-                dq = False
-            i += 1
-            continue
-        if c == "'":
-            sq = True
-            cur.append(c)
-            i += 1
-            continue
-        if c == '"':
-            dq = True
-            cur.append(c)
-            i += 1
-            continue
-        two = text[i:i + 2]
-        if two in ("&&", "||"):
-            segs.append("".join(cur))
-            cur = []
+        if c == "\\" and quote != "'":
             i += 2
             continue
-        if c == ";":
-            segs.append("".join(cur))
-            cur = []
-            i += 1
-            continue
-        if c == "|":
-            segs.append("".join(cur))
-            cur = []
-            i += 1
-            continue
-        if c == "&" and (i == 0 or text[i - 1] not in "><"):
-            segs.append("".join(cur))
-            cur = []
-            i += 1
-            continue
-        cur.append(c)
+        if c == quote:
+            quote = None
+        elif c in "'\"" and quote is None:
+            quote = c
+        elif quote != "'":
+            match = ARRAY_REF.match(text, i)
+            if match:
+                yield (match.group(1), text[:i].count("\n")) if with_lines else match.group(1)
+                i = match.end()
+                continue
         i += 1
-    if cur:
-        segs.append("".join(cur))
-    return segs
+
+
+def closed_fds(tokens):
+    return {int(t.text[0]) for t in tokens
+            if t.kind == "word" and CLOSE_TOK.fullmatch(t.text)}
 
 
 def unquote(tok):
@@ -222,16 +359,15 @@ def unquote(tok):
 
 
 def command_word(seg):
-    """Командное слово сегмента после снятия '(' , присваиваний, env/command."""
-    toks = seg.replace("(", " ").replace(")", " ) ").split()
-    toks = [t for t in toks if t != ")"]
+    """Командное слово после присваиваний и обёрток пункта 4."""
+    toks = [t.text for t in shell_tokens([(1, seg)]) if t.kind == "word"]
     i = 0
     while i < len(toks):
         t = toks[i]
         if ASSIGN.match(unquote(t)):
             i += 1
             continue
-        if t == "command" or t == "builtin":
+        if t in ("exec", "command", "builtin"):
             i += 1
             continue
         if t == "env":
@@ -272,33 +408,74 @@ def scan_file(path, is_data_file):
     """-> (violations, open_events). violations: [(lineno, fd, text)]"""
     with open(path, encoding="utf-8", errors="replace") as fh:
         text = fh.read()
-    opens = set()
     open_events = 0
     violations = []
-    for lineno, ltext in strip_comments_split(text.split("\n")):
-        if is_data_file and DATA_LINE.match(ltext):
-            continue
-        for seg in segments(ltext):
-            s = seg.strip()
-            if not s:
+    arrays = {}
+    logical = [(line, value) for line, value in strip_comments_split(text.split("\n"))
+               if not (is_data_file and DATA_LINE.match(value))]
+
+    def walk(nodes, opens):
+        nonlocal open_events
+        for node in nodes:
+            if isinstance(node, Group):
+                local = opens - closed_fds(node.suffix)
+                walk(node.body, local)
+                if node.kind == "{":
+                    # Перенаправления группы временные; exec без них остаётся в оболочке.
+                    redirected = closed_fds(node.suffix)
+                    opens.difference_update(opens - local - redirected)
+                    opens.update(local - redirected)
                 continue
-            word, _ = command_word(seg)
-            if word == "exec":
-                m = EXEC_CLOSE.match(s)
-                if m:
-                    opens.discard(int(m.group(1)))
+            seg = " ".join(t.text for t in node)
+            for token in node:
+                if token.kind not in ("array", "bad-array"):
                     continue
-                m = EXEC_OPEN.match(s)
-                if m:
-                    opens.add(int(m.group(1)))
-                    open_events += 1
-                    continue
+                name, value = token.text.split("=", 1)
+                name = name.rstrip("+")
+                body = value[1:-1]
+                word, args = command_word(body)
+                inline = unquote(word) == "perl" or (
+                    unquote(word) in INTERPRETERS and
+                    any(unquote(a) in INLINE_OPTS for a in args))
+                origins = arrays.setdefault(name, set())
+                refs = list(array_refs(body))
+                for ref in refs:
+                    origins.update(arrays.get(ref, {token.line}))
+                if tool_spawn(body) or (TOOL_PATH.search(body) and not inline):
+                    origins.add(token.line)
+                if token.kind == "bad-array" and origins:
+                    for fd in sorted(opens):
+                        violations.append((token.line, fd, f"не разобрано присваивание {name}, строка {token.line}"))
+            commands = [t for t in node if t.kind == "word"]
+            if not commands:
                 continue
-            if opens and tool_spawn(seg):
-                closed = {int(x) for x in CLOSE_TOK.findall(seg)}
-                for fd in sorted(opens):
-                    if fd not in closed:
-                        violations.append((lineno, fd, s[:120]))
+            s = " ".join(t.text for t in commands)
+            m = EXEC_CLOSE.match(s)
+            if m and commands[0].text == "exec":
+                opens.difference_update(closed_fds(commands))
+                continue
+            m = EXEC_OPEN.match(s)
+            if m and commands[0].text == "exec":
+                opens.add(int(m.group(1)))
+                open_events += 1
+                continue
+            word, _ = command_word(s)
+            uses = []
+            for token in commands:
+                for name, offset in array_refs(token.text, with_lines=True):
+                    origins = arrays.get(name)
+                    if origins or (origins is None and name in set(array_refs(word))):
+                        source = ",".join(map(str, sorted(origins))) if origins else "неизвестна"
+                        line = token.line + offset
+                        uses.append((line, f"массив {name}, присваивание: {source}; раскрытие: {line}"))
+            if opens and (tool_spawn(s) or uses):
+                lineno = uses[0][0] if uses else commands[0].line
+                detail = "; ".join(u[1] for u in uses)
+                snippet = (detail + ": " if detail else "") + seg[:120]
+                for fd in sorted(opens - closed_fds(commands)):
+                    violations.append((lineno, fd, snippet))
+
+    walk(command_tree(shell_tokens(logical)), set())
     return violations, open_events
 
 
@@ -329,7 +506,7 @@ def scan_tree(root):
 
 
 SELF_CASES = [
-    # (имя, тело, ожидаемые нарушения [(lineno, fd)])
+    # (имя, тело, нарушения [(lineno, fd)], необязательные фрагменты диагностик)
     ("open-then-bare-call",
      "exec 9>\"$L\"\nbash tools/x.sh\n",
      [(2, 9)]),
@@ -390,6 +567,98 @@ SELF_CASES = [
     ("env-wrapped-closed",
      "exec 9>\"$L\"\nenv -u A -u B bash tools/x.sh 9>&- || {\n",
      []),
+    ("multiline-subshell-closed",
+     'exec 9>"$L"\n(\n bash tools/x.sh\n) 9>&- &\n', []),
+    ("multiline-subshell-open",
+     'exec 9>"$L"\n(\n bash tools/x.sh\n) &\n', [(3, 9)]),
+    ("multiline-group-closed",
+     'exec 9>"$L"\n{\n bash tools/x.sh;\n} 9>&-\n', []),
+    ("multiline-group-open",
+     'exec 9>"$L"\n{\n bash tools/x.sh;\n}\n', [(3, 9)]),
+    ("nested-outer-close",
+     'exec 9>"$L"\n(\n {\n  bash tools/x.sh\n }\n) 9>&-\n', []),
+    ("nested-no-close",
+     'exec 9>"$L"\n(\n {\n  bash tools/x.sh\n }\n)\n', [(4, 9)]),
+    ("boundary-wrong-fd",
+     'exec 9>"$L"\n(\n bash tools/x.sh\n) 8>&-\n', [(3, 9)]),
+    ("boundary-two-fds",
+     'exec 9>"$L"\nexec 8>"$M"\n(\n bash tools/x.sh\n) 8>&- 9>&-\n', []),
+    ("boundary-does-not-cover-sibling",
+     'exec 9>"$L"\n( bash tools/x.sh ) 9>&-; bash tools/y.sh\n', [(2, 9)]),
+    ("inner-close-does-not-cover-outer",
+     'exec 9>"$L"\n(\n ( bash tools/x.sh ) 9>&-\n bash tools/y.sh\n)\n', [(4, 9)]),
+    ("multiple-body-segments",
+     'exec 9>"$L"\n( bash tools/x.sh; bash tools/y.sh ) 9>&-\n', []),
+    ("body-close-not-boundary",
+     'exec 9>"$L"\n( bash tools/x.sh; bash tools/y.sh 9>&- )\n', [(2, 9)]),
+    ("quoted-close-is-data",
+     'exec 9>"$L"\n( bash tools/x.sh ) >"9>&-"\n', [(2, 9)]),
+    ("subshell-global-close-is-local",
+     'exec 9>"$L"\n( exec 9>&- )\nbash tools/x.sh\n', [(3, 9)]),
+    ("boundary-reopened-in-body",
+     'exec 9>"$L"\n(\n exec 9>"$M"\n bash tools/x.sh\n) 9>&-\n', [(4, 9)]),
+    ("array-segment-close",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\n"${A[@]}" 9>&-\n', []),
+    ("array-open",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\n"${A[@]}"\n', [(3, 9)],
+     ['массив A, присваивание: 2; раскрытие: 3']),
+    ("array-assignment-close-not-inherited",
+     'exec 9>"$L"\nA=(python3 tools/x.py) 9>&-\n"${A[@]}"\n', [(3, 9)]),
+    ("array-inline-code",
+     'exec 9>"$L"\nA=(python3 -c "print(\'tools/x.py\')")\n"${A[@]}"\n', []),
+    ("array-non-tool",
+     'exec 9>"$L"\nA=(printf hello)\n"${A[@]}"\n', []),
+    ("array-assignment-not-spawn",
+     'exec 9>"$L"\nA=(python3\n tools/x.py)\n', []),
+    ("array-before-open",
+     'A=(python3 tools/x.py)\nexec 9>"$L"\n${A[@]}\n', [(3, 9)]),
+    ("array-star-open",
+     'exec 9>"$L"\nA=(bash tools/x.sh)\n"${A[*]}"\n', [(3, 9)]),
+    ("array-star-closed",
+     'exec 9>"$L"\nA=(bash tools/x.sh)\n"${A[*]}" 9>&-\n', []),
+    ("array-unquoted-closed",
+     'exec 9>"$L"\nA=(bash tools/x.sh)\n${A[@]} 9>&-\n', []),
+    ("array-exec-env-boundary",
+     'exec 9>"$L"\nA=(python3\n tools/x.py --cols "${SIZE[0]}")\n(\n exec env X=1 "${A[@]}"\n) 9>&- &\n', []),
+    ("array-exec-env-open",
+     'exec 9>"$L"\nA=(python3\n tools/x.py --cols "${SIZE[0]}")\n(\n exec env X=1 "${A[@]}"\n) &\n', [(5, 9)],
+     ['массив A, присваивание: 2; раскрытие: 5']),
+    ("array-single-quoted-is-data",
+     'exec 9>"$L"\nA=(bash tools/x.sh)\nprintf \'${A[@]}\'\n', []),
+    ("array-escaped-is-data",
+     'exec 9>"$L"\nA=(bash tools/x.sh)\nprintf "\\${A[@]}"\n', []),
+    ("array-copy-open",
+     'exec 9>"$L"\nA=(bash tools/x.sh)\nB=("${A[@]}")\n"${B[@]}"\n', [(4, 9)]),
+    ("array-reassignment-conservative",
+     'exec 9>"$L"\nA=(bash tools/x.sh)\nA=(printf hello)\n"${A[@]}"\n', [(4, 9)]),
+    ("array-unknown-command-open",
+     'exec 9>"$L"\n"${UNKNOWN[@]}"\n', [(2, 9)]),
+    ("array-unknown-command-closed",
+     'exec 9>"$L"\n"${UNKNOWN[@]}" 9>&-\n', []),
+    ("array-ambiguous-path-open",
+     'exec 9>"$L"\nA=("$RUNNER" tools/x.py)\n"${A[@]}"\n', [(3, 9)]),
+    ("array-unclosed-refused",
+     'exec 9>"$L"\nA=(python3 tools/x.py\n', [(2, 9)]),
+    ("case-pattern-not-subshell-boundary",
+     'exec 9>"$L"\n(\n case "$x" in\n x) bash tools/x.sh;;\n esac\n) 9>&-\n', []),
+    ("case-pattern-open",
+     'exec 9>"$L"\n(\n case "$x" in\n x) bash tools/x.sh;;\n esac\n)\n', [(4, 9)]),
+    ("exec-direct-open",
+     'exec 9>"$L"\nexec bash tools/x.sh\n', [(2, 9)]),
+    ("exec-direct-closed",
+     'exec 9>"$L"\nexec bash tools/x.sh 9>&-\n', []),
+    ("array-continuation-expansion-line",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\nexec env X=1 \\\n "${A[@]}"\n', [(4, 9)],
+     ['массив A, присваивание: 2; раскрытие: 4']),
+    ("array-continuation-expansion-closed",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\nexec env X=1 \\\n "${A[@]}" 9>&-\n', []),
+    ("array-multiline-word-expansion-line",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\nprintf "prefix\n${A[@]}"\n', [(4, 9)],
+     ['массив A, присваивание: 2; раскрытие: 4']),
+    ("group-global-close-persists",
+     'exec 9>"$L"\n{ exec 9>&-; }\nbash tools/x.sh\n', []),
+    ("group-boundary-close-temporary",
+     'exec 9>"$L"\n{ bash tools/x.sh; } 9>&-\nbash tools/y.sh\n', [(3, 9)]),
 ]
 
 
@@ -397,7 +666,8 @@ def self_check():
     root = tempfile.mkdtemp(prefix="lockfd-self.")
     fails = 0
     try:
-        for name, body, want in SELF_CASES:
+        for case in SELF_CASES:
+            name, body, want = case[:3]
             fname = "case.sh"
             if name == "data-line-in-bench":
                 # Правило данных привязано к ИМЕНИ файла: кладём в подкаталог
@@ -410,6 +680,12 @@ def self_check():
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(body)
             got, _opens = scan_file(path, bool(DATA_FILE.match(os.path.basename(path))))
+            if len(case) == 4:
+                details = [snippet for _ln, _fd, snippet in got]
+                if len(details) != len(case[3]) or any(
+                        expected not in actual for expected, actual in zip(case[3], details)):
+                    fails += 1
+                    print(f"self-check: FAIL {name}: диагностика {details}, ожидалось {case[3]}", file=sys.stderr)
             got = [(ln, fd) for ln, fd, _s in got]
             if got != list(want):
                 fails += 1
