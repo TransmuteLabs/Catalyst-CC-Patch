@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
-"""Daily compaction of judgment records.
+"""Compaction pass over probe journals and records.
 
 Records are written uncompressed: a fresh record must be readable and greppable.
 They lose value gradually, while the volume grows noticeably — about a hundred
 kilobytes per judgment, almost all of it the transcript. So they are compacted
 by a separate pass, by age.
 
-  compact.py [--dir D] [--older-than-hours N] [--dry-run]
+  compact.py [--dir D] [--probe P1,P2] [--older-than-hours N] [--dry-run]
 
 Архив (сжатые <имя>.json.gz) растёт неограниченно; его горизонт -- возрастная
 граница с обязательной машиночитаемой отметкой horizon.json рядом с каталогом
 записей (подробности -- у prune_archive_horizon). Рубеж задаёт ручка окружения
 $CLAUDE_JUDGE_ARCHIVE_DAYS (сутки, умолчание 180).
+
+Проб в одном прогоне может быть НЕСКОЛЬКО: --probe judge,failover (волна
+227b). Владелец прополки один на все журналы -- этот проход; второй агент,
+обёртка и вторая копия расписания не заводятся. Весь проход (fold mod ->
+fold shards -> сжатие -> горизонт) выполняется ПО КАЖДОЙ пробе отдельно;
+каждая строка вывода несёт имя пробы префиксом [<probe>] ВСЕГДА, включая
+одиночную пробу -- разбор вывода не должен зависеть от того, список это или
+одно имя (урок #207: рядом с числом стоит имя владельца). Итоговый код
+прогона: 1, если хотя бы одна проба отказала по существу (горизонт либо
+изолированный OSError); тихий успех одной пробы не имеет права спрятать
+отказ другой, и наоборот -- отказ одной не отнимает проход у остальных.
+Двойка в «худший из проб» НЕ входит: код 2 -- контракт вызова по таблице
+кита, он про АРГУМЕНТЫ, а не про выполнение, и весь проверяется ДО начала
+прохода проб.
 
 Idempotent: already-compacted ones are skipped, the source is deleted only
 after the archive has been written and read back.
@@ -22,8 +36,16 @@ after the archive has been written and read back.
      пустой список кандидатов горизонта -- тоже 0: ПУСТО не есть НОЛЬ)
   1  отказ по существу: горизонт архива не может ни унести, ни отметиться --
      не читается каталог или метка времени архива, не читается либо не пишется
-     отметка горизонта, мусор в ручке окружения; причина -- словами в stderr
-  2  контракт вызова нарушен: argparse отверг аргументы (питон отдаёт 2 сам)
+     отметка горизонта, мусор в ручке окружения; либо изолированная ошибка
+     внешней среды пробы (OSError: права, ENOSPC, битый путь); причина --
+     словами в stderr; отказ ОДНОЙ пробы не останавливает остальные, но
+     делает итоговый код 1
+  2  контракт вызова нарушен (весь -- ДО начала прохода проб): argparse
+     отверг аргументы (питон отдаёт 2 сам), элемент списка --probe пуст
+     после обрезки пробелов, имя пробы -- не простой сегмент (пробельные
+     символы, разделитель пути, «.»/«..»), либо --dir при более чем одной
+     пробе (каталог записей один, а пробы разные: у каждой свой
+     <дом>/<проба>/records)
 Круг 28, F-10: шапка заведена, чтобы объявленный код был виден вызывающему.
 """
 import argparse, glob, gzip, json, math, os, re, shutil, sys, time
@@ -71,6 +93,18 @@ def _clip(v, n=400):
     if isinstance(v, str) and len(v) > n:
         return v[:n]
     return v
+
+
+def _say(probe, text):
+    # CONSTRAINT (волна 227b): каждая строка вывода несёт имя пробы префиксом
+    # ВСЕГДА, включая одиночную пробу -- разбор вывода не зависит от того,
+    # список проб назван или одно имя, а рядом с каждым числом стоит владелец.
+    print(f'[{probe}] {text}')
+
+
+def _warn(probe, text):
+    # Тот же префикс для stderr: отказ и предупреждение принадлежат пробе.
+    print(f'[{probe}] {text}', file=sys.stderr)
 
 
 def _outcome_of(kind):
@@ -126,7 +160,7 @@ def _load_mod_record(path):
         return False
 
 
-def read_journal_lines(journal_path, existing):
+def read_journal_lines(journal_path, existing, probe):
     """Разбор строк журнала с ИМЕНОВАНИЕМ непарсящихся.
 
     Возвращает (rows, torn): rows -- список пар (строка, объект) по тем
@@ -172,15 +206,15 @@ def read_journal_lines(journal_path, existing):
             torn += 1
             body = raw.encode('utf-8', 'surrogateescape')
             has_nul = 'да' if b'\x00' in body else 'нет'
-            sys.stderr.write(
-                f'ВНИМАНИЕ: {journal_path}:{lineno} не разбирается ({exc}); '
-                f'длина {len(body)} байт, NUL: {has_nul}; строка пропущена\n')
+            _warn(probe,
+                  f'ВНИМАНИЕ: {journal_path}:{lineno} не разбирается ({exc}); '
+                  f'длина {len(body)} байт, NUL: {has_nul}; строка пропущена')
             continue
         rows.append((s, obj))
     return rows, torn
 
 
-def fold_mod_records(journal_path, records_dir, dry_run=False):
+def fold_mod_records(journal_path, records_dir, probe, dry_run=False):
     """Insert missing journal index lines for records/mod-*.json{,.gz}.
 
     The function-hooks carrier has no append verb ($.fs.write overwrites).
@@ -191,13 +225,13 @@ def fold_mod_records(journal_path, records_dir, dry_run=False):
     """
     added = skipped = unread = torn = 0
     if not os.path.isdir(records_dir):
-        print(f'fold mod: записей нет ({records_dir})')
+        _say(probe, f'fold mod: записей нет ({records_dir})')
         return
     names = []
     for pat in ('mod-*.json', 'mod-*.json.gz'):
         names.extend(os.path.basename(x) for x in glob.glob(os.path.join(records_dir, pat)))
     if not names:
-        print('fold mod: нечего вкладывать')
+        _say(probe, 'fold mod: нечего вкладывать')
         return
     seen = set()
     existing = ''
@@ -207,7 +241,7 @@ def fold_mod_records(journal_path, records_dir, dry_run=False):
     except FileNotFoundError:
         existing = ''
     if existing:
-        rows, torn = read_journal_lines(journal_path, existing)
+        rows, torn = read_journal_lines(journal_path, existing, probe)
         for _s, obj in rows:
             rec = obj.get('rec')
             if isinstance(rec, str):
@@ -243,12 +277,12 @@ def fold_mod_records(journal_path, records_dir, dry_run=False):
             fh.write(pfx + '\n'.join(new_lines) + '\n')
     # Ноль печатается тоже: отсутствие слова читатель принимает за отсутствие
     # проблемы, и молчащее число ничем не лучше молчащего разбора.
-    print(f'fold mod: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
-          f', строк журнала не разобрано {torn}'
-          f'{" (dry-run)" if dry_run else ""}')
+    _say(probe, f'fold mod: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
+         f', строк журнала не разобрано {torn}'
+         f'{" (dry-run)" if dry_run else ""}')
 
 
-def fold_journal_shards(journal_path, dry_run=False):
+def fold_journal_shards(journal_path, probe, dry_run=False):
     """Append unique sibling shards written by the function-hooks carrier.
 
     The hook cannot append: $.fs.write overwrites. It writes
@@ -264,13 +298,13 @@ def fold_journal_shards(journal_path, dry_run=False):
     try:
         names = os.listdir(d)
     except FileNotFoundError:
-        print('fold shards: каталога нет')
+        _say(probe, 'fold shards: каталога нет')
         return
     for name in names:
         if name.startswith(prefix):
             shards.append(os.path.join(d, name))
     if not shards:
-        print('fold shards: нечего вкладывать')
+        _say(probe, 'fold shards: нечего вкладывать')
         return
     seen_rec = set()
     seen_line = set()
@@ -280,7 +314,7 @@ def fold_journal_shards(journal_path, dry_run=False):
             existing = fh.read()
     except FileNotFoundError:
         existing = ''
-    rows, torn = read_journal_lines(journal_path, existing)
+    rows, torn = read_journal_lines(journal_path, existing, probe)
     for s, obj in rows:
         seen_line.add(s)
         rec = obj.get('rec')
@@ -335,7 +369,7 @@ def fold_journal_shards(journal_path, dry_run=False):
         with open(journal_path, encoding='utf-8') as fh:
             got = set(x.strip() for x in fh.read().splitlines() if x.strip())
         if not set(new_lines) <= got:
-            print('fold shards: read-back missed lines; shards kept')
+            _say(probe, 'fold shards: read-back missed lines; shards kept')
             consumed = []
     if not dry_run:
         for path in consumed:
@@ -344,9 +378,9 @@ def fold_journal_shards(journal_path, dry_run=False):
             except FileNotFoundError:
                 pass
     # Тот же договор, что у fold mod: число называется всегда, включая ноль.
-    print(f'fold shards: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
-          f', строк журнала не разобрано {torn}'
-          f'{" (dry-run)" if dry_run else ""}')
+    _say(probe, f'fold shards: добавлено {added}, уже в индексе {skipped}, не прочитано {unread}'
+         f', строк журнала не разобрано {torn}'
+         f'{" (dry-run)" if dry_run else ""}')
 
 
 
@@ -430,7 +464,7 @@ def _horizon_write_mark(mark_path, runs):
         raise HorizonRefusal(f'отметка горизонта не пишется: {mark_path}: {exc}')
 
 
-def prune_archive_horizon(records_dir, dry_run=False):
+def prune_archive_horizon(records_dir, probe, dry_run=False):
     """Прополка архива по возрасту с обязательной отметкой горизонта.
 
     Архив -- имена, КОТОРЫМИ кончающиеся на .json.gz. Положительный список
@@ -452,7 +486,7 @@ def prune_archive_horizon(records_dir, dry_run=False):
         names = sorted(os.listdir(records_dir))
     except FileNotFoundError:
         # Тот же договор, что у сжатия (шапка): отсутствующий каталог -- не отказ.
-        print('горизонт архива: каталога нет -- нечего пропалывать')
+        _say(probe, 'горизонт архива: каталога нет -- нечего пропалывать')
         return counters
     except OSError as exc:
         raise HorizonRefusal(f'каталог архива не читается: {records_dir}: {exc}')
@@ -478,7 +512,7 @@ def prune_archive_horizon(records_dir, dry_run=False):
         _horizon_write_mark(mark_path, _horizon_merged(runs, entry))
     for path, name, size in candidates:
         if dry_run:
-            print(f'унёс бы архив: {name}  {size} байт')
+            _say(probe, f'унёс бы архив: {name}  {size} байт')
             counters['taken'] += 1
             counters['bytes'] += size
             continue
@@ -496,37 +530,78 @@ def prune_archive_horizon(records_dir, dry_run=False):
         entry['removed'] = counters['taken']
         _horizon_write_mark(mark_path, _horizon_merged(runs, entry))
     # Ноль печатается тоже: молчащее число ничем не лучше молчащего разбора.
-    print(f"горизонт архива: унесено {counters['taken']}, "
-          f"исчезли {counters['vanished']}, байт {counters['bytes']}, рубеж "
-          f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(edge))}")
+    _say(probe, f"горизонт архива: унесено {counters['taken']}, "
+         f"исчезли {counters['vanished']}, байт {counters['bytes']}, рубеж "
+         f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(edge))}")
     return counters
 
 
-def main():
-    p = argparse.ArgumentParser()
-    # Лестница дома -- та же, что у ядра (круг 21, F-8).
-    home = (os.environ.get('CLAUDE_PROBES_DIR')
-            or os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude', 'probes'))
-    p.add_argument('--home', default=home, help='дом проб')
-    p.add_argument('--probe', default='judge', help='идентификатор пробы')
-    p.add_argument('--dir', default=None,
-                   help='каталог записей (умолчание: <дом>/<проба>/records)')
-    # Отрезок [0, 876000]: ноль -- буквальное «старше нуля часов» (решение
-    # контроллера, не менять), верхняя граница -- сто лет: конечность и
-    # неотрицательность -- часть контракта. Прежний type=float пропускал минус
-    # и nan молча: минус клал cutoff в БУДУЩЕЕ и сжимал всё живое, nan делал
-    # `mtime > nan` всегда ложным с тем же исходом -- при коде 0 и счётчике
-    # «сжато: N», выглядящем как штатный проход (круг 26, K-14).
-    p.add_argument('--older-than-hours', type=replay.bounded_float(
-        '--older-than-hours', 0, 876000), default=24)
-    p.add_argument('--dry-run', action='store_true')
-    a = p.parse_args()
-    if a.dir is None:
-        a.dir = os.path.join(os.path.expanduser(a.home), a.probe, 'records')
+def _bad_probe_name(name):
+    """Причина негодности имени пробы словами, либо None.
 
-    journal_path = os.path.join(os.path.expanduser(a.home), a.probe, 'journal.jsonl')
-    fold_mod_records(journal_path, a.dir, dry_run=a.dry_run)
-    fold_journal_shards(journal_path, dry_run=a.dry_run)
+    Имя пробы -- ПРОСТОЙ СЕГМЕНТ пути: оно становится именем каталога внутри
+    дома проб, и всё, что выходит за сегмент (пробельные символы,
+    разделитель пути, точка-имя), уводит проход в каталог с пробелом или за
+    пределы дома, а проход УДАЛЯЕТ файлы (шарды, архивы горизонта). Опечатка
+    владельца не имеет права превращаться в прогон неизвестно чего; имя с
+    пробельными символами отвергается ЦЕЛИКОМ, без молчаливой обрезки:
+    прощённая опечатка невидима, названная -- исправима (замер контроллера:
+    «judge, failover» молча шёл в каталог « failover», «../escaped» -- за
+    пределы дома).
+    """
+    if any(ch.isspace() for ch in name):
+        return 'пробельные символы'
+    if '/' in name or os.sep in name:
+        return 'разделитель пути'
+    if name in ('.', '..'):
+        return 'имя-точка'
+    return None
+
+
+def _probe_list(raw):
+    """Разбор --probe: список через запятую (волна 227b).
+
+    Порядок сохраняется, повтор схлопывается с названной строкой. Элемент,
+    пустой после обрезки пробелов («judge,», «--probe ""»), -- отказ
+    контракта кодом 2, а не молчаливый пропуск; имя пробы обязано быть
+    ПРОСТЫМ СЕГМЕНТОМ пути (см. _bad_probe_name) -- тоже кодом 2, с
+    показом негодного имени. Обе проверки -- ДО начала прохода: опечатка
+    владельца не имеет права превращаться в прогон неизвестно чего, а
+    проход удаляет файлы. Владелец прополки журналов один на все пробы --
+    второй агент не заводится, список расширяет этот же проход.
+    """
+    probes = []
+    seen = set()
+    for item in raw.split(','):
+        if item.strip() == '':
+            print(f'ОТКАЗ: пустой элемент в списке проб ({item!r} в '
+                  f'--probe {raw!r}); проба обязана быть названа', file=sys.stderr)
+            sys.exit(2)
+        if _bad_probe_name(item):
+            print(f'ОТКАЗ: негодное имя пробы {item!r} в --probe {raw!r}: '
+                  f'{_bad_probe_name(item)}; имя обязано быть простым сегментом '
+                  '(без пробельных символов, без разделителей пути, не . и не ..)',
+                  file=sys.stderr)
+            sys.exit(2)
+        if item in seen:
+            _say(item, 'проба названа повторно -- схлопнуто')
+            continue
+        seen.add(item)
+        probes.append(item)
+    return probes
+
+
+def run_probe(probe, a):
+    """Один полный проход по пробе: свёртки, сжатие, горизонт.
+
+    Отказ HorizonRefusal ловит вызывающий цикл: отказ одной пробы не
+    останавливает остальные и не отменяет их вывод.
+    """
+    records_dir = a.dir if a.dir is not None else os.path.join(
+        os.path.expanduser(a.home), probe, 'records')
+    journal_path = os.path.join(os.path.expanduser(a.home), probe, 'journal.jsonl')
+    fold_mod_records(journal_path, records_dir, probe, dry_run=a.dry_run)
+    fold_journal_shards(journal_path, probe, dry_run=a.dry_run)
 
 
     cutoff = time.time() - a.older_than_hours * 3600
@@ -551,7 +626,7 @@ def main():
     # принадлежит другому пользователю); нечисловой суффикс оставляем:
     # происхождение такого файла неизвестно.
     tmp_form = re.compile(r'\.json\.gz\.tmp\.[0-9]+\Z')
-    for t in glob.glob(os.path.join(a.dir, '*.json.gz.tmp.*')):
+    for t in glob.glob(os.path.join(records_dir, '*.json.gz.tmp.*')):
         # Глоб шире формы писателя: `.tmp.*` ловит и `.tmp.12.34`, и
         # `.tmp.pid-7`, и `.tmp.²`. Имя сверяется с ТОЙ ЖЕ формой, которую
         # пишет строка создания ниже (`gz + f'.tmp.{os.getpid()}'`), иначе
@@ -603,7 +678,7 @@ def main():
                 tmp_held += 1
                 continue               # живой писатель, файл свежий
         if a.dry_run:
-            print(f'снёс бы сироту tmp: {os.path.basename(t)}')
+            _say(probe, f'снёс бы сироту tmp: {os.path.basename(t)}')
         else:
             try:
                 after = os.stat(t)
@@ -616,7 +691,7 @@ def main():
             except FileNotFoundError:
                 continue
         orphans += 1
-    for f in sorted(glob.glob(os.path.join(a.dir, '*.json'))):
+    for f in sorted(glob.glob(os.path.join(records_dir, '*.json'))):
         try:
             mtime = os.path.getmtime(f)
         except FileNotFoundError:
@@ -659,18 +734,18 @@ def main():
                     # Паритет: сухой прогон обязан назвать тот ИСХОД, к
                     # которому пришёл бы боевой (запись будет сжата -> done),
                     # иначе «сжал бы N» расходится с реальным N.
-                    print(f'пересжал бы (архив рядом не читается): {os.path.basename(f)}: {e}')
+                    _say(probe, f'пересжал бы (архив рядом не читается): {os.path.basename(f)}: {e}')
                     done += 1
                     continue
                 try:
                     os.unlink(gz)
                 except FileNotFoundError:
                     pass          # архив уже убран — пересжимаем всё равно
-                print(f'ОБОРВАННОЕ СЖАТИЕ, архив не читается -- пересжимаю: {os.path.basename(f)}: {e}')
+                _say(probe, f'ОБОРВАННОЕ СЖАТИЕ, архив не читается -- пересжимаю: {os.path.basename(f)}: {e}')
                 recompress = True
             else:
                 if a.dry_run:
-                    print(f'удалил бы исходник (архив рядом целый): {os.path.basename(f)}')
+                    _say(probe, f'удалил бы исходник (архив рядом целый): {os.path.basename(f)}')
                     done += 1
                     continue
                 # Та же асимметрия, что была ниже у основного пути: архив уже
@@ -694,7 +769,7 @@ def main():
                         saved += before - os.path.getsize(gz)
                     except FileNotFoundError:
                         gz_gone += 1
-                print(f'ОБОРВАННОЕ СЖАТИЕ ДОВЕДЕНО: {os.path.basename(f)}')
+                _say(probe, f'ОБОРВАННОЕ СЖАТИЕ ДОВЕДЕНО: {os.path.basename(f)}')
                 continue
             del recompress          # сюда попадают только записи на пересжатие
         try:
@@ -703,7 +778,7 @@ def main():
             vanished += 1
             continue
         if a.dry_run:
-            print(f'сжал бы: {os.path.basename(f)}  {before} байт')
+            _say(probe, f'сжал бы: {os.path.basename(f)}  {before} байт')
             done += 1
             continue
         # Архив пишется под временным именем и становится конечным только
@@ -738,7 +813,7 @@ def main():
                 os.unlink(tmp)
             except FileNotFoundError:
                 pass
-            print(f'ПРОПУЩЕНО (архив не читается): {os.path.basename(f)}: {e}')
+            _say(probe, f'ПРОПУЩЕНО (архив не читается): {os.path.basename(f)}: {e}')
             skipped += 1
             continue
         # Прополка ядра не смотрит на расширения: и tmp может не дожить до
@@ -766,24 +841,71 @@ def main():
         except FileNotFoundError:
             gz_gone += 1
 
-    print(f'сжато: {done}, пропущено: {skipped}, исчезли под руками: {vanished}, '
-          f'архив исчез после сжатия: {gz_gone}, исходник исчез до замера: {src_gone}, '
-          f'сирот tmp убрано: {orphans}, tmp при живом pid: {tmp_held}, '
-          f'освобождено: {saved/1048576:.2f} МБ')
+    # Ноль печатается тоже (тот же договор, что у свёрток): молчащее число
+    # ничем не лучше молчащего разбора.
+    _say(probe, f'сжато: {done}, пропущено: {skipped}, исчезли под руками: {vanished}, '
+         f'архив исчез после сжатия: {gz_gone}, исходник исчез до замера: {src_gone}, '
+         f'сирот tmp убрано: {orphans}, tmp при живом pid: {tmp_held}, '
+         f'освобождено: {saved/1048576:.2f} МБ')
 
     # Горизонт идёт ПОСЛЕ цикла сжатия, и порядок здесь несущий: сжатие
     # создаёт архивы, горизонт их уносит. В обратном порядке запись, сжатая
     # этим же проходом, успевала бы попасть в кандидаты того же прогона.
-    prune_archive_horizon(a.dir, dry_run=a.dry_run)
+    prune_archive_horizon(records_dir, probe, dry_run=a.dry_run)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    # Лестница дома -- та же, что у ядра (круг 21, F-8).
+    home = (os.environ.get('CLAUDE_PROBES_DIR')
+            or os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude', 'probes'))
+    p.add_argument('--home', default=home, help='дом проб')
+    p.add_argument('--probe', default='judge',
+                   help='пробы через запятую (judge,failover)')
+    p.add_argument('--dir', default=None,
+                   help='каталог записей; только для одиночной пробы '
+                        '(умолчание: <дом>/<проба>/records)')
+    # Отрезок [0, 876000]: ноль -- буквальное «старше нуля часов» (решение
+    # контроллера, не менять), верхняя граница -- сто лет: конечность и
+    # неотрицательность -- часть контракта. Прежний type=float пропускал минус
+    # и nan молча: минус клал cutoff в БУДУЩЕЕ и сжимал всё живое, nan делал
+    # `mtime > nan` всегда ложным с тем же исходом -- при коде 0 и счётчике
+    # «сжато: N», выглядящем как штатный проход (круг 26, K-14).
+    p.add_argument('--older-than-hours', type=replay.bounded_float(
+        '--older-than-hours', 0, 876000), default=24)
+    p.add_argument('--dry-run', action='store_true')
+    a = p.parse_args()
+    probes = _probe_list(a.probe)
+    if a.dir is not None and len(probes) > 1:
+        print('ОТКАЗ: --dir задаёт ОДИН каталог записей, а проб в списке '
+              f'{len(probes)}; у каждой пробы свой <дом>/<проба>/records',
+              file=sys.stderr)
+        sys.exit(2)
+
+    worst = 0
+    for probe in probes:
+        try:
+            run_probe(probe, a)
+        except HorizonRefusal as exc:
+            # Отказ прибора отделён от работы (шапка файла): «унести нельзя» и
+            # «уносить нечего» -- разные исходы, и второй никогда не маскирует
+            # первый. Причина словами в stderr, код 1, без трейсбека: адресат
+            # этой строки -- журнал launchd, а не отладчик. Отказ ОДНОЙ пробы
+            # не останавливает остальные: тихий успех одной пробы не имеет
+            # права спрятать отказ другой, и наоборот.
+            _warn(probe, f'ОТКАЗ ГОРИЗОНТА: {exc}')
+            worst = 1
+        except OSError as exc:
+            # Изоляция пробы от ошибок ВНЕШНЕЙ среды (права, ENOSPC, битый
+            # путь): запись журнала в свёртках идёт open(..., 'a') без охраны,
+            # и непишущийся журнал ОДНОЙ пробы ронял весь прогон трейсбеком,
+            # отнимая проход у остальных (доработка 227b). Ловится ровно
+            # OSError: ошибки программиста (TypeError и прочие) обязаны
+            # падать громко -- глухой except Exception здесь запрещён.
+            _warn(probe, f'ОТКАЗ ПРОХОДА: {exc}')
+            worst = 1
+    return worst
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except HorizonRefusal as exc:
-        # Отказ прибора отделён от работы: «унести нельзя» и «уносить нечего»
-        # -- разные исходы, и второй никогда не маскирует первый. Причина
-        # словами в stderr, код 1 (шапка файла), без трейсбека: адресат этой
-        # строки -- журнал launchd, а не отладчик.
-        print(f'ОТКАЗ ГОРИЗОНТА: {exc}', file=sys.stderr)
-        sys.exit(1)
+    sys.exit(main())

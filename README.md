@@ -118,8 +118,8 @@ invocation (including its TUI) requires re-running this script.
 | `judge/validate.py` | runs the corpus through several models, with metrics and a recommendation |
 | `judge/adjudicate.py` | annotation: a strong model evaluates a delivered verdict |
 | `judge/fixtures/` | fixtures for the live checks: the ladder and cancellation |
-| `judge/compact.py` | daily compaction of records; installed as a launchd agent |
-| `judge/com.transmutelabs.judge-compact.plist` | a sample launchd agent for daily compaction (adjust the paths) |
+| `judge/compact.py` | hourly compaction of records; installed as a launchd agent |
+| `judge/com.transmutelabs.judge-compact.plist` | a sample launchd agent for hourly compaction (adjust the paths) |
 | `idle-watch/` | the fleet idle watcher's files → put into `~/.claude/probes/idle-watch/` |
 | `idle-watch/README.md` | the watcher's operator manual: enabling, thresholds, the journal |
 | `docs/idle-watch.md` | the watcher's full design: two filters, the channel, the refusal policy |
@@ -251,10 +251,12 @@ above the working directory: keys go in `probes.toml` under the
 knows nothing about the project — it judges the event, the logic, and the
 rules.
 
-Adjudication records accumulate uncompressed and are archived by a daily
-pass. A launchd agent (sample: `com.transmutelabs.judge-compact`, 04:07) is
-more reliable than crontab: a run missed due to sleep is worked off by
-launchd after wake-up.
+Adjudication records accumulate uncompressed and are archived by an hourly
+pass (the failover ladder's journal grows at ~1664 shard files/hour, so the
+compaction owner runs hourly at minute 23; one agent serves both probes).
+A launchd agent (sample: `com.transmutelabs.judge-compact`, minute 23 of
+every hour) is more reliable than crontab: a run missed due to sleep is
+worked off by launchd after wake-up.
 
 The fleet idle watcher is also off by default and is enabled by its own
 variable:

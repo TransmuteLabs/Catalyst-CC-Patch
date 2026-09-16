@@ -10,17 +10,27 @@
         <string>/Users/YOUR-USER/.claude/judge/compact.py</string>
         <string>--older-than-hours</string>
         <string>24</string>
+        <!-- One agent, several probes (the compaction owner is single): the
+             journal of the failover ladder is written as a shard per record
+             (~1664 files/hour), and the same pass prunes every probe's
+             journal named in this list. A machine that leaves the agent at
+             the default `judge` never prunes the failover journal at all. -->
+        <string>--probe</string>
+        <string>judge,failover</string>
     </array>
-    <!-- 04:07, not 04:00: round minutes are a shared slot for the whole machine.
-         A launchd run missed due to sleep is executed after wake-up,
-         so the daily pass is not lost. -->
+    <!-- Hourly at minute 23, not a round minute: round minutes are a shared
+         slot for the whole machine. The hourly cadence is set by the measured
+         shard rate of the failover journal (~1664 files/hour): a daily pass
+         would accumulate ~40k files before each run, the hourly one holds the
+         peak at ~1.7k, and the pass itself costs ~0.5s wall (measured on the
+         live judge tree, 6940 record files) -- the cadence is free. A launchd
+         run missed due to sleep is executed after wake-up, so a pass is not
+         lost. Omitted calendar fields are wildcards: Minute alone means
+         "every hour". -->
     <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Hour</key><integer>4</integer>
-            <key>Minute</key><integer>7</integer>
-        </dict>
-    </array>
+    <dict>
+        <key>Minute</key><integer>23</integer>
+    </dict>
     <!-- Run at load is NOT needed: the pass compacts records older than a day,
          there is no point running it on every login, and it clutters the log. -->
     <key>RunAtLoad</key>

@@ -912,7 +912,7 @@ replaying the record (`OK -> BLOCK` on the same request) and by a live
 run. The blind spot remains: the judge judges by the dispatch, not by
 the project's rules.
 
-## Replay and daily compaction
+## Replay and compaction
 
 `replay.py <file|directory>` replays a recorded judging: the request body
 in the record lies exactly as it went to the channel, so a replay is the
@@ -933,19 +933,22 @@ walks from inside the binary and never loses its agent — from the
 outside this has to be restored by hand, otherwise reproducibility is
 illusory.
 
-`compact.py` — the daily compaction pass: records are written
+`compact.py` — the compaction pass: records are written
 uncompressed (a fresh one must be readable and greppable) and by age are
 moved into `.gz`. Order of magnitude: 107 KB -> 26 KB, fourfold. The
-pass is idempotent; the source is deleted only after the archive has
-been read back and parsed.
+pass is idempotent; the source is deleted only after the archive has been
+read back and parsed. It serves SEVERAL probes in one run (`--probe
+judge,failover`): the compaction owner is a single agent, and the failover
+ladder's journal — a shard per record, ~1664 files/hour — is pruned by the
+same pass.
 
     python3 ~/.claude/probes/judge/compact.py --older-than-hours 24
 
-It is run by the launchd agent `com.transmutelabs.judge-compact` (04:07,
-`RunAtLoad false`, log `~/Library/Logs/judge-compact.log`). Not crontab:
-a run missed to sleep is worked off by launchd after wake. A sample
-plist sits in the kit next to this file — edit the paths for yourself in
-it, and `launchctl bootstrap gui/$UID
+It is run by the launchd agent `com.transmutelabs.judge-compact` (hourly
+at minute 23, `RunAtLoad false`, log `~/Library/Logs/judge-compact.log`).
+Not crontab: a run missed to sleep is worked off by launchd after wake. A
+sample plist sits in the kit next to this file — edit the paths for
+yourself in it, and `launchctl bootstrap gui/$UID
 ~/Library/LaunchAgents/<file>.plist` installs it.
 
 `recstore.py` — the resolver from the journal's `rec` field to the record

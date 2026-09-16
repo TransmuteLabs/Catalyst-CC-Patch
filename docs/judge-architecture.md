@@ -221,7 +221,7 @@ Files:
 | `replay.py` | replay a record with model/prompt/effort substitution; the sole home of the verdict dictionary reader |
 | `validate.py` | run the corpus through several models, metrics, recommendation |
 | `adjudicate.py` | corpus labeling by a strong model over the verdicts already issued |
-| `compact.py` | daily compression of records (launchd agent) |
+| `compact.py` | hourly compression of records (launchd agent) |
 
 All four accept the common `--home <probes home>`, `--probe <id>`, and
 `--image <path>`: the home says where to look for `probes.toml` and the
@@ -687,11 +687,13 @@ proved the fix. The request needs a recognizable `User-Agent`, otherwise
 the perimeter answers 403.
 
 Records accumulate uncompressed (writing in the hot path must be cheap)
-and are compressed by a daily pass of `compact.py` — idempotently; the
+and are compressed by an hourly pass of `compact.py` — idempotently; the
 source is deleted only after the archive is re-read and parsed. It is
-started by a launchd agent (`com.transmutelabs.judge-compact`, 04:07): a
-run missed due to sleep launchd works off after wakeup, whereas crontab
-does not.
+started by a launchd agent (`com.transmutelabs.judge-compact`, hourly at
+minute 23): a run missed due to sleep launchd works off after wakeup,
+whereas crontab does not. The same pass prunes every probe journal named
+in its `--probe` list: the failover ladder's journal grows at ~1664 shard
+files/hour, and a daily cadence would pile up ~40k files between runs.
 
 ---
 
@@ -759,7 +761,7 @@ redacts, because it does not.
 | routing gate (`routing-table.toml`, PreToolUse) | deterministic, runs EARLIER; the judge only narrows what is allowed |
 | permission system | separate; the glued-in rule explicitly forbids blaming a cancellation on it |
 | server-side advisor (`advisor`) | invoked by the model on the server, sees the request body, i.e. the state BEFORE the model's answer; the judge sees the current turn, which the advisor never gets |
-| daily compression | outside the process, launchd |
+| hourly compression | outside the process, launchd |
 
 ---
 

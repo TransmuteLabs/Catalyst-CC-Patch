@@ -58,15 +58,23 @@ BENCH = Path(__file__).resolve()
 ANCHOR = ROOT / "tools" / "heredoc-anchor.py"
 # Волна 205 добавила judge-tools-bench сценарии 51-56 (docnum:subset --
 # диапазон номеров новых сценариев, не счёт набора; горизонт архива
-# compact.py); счётчик растёт вместе с ними по тому же правилу, что и
-# раньше (круг 25, E-4).
-EXPECTED_SCENARIOS = 57
+# compact.py), волна 227b -- сценарии 58-61 (docnum:subset -- тот же класс:
+# список проб за один прогон, худший код из проб, пустой элемент списка, ценз
+# покрытия агента), доработка 227b -- сценарии 62-63 (docnum:subset -- тот же
+# класс: изоляция OSError-отказа пробы, валидация имени пробы); счётчик
+# растёт вместе с ними по тому же правилу, что и раньше (круг 25, E-4).
+EXPECTED_SCENARIOS = 63
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 67
+EXPECTED_MUTATIONS = 73
+# CONSTRAINT (волна 227b): каждая итоговая строка compact.py несёт имя пробы
+# префиксом [<probe>] -- ВСЕГДА, включая одиночную пробу (урок #207: рядом с
+# числом стоит имя владельца; условный «префикс только при списке» делает разбор
+# вывода зависимым от аргументов). Регулярки ниже требуют префикс и НАЗЫВАЮТ
+# пробу: итог без префикса или с чужим именем -- не распознан.
 SUMMARY_RE = re.compile(
-    r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
+    r"\[(?P<probe>[^\]]+)\] сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
     r"архив исчез после сжатия: (?P<gz_gone>\d+), "
     r"исходник исчез до замера: (?P<src_gone>\d+), "
@@ -75,7 +83,7 @@ SUMMARY_RE = re.compile(
     r"освобождено: [-0-9.]+ МБ"
 )
 HORIZON_RE = re.compile(
-    r"горизонт архива: унесено (?P<arch_taken>\d+), "
+    r"\[(?P<probe>[^\]]+)\] горизонт архива: унесено (?P<arch_taken>\d+), "
     r"исчезли (?P<arch_vanished>\d+), байт (?P<arch_bytes>\d+), рубеж \S+"
 )
 
@@ -210,6 +218,7 @@ def run_compact(
     dry_run: bool = False,
     home: Path | None = None,
     extra_env: dict[str, str] | None = None,
+    probe: str = "judge",
 ) -> tuple[dict[str, int], str]:
     """Прогон compact.py в ИЗОЛИРОВАННОМ доме проб.
 
@@ -236,11 +245,11 @@ def run_compact(
     в живой журнал пользователя.
     """
     if home is not None:
-        return _compact_once(home, directory, older_than_hours, dry_run, extra_env)
+        return _compact_once(home, directory, older_than_hours, dry_run, extra_env, probe)
     # Дом без предмета: свой каталог на прогон, чтобы состояние не перетекало
     # между сценариями и не оставалось после стенда.
     with tempfile.TemporaryDirectory() as raw:
-        return _compact_once(Path(raw), directory, older_than_hours, dry_run, extra_env)
+        return _compact_once(Path(raw), directory, older_than_hours, dry_run, extra_env, probe)
 
 
 def _compact_once(
@@ -249,6 +258,7 @@ def _compact_once(
     older_than_hours: float,
     dry_run: bool,
     extra_env: dict[str, str] | None = None,
+    probe: str = "judge",
 ) -> tuple[dict[str, int], str]:
     command = [
         sys.executable,
@@ -259,6 +269,8 @@ def _compact_once(
         str(directory),
         "--older-than-hours",
         str(older_than_hours),
+        "--probe",
+        probe,
     ]
     if dry_run:
         command.append("--dry-run")
@@ -275,14 +287,21 @@ def _compact_once(
     )
     output = result.stdout + result.stderr
     require(result.returncode == 0, f"compact.py rc={result.returncode}\n{output}")
-    matches = list(SUMMARY_RE.finditer(result.stdout))
-    require(len(matches) == 1, f"итоговая строка compact.py не распознана\n{output}")
-    counters = {name: int(value) for name, value in matches[0].groupdict().items()}
-    hmatches = list(HORIZON_RE.finditer(result.stdout))
-    require(len(hmatches) == 1, f"строка горизонта compact.py не распознана\n{output}")
+    # «Ровно одна итоговая строка НА ПРОБУ» (волна 227b): матч с ЧУЖИМ именем
+    # пробы не засчитывается, второй итог той же пробы -- отказ разбора.
+    matches = [m for m in SUMMARY_RE.finditer(result.stdout)
+               if m.group("probe") == probe]
+    require(len(matches) == 1,
+            f"итоговая строка compact.py пробы {probe} не распознана ровно один раз\n{output}")
+    counters = {name: int(value) for name, value in matches[0].groupdict().items()
+                if name != "probe"}
+    hmatches = [m for m in HORIZON_RE.finditer(result.stdout)
+                if m.group("probe") == probe]
+    require(len(hmatches) == 1,
+            f"строка горизонта compact.py пробы {probe} не распознана ровно один раз\n{output}")
     counters.update(
         {name: int(value) for name, value in hmatches[0].groupdict().items()
-         if name != "arch_edge"})
+         if name not in ("arch_edge", "probe")})
     return counters, output
 
 
@@ -311,6 +330,88 @@ def run_compact_raw(
     return subprocess.run(
         command, capture_output=True, text=True, errors="replace", env=env,
     )
+
+
+def _run_compact_probes(
+    home: Path,
+    probes: list[str],
+    older_than_hours: float,
+    dry_run: bool,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Прогон compact.py по СПИСКУ проб в изолированном доме (общая команда).
+
+    `--dir` не передаётся НАМЕРЕННО: каталог записей один, а проб в списке
+    может быть несколько, и контракт compact.py (волна 227b) отвергает такую
+    пару кодом 2 -- у каждой пробы свой <дом>/<проба>/records.
+    """
+    command = [
+        sys.executable,
+        str(COMPACT),
+        "--home",
+        str(home),
+        "--probe",
+        ",".join(probes),
+        "--older-than-hours",
+        str(older_than_hours),
+    ]
+    if dry_run:
+        command.append("--dry-run")
+    env = dict(os.environ)
+    env.pop("CLAUDE_JUDGE_ARCHIVE_DAYS", None)
+    env["CLAUDE_PROBES_DIR"] = str(home)
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        command, capture_output=True, text=True, errors="replace", env=env,
+    )
+
+
+def run_compact_probes(
+    home: Path,
+    probes: list[str],
+    *,
+    older_than_hours: float = 0,
+    dry_run: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[dict[str, dict[str, int]], str]:
+    """Прогон по списку проб с требованием rc=0 и разбором «НА ПРОБУ».
+
+    Итоговые строки разбираются поимённо: ровно один «сжато» и ровно один
+    горизонт НА КАЖДУЮ пробу списка. Ослабление до «хотя бы одной» сняло бы
+    зуб: потерянная проба стала бы невидимой (волна 227b).
+    """
+    result = _run_compact_probes(home, probes, older_than_hours, dry_run, extra_env)
+    output = result.stdout + result.stderr
+    require(result.returncode == 0, f"compact.py rc={result.returncode}\n{output}")
+    counters: dict[str, dict[str, int]] = {}
+    for probe in probes:
+        summary = [m for m in SUMMARY_RE.finditer(result.stdout)
+                   if m.group("probe") == probe]
+        require(len(summary) == 1,
+                f"итоговая строка пробы {probe} не распознана ровно один раз\n{output}")
+        row = {name: int(value) for name, value in summary[0].groupdict().items()
+               if name != "probe"}
+        horizon = [m for m in HORIZON_RE.finditer(result.stdout)
+                   if m.group("probe") == probe]
+        require(len(horizon) == 1,
+                f"строка горизонта пробы {probe} не распознана ровно один раз\n{output}")
+        row.update({name: int(value) for name, value in horizon[0].groupdict().items()
+                    if name not in ("arch_edge", "probe")})
+        counters[probe] = row
+    return counters, output
+
+
+def run_compact_probes_raw(
+    home: Path,
+    probes: list[str],
+    *,
+    older_than_hours: float = 0,
+    dry_run: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Прогон по списку проб БЕЗ требования кода: путь отказа -- предмет сценария."""
+    return _run_compact_probes(home, probes, older_than_hours, dry_run, extra_env)
 
 
 def require_counters(counters: dict[str, int], **expected: int) -> None:
@@ -2314,6 +2415,232 @@ def scenario_57() -> None:
             f"отказ без названной причины: {out!r}")
 
 
+# --- волна 227b: список проб за один прогон владельца прополки ---------------
+#
+# Журнал лестницы failover пишется ШАРДОМ НА КАЖДУЮ ЗАПИСЬ (у хоста нет глагола
+# дописывания: моду доступны ровно $.fs.read/$.fs.write) -- 1664 файла/ч, и
+# владельцем его прополки назначен тот же compact.py: второй агент, обёртка и
+# вторая копия расписания НЕ заводятся. Зубы ниже держат список проб, худший
+# код, контракт списка и ценз покрытия агента.
+
+
+def build_probe_shard(base: Path, probe: str) -> Path:
+    """Проба с журналом, СВОИМ шардом и пустым records; путь журнала.
+
+    Форма шарда -- боевого носителя: одна строка JSON рядом с journal.jsonl
+    пробы; fold_journal_shards сворачивает такие и сносит после обратного
+    чтения. records обязан существовать: горизонт на отсутствующем каталоге
+    уходит в тихий ранний возврат, а разбору нужна итоговая строка КАЖДОЙ
+    пробы.
+    """
+    probe_dir = base / probe
+    (probe_dir / "records").mkdir(parents=True)
+    journal = probe_dir / "journal.jsonl"
+    journal.write_text("", encoding="utf-8")
+    shard = probe_dir / (journal.name + f".shard.mod-{probe}.json")
+    shard.write_text(
+        f'{{"rec": "mod-{probe}.json", "carrier": "mod"}}\n', encoding="utf-8")
+    return journal
+
+
+def scenario_58() -> None:
+    """Две пробы за один прогон: обе свёрнуты, у каждой строки свой префикс.
+
+    До волны 227b --probe принимал ОДНУ пробу, и агент на умолчании judge не
+    пропалывал failover вовсе. Разбор прогона -- «ровно одна итоговая строка
+    НА ПРОБУ» (run_compact_probes); здесь держится ЭФФЕКТ обеих свёрток и
+    СВОЙ префикс у каждой строки вывода.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        journals = {probe: build_probe_shard(home, probe)
+                    for probe in ("judge", "failover")}
+        counters, output = run_compact_probes(home, ["judge", "failover"])
+
+        require("[judge] fold shards: добавлено 1" in output,
+                f"строки пробы judge не несут свой префикс\n{output}")
+        require("[failover] fold shards: добавлено 1" in output,
+                f"строки пробы failover не несут свой префикс\n{output}")
+        for probe, journal in journals.items():
+            leftovers = [p.name for p in journal.parent.iterdir()
+                         if p.name.startswith(journal.name + ".shard.")]
+            require(not leftovers,
+                    f"проба {probe}: шард не снесён после свёртки: {leftovers}")
+            require(f'"rec": "mod-{probe}.json"'
+                    in journal.read_text(encoding="utf-8"),
+                    f"проба {probe}: строка шарда не вложена в её журнал")
+        require_counters(counters["judge"], done=0, skipped=0)
+        require_counters(counters["failover"], done=0, skipped=0)
+
+
+def scenario_59() -> None:
+    """Худший код побеждает: отказ одной пробы не спрятан успехом соседней.
+
+    Итоговый код прогона -- ХУДШИЙ из проб (2 бьёт 1, 1 бьёт 0): тихий успех
+    одной пробы не имеет права спрятать отказ другой. Отказ по существу -- у
+    пробы judge (каталог пробы читаем, но отметка горизонта в него не
+    пишется), failover в том же прогоне проходит штатно. Успех соседней пробы
+    держится ЭФФЕКТОМ на диске, а не строкой вывода.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        failover = build_probe_shard(home, "failover")
+        # records у judge обязан СУЩЕСТВОВАТЬ: горизонт на отсутствующем
+        # каталоге уходит в тихий ранний возврат, а отказ нужен по существу.
+        (home / "judge" / "records").mkdir(parents=True)
+        os.chmod(home / "judge", 0o555)
+        try:
+            done = run_compact_probes_raw(home, ["judge", "failover"])
+        finally:
+            os.chmod(home / "judge", 0o755)
+        output = done.stdout + done.stderr
+        require(done.returncode == 1,
+                f"отказ по существу не победил: rc={done.returncode}, ожидался 1\n{output}")
+        require("[judge] ОТКАЗ ГОРИЗОНТА" in output,
+                f"отказ пробы judge не назван её именем\n{output}")
+        leftovers = [p.name for p in failover.parent.iterdir()
+                     if p.name.startswith(failover.name + ".shard.")]
+        require(not leftovers,
+                f"успех второй пробы проглочен: шард failover не снесён: {leftovers}")
+        require('"rec": "mod-failover.json"' in failover.read_text(encoding="utf-8"),
+                "успех второй пробы проглочен: строка шарда failover не в её журнале")
+
+
+def scenario_60() -> None:
+    """Пустой элемент списка проб -- отказ контракта кодом 2, а не пропуск.
+
+    «judge,» и «--probe ""» -- опечатка владельца; молчаливый пропуск элемента
+    превращал бы её в прогон неизвестно чего. Отказ обязан назвать причину и
+    не тронуть НИ ОДНОГО файла дома: проход не начался.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        build_probe_shard(home, "judge")
+
+        def snapshot() -> dict[str, bytes]:
+            return {str(p.relative_to(home)): p.read_bytes()
+                    for p in sorted(home.rglob("*")) if p.is_file()}
+
+        before = snapshot()
+        done = run_compact_probes_raw(home, ["judge", ""])
+        output = done.stdout + done.stderr
+        require(done.returncode == 2,
+                f"пустой элемент списка проб не отвергнут кодом 2 (rc={done.returncode})\n{output}")
+        require("пустой элемент" in output and "--probe" in output,
+                f"отказ не назвал причину: пустой элемент списка --probe\n{output}")
+        require(snapshot() == before,
+                "отказ контракта тронул файлы дома -- проход не должен был начаться")
+
+
+def scenario_61() -> None:
+    """Ценз покрытия: агент без failover в аргументах -- красная строка.
+
+    Проверка цели агента (сценарий 19) сверяет, ЧТО запускает агент, и не
+    видит, КАКИЕ ПРОБЫ: машина, где агент остался на умолчании judge,
+    выглядела зелёной, а журнал лестницы failover не пропалывал никто (волна
+    227b). Образец plist -- из кита, пути подставлены на игрушечные дома, как
+    у сценария 29: канон -- плейсхолдеры, живой агент -- заполненный файл.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        kit = toy_kit(base)
+        home, tools, agents = base / "p", base / "t", base / "la"
+        agents.mkdir()
+
+        done = run_sync(kit, "--to-home", home, tools, agents)
+        if done.returncode == 3:
+            raise CannotMeasureNow(
+                f"замок дома держит другой писатель: {done.stderr.strip()}")
+        require(done.returncode == 0, f"раскатка в игрушечный дом провалилась: {done.stderr}")
+
+        sample = (kit / "judge" / "com.transmutelabs.judge-compact.plist").read_text(
+            encoding="utf-8")
+        filled = sample.replace("/Users/YOUR-USER/.claude/judge", str(tools))
+        agent = agents / "com.toy.judge-compact.plist"
+
+        agent.write_text(filled, encoding="utf-8")
+        done = run_sync(kit, "--diff", home, tools, agents)
+        out = done.stdout + done.stderr
+        require(done.returncode == 0,
+                f"агент с --probe judge,failover не должен краснить: {out}")
+
+        agent.write_text(
+            filled.replace("<string>judge,failover</string>", "<string>judge</string>"),
+            encoding="utf-8")
+        done = run_sync(kit, "--diff", home, tools, agents)
+        out = done.stdout + done.stderr
+        require(done.returncode == 1,
+                f"агент без failover не краснит (rc={done.returncode})\n{out}")
+        require("агент com.toy.judge-compact.plist не покрывает пробу failover" in out,
+                f"класс непокрытия не назван\n{out}")
+
+
+def scenario_62() -> None:
+    """Отказ I/O одной пробы изолирован: соседняя выполняется, код -- 1.
+
+    Доработка волны: цикл ловил только HorizonRefusal, а запись журнала в
+    fold_journal_shards идёт open(..., 'a') без охраны -- непишущийся журнал
+    пробы judge (права, ENOSPC) ронял весь прогон ТРЕЙСБЕКОМ, и failover не
+    выполнялся вовсе при обещании обратного. Изолируется ровно OSError:
+    ошибки программиста (TypeError и прочие) обязаны падать громко.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        judge = build_probe_shard(home, "judge")
+        failover = build_probe_shard(home, "failover")
+        os.chmod(judge, 0o444)
+        try:
+            done = run_compact_probes_raw(home, ["judge", "failover"])
+        finally:
+            os.chmod(judge, 0o644)
+        output = done.stdout + done.stderr
+        require(done.returncode == 1,
+                f"отказ пробы не изолирован: rc={done.returncode}, ожидался 1\n{output}")
+        require("[judge] ОТКАЗ ПРОХОДА" in output,
+                f"отказ I/O пробы не назван её именем\n{output}")
+        require("Traceback" not in output,
+                f"изоляция отдаёт трейсбек вместо причины\n{output}")
+        leftovers = [p.name for p in failover.parent.iterdir()
+                     if p.name.startswith(failover.name + ".shard.")]
+        require(not leftovers,
+                f"соседняя проба не выполнена после отказа judge: {leftovers}")
+        require('"rec": "mod-failover.json"' in failover.read_text(encoding="utf-8"),
+                "соседняя проба не выполнена после отказа judge: строка не в журнале")
+
+
+def scenario_63() -> None:
+    """Имя пробы -- ПРОСТОЙ СЕГМЕНТ: опечатка не уводит проход за дом.
+
+    Замер контроллера на первой редакции: --probe "judge, failover" шёл в
+    каталог с ВЕДУЩИМ ПРОБЕЛОМ в имени, --probe "../escaped" -- за пределы
+    дома проб. Проход УДАЛЯЕТ файлы (шарды, архивы горизонта), поэтому имя с
+    пробельными символами, разделителем пути, точка-имя и пустое после
+    обрезки -- отказ контракта кодом 2 с показом негодного имени, ДО начала
+    прохода.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw)
+        build_probe_shard(home, "judge")
+
+        def snapshot() -> dict[str, bytes]:
+            return {str(p.relative_to(home)): p.read_bytes()
+                    for p in sorted(home.rglob("*")) if p.is_file()}
+
+        for bad, cls in ((" failover", "пробельные символы"),
+                         ("../escaped", "разделитель пути"),
+                         ("..", "имя-точка"),
+                         (" ", "пустой элемент")):
+            before = snapshot()
+            done = run_compact_probes_raw(home, ["judge", bad])
+            output = done.stdout + done.stderr
+            require(done.returncode == 2,
+                    f"имя пробы не отвергнуто кодом 2 (rc={done.returncode}): {bad!r}\n{output}")
+            require(repr(bad) in output and cls in output,
+                    f"отказ не назвал имя и класс негодности: {bad!r} / {cls}\n{output}")
+            require(snapshot() == before,
+                    f"отказ имени тронул дом: {bad!r}")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -2375,6 +2702,12 @@ def run_scenarios() -> int:
         (55, scenario_55),
         (56, scenario_56),
         (57, scenario_57),
+        (58, scenario_58),
+        (59, scenario_59),
+        (60, scenario_60),
+        (61, scenario_61),
+        (62, scenario_62),
+        (63, scenario_63),
     ]
     mismatches = 0
     for number, case in cases:
@@ -2487,9 +2820,9 @@ def mutation_m1(root: Path) -> None:
 def mutation_m2(root: Path) -> None:
     replace_once(
         root / "judge" / "compact.py",
-        "                    print(f'удалил бы исходник (архив рядом целый): {os.path.basename(f)}')\n"
+        "                    _say(probe, f'удалил бы исходник (архив рядом целый): {os.path.basename(f)}')\n"
         "                    done += 1\n                    continue\n",
-        "                    print(f'удалил бы исходник (архив рядом целый): {os.path.basename(f)}')\n"
+        "                    _say(probe, f'удалил бы исходник (архив рядом целый): {os.path.basename(f)}')\n"
         "                    skipped += 1\n                    continue\n",
         "M2",
     )
@@ -2652,8 +2985,8 @@ def mutation_m18(root: Path) -> None:
 def mutation_m19(root: Path) -> None:
     replace_once(
         root / "judge" / "compact.py",
-        "        if a.dry_run:\n            print(f'снёс бы сироту tmp: ",
-        "        if a.dry_run:\n            os.unlink(t)\n            print(f'снёс бы сироту tmp: ",
+        "        if a.dry_run:\n            _say(probe, f'снёс бы сироту tmp: ",
+        "        if a.dry_run:\n            os.unlink(t)\n            _say(probe, f'снёс бы сироту tmp: ",
         "M19",
     )
 
@@ -2843,7 +3176,7 @@ def mutation_m36(root: Path) -> None:
         "                try:\n                    os.unlink(gz)\n"
         "                except FileNotFoundError:\n"
         "                    pass          # архив уже убран — пересжимаем всё равно\n"
-        "                print(f'ОБОРВАННОЕ СЖАТИЕ, архив не читается -- пересжимаю: {os.path.basename(f)}: {e}')\n"
+        "                _say(probe, f'ОБОРВАННОЕ СЖАТИЕ, архив не читается -- пересжимаю: {os.path.basename(f)}: {e}')\n"
         "                recompress = True",
         "                done += 1\n                continue",
         "M36",
@@ -3143,9 +3476,9 @@ def mutation_m59(root: Path) -> None:
         "            torn += 1\n"
         "            body = raw.encode('utf-8', 'surrogateescape')\n"
         "            has_nul = 'да' if b'\\x00' in body else 'нет'\n"
-        "            sys.stderr.write(\n"
-        "                f'ВНИМАНИЕ: {journal_path}:{lineno} не разбирается ({exc}); '\n"
-        "                f'длина {len(body)} байт, NUL: {has_nul}; строка пропущена\\n')\n"
+        "            _warn(probe,\n"
+        "                  f'ВНИМАНИЕ: {journal_path}:{lineno} не разбирается ({exc}); '\n"
+        "                  f'длина {len(body)} байт, NUL: {has_nul}; строка пропущена')\n"
         "            continue\n",
         "        except ValueError:\n"
         "            continue\n",
@@ -3157,10 +3490,10 @@ def mutation_m60(root: Path) -> None:
     """Снять счёт порванных строк с итога fold mod, оставив сам счётчик."""
     replace_once(
         root / "judge" / "compact.py",
-        "    print(f'fold mod: добавлено {added}, уже в индексе {skipped},"
+        "    _say(probe, f'fold mod: добавлено {added}, уже в индексе {skipped},"
         " не прочитано {unread}'\n"
-        "          f', строк журнала не разобрано {torn}'\n",
-        "    print(f'fold mod: добавлено {added}, уже в индексе {skipped},"
+        "         f', строк журнала не разобрано {torn}'\n",
+        "    _say(probe, f'fold mod: добавлено {added}, уже в индексе {skipped},"
         " не прочитано {unread}'\n",
         "M60",
     )
@@ -3215,15 +3548,15 @@ def mutation_m64(root: Path) -> None:
 
 
 def mutation_m65(root: Path) -> None:
-    # Отказ прибора проглатывается: ненулевой код заменён молчаливым нулём --
+    # Отказ прибора проглатывается: худший код заменён молчаливым нулём --
     # ровно fail-open, который запрещает шапка compact.py.
     replace_once(
         root / "judge" / "compact.py",
-        # Якорь -- ровно несущая строка (выход кодом 1), а не окружающий её
-        # текст: якорь по форме сообщения ломался бы от правки слов в нём,
-        # и мутация молча переставала бы мерить (#75, круг 26).
-        "        sys.exit(1)\n",
-        "        pass\n",
+        # Якорь -- ровно несущая строка (выход худшим из проб, волна 227b), а
+        # не окружающий её текст: якорь по форме сообщения ломался бы от правки
+        # слов в нём, и мутация молча переставала бы мерить (#75, круг 26).
+        "    return worst\n",
+        "    return 0  # M65: отказ прибора проглатывается\n",
         "M65",
     )
 
@@ -3259,6 +3592,100 @@ def mutation_m67(root: Path) -> None:
     )
 
 
+# M68-M71 -- зубы волны 227b: список проб за один прогон владельца прополки,
+# худший код из проб, контракт списка и ценз покрытия агента.
+def mutation_m68(root: Path) -> None:
+    # Разбор «ровно одна итоговая строка НА ПРОБУ» ослеп: матч любой пробы
+    # засчитывается каждой -- потерянная или задублированная проба стала бы
+    # невидимой (класс «прибор ослеп»). Сценарии 59-61 этим разбором не
+    # пользуются, красит ровно зуб 58.
+    replace_once(
+        root / "tools" / "judge-tools-bench.py",
+        "        summary = [m for m in SUMMARY_RE.finditer(result.stdout)\n"
+        "                   if m.group(\"probe\") == probe]\n"
+        "        require(len(summary) == 1,\n"
+        "                f\"итоговая строка пробы {probe} не распознана ровно один раз\\n{output}\")\n",
+        "        summary = list(SUMMARY_RE.finditer(result.stdout))  # M68: разбор ослеп\n"
+        "        require(len(summary) == 1,\n"
+        "                f\"итоговая строка пробы {probe} не распознана ровно один раз\\n{output}\")\n",
+        "M68",
+    )
+
+
+def mutation_m69(root: Path) -> None:
+    # Проход останавливается на первом отказе: успешная проба не исполняется,
+    # её эффект на диске пропадает. Одиночные пробы (сценарии 1-56) и прогон
+    # без отказов (58) не задеты -- красит ровно зуб 59. Якорь -- блок целиком:
+    # после доработки 227b строка `worst = 1` встречается в файле дважды
+    # (горизонт и OSError-изоляция), и якорь по одной строке не уникален.
+    replace_once(
+        root / "judge" / "compact.py",
+        "            _warn(probe, f'ОТКАЗ ГОРИЗОНТА: {exc}')\n"
+        "            worst = 1\n",
+        "            _warn(probe, f'ОТКАЗ ГОРИЗОНТА: {exc}')\n"
+        "            worst = 1\n"
+        "            break  # M69: проход остановлен на первом отказе\n",
+        "M69",
+    )
+
+
+def mutation_m70(root: Path) -> None:
+    # Пустой элемент списка проб пропускается молча: опечатка владельца
+    # превращается в прогон неизвестно чего с кодом 0 -- красит ровно зуб 60.
+    # Якорь -- ветка целиком (со строкой печати): sys.exit(2) после доработки
+    # 227b встречается в файле дважды (пустой элемент и негодное имя), и
+    # якорь по одной несущей строке перестал бы быть уникальным.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if item.strip() == '':\n"
+        "            print(f'ОТКАЗ: пустой элемент в списке проб ({item!r} в '\n"
+        "                  f'--probe {raw!r}); проба обязана быть названа', file=sys.stderr)\n"
+        "            sys.exit(2)\n",
+        "        if item.strip() == '':\n"
+        "            continue  # M70: пустой элемент пропущен молча\n",
+        "M70",
+    )
+
+
+def mutation_m71(root: Path) -> None:
+    # Ценз покрытия агента снят: агент на умолчании judge снова выглядит
+    # зелёным, а журнал лестницы failover не пропалывает никто -- красит
+    # ровно зуб 61. Проверка цели агента (строка выше) не тронута.
+    replace_once(
+        root / "scripts" / "probes-sync.sh",
+        "    if grep -q -- '--probe' <<<\"$__args\" && grep -qF 'failover' <<<\"$__args\"; then\n",
+        "    if true; then\n",
+        "M71",
+    )
+
+
+# M72-M73 -- зубы доработки 227b: изоляция OSError-отказа пробы и валидация
+# имени пробы (находки контроллера на первой редакции волны).
+def mutation_m72(root: Path) -> None:
+    # Изоляция OSError-отказа пробы проглатывает его: worst не поднят и
+    # причина не названа, непишущийся журнал снова даёт код 0 -- красит
+    # ровно зуб 62. Ошибка программиста остаётся громкой: глотается только
+    # OSError.
+    replace_once(
+        root / "judge" / "compact.py",
+        "            _warn(probe, f'ОТКАЗ ПРОХОДА: {exc}')\n"
+        "            worst = 1\n",
+        "            pass  # M72: отказ пробы проглочен молча\n",
+        "M72",
+    )
+
+
+def mutation_m73(root: Path) -> None:
+    # Валидация имени пробы ослеплена: опечатка снова уводит проход за дом
+    # проб или в каталог с пробелом -- красит ровно зуб 63.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if _bad_probe_name(item):\n",
+        "        if False:  # M73: валидация имени ослеплена\n",
+        "M73",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -3269,7 +3696,11 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M7", mutation_m7, 17, "ветка FileNotFoundError больше не ведёт к пересжатию"),
     ("M8", mutation_m8, 18, "исчезнувший до замера исходник снова не имеет своего счётчика"),
     ("M9", mutation_m9, 15, "снята запись живого процесса чужого пользователя"),
-    ("M10", mutation_m10, 16, "PermissionError"),
+    # Причина M10 -- именованный отказ ПРОГОНА (доработка 227b): PermissionError
+    # от os.kill(чужой pid, 0) больше не роняет прогон трейсбеком -- его ловит
+    # изоляция OSError и называет по имени пробы; прежняя причина ждала слово
+    # «PermissionError» из трейсбека, которого больше не существует.
+    ("M10", mutation_m10, 16, "ОТКАЗ ПРОХОДА"),
     ("M11", mutation_m11, 19, "пустая машина обязана давать «мерить нечего» (5)"),
     ("M12", mutation_m12, 19, "агент мимо раскатки обязан краснить"),
     ("M13", mutation_m13, 20, "гейт не снимает тест-ручку дома инструментов"),
@@ -3327,6 +3758,12 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M65", mutation_m65, 55, "нечитаемый каталог дал rc=0"),
     ("M66", mutation_m66, 56, "исчезнувший под руками архив снова становится отказом"),
     ("M67", mutation_m67, 57, "вызов зубов якоря при старте не выполнялся"),
+    ("M68", mutation_m68, 58, "не распознана ровно один раз"),
+    ("M69", mutation_m69, 59, "успех второй пробы проглочен"),
+    ("M70", mutation_m70, 60, "не отвергнут кодом 2"),
+    ("M71", mutation_m71, 61, "агент без failover не краснит"),
+    ("M72", mutation_m72, 62, "отказ пробы не изолирован"),
+    ("M73", mutation_m73, 63, "имя пробы не отвергнуто кодом 2"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно

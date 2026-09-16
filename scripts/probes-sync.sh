@@ -453,6 +453,23 @@ if [[ "$MODE" == "--diff" ]]; then
       echo "расходится: агент $(basename "$__pl") запускает НЕ $TOOLS_HOME/compact.py"
       DIFFERS=$((DIFFERS+1))
     fi
+    # Вторая проверка ТОГО ЖЕ агента -- покрытие ПРОБ (волна 227b): сверка цели
+    # видит только путь к инструменту, и машина, где агент остался на умолчании
+    # judge, выглядела зелёной, а журнал лестницы failover не пропалывал никто.
+    # Сверяются ИМЕННО элементы <string> блока ProgramArguments: слово failover
+    # в XML-комментарии внутри массива ничего не доказывает -- аргумент обязан
+    # назвать пробу, а владелец прополки один на все журналы. `|| true` обязателен:
+    # под set -e код подстановки становится кодом присваивания, и plist без
+    # блока аргументов ронял бы всю сверку вместо красной строки о непокрытии
+    # (fail-closed -- пустой набор аргументов красит).
+    __args=$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$__pl" \
+             | grep -o '<string>[^<]*</string>' || true)
+    if grep -q -- '--probe' <<<"$__args" && grep -qF 'failover' <<<"$__args"; then
+      echo "агент $(basename "$__pl") покрывает пробу failover"
+    else
+      echo "расходится: агент $(basename "$__pl") не покрывает пробу failover"
+      DIFFERS=$((DIFFERS+1))
+    fi
   done
   if [[ "$__agents" -eq 0 ]]; then
     echo "(агента launchd *judge-compact.plist нет — сжатие журналов не заведено)"
