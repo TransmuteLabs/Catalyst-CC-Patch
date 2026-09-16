@@ -7,9 +7,30 @@
 # Коды:
 #   0  перепись прошла (таблица на stdout; с --apply кандидаты сняты)
 #   2  прибор не смог измерить: корень недоступен, нет python3/lsof, lsof
-#      не прошёл положительный контроль
+#      не прошёл положительный контроль, или битый/нечитаемый маркер аренды
 #   3  НЕ ИЗМЕРЕНО: имя попало под правило, а размер/возраст снять не удалось
 #      — частичная таблица не выдаётся и --apply не исполняется
+#
+# ОБЪЯВЛЕННАЯ АРЕНДА корня (после incident 16.09: возраст+размер — НЕ основание
+# сносить то, что читает живой замер; прополка 09:21 снесла корпуса 267-270
+# под идущим цензом). Маркер кладёт ВЛАДЕЛЕЦ занятого каталога:
+#   <занятый каталог>/.reap-lease  -- одна строка:
+#   reap-lease-v1 <unix-секунды-истечения> [причина...]
+# Срок — epoch (UTC без засады часовых поясов), целое, 10+ цифр.
+#   занять: printf 'reap-lease-v1 %s мой замер\n' "$(( $(date +%s) + 7200 ))" \
+#             > <каталог>/.reap-lease
+#   снять:  rm <каталог>/.reap-lease
+# Аренда защищает каталог-владелец и ВСЁ внутри: на уровне корня — весь
+# корень целиком; на уровне кандидата — обход каталогов-предков от корня
+# до кандидата (для файла — до его каталога), живой маркер в любом звене
+# исключает весь поддерево этого звена.
+# Истёкшая аренда не защищает НИЧЕГО (бессрочной аренды нет). Битый или
+# нечитаемый маркер -- ОТКАЗ с кодом 2 и причиной: принять испорченное
+# объявление за «аренды нет» значит снести данные под живым замером.
+# Прополка НЕ угадывает занятость (ни по mtime, ни по чему иному):
+# защищает только ЯВНОЕ объявление. Каждый прогон печатает громкую строку
+# «аренда: пропущено корней по аренде: N» -- в перечислении и в --apply,
+# ноль тоже.
 #
 # КОНСТРЕЙНТ (жёсткий список, не трогать НИКОГДА):
 #   * бэкап образа в ~/.tweakcc (и любой путь внутри этого корня);
@@ -36,7 +57,13 @@ usage: bash tools/reap-heavy.sh [--apply] [--older-than-hours N] [--min-size-mb 
 
   без --apply     таблица кандидатов (path, mb, age_h, reason), ничего не сносит
   --apply         снести ровно кандидатов таблицы
-  --self-check    шесть зубов на своей фикстуре; боевые корни не участвуют
+  --self-check    десять зубов на своей фикстуре; боевые корни не участвуют
+
+Занятые каталоги защищаются ОБЪЯВЛЕННОЙ АРЕНДОЙ: одна строка
+  <каталог>/.reap-lease -> "reap-lease-v1 <unix-секунды-истечения> [причина]"
+Арендованное не сносится; истёкшая аренда не защищает; битый маркер =
+отказ с кодом 2. Каждый прогон печатает громкую строку с числом пропущенных
+корней (ноль тоже). Форма -- в шапке файла.
 
 Корни (боевой прогон):
   \${TMPDIR:-/tmp}     cc-build-path-probe.* и checks-teeth.<pid>.*.bin
@@ -349,6 +376,111 @@ def is_protected(path):  # MUT_PROTECTED
         return True
     return False
 
+# --- ОБЪЯВЛЕННАЯ АРЕНДА корня -------------------------------------------------
+# КОНСТРЕЙНТ: защищает только ЯВНОЕ объявление <каталог>/.reap-lease (одна
+# строка: "reap-lease-v1 <unix-секунды> [причина]"); прополка не угадывает
+# занятость по mtime/lsof/чему-либо ещё. Битый или нечитаемый маркер --
+# ОТКАЗ 2 с причиной: принять испорченное объявление за «аренды нет» значит
+# снести данные под живым замером (инцидент 16.09, 09:21). Живость аренды
+# (срок > now) живёт в ОДНОМ доме -- lease_on_dir; истёкшая не защищает.
+
+LEASE_NAME = '.reap-lease'
+LEASE_MAGIC = 'reap-lease-v1'
+lease_hits = {}  # занятой каталог -> (expiry, причина); только реально пропущенное
+
+
+def read_lease(lease_path):
+    # None -- маркера нет. Пустой/многострочный/непонятный/нечитаемый -- die2.
+    try:
+        st = os.lstat(lease_path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        die2("ОТКАЗ: битый маркер аренды %s: не обычный файл" % lease_path)
+    try:
+        fh = open(lease_path, 'r')
+    except OSError as exc:
+        die2("ОТКАЗ: не прочитать маркер аренды %s: %s" % (lease_path, exc))
+    try:
+        data = fh.read()
+    finally:
+        fh.close()
+    lines = [l for l in data.splitlines() if l.strip()]
+    if len(lines) != 1:
+        die2("ОТКАЗ: битый маркер аренды %s: значимых строк %d, нужна одна"
+             % (lease_path, len(lines)))
+    parts = lines[0].split(None, 2)
+    if len(parts) < 2 or parts[0] != LEASE_MAGIC:
+        die2("ОТКАЗ: битый маркер аренды %s: ждали %r, дано %r"
+             % (lease_path, LEASE_MAGIC, lines[0]))
+    tok = parts[1]
+    if not tok.isdigit() or len(tok) < 10:
+        die2("ОТКАЗ: битый маркер аренды %s: срок %r -- не unix-секунды"
+             % (lease_path, tok))
+    reason = parts[2] if len(parts) > 2 else ''
+    return int(tok), reason
+
+
+def lease_on_dir(d):
+    got = read_lease(os.path.join(d, LEASE_NAME))
+    if got is None:
+        return None
+    expiry, reason = got
+    if expiry > now:  # MUT_LEASE_LIVE
+        return expiry, reason
+    return None  # истёкшая аренда не защищает ничего (бессрочной аренды нет)
+
+
+def reaped_root(root):
+    # Аренда на уровне корня: корень целиком выпадает из скана и считается
+    # пропущенным даже если кандидатов в нём не нашли (иначе «пропущено»
+    # неотличимо от «нечего сносить»).
+    hit = lease_on_dir(root)
+    if hit is None:
+        return False
+    lease_hits.setdefault(root, hit)
+    return True
+
+
+def chain_lease(path, root):
+    # Цепь каталогов root..candidate: живой маркер в любом звене защищает
+    # поддерево этого звена; звено = (путь, срок, причина). Кандидат всегда
+    # собран os.path.join от того же root (см. add()/under()), поэтому цепля
+    # идёт по совпадению путей, а не по realpath: realpath рвал бы цепь на
+    # симлинках внутри корня и молча переставал видеть аренду.
+    root_n = root.rstrip('/') or '/'
+    if os.path.isdir(path) and not os.path.islink(path):
+        cur = path
+    else:
+        cur = os.path.dirname(path)
+    chain = []
+    while True:
+        chain.append(cur)
+        if cur == root_n or cur == os.sep:
+            break
+        nxt = os.path.dirname(cur)
+        if nxt == cur:
+            break
+        cur = nxt
+    chain.reverse()
+    for d in chain:
+        hit = lease_on_dir(d)
+        if hit is not None:
+            return d, hit[0], hit[1]
+    return None
+
+
+def covered_by_lease(path, root):
+    hit = chain_lease(path, root)
+    if hit is None:
+        return False
+    lease_hits.setdefault(hit[0], (hit[1], hit[2]))
+    return True
+
+
+def fmt_utc(ts):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ts))
+
 def require_root_readable(root, label):
     if not exists(root):
         return False
@@ -395,6 +527,8 @@ def add(path, reason, root):
         return
     if not under(root, path):
         return
+    if covered_by_lease(path, root):
+        return
     if is_protected(path):
         return
     if path_is_open(path):
@@ -403,7 +537,7 @@ def add(path, reason, root):
     cands.append((path, nbytes, mtime, reason, root))
 
 # 1. временный каталог: cc-build-path-probe.* и копии зубов
-if require_root_readable(tmp, 'tmp'):
+if require_root_readable(tmp, 'tmp') and not reaped_root(tmp):
     for path in glob.glob(os.path.join(tmp, 'cc-build-path-probe.*')):
         if not os.path.isdir(path):
             continue
@@ -430,7 +564,7 @@ if require_root_readable(tmp, 'tmp'):
                 add(path, 'tmp: teeth copy, no pid, older than %sh' % hours, tmp)
 
 # 2. /tmp/cc-matrix/bin — копии образов волн по возрасту
-if require_root_readable(matrix, 'cc-matrix/bin'):
+if require_root_readable(matrix, 'cc-matrix/bin') and not reaped_root(matrix):
     try:
         names = os.listdir(matrix)
     except OSError as exc:
@@ -445,7 +579,7 @@ if require_root_readable(matrix, 'cc-matrix/bin'):
 
 # 3. корпус: ТОЛЬКО обрывки загрузки и версии ниже пола.
 #    Пристинные копии поддерживаемых версий сюда не попадают.
-if require_root_readable(corpus, 'corpus'):
+if require_root_readable(corpus, 'corpus') and not reaped_root(corpus):
     try:
         names = os.listdir(corpus)
     except OSError as exc:
@@ -468,7 +602,7 @@ if require_root_readable(corpus, 'corpus'):
             add(path, 'corpus: version %s below floor %s' % (ver, floor), corpus)
 
 # 4. каталог версий: ниже пола, КРОМЕ цели указателя и открытых живым процессом
-if require_root_readable(versions, 'versions'):
+if require_root_readable(versions, 'versions') and not reaped_root(versions):
     try:
         names = os.listdir(versions)
     except OSError as exc:
@@ -494,7 +628,7 @@ if require_root_readable(versions, 'versions'):
             add(path, 'versions: version %s below floor %s' % (ver, floor), versions)
 
 # 5. ~/ccpatch — каталоги прогонов по возрасту
-if require_root_readable(ccpatch, 'ccpatch'):
+if require_root_readable(ccpatch, 'ccpatch') and not reaped_root(ccpatch):
     try:
         names = os.listdir(ccpatch)
     except OSError as exc:
@@ -508,7 +642,7 @@ if require_root_readable(ccpatch, 'ccpatch'):
             add(path, 'ccpatch: run dir older than %sh' % hours, ccpatch)
 
 # 6. скратчпады: файлы крупнее порога, по возрасту
-if require_root_readable(scratch, 'scratch'):
+if require_root_readable(scratch, 'scratch') and not reaped_root(scratch):
     try:
         for root, dirs, files in os.walk(scratch, followlinks=False):
             for name in files:
@@ -540,6 +674,9 @@ if do_apply:
         if not under(root, path):
             sys.stderr.write('пропуск (вышел из корня): %s\n' % path)
             continue
+        if covered_by_lease(path, root):
+            sys.stderr.write('пропуск (аренда): %s\n' % path)
+            continue
         if is_protected(path) or path_is_open(path):
             sys.stderr.write('пропуск (защищено): %s\n' % path)
             continue
@@ -550,11 +687,19 @@ if do_apply:
                 os.remove(path)
         except OSError as exc:
             die2("ОТКАЗ: не снести %s: %s" % (path, exc))
+
+# ГРОМКАЯ СТРОКА: молчаливый пропуск по аренде неотличим от «нечего
+# сносить» -- печатается число и ноль тоже, в обоих режимах.
+print('аренда: пропущено корней по аренде: %d' % len(lease_hits))
+for _d in sorted(lease_hits):
+    _exp, _rsn = lease_hits[_d]
+    print('аренда: пропущен %s до %s%s'
+          % (_d, fmt_utc(_exp), (' причина: %s' % _rsn) if _rsn else ''))
 PY
 }
 
 # ---------------------------------------------------------------------------
-# --self-check: шесть зубов, у каждого свой названный красный.
+# --self-check: десять зубов, у каждого свой названный красный.
 # Мутации правят КОПИЮ; оригинал не трогается. Снимок + sha256, не git.
 # ---------------------------------------------------------------------------
 
@@ -715,6 +860,18 @@ elif n == 5:
 elif n == 6:
     old = "hours = int(os.environ['REAP_HOURS'])  # ONE_HOME_HOURS\n"
     new = "hours = 6  # ONE_HOME_HOURS\n"
+elif n == 7:
+    old = '    if covered_by_lease(path, root):\n        return\n'
+    new = ''
+elif n == 8:
+    old = '    if expiry > now:  # MUT_LEASE_LIVE\n'
+    new = '    if True:  # MUT_LEASE_LIVE\n'
+elif n == 9:
+    old = "print('аренда: пропущено корней по аренде: %d' % len(lease_hits))\n"
+    new = "pass  # MUT_LOUD\n"
+elif n == 10:
+    old = 'def lease_on_dir(d):\n    got = read_lease(os.path.join(d, LEASE_NAME))\n'
+    new = 'def lease_on_dir(d):  # MUT_SILENT_BAD\n    return None\n    got = read_lease(os.path.join(d, LEASE_NAME))\n'
 else:
     sys.stderr.write('unknown mutation %d\n' % n)
     raise SystemExit(2)
@@ -980,6 +1137,202 @@ PY
   tooth_pass
 }
 
+# Аренда в зубах пишется ВЯЗКОГО срока: владеющий замер длился бы минуты,
+# а фикстура живёт секунды -- epoch из date +%s + запас.
+write_lease() {
+  # $1 каталог  $2 срок (unix-секунды)  $3 причина
+  mkdir -p "$1"
+  printf 'reap-lease-v1 %s %s\n' "$2" "$3" > "$1/.reap-lease"
+}
+
+# КОНСТРЕЙНТ зуба: файл аренды ВНУТРИ каталога-кандидата двигает его mtime,
+# и возрастной кандидат перестает им быть -- зуб покраснел бы не по своему
+# основанию (или прошёл бы молча под мутацией). После write_lease на
+# возрастном кандидате mtime обязана быть возвращена назад.
+backdate() {
+  # $1 path  $2 unix-секунды
+  python3 - "$1" "$2" <<'PY'
+import os, sys
+ts = float(sys.argv[2])
+os.utime(sys.argv[1], (ts, ts))
+PY
+}
+
+# ЗУБ 7: арендованный корень/каталог НЕ сносится, неарендованный -- сносится.
+# Аренда стоит ДВУМЯ способами: на уровне корня (ccpatch -- весь корень
+# выпадает) и на уровне каталога-кандидата (проб в tmp). Неарендованный
+# мусор обязан уйти, иначе «не сносит» неотличим от «сломан весь прибор».
+tooth_7() {
+  TOOTH_N=7 TOOTH_NAME='аренда-защищает' TOOTH_RC=0
+  local fx out err rc now_s
+  fx=$(mktemp -d "$WORK/fx7.XXXXXX")
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  now_s=$(date +%s)
+  write_lease "$fx/ccpatch" "$((now_s + 7200))" 'зуб7: боевой корень занят'
+  write_lease "$fx/tmp/cc-build-path-probe.oldnopid" "$((now_s + 7200))" 'зуб7: занят кандидат'
+  backdate "$fx/tmp/cc-build-path-probe.oldnopid" "$((now_s - 7 * 3600))"
+  out=$WORK/t7.out; err=$WORK/t7.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1 --apply
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "apply с арендой rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  if [[ ! -d "$fx/ccpatch/w100" || ! -e "$fx/ccpatch/w100/target" ]]; then
+    tooth_fail "снесено арендованное: $fx/ccpatch"
+    return 0
+  fi
+  if [[ ! -d "$fx/tmp/cc-build-path-probe.oldnopid" ]]; then
+    tooth_fail "снесён арендованный кандидат: $fx/tmp/cc-build-path-probe.oldnopid"
+    return 0
+  fi
+  # Аренда видна и в таблице: без учета аренды в add() арендованный
+  # кандидат возвращается в кандидаты (перечисление врёт, даже если
+  # повторная проверка apply ещё что-то прикрывает). Табличная строка
+  # отличается от громкой строки аренды тем, что путь в ней отделён
+  # табуляцией ('path\tmb\t...'), поэтому поиск с хвостовым табулятором.
+  if grep -F "${fx}/tmp/cc-build-path-probe.oldnopid	" "$out" >/dev/null; then
+    tooth_fail "арендованный кандидат в таблице сноса: $fx/tmp/cc-build-path-probe.oldnopid"
+    return 0
+  fi
+  if grep -F "${fx}/ccpatch/w100	" "$out" >/dev/null; then
+    tooth_fail "кандидаты из арендованного корня в таблице: $fx/ccpatch/w100"
+    return 0
+  fi
+  if [[ -e "$fx/cc-matrix/bin/242.wave.bin" ]]; then
+    tooth_fail "неарендованный мусор цел: $fx/cc-matrix/bin/242.wave.bin"
+    return 0
+  fi
+  if [[ -e "$fx/scratchpad/big-old.bin" ]]; then
+    tooth_fail "неарендованный мусор цел: $fx/scratchpad/big-old.bin"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 8: ИСТЁКШАЯ аренда не защищает.
+tooth_8() {
+  TOOTH_N=8 TOOTH_NAME='аренда-истекла' TOOTH_RC=0
+  local fx out err rc now_s
+  fx=$(mktemp -d "$WORK/fx8.XXXXXX")
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  now_s=$(date +%s)
+  write_lease "$fx/ccpatch" "$((now_s - 60))" 'зуб8: срок прошёл до прогона'
+  out=$WORK/t8.out; err=$WORK/t8.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1 --apply
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "apply с истёкшей арендой rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  if [[ -d "$fx/ccpatch/w100" ]]; then
+    tooth_fail "истёкшая аренда защитила: $fx/ccpatch/w100"
+    return 0
+  fi
+  if grep -F 'пропущено корней по аренде: 1' "$out" >/dev/null; then
+    tooth_fail "истёкшая аренда учтена в громкой строке: $(cat "$out")"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 9: пропуск назван ГРОМКОЙ строкой с числом; ноль тоже печатается.
+tooth_9() {
+  TOOTH_N=9 TOOTH_NAME='громкая-строка-аренды' TOOTH_RC=0
+  local fx out err rc now_s n
+  # 9а: аренд нет -- строка с нулём обязана быть (иначе «пропущено»
+  # неотличимо от «не печатаем»).
+  fx=$(mktemp -d "$WORK/fx9a.XXXXXX")
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  out=$WORK/t9a.out; err=$WORK/t9a.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "перечисление без аренд rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  n=$(grep -c '^аренда: пропущено корней по аренде: 0$' "$out" || true)
+  if [[ "$n" -ne 1 ]]; then
+    tooth_fail "нет громкой строки с нулём (строка '^...: 0' найдена $n раз): $(cat "$out")"
+    return 0
+  fi
+  # 9б: есть живая аренда на уровень корня -- число 1 и названный путь.
+  fx=$(mktemp -d "$WORK/fx9b.XXXXXX")
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  now_s=$(date +%s)
+  write_lease "$fx/corpus" "$((now_s + 3600))" 'ценз мёртвых ветвей читает корпуса'
+  out=$WORK/t9b.out; err=$WORK/t9b.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "перечисление с арендой rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  if ! grep -F 'аренда: пропущено корней по аренде: 1' "$out" >/dev/null; then
+    tooth_fail "нет строки с числом 1: $(cat "$out")"
+    return 0
+  fi
+  if ! grep -F "$fx/corpus" "$out" >/dev/null; then
+    tooth_fail "арендованный корень не назван: $(cat "$out")"
+    return 0
+  fi
+  if ! grep -F 'до ' "$out" >/dev/null; then
+    tooth_fail "не назван момент истечения: $(cat "$out")"
+    return 0
+  fi
+  if ! grep -F 'ценз мёртвых ветвей' "$out" >/dev/null; then
+    tooth_fail "не названа причина аренды: $(cat "$out")"
+    return 0
+  fi
+  if grep -F 'corpus/2.1.270' "$out" >/dev/null; then
+    tooth_fail "арендованный корпус всё равно в кандидатах: $(cat "$out")"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 10: битый маркер = ненулевой код с причиной, а не «аренды нет».
+tooth_10() {
+  TOOTH_N=10 TOOTH_NAME='битый-маркер-отказ' TOOTH_RC=0
+  local fx out err rc now_s bad
+  for bad in 'мусор вместо аренды' 'reap-lease-v1 не-число' 'reap-lease-v1 123' ''; do
+    fx=$(mktemp -d "$WORK/fx10.XXXXXX")
+    build_fixture "$fx" "$DEADPID" "$LIVEPID"
+    mkdir -p "$fx/corpus"
+    printf '%s\n' "$bad" > "$fx/corpus/.reap-lease"
+    out=$WORK/t10.out; err=$WORK/t10.err
+    run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
+    rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      tooth_fail "битый маркер проглочен молча (rc=0) на входе '$bad': $(cat "$out")"
+      return 0
+    fi
+    if [[ "$rc" -ne 2 ]]; then
+      tooth_fail "битый маркер '$bad' дал rc=$rc, ждали 2: $(cat "$err")"
+      return 0
+    fi
+    if ! grep -F 'битый маркер аренды' "$err" >/dev/null; then
+      tooth_fail "код 2 без причины на входе '$bad': $(cat "$err")"
+      return 0
+    fi
+    rm -rf "$fx"
+  done
+  # положительный контроль той же формой: ВЯЗКИЙ текст, годный маркер рядом --
+  # rc=0 (иначе «падает на всём» выглядело бы падением на битом).
+  fx=$(mktemp -d "$WORK/fx10ok.XXXXXX")
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  now_s=$(date +%s)
+  write_lease "$fx/corpus" "$((now_s + 3600))" 'годный'
+  out=$WORK/t10ok.out; err=$WORK/t10ok.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "годный маркер дал rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  tooth_pass
+}
+
 run_one_tooth() {
   case "$1" in
     1) tooth_1 ;;
@@ -988,6 +1341,10 @@ run_one_tooth() {
     4) tooth_4 ;;
     5) tooth_5 ;;
     6) tooth_6 ;;
+    7) tooth_7 ;;
+    8) tooth_8 ;;
+    9) tooth_9 ;;
+    10) tooth_10 ;;
     *) say "нет зуба $1"; return 2 ;;
   esac
 }
@@ -1041,21 +1398,21 @@ bin/claude
   trap 'stop_holder; rm -rf "$WORK"' EXIT
 
   local n green=0 redctl=0
-  say "reap-heavy --self-check: зубы=6 (зелёная сторона на исходном тексте)"
-  for n in 1 2 3 4 5 6; do
+  say "reap-heavy --self-check: зубы=10 (зелёная сторона на исходном тексте)"
+  for n in 1 2 3 4 5 6 7 8 9 10; do
     TOOTH_RC=0
     run_one_tooth "$n" || return 2
     if [[ "$TOOTH_RC" -eq 0 ]]; then
       green=$((green + 1))
     fi
   done
-  if [[ "$green" -ne 6 ]]; then
-    say "reap-heavy --self-check: ОТКАЗ — зелёных $green из 6"
+  if [[ "$green" -ne 10 ]]; then
+    say "reap-heavy --self-check: ОТКАЗ — зелёных $green из 10"
     return 1
   fi
 
   say "reap-heavy --self-check: красный контроль (мутация → именной красный → снимок)"
-  for n in 1 2 3 4 5 6; do
+  for n in 1 2 3 4 5 6 7 8 9 10; do
     cp "$SNAP" "$TOOL"
     if ! mutate_copy "$TOOL" "$n"; then
       say "ЗУБ $n красный-контроль: ОТКАЗ прибора — якорь мутации не единственный"
@@ -1078,8 +1435,8 @@ bin/claude
     fi
     redctl=$((redctl + 1))
   done
-  say "reap-heavy --self-check: ИТОГ зубов=6 зелёных=$green красный-контроль=$redctl"
-  [[ "$green" -eq 6 && "$redctl" -eq 6 ]]
+  say "reap-heavy --self-check: ИТОГ зубов=10 зелёных=$green красный-контроль=$redctl"
+  [[ "$green" -eq 10 && "$redctl" -eq 10 ]]
 }
 
 parse_args "$@"
