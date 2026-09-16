@@ -192,3 +192,59 @@ B = "решение без основания и референта (файл:с
 C1 = "найденную проблему чинить всегда и полно; частичный фикс — только по ЯВНОМУ слову юзера"
 C2 = "свидетель удалённой сборки — строка [RCH] remote, а не Selected worker:"
 F = "коммит только --only по явным путям; push только origin <ветка>:<ветка> без принудительных форм; трейлеры Session: и Co-Authored-By: соседними строками"
+
+# --- лестница замены модели при отказе носителя (мод 0.1.19+, #68/#116) -------
+# КОНСТРЕЙНТ: лестница строится ТОЛЬКО из носителей, допущенных к этой точке
+# сетки (hooks/routing-table.toml, ценз 16.09). Ступень ниже пола класса тихо
+# отправила бы работу не туда -- это ровно тот дефект, от которого поставлен
+# гейт диспатча, и лестница не вправе его обходить сзади.
+# КОНСТРЕЙНТ: Anthropic-носители (opus/fable) в лестницах НЕ называются. Их
+# допуск требует маркера [anthropic-exception:<основание>] в каждом диспатче;
+# автоматический переход на них обошёл бы этот маркер молча.
+# КОНСТРЕЙНТ: общего [failover.default] НЕТ НАМЕРЕННО. Единая лестница на все
+# классы неизбежно нарушила бы пол хотя бы одного из них. Диспатч без маркера
+# класса ступеней не получает -- и это не пробел: маркер обязателен по гейту.
+# GLM назван первым везде, где допущен: безлимитный носитель.
+[failover]
+enabled = true
+
+[failover.class.exec-0n]
+models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "qwen3.8-flash"]
+[failover.class.exec-0w]
+models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "qwen3.8-flash"]
+[failover.class.exec-0p]
+models = ["glm-5.3", "grok-4.6"]
+[failover.class.exec-1n]
+models = ["glm-5.3", "gpt-6-astra", "grok-4.6", "gpt-5.6-sol"]
+[failover.class.exec-1w]
+models = ["glm-5.3", "gpt-6-astra"]
+[failover.class.exec-2]
+models = ["glm-5.3", "gpt-6-astra"]
+[failover.class.exec-test]
+models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "qwen3.8-flash"]
+[failover.class.doc-annex]
+models = ["glm-5.3", "gpt-6-astra"]
+[failover.class.doc-spec]
+models = ["gpt-6-astra", "glm-5.3"]
+[failover.class.crit-form]
+models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+[failover.class.crit-mech]
+models = ["gpt-6-astra", "glm-5.3", "grok-4.6", "gpt-5.6-sol", "qwen3.8-flash"]
+[failover.class.crit-doc]
+models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+[failover.class.audit-form]
+models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+[failover.class.audit-mech]
+models = ["gpt-6-astra", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+[failover.class.an-cause]
+models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+[failover.class.an-system]
+models = ["glm-5.3", "gpt-6-astra", "grok-4.6", "gpt-5.6-sol", "qwen3.8-flash"]
+[failover.class.scout-enum]
+models = ["grok-4.6", "glm-5.3", "glm-5.3-flash", "qwen3.8-flash"]
+[failover.class.scout-class]
+models = ["gpt-6-astra", "glm-5.3", "qwen3.8-flash"]
+[failover.class.res-fact]
+models = ["glm-5.3-flash", "glm-5.3", "gpt-5.6-luna", "qwen3.8-flash"]
+[failover.class.res-synth]
+models = ["gpt-6-astra", "glm-5.3", "gpt-5.6-sol", "gpt-5.6-luna", "qwen3.8-flash"]
