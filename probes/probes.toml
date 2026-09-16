@@ -211,42 +211,56 @@ F = "коммит только --only по явным путям; push толь�
 enabled = true
 
 [failover.class.exec-0n]
-models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.exec-0w]
-models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.exec-0p]
-models = ["glm-5.3", "grok-4.6"]
+models = [{model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}]
 [failover.class.exec-1n]
-models = ["glm-5.3", "gpt-6-astra", "grok-4.6", "gpt-5.6-sol"]
+models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "high"}, {model = "grok-4.6", effort = "max"}, {model = "gpt-5.6-sol", effort = "high"}]
 [failover.class.exec-1w]
-models = ["glm-5.3", "gpt-6-astra"]
+models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "high"}]
 [failover.class.exec-2]
-models = ["glm-5.3", "gpt-6-astra"]
+models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "high"}]
+
+# CONSTRAINT: ступень glm-5.3 идёт БЕЗ эффорта -- пин клетки не объявлен НИГДЕ: агента этой модели на этой клетке не существует, выдуманный эффорт хуже отсутствующего
 [failover.class.exec-test]
-models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "max"}, "glm-5.3", {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
+
+# CONSTRAINT: ступень gpt-6-astra идёт БЕЗ эффорта -- пин клетки не объявлен НИГДЕ: агента этой модели на этой клетке не существует, выдуманный эффорт хуже отсутствующего
 [failover.class.doc-annex]
-models = ["glm-5.3", "gpt-6-astra"]
+models = [{model = "glm-5.3", effort = "max"}, "gpt-6-astra"]
+
+# CONSTRAINT: ступень glm-5.3 идёт БЕЗ эффорта -- пин клетки не объявлен НИГДЕ: агента этой модели на этой клетке не существует, выдуманный эффорт хуже отсутствующего
 [failover.class.doc-spec]
-models = ["gpt-6-astra", "glm-5.3"]
+models = [{model = "gpt-6-astra", effort = "xhigh"}, "glm-5.3"]
 [failover.class.crit-form]
-models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "high"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "medium"}, {model = "deepseek-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
 [failover.class.crit-mech]
-models = ["gpt-6-astra", "glm-5.3", "grok-4.6", "gpt-5.6-sol", "qwen3.8-flash"]
+models = [{model = "gpt-6-astra", effort = "xhigh"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "medium"}, {model = "gpt-5.6-sol", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "max"}]
+
+# CONSTRAINT: ступень glm-5.3 идёт БЕЗ эффорта -- пин клетки не объявлен НИГДЕ: агента этой модели на этой клетке не существует, выдуманный эффорт хуже отсутствующего
+# CONSTRAINT: ступень grok-4.6 идёт БЕЗ эффорта -- пин клетки не объявлен НИГДЕ: агента этой модели на этой клетке не существует, выдуманный эффорт хуже отсутствующего
 [failover.class.crit-doc]
-models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "high"}, "glm-5.3", "grok-4.6", {model = "deepseek-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
+
+# CONSTRAINT: ступень glm-5.3 идёт БЕЗ эффорта -- веер #750 (6) пинит high, но допуск модели -- ["max"] (директива юзера 14.08): high отверг бы гейт, max -- замер, которого не было; дома пина сводит юзер
 [failover.class.audit-form]
-models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "max"}, "glm-5.3", {model = "grok-4.6", effort = "max"}, {model = "deepseek-flash", effort = "high"}, {model = "qwen3.8-flash", effort = "high"}]
+
+# CONSTRAINT: ступень glm-5.3 идёт БЕЗ эффорта -- веер #750 (6) пинит high, но допуск модели -- ["max"] (директива юзера 14.08): high отверг бы гейт, max -- замер, которого не было; дома пина сводит юзер
+# CONSTRAINT: ступень grok-4.6 идёт БЕЗ эффорта -- пин клетки не объявлен НИГДЕ: агента этой модели на этой клетке не существует, выдуманный эффорт хуже отсутствующего
 [failover.class.audit-mech]
-models = ["gpt-6-astra", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+models = [{model = "gpt-6-astra", effort = "xhigh"}, "glm-5.3", "grok-4.6", {model = "deepseek-flash", effort = "high"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.an-cause]
-models = ["glm-5.3-flash", "glm-5.3", "grok-4.6", "deepseek-flash", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "deepseek-flash", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.an-system]
-models = ["glm-5.3", "gpt-6-astra", "grok-4.6", "gpt-5.6-sol", "qwen3.8-flash"]
+models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "xhigh"}, {model = "grok-4.6", effort = "max"}, {model = "gpt-5.6-sol", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.scout-enum]
-models = ["grok-4.6", "glm-5.3", "glm-5.3-flash", "qwen3.8-flash"]
+models = [{model = "grok-4.6", effort = "medium"}, {model = "glm-5.3", effort = "max"}, {model = "glm-5.3-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.scout-class]
-models = ["gpt-6-astra", "glm-5.3", "qwen3.8-flash"]
+models = [{model = "gpt-6-astra", effort = "high"}, {model = "glm-5.3", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.res-fact]
-models = ["glm-5.3-flash", "glm-5.3", "gpt-5.6-luna", "qwen3.8-flash"]
+models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "gpt-5.6-luna", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
 [failover.class.res-synth]
-models = ["gpt-6-astra", "glm-5.3", "gpt-5.6-sol", "gpt-5.6-luna", "qwen3.8-flash"]
+models = [{model = "gpt-6-astra", effort = "xhigh"}, {model = "glm-5.3", effort = "max"}, {model = "gpt-5.6-sol", effort = "xhigh"}, {model = "gpt-5.6-luna", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
