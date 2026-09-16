@@ -10,7 +10,8 @@
      дерева уже красная (контроль провален), замена СЛОМАЛА РАЗБОР жертвы
      (круг 25, E-3) -- покраснение разбором ничего не доказывает, и такой
      прогон останавливается ДО счёта покраснений -- либо правило
-     единственного дома (tools/heredoc-anchor.py) не загрузилось
+     единственного дома (tools/heredoc-anchor.py) не загрузилось либо
+     не держит свои зубы
   3  замок объекта держит другой живой прогон -- повторить позже; счёт
      расхождений при этом НЕ ведётся, «занято» вердиктом не является
   4  объявленное число не сходится с фактическим (EXPECTED_SCENARIOS,
@@ -21,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import gzip
 import io
@@ -58,11 +60,11 @@ ANCHOR = ROOT / "tools" / "heredoc-anchor.py"
 # диапазон номеров новых сценариев, не счёт набора; горизонт архива
 # compact.py); счётчик растёт вместе с ними по тому же правилу, что и
 # раньше (круг 25, E-4).
-EXPECTED_SCENARIOS = 56
+EXPECTED_SCENARIOS = 57
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 66
+EXPECTED_MUTATIONS = 67
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -91,6 +93,36 @@ except Exception as _error:    # отказ загрузки -- не откат 
     print(f"judge-tools-bench: ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: {_error}")
     sys.exit(2)
 opener_match = _anchor.opener_match
+
+# КОНСТРЕЙНТ (волна 230): импортируемый-но-негодный прибор обязан отказывать
+# стенду так же, как незагружающийся: с полностью ослеплённым opener_match
+# оба стенда проходили самопроверку целиком -- зелёный вердикт над прибором,
+# не видящим открытий, «измерен» только по имени. Решают ПУБЛИЧНЫЕ зубы
+# прибора; их отпечаток успеха ПОГЛОЩАЕТСЯ, а не печатается: вывод стендов
+# сравнивается побайтно, лишняя строка сломала бы их собственный контракт.
+ANCHOR_TEETH_RAN = False
+
+
+def _anchor_teeth_hold() -> None:
+    """Прогнать публичные зубы якоря; отказ прибора -- отказ стенду."""
+    global ANCHOR_TEETH_RAN
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            rc = _anchor.self_check()
+    except SystemExit as error:
+        rc = error.code if isinstance(error.code, int) else 1
+    except Exception as error:    # любой отказ прибора -- «не могу мерить»
+        rc = 1
+        buffer.write(f"{type(error).__name__}: {error}")
+    if rc != 0:
+        print(f"judge-tools-bench: ЯКОРЬ HEREDOC'ОВ НЕ ДЕРЖИТ ФОРМУ: "
+              f"{buffer.getvalue().strip()}")
+        sys.exit(2)
+    ANCHOR_TEETH_RAN = True
+
+
+_anchor_teeth_hold()
 
 
 class BenchFailure(AssertionError):
@@ -2253,6 +2285,35 @@ def scenario_56() -> None:
             "исчезнувший под руками архив не считается своим счётчиком")
 
 
+def scenario_57() -> None:
+    """Прибор на месте -- ещё не доказательство, что он видит открытия.
+
+    Волна 230: с полностью ослеплённым opener_match оба стенда проходили
+    самопроверку целиком -- зелёный вердикт над слепым прибором. Негодный
+    прибор обязан отказывать стенду кодом «не могу мерить» с названной
+    причиной, а вызов зубов -- выполняться при старте.
+    """
+    require(ANCHOR_TEETH_RAN, "вызов зубов якоря при старте не выполнялся")
+    def _broken_teeth() -> None:
+        print("ЯКОРЬ HEREDOC ПОТЕРЯЛ ФОРМУ: синтетика сценария 57")
+        sys.exit(1)
+    saved = _anchor.self_check
+    _anchor.self_check = _broken_teeth
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            try:
+                _anchor_teeth_hold()
+            except SystemExit as error:
+                require(error.code == 2, f"код отказа {error.code}, а не 2")
+            else:
+                raise BenchFailure("ослеплённый якорь принят: стенд мерил бы дальше")
+    finally:
+        _anchor.self_check = saved
+    out = captured.getvalue()
+    require("НЕ ДЕРЖИТ ФОРМУ" in out and "синтетика сценария 57" in out,
+            f"отказ без названной причины: {out!r}")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -2313,6 +2374,7 @@ def run_scenarios() -> int:
         (54, scenario_54),
         (55, scenario_55),
         (56, scenario_56),
+        (57, scenario_57),
     ]
     mismatches = 0
     for number, case in cases:
@@ -3183,6 +3245,20 @@ def mutation_m66(root: Path) -> None:
     )
 
 
+def mutation_m67(root: Path) -> None:
+    # Волна 230: вызов зубов при старте снят -- сценарий 57 обязан поймать
+    # стенд, который мерил бы поверх негодного прибора. Якорь -- последняя
+    # строка функции зубов плюс вызов на уровне модуля (каждый встречается
+    # только там); присваивание флага остаётся, красит именно проверка
+    # сценария.
+    replace_once(
+        root / "tools" / "judge-tools-bench.py",
+        "    ANCHOR_TEETH_RAN = True\n\n\n_anchor_teeth_hold()",
+        "    ANCHOR_TEETH_RAN = True",
+        "M67",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -3250,6 +3326,7 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M64", mutation_m64, 54, "отметка горизонта не написана"),
     ("M65", mutation_m65, 55, "нечитаемый каталог дал rc=0"),
     ("M66", mutation_m66, 56, "исчезнувший под руками архив снова становится отказом"),
+    ("M67", mutation_m67, 57, "вызов зубов якоря при старте не выполнялся"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно

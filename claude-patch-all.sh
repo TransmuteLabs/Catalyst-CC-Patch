@@ -3305,10 +3305,46 @@ python3 - "$0" <<'PYDOCS'
 # Объявление лежит внутри блока, а не в списке имён снаружи: список отстал бы
 # от переименования тега молча, а самоисключение по имени файла выключило бы
 # охват всего конвейера разом.
-import ast, io, os, re, sys, glob
+import ast, contextlib, importlib.util, io, os, re, sys, glob
 
 here = os.path.dirname(os.path.abspath(sys.argv[1]))
 read = lambda p: io.open(p, encoding='utf-8').read()
+
+# Правило «строка открывает питоновский heredoc» живёт в ЕДИНСТВЕННОМ доме --
+# tools/heredoc-anchor.py; местная редакция стадии удалена (волна 230):
+# открытие, обязанное кончать строку, пропускало живые формы с хвостом, а
+# python3 в ЛЮБОМ месте строки принимал стабы и упоминания. Форма загрузки --
+# как у стадии PYCOMPILE выше; отказ загрузки ИЛИ зубов прибора -- отказ
+# сверки (код 2), а не откат к местной редакции и не «тел нет».
+_anchor_spec = importlib.util.spec_from_file_location(
+    'heredoc_anchor', os.path.join(here, 'tools/heredoc-anchor.py'))
+if _anchor_spec is None or _anchor_spec.loader is None:
+    print("ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: нет tools/heredoc-anchor.py")
+    sys.exit(2)
+_anchor = importlib.util.module_from_spec(_anchor_spec)
+try:
+    _anchor_spec.loader.exec_module(_anchor)
+except Exception as _e:    # отказ загрузки -- не откат к своей копии правила
+    print(f"ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: {_e}")
+    sys.exit(2)
+# Зубы -- ДО разметки: импортируемый-но-негодный прибор (ослеплённый
+# opener_match) оставлял сверку зелёной, и слепота выглядела как «проверено»
+# (волна 230). Отпечаток успеха прибора ПОГЛОЩАЕТСЯ, а не печатается: лишняя
+# строка в выводе стадии -- шум перед сличением выводов.
+_anchor_teeth_out = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_anchor_teeth_out):
+        _anchor_teeth_rc = _anchor.self_check()
+except SystemExit as _e:
+    _anchor_teeth_rc = _e.code if isinstance(_e.code, int) else 1
+except Exception as _e:
+    _anchor_teeth_rc = 1
+    _anchor_teeth_out.write(f'{type(_e).__name__}: {_e}')
+if _anchor_teeth_rc != 0:
+    print(f"ЯКОРЬ HEREDOC'ОВ НЕ ДЕРЖИТ ФОРМУ: "
+          f"{_anchor_teeth_out.getvalue().strip()}")
+    sys.exit(2)
+opener_match = _anchor.opener_match
 
 # --- кто объявляет число ------------------------------------------------------
 # Число в прозе принадлежит ОДНОМУ объявляющему месту. Пока счётчик сценариев
@@ -3504,7 +3540,6 @@ WORDNUM = ('два', 'две', 'три', 'четыре', 'пять', 'шесть
            'hundred')
 
 
-HEREDOC_OPEN = re.compile(r"<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?\s*$")
 # Блок, ОБЪЯВИВШИЙ себя синтетикой, не читается: его числа врут по замыслу
 # (положительные контроли грамматики этого же гейта). Объявление ЯВНОЕ и
 # лежит в самом блоке -- исключение по имени тега сломалось бы от
@@ -3521,14 +3556,20 @@ def heredoc_map(text):
     Питоновость определяется по КОМАНДЕ, открывающей heredoc, а не по
     содержимому: `python3 - <<'PY'` -- питон, `cat > f <<'STUB'` -- данные,
     и данные читать как прозу нельзя (внутри них лежат куски чужих файлов).
+    Решение открытия -- ЕДИНСТВЕННЫЙ дом tools/heredoc-anchor.py
+    (opener_match, загружен в голове стадии): местная редакция (открытие
+    обязано кончать строку + python3 где угодно в строке) пропускала живые
+    формы с хвостом и принимала стабы (волна 230). Прогулка и разбор тел --
+    собственные: тег закрывается строкой без табуляций (`<<-`), докстринги
+    собираются разбором тела.
     """
     body, docs, synthetic = set(), set(), set()
     lines = text.split('\n')
     i = 0
     while i < len(lines):
         line = lines[i]
-        match = HEREDOC_OPEN.search(line)
-        if not match or not re.search(r'\bpython3?\b', line):
+        match = opener_match(line)
+        if match is None:
             i += 1
             continue
         tag = match.group(1)

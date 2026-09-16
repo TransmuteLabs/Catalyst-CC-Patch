@@ -8,7 +8,7 @@ Exit codes (subset of the kit-wide table in claude-patch-all.sh):
      a replacement BROKE THE VICTIM'S PARSE (circle 25, E-3) -- a scenario
      reddened by a parse error proves nothing, and the run stops BEFORE the
      reddening count -- or the kit's single-home heredoc rule
-     (tools/heredoc-anchor.py) refused to load
+     (tools/heredoc-anchor.py) refused to load or failed its own teeth
   4  the declared scenario or mutation count differs from the tables below,
      or some scenario has NO mutation of its own (circle 25, E-4: an uncovered
      scenario is a door without teeth)
@@ -56,8 +56,8 @@ ROUTING = ROOT / "patch_claude_routing.py"
 # the bench itself does -- the copy list carries it as a dependency, for the
 # same one-way-census reason as ROUTING above.
 ANCHOR = ROOT / "tools" / "heredoc-anchor.py"
-EXPECTED_SCENARIOS = 13
-EXPECTED_MUTATIONS = 20
+EXPECTED_SCENARIOS = 14
+EXPECTED_MUTATIONS = 21
 
 # Load form mirrors the pipeline's PYCOMPILE stage: a load failure is a named
 # bench refusal (code 2, "cannot measure"), not a fallback to a local edition
@@ -73,6 +73,36 @@ except Exception as _error:    # load refusal -- no fallback to a local rule cop
     print(f"costs-bench: ЯКОРЬ HEREDOC'ОВ НЕ ЗАГРУЖАЕТСЯ: {_error}")
     sys.exit(2)
 opener_match = _anchor.opener_match
+
+# CONSTRAINT (wave 230): an importable-but-broken instrument must refuse the
+# bench too. Both benches passed their whole self-check with a fully blinded
+# opener_match: a green verdict over an instrument that cannot see openings
+# is "measured" only in name. The instrument's PUBLIC teeth decide; its
+# success print is captured, not shown -- bench output is compared
+# byte-for-byte, and an extra line would break the stands' own contract.
+ANCHOR_TEETH_RAN = False
+
+
+def _anchor_teeth_hold() -> None:
+    """Run the anchor's public self-check; refuse the bench if it fails."""
+    global ANCHOR_TEETH_RAN
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            rc = _anchor.self_check()
+    except SystemExit as error:
+        rc = error.code if isinstance(error.code, int) else 1
+    except Exception as error:    # any instrument refusal is a refusal to measure
+        rc = 1
+        buffer.write(f"{type(error).__name__}: {error}")
+    if rc != 0:
+        print(f"costs-bench: ЯКОРЬ HEREDOC'ОВ НЕ ДЕРЖИТ ФОРМУ: "
+              f"{buffer.getvalue().strip()}")
+        sys.exit(2)
+    ANCHOR_TEETH_RAN = True
+
+
+_anchor_teeth_hold()
 
 
 class BenchFailure(AssertionError):
@@ -619,12 +649,39 @@ def scenario_c13() -> None:
     signing_launch_cases()
 
 
+def scenario_c14() -> None:
+    # Wave 230: an instrument that sits in place and imports is not proven
+    # able to see openings -- with opener_match fully blinded this bench
+    # passed its whole self-check, a verdict in name only. The bench must
+    # refuse to measure (code 2, named reason) when the anchor's own teeth
+    # fail, and the teeth must have RUN at startup.
+    require(ANCHOR_TEETH_RAN, "anchor teeth never ran at startup")
+    def _broken_teeth() -> None:
+        print("ЯКОРЬ HEREDOC ПОТЕРЯЛ ФОРМУ: синтетика сценария C14")
+        sys.exit(1)
+    saved = _anchor.self_check
+    _anchor.self_check = _broken_teeth
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            try:
+                _anchor_teeth_hold()
+            except SystemExit as error:
+                require(error.code == 2, f"refusal code is {error.code}, not 2")
+            else:
+                raise BenchFailure("blinded anchor accepted: bench would measure on")
+    finally:
+        _anchor.self_check = saved
+    out = captured.getvalue()
+    require("НЕ ДЕРЖИТ ФОРМУ" in out and "синтетика сценария C14" in out,
+            f"refusal is not named: {out!r}")
+
+
 SCENARIOS: list[tuple[str, Callable[[], None]]] = [
     ("C1", scenario_c1), ("C2", scenario_c2), ("C3", scenario_c3),
     ("C4", scenario_c4), ("C5", scenario_c5), ("C6", scenario_c6),
     ("C7", scenario_c7), ("C8", scenario_c8), ("C9", scenario_c9),
     ("C10", scenario_c10), ("C11", scenario_c11), ("C12", scenario_c12),
-    ("C13", scenario_c13),
+    ("C13", scenario_c13), ("C14", scenario_c14),
 ]
 
 
@@ -826,6 +883,17 @@ def m19(root: Path) -> None:
                  'if False and out.returncode != 0:\n        die(f"post-check: --version failed', "M19")
 
 
+def m20(root: Path) -> None:
+    # Wave 230: the startup teeth call removed -- scenario C14 must catch a
+    # bench that would measure on a broken instrument. The anchor is the
+    # function's last line plus the module-level call (each occurs only
+    # there); the flag assignment stays, so the scenario's check is what
+    # reddens.
+    replace_once(root / "tools" / "costs-bench.py",
+                 "    ANCHOR_TEETH_RAN = True\n\n\n_anchor_teeth_hold()",
+                 "    ANCHOR_TEETH_RAN = True", "M20")
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M1", m1, "C1", "empty replacement"),
     ("M2", m2, "C2", "empty replacement"),
@@ -847,6 +915,7 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M17", m17, "C13", "shell valid identity: calls"),
     ("M18", m18, "C13", "python missing identity: returned rc=0"),
     ("M19", m19, "C13", "python launch nonzero: returned rc=0"),
+    ("M20", m20, "C14", "anchor teeth never ran at startup"),
 ]
 
 # Circle 25, E-4: a scenario with no mutation of its own proves nothing --
