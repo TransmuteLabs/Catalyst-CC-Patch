@@ -82,8 +82,11 @@
 #      backup guard) says the kit is broken -- retrying will not help
 #   2  the call contract is broken (unknown argument, unknown case letter, an
 #      empty case set), OR an instrument of this probe cannot measure: the
-#      lock preamble moved, the backup guard's carve anchor is gone, or the
-#      canonical probe-config marker cannot be extracted. All of these
+#      lock preamble moved, the backup guard's carve anchor is gone, the
+#      canonical probe-config marker cannot be extracted, or the tweakcc
+#      section lists of the synthetic fork output no longer match the
+#      pipeline's own enumeration (that output would no longer stand for
+#      the product). All of these
 #      say "there is nothing to measure yet", not "the kit is broken" --
 #      different repairs, so they must not share a code
 #   3  the pipeline lock is held by another live run -- retry later
@@ -286,6 +289,99 @@ if [[ -z "$TWEAKCC_PROBE_CFG_MARKER" ]]; then
   echo "  Прибор не знает, какое ccVersion является следом оборванного зонда." >&2
   exit 2
 fi
+
+# CONSTRAINT: перечень секций tweakcc живёт в трёх местах -- в конвейере (дом:
+# __TW_CODE_SECTIONS / __TW_PROMPT_SECTIONS), у стенда корпусных инструментов
+# (он переносит их из дома в заглушку дословно) и здесь, литералом в
+# генераторе синтетического вывода форка. Зонду НЕЛЬЗЯ читать дом на лету:
+# его вход ГЕНЕРИРУЕТСЯ, мутация N3-code-swallows-prompts подменяет
+# перечисление именно в копии конвейера, и вход, идущий за домом, поехал бы
+# следом за предметом -- зуб перестал бы мерить. Третья форма: перечень
+# остаётся свой, а расхождение с домом -- отказ ПРИБОРА (код 2), не вердикт
+# о ветке сборки. Лестница извлечения из дома -- та же, что у свипа и стенда:
+# не найдено / несколько / не разобрано; якорь -- СТОЛБЕЦ 0, как объявлено у
+# соседнего маркера в claude-patch-all.sh. Собственный перечень читается из
+# ТЕКСТА прибора, как ценз случаев выше: мерить надо объявление, а не
+# питоновский рантайм. Пустой замер любой стороны -- смена формы объявления
+# («ценз недействителен»), а не «перечни разошлись»: пусто не ноль.
+__twsec_tab=$(printf '\t')
+__twsec_from_pipeline() {   # <имя константы>: значение в __twsec_val; отказ -- код 2
+  local __name="$1" __hits
+  __twsec_val=''
+  __hits=$(grep -a -c "^${__name}=" "$PIPELINE")
+  case "$__hits" in ''|*[!0-9]*) __hits=0 ;; esac
+  if (( __hits == 0 )); then
+    echo "build-path-probe: ОТКАЗ -- в конвейере не найдено присваивание ${__name} --" >&2
+    echo "  Перечень секций принадлежит конвейеру; сверять синтетический вход" >&2
+    echo "  не с чем: мерить нечем, а не вердикт о ветке сборки." >&2
+    exit 2
+  fi
+  if (( __hits > 1 )); then
+    echo "build-path-probe: ОТКАЗ -- в конвейере присваиваний ${__name} несколько (${__hits}) --" >&2
+    echo "  bash исполнил бы последнее, а зонд сверил бы первое." >&2
+    exit 2
+  fi
+  __twsec_val="$(sed -n "s/^${__name}='\(.*\)'\$/\1/p" "$PIPELINE")"
+  if [[ -z "$__twsec_val" ]]; then
+    echo "build-path-probe: ОТКАЗ -- присваивание ${__name} в конвейере не разобрано --" >&2
+    echo "  Строка есть, но не в форме ${__name}='…': пустое перечисление --" >&2
+    echo "  смена формы, а не «перечни разошлись»." >&2
+    exit 2
+  fi
+}
+__twsec_census_broken() {   # <что читалось> <детали>: собственная форма объявления сменилась
+  echo "build-path-probe: ОТКАЗ -- собственный перечень секций зонда не читается из текста прибора (${1}: ${2}) --" >&2
+  echo "  Форма объявления сменилась: ценз недействителен, и сверка по пустому" >&2
+  echo "  замеру краснела бы «расхождением», не измерив ничего." >&2
+  exit 2
+}
+__twsec_own_hits=$(grep -a -c -E '^CODE_SECTIONS = \[' "$0")
+if [[ "$__twsec_own_hits" != 1 ]]; then
+  __twsec_census_broken 'перечень КОДА' "строк объявления ${__twsec_own_hits:-0}, нужно 1"
+fi
+__twsec_own_code="$(grep -a -E '^CODE_SECTIONS = \[' "$0")"
+__twsec_own_code="${__twsec_own_code#CODE_SECTIONS = \[}"
+__twsec_own_code="${__twsec_own_code%]}"
+__twsec_sep='", "'
+__twsec_own_code="${__twsec_own_code//${__twsec_sep}/${__twsec_tab}}"
+__twsec_own_code="${__twsec_own_code#\"}"
+__twsec_own_code="${__twsec_own_code%\"}"
+if [[ -z "$__twsec_own_code" || "$__twsec_own_code" == *'"'* ]]; then
+  __twsec_census_broken 'перечень КОДА' 'литерал не разбирается как список строк в двойных кавычках'
+fi
+__twsec_own_hits=$(grep -a -c -E '^PROMPT_SECTION = "' "$0")
+if [[ "$__twsec_own_hits" != 1 ]]; then
+  __twsec_census_broken 'перечень ПРОМТОВ' "строк объявления ${__twsec_own_hits:-0}, нужно 1"
+fi
+__twsec_own_prompt="$(grep -a -E '^PROMPT_SECTION = "' "$0")"
+__twsec_own_prompt="${__twsec_own_prompt#PROMPT_SECTION = \"}"
+__twsec_own_prompt="${__twsec_own_prompt%\"}"
+if [[ -z "$__twsec_own_prompt" || "$__twsec_own_prompt" == *'"'* ]]; then
+  __twsec_census_broken 'перечень ПРОМТОВ' 'литерал не разбирается как строка в двойных кавычках'
+fi
+__twsec_from_pipeline __TW_CODE_SECTIONS
+__twsec_home_code="$__twsec_val"
+__twsec_from_pipeline __TW_PROMPT_SECTIONS
+__twsec_home_prompt="$__twsec_val"
+if [[ "$__twsec_home_code" != "$__twsec_own_code" ]]; then
+  echo "build-path-probe: ОТКАЗ -- перечень секций КОДА разошёлся с домом конвейера:" >&2
+  echo "  дом секций сменился, синтетический вход зонда больше не представляет продукт." >&2
+  echo "  Дрейфнула любая из сторон -- дом или собственная копия зонда; обе ниже." >&2
+  echo "  дом:   ${__twsec_home_code//${__twsec_tab}/ | }" >&2
+  echo "  зонд:  ${__twsec_own_code//${__twsec_tab}/ | }" >&2
+  exit 2
+fi
+if [[ "$__twsec_home_prompt" != "$__twsec_own_prompt" ]]; then
+  echo "build-path-probe: ОТКАЗ -- перечень секций ПРОМТОВ разошёлся с домом конвейера:" >&2
+  echo "  дом секций сменился, синтетический вход зонда больше не представляет продукт." >&2
+  echo "  Дрейфнула любая из сторон -- дом или собственная копия зонда; обе ниже." >&2
+  echo "  дом:   ${__twsec_home_prompt//${__twsec_tab}/ | }" >&2
+  echo "  зонд:  ${__twsec_own_prompt//${__twsec_tab}/ | }" >&2
+  exit 2
+fi
+unset __twsec_val __twsec_tab __twsec_sep __twsec_own_hits \
+      __twsec_own_code __twsec_own_prompt __twsec_home_code __twsec_home_prompt
+unset -f __twsec_from_pipeline __twsec_census_broken
 
 case_k() {   # чужой probe-marker: отказ до снимка, игрушечный HOME
   local d home cfg before after out rc self kit mut mout mrc ver patched pristine f discrepancies=0
