@@ -2889,19 +2889,138 @@ def check(src, name):
 # (Круг 28, F-13: прежде перечислялись heredoc'и ТОЛЬКО самого конвейера,
 # а питоньи тела остальных .sh -- зонда пути, стенда корпусных инструментов --
 # гейт не видел никогда, при целом объявлении «ВСЕ heredoc'и».)
-# Якорь начала: строка НАЧИНАЕТСЯ с вызова python3 -- упоминание тех же
-# слов внутри кода (как в этой строке) под якорь не подходит.
-# Строка обязана КОНЧАТЬСЯ открытием heredoc: так под якорь попадает и форма
-# внутри подстановки (BIN="$(python3 - <<'PY'), и не попадают упоминания тех
-# же слов в коде и комментариях -- как эта строка. Круг 28, F-13 добавил
-# ЕДИНСТВЕННОЕ послабление -- закрытый список управляющих продолжений
-# (`; then`, `; do`, `; fi`, `; else`, `; done`, `; esac`): живая форма
-# `if ! python3 - "$X" <<'MUTX'; then` под старый якорь не подходила ВООБЩЕ,
-# и её питоновское тело не проверял никто. ЗАЩИТА КОНЦА СТРОКИ ЭТИМ НЕ
-# СНИМАЕТСЯ: произвольный текст после тега (строки-примеры в комментариях
-# и коде) отсекается, как и прежде.
-opener = re.compile(r"^[^#]*\bpython3\b[^|;&]*<<'([A-Za-z_][A-Za-z0-9_]*)'"
-                    r"(?:\s*;\s*(?:then|do|fi|else|done|esac))?\s*$")
+# Якорь: строка ОТКРЫВАЕТ питоновский heredoc. Круг 28, F-13 держал этот
+# признак закрытым списком ХВОСТОВ (конец строки плюс `; then|do|fi|else|done|
+# esac`), и список молча отставал от кита: живые формы `python3 - "$p" <<'PY' &`,
+# `out=$(python3 - "$c" 2>&1 <<'WRAP'`, `out=$(... <<'TAG' 2>&1` и гейт имён
+# переменных `python3 - ... <<'SHVARS' || { ...; }` под него не подходили ВООБЩЕ
+# -- ЧЕТЫРЕ питоновских тела не компилировал никто, и слепота выглядела ровно
+# как исправность. Белый список хвостов ошибается МОЛЧА, поэтому он заменён на
+# признак самого языка: открытие `<<'TAG'` стоит вне кавычек и вне комментария
+# (только так отсекается упоминание `echo "python3 - <<'PY'"`), слово python3 --
+# КОМАНДА своего сегмента (после ключевых слов и присваиваний окружения), между
+# ними нет разделителя команд. Хвост после тега не разбирается: в bash он на
+# открытие не влияет. Ошибка в обратную сторону -- ложное открытие -- краснеет
+# ВСЛУХ («HEREDOC НЕ ЗАКРЫТ»), а не молча, и это единственное направление
+# ошибки, допустимое для гейта.
+heredoc_open = re.compile(r"<<'([A-Za-z_][A-Za-z0-9_]*)'")
+shell_lead = ('if', '!', 'then', 'else', 'elif', 'do', 'while', 'until',
+              'time', '{', '(')
+shell_assign = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def _shell_cells(line):
+    """Индексы символов строки ВНЕ кавычек и ДО начала комментария.
+
+    Кавычки и решают, упоминание перед нами или команда, поэтому разбор идёт по
+    символам: `#` внутри кавычек комментария не открывает, `'` внутри двойных
+    кавычек строки не открывает, а `$(` восстанавливает НЕЗАКАВЫЧЕННЫЙ контекст
+    внутри двойных -- без этого живая форма `BIN="$(python3 - <<'PY'` читалась
+    бы как текст в кавычках.
+    """
+    cells, stack, quote, i, n = [], [], None, 0, len(line)
+    while i < n:
+        c = line[i]
+        if quote in (None, '"') and c == '$' and i + 1 < n and line[i + 1] == '(':
+            stack.append(quote)
+            quote = None
+            cells.extend((i, i + 1))
+            i += 2
+            continue
+        if quote is None and c == ')' and stack:
+            quote = stack.pop()
+            cells.append(i)
+            i += 1
+            continue
+        if quote is None:
+            if c == '\\':
+                i += 2
+                continue
+            if c in '"\'':
+                quote = c
+                i += 1
+                continue
+            if c == '#' and (i == 0 or line[i - 1] in ' \t;&|(<>'):
+                break
+            cells.append(i)
+        elif quote == '"' and c == '\\':
+            i += 2
+            continue
+        elif c == quote:
+            quote = None
+        i += 1
+    return cells
+
+
+def _words(text, base, cells):
+    """Слова текста с их индексами; границей служит пробел ВНЕ кавычек."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        while i < n and text[i] in ' \t' and base + i in cells:
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and not (text[i] in ' \t' and base + i in cells):
+            i += 1
+        out.append((start, i))
+    return out
+
+
+def _is_command_word(line, at, cells):
+    """Слово с python3 на позиции at -- КОМАНДА своего сегмента.
+
+    `cat > "$1/python3" <<'TAG'` -- питон тут не запускается, он ПИШЕТСЯ: тело
+    heredoc'а башовое, и компиляция его как Python краснит гейт на исправном
+    ките (измерено на волне pty: STUBPTY@4823 в corpus-tools-bench.sh). Правило
+    «python3 в конце пути» для этого негодно: оно погасило бы и НАСТОЯЩИЙ вызов
+    `/usr/bin/python3 - <<'PY'`, то есть закрыло бы гейту глаза на живое тело.
+    Различает их позиция слова: у стаба команда -- `cat`, питон стоит аргументом
+    редиректа. Тот же вопрос решают копии `python_heredoc_bodies` в стендах кита
+    (corpus-tools-bench.sh, build-path-probe.sh, probes-sync-bench.sh) -- правилом
+    грубее и в РАЗНЫХ редакциях (только первая отсеивает хвост пути), якоря
+    мутации у них нет; сведение их к одному дому идёт отдельной задачей (#220).
+    """
+    start = 0
+    for i in range(at):
+        # `>|` и `>&` -- РЕДИРЕКТЫ, а не разделители: приняв их за границу
+        # сегмента, гейт сделал бы цель редиректа «командой» и снова принял
+        # башовый стаб `cat >| "$d/python3"` за вызов питона.
+        if i in cells and line[i] in ';|&({`' and not (
+                i and line[i - 1] in '<>' and line[i] in '|&'):
+            start = i + 1
+    for ws, we in _words(line[start:], start, cells):
+        word = line[start + ws:start + we]
+        if word in shell_lead or shell_assign.match(word):
+            if start + ws <= at < start + we:
+                return False    # python3 внутри присваивания -- не команда
+            continue
+        return start + ws <= at < start + we
+    return False
+
+
+def _opener_match(line):
+    """Открытие питоновского heredoc'а в строке, либо None."""
+    cells = set(_shell_cells(line))
+    for m in heredoc_open.finditer(line):
+        if m.start() not in cells:
+            continue            # упоминание внутри кавычек -- не открытие
+        head = line[:m.start()]
+        # ВСЕ вхождения, а не первое: строка `cat > "$d/python3" && python3 -
+        # <<'PY'` несёт и имя файла, и вызов -- открытие принадлежит тому, до
+        # которого от него нет разделителя команд.
+        at = head.find("python3")
+        while at >= 0:
+            end = at + len("python3")
+            edge = ((at == 0 or not (head[at - 1].isalnum() or head[at - 1] == '_'))
+                    and (end >= len(head)
+                         or not (head[end].isalnum() or head[end] == '_')))
+            if edge and _is_command_word(line, at, cells) and not any(
+                    head[k] in ';|' or (head[k] == '&' and head[k - 1] not in '<>')
+                    for k in range(end, len(head)) if k in cells):
+                return m
+            at = head.find("python3", at + 1)
+    return None
 
 # ЗУБЫ НА ЯКОРЬ (круг 28, F-13). Сужение якоря -- например, возврат к «кончается
 # открытием без хвостов» -- снова оставило бы форму `; then` невидимой, и
@@ -2913,10 +3032,49 @@ for _line, _want in (
     ('  python3 - "$X" <<\'PY\'', True),
     ('BIN="$(python3 - <<\'PY\'', True),
     ('# пример: python3 - <<\'PY\' и текст', False),
+    ('    # python3 - <<\'PY\' с отступом', False),
+    # Комментарий обязан гаситься САМ, а не по счастью: скобка в прозе открыла
+    # бы новый сегмент, и python3 стал бы в нём первым словом.
+    ('# и тогда (python3 - <<\'PY\') упадёт', False),
+    ('#python3 - <<\'PY\'', False),
+    # Открытие принадлежит СЛЕДУЮЩЕЙ команде: разделитель стоит ДО тега.
+    ('python3 -c pass; cat <<\'DATA\'', False),
+    ('python3 -c pass & cat <<\'DATA\'', False),
     ('echo "python3 - <<\'PY\'"', False),
-    ('python3 - <<\'X\'; echo done', False),
+    ('grep -n "python3 - <<\'PY\'" kit.sh', False),
+    # УПОМИНАНИЕ решают кавычки, а не хвост строки: `; echo done` открытие не
+    # отменяет (тело начинается со следующей строки и кончается тегом), и
+    # прежний отказ на этой форме был слепотой, а не строгостью.
+    ('python3 - <<\'X\'; echo done', True),
+    # Четыре живые формы кита, которых прежний якорь не видел ВООБЩЕ.
+    ('python3 - "$(dirname "$0")" <<\'SHVARS\' || { echo "упал" >&2; exit 1; }', True),
+    ('  out=$(python3 - "$carved" "$list" 0.0.900 "$h900" 2>&1 <<\'WRAP\'', True),
+    ('  out=$(CPK="$K" CPH="$home" python3 - <<\'DLONLY40C\' 2>&1', True),
+    ('  python3 - "$path" <<\'PY\' &', True),
+    # `#` внутри кавычек комментария не открывает -- прежний якорь (`^[^#]*`)
+    # на этой форме терял тело молча.
+    ('python3 - "$d#tag" <<\'PY\'', True),
+    # А вот python3 АРГУМЕНТОМ чужой команды тело не открывает: компилировать
+    # башовый ввод grep как Python -- та же краснота на исправном ките.
+    ('grep python3 "$f" <<\'DATA\'', False),
+    # ИМЯ ФАЙЛА, не интерпретатор: цель редиректа. Форма измерена на волне pty.
+    ('  cat > "$1/python3" <<\'STUBPTY\'', False),
+    ('cat >> "$d/python3" <<\'T\'', False),
+    # Пробел вокруг скобки НЕОБЯЗАТЕЛЕН -- эти три формы гейт раньше принимал
+    # за вызов и кормил компилятор башовым телом (найдено аудитом 16.09).
+    ('cat >"$d/python3" <<\'T\'', False),
+    ('cat >>"$d/python3" <<\'T\'', False),
+    ('cat >| "$d/python3" <<\'T\'', False),
+    ('cat >|"$d/python3" <<\'T\'', False),
+    # А вот ВЫЗОВ по абсолютному пути обязан остаться видимым: правило по форме
+    # пути («хвост /python3») погасило бы эту строку вместе со стабом.
+    ('/usr/bin/python3 - <<\'PY\'', True),
+    ('"$VENV/bin/python3" - <<\'PY\'', True),
+    # Смешанная строка: якорь жадный и цепляется за ПОСЛЕДНЕЕ вхождение, поэтому
+    # запись файла рядом с вызовом не имеет права погасить тело heredoc'а.
+    ('cat > "$d/python3" && python3 - <<\'PY\'', True),
 ):
-    if bool(opener.match(_line)) is not _want:
+    if bool(_opener_match(_line)) is not _want:
         print("ЯКОРЬ HEREDOC ПОТЕРЯЛ ФОРМУ: ожидалось "
               + ("принять" if _want else "отвергнуть") + f": {_line!r}")
         sys.exit(1)
@@ -2926,7 +3084,7 @@ def scan_heredocs(lines, where):
     """Все питоновские heredoc'и одного файла; (число, виден ли блок проверок)."""
     count, saw, i = 0, False, 0
     while i < len(lines):
-        m = opener.match(lines[i])
+        m = _opener_match(lines[i])
         if not m:
             i += 1
             continue
@@ -4371,12 +4529,12 @@ python3 "$(dirname "$0")/tools/orphan-stand-gate.py" 9>&- || {
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-970fc30e03605d47cb873d0fd595a6623210d579}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-59fd2d46d04b04e90d0cd1ffedf418d7ee6f9030}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "970fc30e03605d47cb873d0fd595a6623210d579" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "59fd2d46d04b04e90d0cd1ffedf418d7ee6f9030" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -8462,51 +8620,13 @@ validated_nonnegative_integer() {
   printf '%d\n' "$((10#$digits))"
 }
 GATE_BUDGET="$(validated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET "${CLAUDE_PATCH_GATE_BUDGET:-150}")"
+GATE_SCREEN=(120 40)
 # G-5: поднятый или срезанный бюджет меняет СМЫСЛ вердикта этого гейта
 # (срезанный краснит здоровую сборку, поднятый прячет медленную), поэтому
 # отклонение от умолчания объявляется в потоке, а не остаётся в окружении.
 [[ "$GATE_BUDGET" == "150" ]] \
   || echo "Interface gate: budget ${GATE_BUDGET}s (CLAUDE_PATCH_GATE_BUDGET, default 150)"
 
-# Форма `script` выбирается ЗАМЕРОМ ИНСТРУМЕНТА, а не именем ОС: у util-linux
-# команда приходит СТРОКОЙ в `-c`, у BSD -- хвостом argv после файла, и каждая
-# форма на чужой стороне отвечает ненулевым кодом. Выбор по `uname` -- третий
-# случай того же класса, что и разъехавшийся формат чтения метаданных (#89):
-# имя ОС не удостоверяет, ЧЕМ отвечает бинарь на этой машине.
-# КОНСТРЕЙНТ: ровно одна из проб обязана пройти -- это собственный
-# положительный контроль различителя. Прошли обе или ни одной -- прибор не
-# может мерить (код 2), и молчаливый выбор одной из форм вернул бы тот же немой
-# отказ, из которого выросла эта проба.
-# Проба следов не оставляет (гоняет `true`, вывод в /dev/null), но зовётся она
-# теперь ВНУТРИ стадии, а не здесь: на чужой платформе гейт ПРОПУСКАЕТСЯ, и
-# замер на верхнем уровне убивал бы прогон кодом 2 ради прибора, который этому
-# прогону не нужен (машина без обеих форм `script`). Путь пропуска форму не
-# мерит и строку про неё не печатает.
-__gate_script_form() {   # печатает utillinux|bsd; код 2 -- обе или ни одной
-  local ul=0 bsd=0
-  # КОНСТРЕЙНТ: стандартный ввод обеих проб ЗАКРЕПЛЁН и наследоваться не
-  # вправе. BSD-`script` зовёт tcgetattr по своему stdin безусловно; когда
-  # вызывающий отдаёт сокет (агентский контекст, launchd, cron), проба
-  # падает с `tcgetattr/ioctl: Operation not supported on socket`, и
-  # различитель объявляет «ни одной известной формы» -- то есть прибор
-  # меряет состояние ВЫЗЫВАЮЩЕГО, а не хозяина, и валит прогон кодом 2
-  # там, где обе формы на месте. Источник выбран замером, а не наугад:
-  # 09.09 живой конвейер с `</dev/null` на весь прогон не только определил
-  # форму, но и отрисовал интерфейс («came up in a throwaway home and drew
-  # its message»), значит EOF на входе предмет замера не ломает.
-  if script -q -c true /dev/null </dev/null >/dev/null 2>&1; then ul=1; fi
-  if script -q /dev/null /usr/bin/true </dev/null >/dev/null 2>&1; then bsd=1; fi
-  if (( ul == 1 && bsd == 0 )); then printf 'utillinux\n'; return 0; fi
-  if (( bsd == 1 && ul == 0 )); then printf 'bsd\n'; return 0; fi
-  if (( ul == 1 )); then
-    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- script принял ОБЕ известные формы," >&2
-  else
-    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- script не принял НИ ОДНОЙ известной формы," >&2
-  fi
-  echo "  значит различитель не различает: интерфейс мерить нечем (отказ прибора," >&2
-  echo "  а не продукта). Пробы: script -q -c КОМАНДА ФАЙЛ и script -q ФАЙЛ КОМАНДА." >&2
-  return 2
-}
 # Пара ЦЕЛИ считается ОДИН раз и передаётся вниз. Считает её ВЫЗЫВАЮЩИЙ, а не
 # стадия: стенд гоняет стадию на ПОДДЕЛЬНОМ $BIN, а он скрипт -- настоящие
 # магические байты взаимоисключающи с шебангом, и детектор отказал бы на нём
@@ -8636,9 +8756,8 @@ PYSTATE
 # $GATE_BUDGET и $GATE_TARGET из окружения вызывающего и НЕ создаёт $GATE_HOME
 # сама. Порядок вызывающего -- «проверка бюджета -> пара цели -> создание
 # дома»: между проверкой бюджета и созданием дома по-прежнему не должно
-# появляться ничего, что создаёт файлы или процессы. $GATE_SCRIPT_FORM из
-# списка УШЁЛ -- стадия его ВЫЧИСЛЯЕТ сама, после решения о паре платформ и до
-# запуска, чтобы путь пропуска не мерил форму. Пару ХОЗЯИНА стадия тоже берёт
+# появляться ничего, что создаёт файлы или процессы. Размер -- $GATE_SCREEN,
+# прибор -- $HERE/tools/pty-run.py. Пару ХОЗЯИНА стадия берёт
 # сама (__host_os_arch): из окружения приходит только пара ЦЕЛИ, и потому зуб
 # может задать чужую цель, не трогая машину, на которой он запущен.
 __interface_gate() {
@@ -8654,16 +8773,16 @@ __interface_gate() {
     rm -rf "$GATE_HOME"
     return 0
   fi
-  # Форма `script` меряется ЗДЕСЬ -- после решения о паре и до запуска. На пути
-  # пропуска эта строка не исполняется: прибор, который прогону не нужен, не
-  # вправе его убить.
-  GATE_SCRIPT_FORM="$(__gate_script_form)" || exit 2
-  echo "Interface gate: script form ${GATE_SCRIPT_FORM} (measured on this machine, not deduced from the OS)"
+  # Пропущенной стадии прибор не нужен; отказ проверяется только на своей паре.
+  if ! command -v python3 >/dev/null; then
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- нет python3 (отказ прибора)" >&2
+    return 2
+  fi
+  local GATE_STATUS="$GATE_HOME/status" GATE_TOOL_RC=0
+  local __status_line="" __status_extra=""
 
-  # `exec` replaces the subshell so $! is the pid that setsid then makes a session
-  # and process-group leader. Killing the single pid leaves `script` and the CLI
-  # running: during one version sweep that left 23 sessions and 1.4 GB resident.
-  # The group kill is what actually ends the run.
+  # $! адресует группу драйвера; тот пересылает TERM группе своей PTY-сессии.
+  # Убийство одного процесса оставило бы дерево образа живым.
   #
   # `9>&-` CLOSES THE PATCH LOCK FOR THIS CHILD, and it is not hygiene -- it is
   # the lock's lifetime. The lock lives in a file DESCRIPTOR, so every process
@@ -8676,41 +8795,22 @@ __interface_gate() {
   # version and then reported the rest as НЕ ИЗМЕРЕНО is exactly this: no pipeline
   # was running, a straggler from the previous version's interface gate was
   # holding the descriptor.
-  # Команда уезжает в `script` ЧЕРЕЗ ЗАПУСКАТЕЛЬ, а не строкой: у util-linux `-c`
-  # принимает СТРОКУ, которую разбирает `sh`, и ручная расстановка кавычек стала
-  # бы вторым источником истины о команде. `printf %q` -- встроенная в bash (есть
-  # и в 3.2), запускатель исполняется bash по шебангу, поэтому кавычки верны по
-  # построению. Путь запускателя тоже проходит через %q: mktemp -d вправе вернуть
-  # каталог с пробелом, а строку `-c` разбирает `sh`.
+  # Запускатель исполняется bash по шебангу; printf %q сохраняет argv даже
+  # при пробелах в пути образа. Сам путь запускателя передаётся одним аргументом.
   { printf '#!/usr/bin/env bash\n'
     printf 'exec %q %q %q\n' "$BIN" --strict-mcp-config "$GATE_PROMPT"
   } > "$GATE_HOME/run.sh"
   chmod +x "$GATE_HOME/run.sh"
   (
     cd "$GATE_HOME/proj" || exit 1
-    # Форма меняет только ХВОСТ argv: окружение, setsid и закрытый замок обязаны
-    # быть общими для обеих, иначе одна из платформ поехала бы своим запуском.
-    if [[ "$GATE_SCRIPT_FORM" == utillinux ]]; then
-      __gate_cmd=(script -q -c "$(printf '%q' "$GATE_HOME/run.sh")" /dev/null)
-    else
-      __gate_cmd=(script -q /dev/null "$GATE_HOME/run.sh")
-    fi
-    # КОНСТРЕЙНТ: ввод закреплён ЯВНО, хотя достижимого отказа здесь НЕ
-    # ИЗМЕРЕНО -- и это записано честно, чтобы читатель не принял строку за
-    # починку живого дефекта. Замер 09.09 (сокет на входе, ребёнок сообщает
-    # класс своего stdin): отцепленная команда получает /dev/null и БЕЗ
-    # этой правки -- как при обычном запуске, так и под `bash -m`, потому
-    # что без управляющего терминала управление заданиями не включается, и
-    # подстановка /dev/null оболочкой действует всегда. То есть сейчас сайт
-    # прикрыт ПРАВИЛОМ ОБОЛОЧКИ, а не нашим кодом. Правило невидимо и
-    # перестанет действовать молча, стоит запуску выйти из формы `( … ) &`
-    # или обзавестись своим перенаправлением ввода. Своего зуба у строки
-    # поэтому НЕТ: мутация на ней зеленела бы, а вакуумный сценарий хуже
-    # отсутствующего. Зуб волны стоит на различителе выше -- там отказ
-    # достижим и измерен.
+    # Драйверу не нужен stdin вызывающего: ребёнок получает собственный PTY.
+    # Его предел включает добор после первой отрисовки; бюджет опроса не меняется.
+    __gate_cmd=(python3 "$HERE/tools/pty-run.py"
+      --cols "${GATE_SCREEN[0]}" --rows "${GATE_SCREEN[1]}"
+      --seconds "$((GATE_BUDGET + 8))" --out "$GATE_LOG" --status "$GATE_STATUS"
+      -- "$GATE_HOME/run.sh")
     exec env CLAUDE_CONFIG_DIR="$GATE_HOME/cfg" CLAUDE_CODE_CHILD_SESSION=1 \
-      perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV or die $!' \
-      "${__gate_cmd[@]}" </dev/null >"$GATE_LOG" 2>&1
+      "${__gate_cmd[@]}" </dev/null >"$GATE_HOME/instrument.log" 2>&1
   ) 9>&- &
   GATE_PID=$!
 
@@ -8744,7 +8844,7 @@ __interface_gate() {
       # It ended on its own. That is not success by itself: read the exit status.
       GATE_EXITED=1
       GATE_RC=0
-      wait $GATE_PID 2>/dev/null || GATE_RC=$?
+      wait $GATE_PID 2>/dev/null || GATE_TOOL_RC=$?
       GATE_STATE="$(gate_state_checked)"
       break
     fi
@@ -8765,7 +8865,7 @@ __interface_gate() {
         if ! kill -0 $GATE_PID 2>/dev/null; then
           GATE_EXITED=1
           GATE_RC=0
-          wait $GATE_PID 2>/dev/null || GATE_RC=$?
+          wait $GATE_PID 2>/dev/null || GATE_TOOL_RC=$?
           GATE_STATE="$(gate_state_checked)"
           break
         fi
@@ -8774,8 +8874,51 @@ __interface_gate() {
     fi
   done
 
+  # GATE_TERM_HELPERS_BEGIN
+  __interface_gate_deliver_term() {
+    local pid="$1"
+    local group_err= process_err=
+    local group_rc=0 process_rc=0
+    GATE_TERM_OUTCOME=undelivered
+    GATE_TERM_GROUP_ERR=
+    GATE_TERM_PROC_ERR=
+    GATE_TERM_GROUP_RC=
+    GATE_TERM_PROC_RC=
+    # CONSTRAINT: stderr обеих попыток сохраняется (не /dev/null). Неуспех
+    # kill не роняет вызывающего под set -e: код в $(…) становится кодом
+    # присваивания, поэтому справа стоит `|| rc=$?`, не `|| true`.
+    group_err="$(kill -TERM -"${pid}" 2>&1)" || group_rc=$?
+    GATE_TERM_GROUP_ERR="${group_err}"
+    GATE_TERM_GROUP_RC="${group_rc}"
+    if [[ "${group_rc}" -eq 0 ]]; then
+      GATE_TERM_OUTCOME=group
+      return 0
+    fi
+    process_err="$(kill -TERM "${pid}" 2>&1)" || process_rc=$?
+    GATE_TERM_PROC_ERR="${process_err}"
+    GATE_TERM_PROC_RC="${process_rc}"
+    if [[ "${process_rc}" -eq 0 ]]; then
+      GATE_TERM_OUTCOME=process
+      return 0
+    fi
+    GATE_TERM_OUTCOME=undelivered
+    return 0
+  }
+  __interface_gate_term_still_alive_msg() {
+    # «ignored TERM» только если сигнал доставлен (group|process).
+    case "${GATE_TERM_OUTCOME}" in
+      group|process)
+        echo "  the interface gate ignored TERM; killing it" >&2
+        ;;
+      *)
+        echo "  the interface gate could not deliver TERM (group rc=${GATE_TERM_GROUP_RC:-?} ${GATE_TERM_GROUP_ERR}; process rc=${GATE_TERM_PROC_RC:-?} ${GATE_TERM_PROC_ERR}); killing it" >&2
+        ;;
+    esac
+    return 0
+  }
+  # GATE_TERM_HELPERS_END
   if [[ $GATE_EXITED -eq 0 ]]; then
-    kill -TERM -"$GATE_PID" 2>/dev/null || kill -TERM "$GATE_PID" 2>/dev/null || true
+    __interface_gate_deliver_term "$GATE_PID"
     # GATE_BUDGET bounds the POLLING, not this. A child that ignores TERM -- or is
     # stuck in a syscall -- leaves the bare `wait` below waiting forever, and the
     # FATAL that explains the timeout sits after it and never prints. Give TERM a
@@ -8785,12 +8928,39 @@ __interface_gate() {
       sleep 0.5
     done
     if kill -0 "$GATE_PID" 2>/dev/null; then
-      echo "  the interface gate ignored TERM; killing it" >&2
+      __interface_gate_term_still_alive_msg
       kill -KILL -"$GATE_PID" 2>/dev/null || kill -KILL "$GATE_PID" 2>/dev/null || true
     fi
-    wait $GATE_PID 2>/dev/null || true
+    wait $GATE_PID 2>/dev/null || GATE_TOOL_RC=$?
     GATE_RC=0
   fi
+
+  # Статус образа и код прибора -- разные каналы. Ровно одна полная строка;
+  # отсутствие, пустота и лишние строки не означают нулевой код образа.
+  if [[ ! -f "$GATE_STATUS" ]] || ! {
+    IFS= read -r __status_line && ! IFS= read -r __status_extra && [[ -z "$__status_extra" ]]
+  } < "$GATE_STATUS"; then
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- статус отсутствует, пуст или неполон (отказ прибора)" >&2
+    return 2
+  fi
+  if [[ "$__status_line" =~ ^exited\ ([0-9]{1,3})$ ]] && (( 10#${BASH_REMATCH[1]} <= 255 )); then
+    GATE_RC=$((10#${BASH_REMATCH[1]}))
+  elif [[ "$__status_line" =~ ^signaled\ ([0-9]{1,3})$ ]] && (( 10#${BASH_REMATCH[1]} > 0 && 10#${BASH_REMATCH[1]} < 128 )); then
+    GATE_RC=$((128 + 10#${BASH_REMATCH[1]}))
+  else
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- отказ прибора или неверный статус: $__status_line" >&2
+    [[ ! -f "$GATE_HOME/instrument.log" ]] || while IFS= read -r __status_extra; do
+      printf '  %s\n' "$__status_extra" >&2
+    done < "$GATE_HOME/instrument.log"
+    return 2
+  fi
+  if (( GATE_TOOL_RC != 0 && GATE_TOOL_RC != 1 )); then
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- прибор завершился кодом $GATE_TOOL_RC" >&2
+    return 2
+  fi
+  if (( GATE_TOOL_RC == 1 )); then GATE_EXITED=0; fi
+  # Наше снятие после опроса не является самостоятельным выходом образа.
+  if [[ "$GATE_EXITED" == 0 ]]; then GATE_RC=0; fi
 
   case "$GATE_STATE" in
     RENDERED)
@@ -8834,6 +9004,28 @@ __interface_gate() {
       ;;
   esac
   return 0
+}
+
+# --- 5a2c. зубы доставки TERM гейта интерфейса ---------------------------------
+# Стенд вырезает блок GATE_TERM_HELPERS из этого файла по якорю и гонит
+# настоящие kill: доставку группе лидера, одиночному процессу, честное
+# сообщение на мёртвом pid и обход всех исходов, не роняющий вызывающего под
+# set -e; каждая записанная мутация обязана покраснить свой зуб своей
+# причиной. КОНСТРЕЙНТ: стенд стоит ДО гейта, чьи зубы держит, -- сломанный
+# зуб останавливает прогон до того, как этот механизм понадобится живой
+# сессии, и стенд отрабатывает даже когда сам гейт объявлен пропущенным
+# (чужая платформная пара): предмет зубов -- код доставки TERM, а не образ.
+echo "==> Зубы доставки TERM гейта интерфейса"
+bash "$(dirname "$0")/tools/gate-kill-teeth.sh" 9>&- || {
+  __rc=$?
+  case $__rc in
+    2) echo "ЗУБЫ ГЕЙТА ИНТЕРФЕЙСА НЕ ИЗМЕРЯЛИ: якорь вырезки либо прибор (rc=2)" >&2
+       exit 2 ;;
+    4) echo "ЗУБЫ ГЕЙТА ИНТЕРФЕЙСА: объявленное число зубов либо мутаций не сошлось (rc=4)" >&2
+       exit 4 ;;
+    *) echo "ЗУБЫ ГЕЙТА ИНТЕРФЕЙСА УПАЛ: зуб не держится (rc=$__rc)" >&2
+       exit 1 ;;
+  esac
 }
 
 # Стадия зовётся ГОЛЫМ ИМЕНЕМ, а не через `|| exit $?`: у функции, стоящей в

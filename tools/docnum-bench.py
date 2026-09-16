@@ -18,8 +18,9 @@
 Коды выхода (подмножество общей таблицы кита -- см. шапку claude-patch-all.sh):
   0  каждая записанная мутация покраснела своей причиной
   1  зубы не держатся: мутация прошла молча или покраснела ЧУЖОЙ причиной
-  2  прибор не может мерить: нет таблицы, строка не о пяти полях, якорь гейта
-     пропал или встречается не один раз, ВЫРЕЗАННЫЙ ГЕЙТ НЕ РАЗБИРАЕТСЯ
+  2  прибор не может мерить: нет таблицы, строка не о пяти полях, владелец
+     чисел не прочитался, якорь гейта пропал или встречается не один раз,
+     ВЫРЕЗАННЫЙ ГЕЙТ НЕ РАЗБИРАЕТСЯ
      (py_compile перед прогоном; круг 25, E-2), ПРИСТИННЫЙ кит уже красный
      (контроль провален, и мутация ничего не докажет), либо выведенный из
      пути корень не несёт подписи кита (круг 24)
@@ -46,6 +47,7 @@
 import io
 import os
 import py_compile
+import re
 import shutil
 import subprocess
 import sys
@@ -121,6 +123,25 @@ END = '\nPYDOCS\n'
 # Круг 28, F-12(б): +1 -- мутация D40 на элидированную форму «все N».
 EXPECTED_MUTATIONS = 45
 
+# Гейт в строке расхождения печатает ЗНАЧЕНИЕ владельца, и ожидаемый след
+# мутаций вокруг чисел корпусного стенда цитирует это значение. Литерал в
+# цитате -- вторая копия знания: владелец переезжает, цитата отстаёт, вход
+# при этом найден, и зуб краснеет не по своей причине. Числа читаются из
+# владельца якорем ТОЙ ЖЕ ФОРМЫ, что и у гейта (присваивание в начале
+# строки, без отступа -- заглушки пишут присваивание с отступом и якорем
+# не считаются; см. комментарий у заглушки в corpus-tools-bench.sh).
+OWNER_BENCH = ('tools', 'corpus-tools-bench.sh')
+OWNER_ANCHORS = (
+    ('scenarios', re.compile(r'^EXPECTED_SCENARIOS=(\d+)$', re.M)),
+    ('mutations', re.compile(r'^EXPECTED_MUTATIONS=(\d+)$', re.M)),
+)
+# Цитата числа владельца в пятом поле таблицы пишется ПЛЕЙСХОЛДЕРОМ, не
+# цифрой: цифра -- второй дом числа (владелец переезжает, цитата отстаёт,
+# вход при этом найден, и зуб краснеет не по своей причине). Плейсхолдер
+# подставляется значением живого владельца; число, написанное цифрой,
+# подстановки не получает и зуб честно не сойдётся.
+WANT_OWNER_TOKEN = ('{OWNER_SCENARIOS}', '{OWNER_MUTATIONS}')
+
 
 def read(path):
     return io.open(path, encoding='utf-8').read()
@@ -144,6 +165,36 @@ def load():
             sys.exit(2)
         rows.append(parts)
     return rows
+
+
+def owner_counts():
+    """Числа владельца из его файла; не прочитался -- отказ, а не зелёный зуб.
+
+    ПУСТО НЕ НОЛЬ: якорь, найденный ноль или два раза, значит «не знаю, какое
+    число цитировать», и прибор обязан сказать это кодом разбора (2), а не
+    мерить со случайно-сходящимся ожиданием.
+    """
+    path = os.path.join(KIT, *OWNER_BENCH)
+    try:
+        text = read(path)
+    except OSError as error:
+        say('ОТКАЗ -- владелец чисел не читается: %s: %s' % (path, error))
+        sys.exit(2)
+    counts = {}
+    for key, anchor in OWNER_ANCHORS:
+        found = anchor.findall(text)
+        if len(found) != 1:
+            say('ОТКАЗ -- у владельца чисел якорь «%s» найден %d раз, нужно '
+                'ровно один: %s' % (anchor.pattern, len(found), path))
+            sys.exit(2)
+        counts[key] = found[0]
+    return counts
+
+
+def refresh_want(want, counts):
+    """Плейсхолдеры числа владельца в ожидаемом следе -- живым значением."""
+    return (want.replace(WANT_OWNER_TOKEN[0], counts['scenarios'])
+                .replace(WANT_OWNER_TOKEN[1], counts['mutations']))
 
 
 def carve(kit):
@@ -259,6 +310,7 @@ def run_gate(kit, gate):
 
 def main():
     rows = load()
+    counts = owner_counts()
     work = tempfile.mkdtemp(prefix='docnum-bench.')
     try:
         kit = os.path.join(work, 'kit')
@@ -280,6 +332,7 @@ def main():
 
         reddened = 0
         for name, rel, old, new, want in rows:
+            want = refresh_want(want, counts)
             target = os.path.join(kit, rel)
             if not os.path.exists(target):
                 say('МУТАЦИЯ %s: FAIL -- нет файла %s' % (name, rel))

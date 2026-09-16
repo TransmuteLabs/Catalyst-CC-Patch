@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=236
-EXPECTED_MUTATIONS=316
+EXPECTED_SCENARIOS=241
+EXPECTED_MUTATIONS=322
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -2114,6 +2114,7 @@ run_all() {
   # каждый различимый текст отказа, все кодом 2 ДО прибора замка.
   scenario_228; scenario_229; scenario_230; scenario_231; scenario_232
   scenario_233; scenario_234; scenario_235; scenario_236
+  scenario_237; scenario_238; scenario_239; scenario_240; scenario_241
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -2880,7 +2881,7 @@ scenario_93() {   # S6: смерть воркера зубов -- код 2, а �
   # Заглушка раннера: контролю нужен мгновенный зелёный ответ, воркеру --
   # время жить; различие по пути образа. Без этой подмены убить воркер ВНУТРИ
   # его работы невозможно: копия игрушечного образа делается мгновенно.
-  local tdir rid anchor img cpid wpid n rc out wk
+  local tdir rid anchor img cpid wpid n rc out wk snap psout leftover p
   tdir="$C/s93tmp"; rm -rf "$tdir"; mkdir -p "$tdir"
   rid=$(awk -F'\t' '$3=="literal"{print $1; exit}' "$K/tools/checks-mutations.tsv")
   anchor=$(awk -F'\t' -v id="$rid" '$1==id{print $4}' "$K/tools/checks-mutations.tsv")
@@ -2904,8 +2905,44 @@ scenario_93() {   # S6: смерть воркера зубов -- код 2, а �
   cp "$K/tools/checks-on-image.sh" "$C/s93-runner-orig"
   cat > "$K/tools/checks-on-image.sh" <<'S93R'
 #!/usr/bin/env bash
+# Дверь входа -- тот же контракт, что у настоящего раннера (checks-on-image.sh):
+# не тот исходник → rc=2 + «ЯКОРЬ ПРОПАЛ» + «вызван неверно» + путь;
+# tweakcc-patch.js дверь не отказывает. Под мутацией (не --floor и не
+# контрольный s93-image) процесс живёт, чтобы воркер пула можно было убить.
+set -u
+FLOOR=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --floor)  FLOOR=1; shift ;;
+    --script) shift 2 ;;
+    *)        break ;;
+  esac
+done
+IMG="${1:-}"
+if [[ -z "$IMG" ]]; then
+  echo "использование: checks-on-image.sh <собранный-образ> [исходник-патча]" >&2
+  exit 2
+fi
+[[ -f "$IMG" ]] || { echo "нет образа: $IMG" >&2; exit 2; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PATCH_SRC="${2:-$HERE/../tweakcc-patch.js}"
+[[ -f "$PATCH_SRC" ]] || { echo "нет исходника патча: $PATCH_SRC" >&2; exit 2; }
+if ! grep -q "^[[:space:]]*step('22 judge consulted" -- "$PATCH_SRC"; then
+  echo "ЯКОРЬ ПРОПАЛ: в исходнике патча нет step('22 judge consulted: $PATCH_SRC" >&2
+  echo "это отказ ПРИБОРА (вызван неверно), а не вердикт о предмете" >&2
+  exit 2
+fi
+if ! grep -q "^[[:space:]]*const ID = '" -- "$PATCH_SRC"; then
+  echo "ЯКОРЬ ПРОПАЛ: в исходнике патча нет const ID = ': $PATCH_SRC" >&2
+  echo "это отказ ПРИБОРА (вызван неверно), а не вердикт о предмете" >&2
+  exit 2
+fi
+if [[ $FLOOR -eq 1 ]]; then
+  echo "  [OK] stub floor"
+  exit 0
+fi
 echo "  [OK] stub check"
-case "$1" in
+case "$IMG" in
   *s93-image) exit 0 ;;
 esac
 sleep 30
@@ -2920,33 +2957,43 @@ S93R
   # Ребёнок у python НЕ один: resource_tracker тоже ребёнок, и его смерть
   # пул переживает (перезапускает), получался ЗЕЛЁНЫЙ «прошла молча».
   #
-  # Воркер опознаётся по РОДСТВУ (ppid), а не по форме argv. Форма argv --
-  # свойство УМОЛЧАНИЯ CPython, а не пула: `spawn_main` попадает в argv только
-  # при методе старта `spawn`, а кит метод старта нигде не пинит (ценз по
-  # `set_start_method|get_context|forkserver` дал ноль при положительном
-  # контроле -- ProcessPoolExecutor стоит в tools/checks-teeth.py). Значит
-  # решает платформа, и это замерено:
+  # Воркер опознаётся по РОДСТВУ (ppid), а не по spawn_main в argv. Форма argv
+  # воркера -- свойство УМОЛЧАНИЯ CPython, а не пула: `spawn_main` попадает в
+  # argv только при методе старта `spawn`, а кит метод старта нигде не пинит
+  # (ценз по `set_start_method|get_context|forkserver` дал ноль при
+  # положительном контроле -- ProcessPoolExecutor стоит в
+  # tools/checks-teeth.py). Значит решает платформа, и это замерено:
   #   macOS  python3 3.14.7: spawn -> ... spawn_main(tracker_fd=9, ...) --multiprocessing-fork
   #   LINUX  python3 3.12.14: fork  -> python3 <путь>   (argv РОДИТЕЛЯ)
   # Половина `$2==p` того же awk ребёнка НАХОДИЛА -- ложен был только предикат
-  # `/spawn_main/`, и цикл выжигал весь бюджет (300 x 0.1 c), после чего
-  # сценарий объявлял «воркер не поднялся» на здоровом ките. На Python 3.14
-  # умолчание Linux становится `forkserver`, и опознание по argv осталось бы
-  # слепым и там; родство устойчиво ко всем трём методам старта.
+  # `/spawn_main/`. На Python 3.14 умолчание Linux становится `forkserver`;
+  # родство устойчиво ко всем трём методам старта.
   #
-  # ОБЪЯВЛЕННОЕ ПРАВИЛО отбора, когда потомков больше одного: из потомков
-  # вычёркивается resource_tracker, и остаться обязан РОВНО ОДИН -- иначе
-  # прибор не мерит и говорит это, а не берёт «первого попавшегося». Трекер
-  # опознаётся по argv намеренно: его argv -- инвариант CPython при ЛЮБОМ
-  # методе старта (он всегда запускается как `python -c 'from
-  # multiprocessing.resource_tracker import main;main(fd)'` и никогда не
-  # форкается), тогда как argv ВОРКЕРА меняется от метода старта. Замер:
-  # на маке потомков два (трекер + воркер), на Linux один (только воркер).
+  # Баш двери входа -- тоже прямой потомок прибора. «Первый не-трекерный»
+  # при медленной двери есть этот баш: его убийство красит исправный прибор
+  # (rc=1 «прошла молча»). Интерпретатор не зависит от темпа фаз: дверь
+  # всегда bash/sh, воркер всегда python (fork копирует argv родителя, spawn
+  # -- spawn_main). Трекер вычёркивается по argv (инвариант CPython:
+  # `python -c 'from multiprocessing.resource_tracker import main;main(fd)'`,
+  # никогда не форкается). Нет ровно одного python-потомка -- ждать; больше
+  # одного -- отказ «не измерено», а не убивать наугад.
   wpid=''; n=0
   while (( n < 300 )); do
-    wpid=$(__ps_children "$cpid" 'resource_tracker')
+    # Родство -- единственный дом в __ps_children (мутация 178 целит туда).
+    # Здесь только фильтр интерпретатора: баш двери входа вычёркивается.
+    snap=$(__ps_children "$cpid" 'resource_tracker')
+    wpid=""
+    if [[ -n "$snap" ]]; then
+      psout=$(__ps_snapshot) || __instrument_dead "снимок ps (фильтр python-воркера с93)" "$?"
+      wpid=$(printf '%s\n' "$psout" | awk -v ids="$(printf '%s' "$snap" | tr '\n' ',')" '
+        BEGIN { n=split(ids, a, ","); for (i = 1; i <= n; i++) if (a[i] ~ /^[0-9]+$/) want[a[i]] = 1 }
+        want[$1] && $3 ~ /(^|\/)[Pp]ython[0-9.]*$/ { print $1 }') \
+        || __instrument_dead "awk фильтра python-воркера (сценарий 93)" "$?"
+    fi
     if [[ "$wpid" == *$'\n'* ]]; then
       kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
+      leftover=$(__ps_matching "$tdir" '.'); leftover="$leftover $(__ps_matching "$img" '.')"
+      for p in $leftover; do kill -KILL "$p" 2>/dev/null; done
       mv "$C/s93-runner-orig" "$K/tools/checks-on-image.sh"
       LAST_EVID="ПРИБОР_НЕ_МЕРИТ ПОТОМКОВ_БОЛЬШЕ_ОДНОГО :: $(printf '%s' "$wpid" | tr '\n' ' ')"
       bad "93 S6: у пула больше одного потомка -- воркер не назван однозначно"; return
@@ -2956,6 +3003,8 @@ S93R
   done
   if [[ -z "$wpid" ]]; then
     kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
+    leftover=$(__ps_matching "$tdir" '.'); leftover="$leftover $(__ps_matching "$img" '.')"
+    for p in $leftover; do kill -KILL "$p" 2>/dev/null; done
     mv "$C/s93-runner-orig" "$K/tools/checks-on-image.sh"
     LAST_EVID="ПРИБОР_НЕ_МЕРИТ :: $(tail -3 "$C/s93.log" | tr '\n' '|')"
     bad "93 S6: воркер не поднялся -- сценарий не измерен"; return
@@ -2964,6 +3013,8 @@ S93R
   kill -9 "$wpid" 2>/dev/null
   wait "$cpid"; rc=$?
   [[ -n "$wk" ]] && kill -9 $wk 2>/dev/null
+  leftover=$(__ps_matching "$tdir" '.'); leftover="$leftover $(__ps_matching "$img" '.')"
+  for p in $leftover; do kill -KILL "$p" 2>/dev/null; done
   mv "$C/s93-runner-orig" "$K/tools/checks-on-image.sh"
   out=$(cat "$C/s93.log")
   if (( rc == 1 )); then
@@ -4619,7 +4670,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 316 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 322 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -4751,119 +4802,97 @@ scenario_149() {   # детектор процессов не возвращае
   ok "149 детектор процессов видит соседа и не возвращает исключённый pid"
 }
 
-# --- волна 41: гейт интерфейса (#92) -----------------------------------------
-# Стадия «запуск -> опрос -> вердикт» вырезается ИЗ КОНВЕЙЕРА по якорям и
-# гоняется на поддельных $BIN и `script`: настоящий интерфейс здесь не нужен,
-# нужен ВЕРДИКТ стадии на каждом её пути. Копия стадии в стенде стала бы вторым
-# домом правила и разошлась бы с конвейером молча.
-#
-# До волны 41 стадия жила без имени и без зуба, и три её ветки были
-# НЕДОСТИЖИМЫ: `wait $GATE_PID` под `set -euo pipefail` убивал оболочку ДО
-# присвоения кода (прогон отдавал голый код ребёнка и молчал), а форма `script`
-# была зашита BSD-синтаксисом и на util-linux не запускала вообще ничего.
-gate_carve() {   # каталог фрагментов -> печатает число вырезанных кусков
+# --- гейт интерфейса: настоящий PTY, поддельный образ -------------------------
+# Тело стадии и размер берутся из конвейера, не из копии правил в стенде.
+gate_carve() {   # каталог фрагментов -> число вырезанных кусков
   local dir="$1" n=0 name
-  for name in __host_os_arch __gate_script_form gate_state __interface_gate; do
-    # Голова функции опознаётся ПОДСТРОКОЙ С НАЧАЛА строки, а не регуляркой:
-    # у голов есть хвостовой комментарий, и экранирование скобок в шаблоне было
-    # бы вторым источником истины о форме объявления.
+  for name in __host_os_arch gate_state __interface_gate; do
     awk -v h="${name}() {" 'index($0, h) == 1 {on=1} on {print} on && $0 == "}" {exit}' \
       "$K/claude-patch-all.real" > "$dir/$name.sh"
     [[ -s "$dir/$name.sh" ]] && n=$((n+1))
   done
+  grep '^GATE_SCREEN=' "$K/claude-patch-all.real" > "$dir/gate_screen.sh"
+  [[ -s "$dir/gate_screen.sh" ]] && n=$((n+1))
   printf '%s\n' "$n"
 }
 
-# Подставной `script`: принимает РОВНО те формы, что названы в GATE_STUB_TAKE,
-# а на чужой отвечает как настоящий -- ненулевым кодом с диагностикой. Так
-# различитель меряется на ОБЕИХ сторонах с одной машины: замер настоящих
-# бинарей (util-linux 2.40.2 и BSD) снят волной 41 и записан в её бриф.
-gate_stub_script() {   # каталог
+# Обёртка пропускает все вызовы Python, кроме явного отказа PTY-прибора.
+# Журнал argv не смешивается с сырыми байтами захвата.
+gate_stub_python() {
   mkdir -p "$1"
-  cat > "$1/script" <<'STUB41'
+  cat > "$1/python3" <<'STUBPTY'
 #!/usr/bin/env bash
-# util-linux: script -q -c КОМАНДА ФАЙЛ (команду разбирает sh)
-# BSD:        script -q ФАЙЛ КОМАНДА    (команда -- хвост argv)
-[[ -n "${GATE_STUB_LOG:-}" ]] && printf '%s\n' "$*" >> "$GATE_STUB_LOG"
-# СВИДЕТЕЛЬ ВХОДА (волна 44, #100). Подставной -- bash-скрипт и tcgetattr не
-# зовёт, поэтому СОКЕТ на входе сам по себе его не валит: настоящий отказ
-# воспроизвёл бы только настоящий BSD-`script`. Значит зуб мерит МЕХАНИЗМ --
-# чем закреплён вход проб, -- и для этого подставной сообщает КЛАСС своего
-# stdin. Журнал ОТДЕЛЬНЫЙ: строку argv соседние сценарии читают по префиксу,
-# и дописывание в неё сделало бы их скрытыми потребителями этого зуба.
-if [[ -n "${GATE_STUB_STDIN_LOG:-}" ]]; then
-  __sin=прочее
-  [[ -S /dev/fd/0 ]] && __sin=сокет
-  [[ -c /dev/fd/0 ]] && __sin=символьное
-  printf '%s\t%s\n' "$__sin" "$*" >> "$GATE_STUB_STDIN_LOG"
-fi
-if [[ "${1:-}" == "-q" && "${2:-}" == "-c" && $# -eq 4 ]]; then
-  case "${GATE_STUB_TAKE:-}" in
-    ul|both) exec sh -c "$3" ;;
+if [[ "${1:-}" == */pty-run.py ]]; then
+  printf '%s\n' "$*" >> "$GATE_STUB_LOG"
+  status=""; out=""; prev=""
+  for arg in "$@"; do
+    [[ "$prev" == --status ]] && status="$arg"
+    [[ "$prev" == --out ]] && out="$arg"
+    prev="$arg"
+  done
+  if [[ "$GATE_STUB_TAKE" == none ]]; then
+    printf 'instrument unavailable\n' > "$status"
+    printf 'PTY unavailable for this fixture\n' >&2
+    exit 2
+  fi
+  case "$GATE_STUB_TAKE" in
+    missing-status|empty-status|bad-status|extra-status|unterminated-status)
+      printf 'tweakcc interface gate\n' > "$out"
+      case "$GATE_STUB_TAKE" in
+        empty-status) : > "$status" ;;
+        bad-status) printf 'unreadable\n' > "$status" ;;
+        extra-status) printf 'exited 0\nexited 0\n' > "$status" ;;
+        unterminated-status) printf 'exited 0' > "$status" ;;
+      esac
+      exit 0 ;;
   esac
-  echo "script: unrecognized option '--strict-mcp-config'" >&2
-  exit 1
 fi
-if [[ "${1:-}" == "-q" && $# -ge 3 ]]; then
-  case "${GATE_STUB_TAKE:-}" in
-    bsd|both) shift 2; exec "$@" ;;
-  esac
-  echo "script: unexpected number of arguments" >&2
-  exit 1
-fi
-echo "script: подставной не понял форму: $*" >&2
-exit 1
-STUB41
-  chmod +x "$1/script"
+exec "$GATE_PYTHON" "$@"
+STUBPTY
+  chmod +x "$1/python3"
 }
 
-# Поддельный интерфейс: ведёт себя ровно тем способом, что назван в
-# GATE_FAKE_MODE. Приглашение печатается ТЕМ ЖЕ текстом, что пришло в argv --
-# разбор захвата сверяет именно его, и выдуманная строка проверяла бы другое.
 gate_fake_bin() {   # путь
   cat > "$1" <<'FAKE41'
 #!/usr/bin/env bash
 prompt="${2:-}"
+# Проверяется именно argv образа, а не похожий текст в журнале драйвера.
+if [[ $# != 2 || "$1" != --strict-mcp-config || "$prompt" != 'tweakcc interface gate' \
+      || "${CLAUDE_CODE_CHILD_SESSION:-}" != 1 || ! -d "${CLAUDE_CONFIG_DIR:-}" ]]; then
+  printf 'fixture argv/environment mismatch\n' >&2
+  exit 9
+fi
 case "${GATE_FAKE_MODE:-}" in
   a) exit 1 ;;
   b) printf '%s\n' "$prompt"; sleep 4; exit 1 ;;
   c) sleep 20 ;;
   d) printf '%s\n' "$prompt"; sleep 20 ;;
   e) printf '%s\n' "$prompt"; exit 0 ;;
+  p) printf '%s\n' "$prompt"; exit 127 ;;
+  s) printf '%s\n' "$prompt"; kill -TERM "$$" ;;
+  tty)
+    if [[ ! -t 0 || ! -t 1 || ! -t 2 ]]; then exit 9; fi
+    printf 'TTY_CONFIRMED\n' > "$GATE_TTY_WITNESS"
+    printf '%s\n' "$prompt" ;;
   *) echo "поддельный интерфейс: неизвестный режим «${GATE_FAKE_MODE:-}»" >&2; exit 9 ;;
 esac
 FAKE41
   chmod +x "$1"
 }
 
-# Запускатель стадии повторяет ВЫЗОВ конвейера, а не его тело: те же три
-# фрагмента, та же оболочка `set -euo pipefail`, та же связка «замер формы ->
-# стадия». Иначе зуб доказывал бы стадию, вызванную не так, как её зовёт кит.
 gate_drv_file() {   # путь
-  # Драйвер НЕ считает форму `script` и не печатает её сам: с волны 40c замер
-  # живёт ВНУТРИ стадии, и вторая копия правила в стенде разошлась бы с
-  # конвейером молча -- ровно то, от чего предостерегает комментарий карвинга.
-  # Сценарии читают СОБСТВЕННУЮ строку стадии.
-  # GATE_TARGET задаёт драйвер: пару ЦЕЛИ стадия читает из окружения
-  # вызывающего, и это единственный способ прогнать её ветки на поддельном
-  # $BIN, который остаётся обычным скриптом.
   cat > "$1" <<'DRV41'
 set -euo pipefail
 source "$1"; source "$2"; source "$3"; source "$4"
-BIN="$5"; GATE_HOME="$6"; GATE_BUDGET="$7"; GATE_TARGET="$8"
+BIN="$5"; GATE_HOME="$6"; GATE_BUDGET="$7"; GATE_TARGET="$8"; HERE="$9"
 GATE_LOG="$GATE_HOME/capture.log"
 GATE_PROMPT="tweakcc interface gate"
 : > "$GATE_LOG"
-# Голым именем -- как в конвейере: под `||` `set -e` не действует во всём теле
-# стадии, и зуб мерил бы стадию под ДРУГОЙ оболочкой, чем её гоняет кит.
+# Голым именем -- иначе set -e не действует во всём теле стадии.
 __interface_gate
 DRV41
 }
 
-# Драйвер под СОКЕТОМ на дескрипторе 0 -- ровно тот вид входа, что приносят
-# агентский, launchd- и cron-контексты. Отдельным ФАЙЛОМ, а не строкой в
-# командной строке: строка уехала бы в argv и в журналы, которые соседние
-# сценарии читают по префиксу.
 gate_sock_py() {   # путь файла
   cat > "$1" <<'SOCKPY'
 import socket, os, sys
@@ -4877,167 +4906,275 @@ gate_prepare() {   # имя каталога сценария
   GATE_D="$C/$1"; rm -rf "$GATE_D"; mkdir -p "$GATE_D/frag" "$GATE_D/stub"
   GATE_CARVED=$(gate_carve "$GATE_D/frag")
   GATE_BIN="$GATE_D/fake-bin"; gate_fake_bin "$GATE_BIN"
-  gate_stub_script "$GATE_D/stub"
+  gate_stub_python "$GATE_D/stub"
   GATE_DRV="$GATE_D/drv.sh"; gate_drv_file "$GATE_DRV"
   GATE_STUB_LOG_F="$GATE_D/stub.log"; : > "$GATE_STUB_LOG_F"
-  GATE_STUB_SIN_F="$GATE_D/stub-stdin.log"; : > "$GATE_STUB_SIN_F"
   GATE_SOCK_PY="$GATE_D/sockexec.py"; gate_sock_py "$GATE_SOCK_PY"
 }
 
-# Пара ХОЗЯИНА, посчитанная ТЕМ ЖЕ домом, что и в конвейере: сценарию нужна
-# «своя» цель, а зашитая строка привязала бы зуб к машине, на которой он писан.
 gate_host_pair() { ( source "$GATE_D/frag/__host_os_arch.sh"; __host_os_arch ); }
 
-gate_call() {   # режим бина, что принимает подставной script, бюджет, [цель]
+gate_call() {   # режим образа, режим прибора, бюджет, [цель]
   GATE_H=$(mktemp -d "$GATE_D/home.XXXXXX")
   mkdir -p "$GATE_H/cfg" "$GATE_H/proj"
-  local target="${4:-$(gate_host_pair)}"
-  # Запускатель отделён от аргументов: под ручкой GATE_STDIN_SOCK драйвер
-  # получает СОКЕТ на дескрипторе 0 (сценарий 171, #100). По умолчанию ручка
-  # снята, и прочие сценарии идут прежним запуском -- иначе зуб одного
-  # сценария молча менял бы условия замера у всех соседей.
+  local target="${4:-$(gate_host_pair)}" gate_path="$GATE_D/stub:$PATH" tool
+  local gate_python
+  gate_python="$(type -P python3)"
+  if [[ "$2" == no-python ]]; then
+    mkdir -p "$GATE_D/bare"
+    for tool in bash uname tr rm; do ln -sf "$(type -P "$tool")" "$GATE_D/bare/$tool"; done
+    gate_path="$GATE_D/bare"
+  fi
   local -a __run=(bash "$GATE_DRV")
   if [[ "${GATE_STDIN_SOCK:-0}" == 1 ]]; then
     __run=(python3 "$GATE_SOCK_PY" bash "$GATE_DRV")
   fi
-  GATE_OUT=$(PATH="$GATE_D/stub:$PATH" GATE_STUB_TAKE="$2" \
+  GATE_OUT=$(PATH="$gate_path" GATE_STUB_TAKE="$2" GATE_PYTHON="$gate_python" \
              GATE_STUB_LOG="$GATE_STUB_LOG_F" GATE_FAKE_MODE="$1" \
-             GATE_STUB_STDIN_LOG="$GATE_STUB_SIN_F" \
+             GATE_TTY_WITNESS="$GATE_D/tty-witness" \
              "${__run[@]}" \
                "$GATE_D/frag/__host_os_arch.sh" \
-               "$GATE_D/frag/__gate_script_form.sh" \
+               "$GATE_D/frag/gate_screen.sh" \
                "$GATE_D/frag/gate_state.sh" \
                "$GATE_D/frag/__interface_gate.sh" \
-               "$GATE_BIN" "$GATE_H" "$3" "$target" 2>&1 9>&-)
+               "$GATE_BIN" "$GATE_H" "$3" "$target" "$K" 2>&1 9>&-)
   GATE_RC=$?
 }
 
-# Строка ЗАПУСКА, а не строка пробы: обе идут в один журнал подставного, и
-# отличает их путь запускателя.
 gate_launch_line() { grep -F 'run.sh' "$GATE_STUB_LOG_F" | tail -1; }
 
-gate_carved_or_bad() {   # номер сценария -- общий отказ прибора
-  # ЧЕТЫРЕ, а не три: с волны 40c стадия сама берёт пару ХОЗЯИНА (__host_os_arch)
-  # -- из окружения ей приходит только пара ЦЕЛИ.
+gate_carved_or_bad() {   # номер сценария
   [[ "$GATE_CARVED" == "4" ]] && return 0
   LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$GATE_CARVED из 4"
   bad "$1 гейт интерфейса: стадия не вырезана из конвейера -- прибор не мерит"
   return 1
 }
 
-scenario_150() {   # форма script ЗАМЕРЕНА: util-linux-подставной
+scenario_150() {   # единственная форма прибора, argv и окружение
   local launch
   gate_prepare s150
   gate_carved_or_bad 150 || return
-  gate_call e ul 5
+  gate_call e run 5
   launch=$(gate_launch_line)
-  LAST_EVID="rc=$GATE_RC запуск=[$launch] дом=$([[ -d "$GATE_H" ]] && echo есть || echo снят) :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
-  if [[ "$GATE_OUT" != *"script form utillinux"* ]]; then
-    LAST_EVID="ФОРМА_НЕ_UTILLINUX :: $LAST_EVID"
-    bad "150 форма script: util-linux-подставной, а выбрана не его форма"; return
+  LAST_EVID="rc=$GATE_RC запуск=[$launch] :: $GATE_OUT"
+  if [[ "$launch" != *"/pty-run.py --cols "* || "$launch" != *" --status "* || "$launch" != *" -- $GATE_H/run.sh" ]]; then
+    LAST_EVID="PTY_ARGV_НЕ_ДОЕХАЛ :: $LAST_EVID"
+    bad "150 PTY: единственная форма argv не доехала"; return
   fi
-  if [[ "$launch" != "-q -c "* ]]; then
-    LAST_EVID="ЗАПУСК_НЕ_ТОЙ_ФОРМЫ :: $LAST_EVID"
-    bad "150 форма script: стадия позвала script НЕ в выбранной форме"; return
+  if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* || -d "$GATE_H" ]]; then
+    LAST_EVID="PTY_ЗАПУСК_НЕ_УСПЕХ :: $LAST_EVID"
+    bad "150 PTY: argv/окружение не довели стадию до успеха и уборки"; return
   fi
-  if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
-    LAST_EVID="ВЕРДИКТ_НЕ_УСПЕХ :: $LAST_EVID"
-    bad "150 форма script: util-linux-форма не довела стадию до успеха"; return
-  fi
-  if [[ -d "$GATE_H" ]]; then
-    LAST_EVID="ДОМ_НЕ_СНЯТ :: $LAST_EVID"
-    bad "150 форма script: успех оставил временный дом гейта"; return
-  fi
-  ok "150 util-linux-подставной: форма замерена, ею же и позвали"
+  ok "150 PTY: единый argv, окружение, успех и уборка дома"
 }
 
-scenario_151() {   # форма script ЗАМЕРЕНА: BSD-подставной
-  local launch
-  gate_prepare s151
+scenario_151() {   # путь с пробелами остаётся одним argv
+  gate_prepare 's151 path with spaces'
   gate_carved_or_bad 151 || return
-  gate_call e bsd 5
-  launch=$(gate_launch_line)
-  LAST_EVID="rc=$GATE_RC запуск=[$launch] :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
-  if [[ "$GATE_OUT" != *"script form bsd"* ]]; then
-    LAST_EVID="ФОРМА_НЕ_BSD :: $LAST_EVID"
-    bad "151 форма script: BSD-подставной, а выбрана не его форма"; return
-  fi
-  if [[ "$launch" != "-q /dev/null "* ]]; then
-    LAST_EVID="ЗАПУСК_НЕ_ТОЙ_ФОРМЫ :: $LAST_EVID"
-    bad "151 форма script: стадия позвала script НЕ в выбранной форме"; return
-  fi
+  GATE_BIN="$GATE_D/image with spaces"; gate_fake_bin "$GATE_BIN"
+  gate_call e run 5
+  LAST_EVID="rc=$GATE_RC :: $GATE_OUT"
   if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
-    LAST_EVID="ВЕРДИКТ_НЕ_УСПЕХ :: $LAST_EVID"
-    bad "151 форма script: BSD-форма не довела стадию до успеха"; return
+    LAST_EVID="PTY_ПРОБЕЛЫ_НЕ_ДОЕХАЛИ :: $LAST_EVID"
+    bad "151 PTY: путь с пробелами не довёл стадию до успеха"; return
   fi
-  ok "151 BSD-подставной: форма замерена, ею же и позвали"
+  ok "151 PTY: пути образа и запускателя с пробелами доехали"
 }
 
-scenario_152() {   # положительный контроль различителя: обе и ни одной
-  # Без этих двух случаев «проба выбрала форму» не доказывает ничего: молчаливый
-  # выбор одной из форм даёт ровно тот немой отказ, из которого выросла волна.
-  local out_both rc_both out_none rc_none
+scenario_152() {   # нет Python и отказ PTY -- прибор, не продукт
+  local mode
   gate_prepare s152
   gate_carved_or_bad 152 || return
-  gate_call e both 5; out_both="$GATE_OUT"; rc_both=$GATE_RC
-  gate_call e none 5; out_none="$GATE_OUT"; rc_none=$GATE_RC
-  LAST_EVID="обе rc=$rc_both [$(printf '%s' "$out_both" | tr '\n' '|')] ни_одной rc=$rc_none [$(printf '%s' "$out_none" | tr '\n' '|')]"
-  if (( rc_both != 2 )) || [[ "$out_both" != *"принял ОБЕ известные формы"* ]]; then
-    LAST_EVID="ОБЕ_ФОРМЫ_НЕ_ОТКАЗ :: $LAST_EVID"
-    bad "152 различитель: принявший ОБЕ формы script не дал отказа кода 2"; return
-  fi
-  if (( rc_none != 2 )) || [[ "$out_none" != *"не принял НИ ОДНОЙ известной формы"* ]]; then
-    LAST_EVID="НИ_ОДНОЙ_НЕ_ОТКАЗ :: $LAST_EVID"
-    bad "152 различитель: не принявший НИ ОДНОЙ формы script не дал отказа кода 2"; return
-  fi
-  ok "152 различитель формы: обе и ни одной -- отказ кода 2 с названной причиной"
+  for mode in no-python none; do
+    gate_call e "$mode" 5
+    LAST_EVID="режим=$mode rc=$GATE_RC :: $GATE_OUT"
+    if (( GATE_RC != 2 )) || [[ "$GATE_OUT" != *"НЕ ИЗМЕРЕН"* ]]; then
+      LAST_EVID="PTY_ОТКАЗ_НЕ_КОД_2 :: $LAST_EVID"
+      bad "152 PTY: недоступный прибор не назван отказом кода 2"; return
+    fi
+  done
+  ok "152 PTY: нет Python и отказ прибора -- код 2 с причиной"
 }
 
-scenario_171() {   # вход проб различителя не наследуется: под СОКЕТОМ форма замерена
-  # Корень #100. BSD-`script` зовёт tcgetattr по СВОЕМУ стандартному вводу;
-  # когда вызывающий отдаёт сокет (агентский контекст, launchd, cron), проба
-  # падает с `Operation not supported on socket`, различитель объявляет «ни
-  # одной известной формы», и конвейер умирает кодом 2 ТАМ, ГДЕ ОБЕ ФОРМЫ НА
-  # МЕСТЕ. Замер 09.09 на настоящем `script`: под сокетом rc=1, с `</dev/null`
-  # rc=0 -- различает ИМЕННО вход, а не машина.
-  #
-  # Подставной `script` -- bash-скрипт, tcgetattr он не зовёт, и сокет сам по
-  # себе его не валит. Поэтому сценарий мерит МЕХАНИЗМ (чем закреплён вход
-  # проб), а не симптом: подставной сообщает КЛАСС входа, который ему дали, а
-  # драйвер запускается с сокетом на дескрипторе 0.
-  #
-  # Предмет -- ТОЛЬКО различитель. Реальный запуск отцеплен через `( … ) &`, и
-  # оболочка подставляет ему /dev/null сама -- замерено, что даже под `bash -m`,
-  # потому что без управляющего терминала управление заданиями не включается.
-  # Утверждение о нём было бы ВАКУУМНЫМ: зеленело бы и без правки.
-  local calls seen_sock
-  local GATE_STDIN_SOCK=1        # видна gate_call по динамической области bash
+scenario_171() {   # сокет вызывающего не заменяет терминал ребёнка
+  local GATE_STDIN_SOCK=1
   gate_prepare s171
   gate_carved_or_bad 171 || return
-  gate_call e bsd 5
-  calls=$(awk 'END{print NR+0}' "$GATE_STUB_SIN_F")
-  seen_sock=$(awk -F'\t' '$1=="сокет"{n++} END{print n+0}' "$GATE_STUB_SIN_F")
-  LAST_EVID="rc=$GATE_RC вызовов_подставного=$calls из_них_сокетом=$seen_sock :: $(printf '%s' "$GATE_OUT" | tr '\n' '|')"
-  # Положительный контроль ПРИБОРА идёт первым: пустой журнал свидетеля сделал
-  # бы проверку «сокетов ноль» истинной впустую. Вызовов обязано быть не меньше
-  # трёх -- две пробы различителя и запуск.
-  if (( calls < 3 )); then
-    LAST_EVID="СВИДЕТЕЛЬ_НЕ_ПИСАЛ вызовов=$calls :: $LAST_EVID"
-    bad "171 вход проб: подставной не засвидетельствовал свой stdin -- прибор не мерит"; return
+  gate_call tty run 5
+  LAST_EVID="rc=$GATE_RC :: $GATE_OUT"
+  if [[ ! -s "$GATE_D/tty-witness" ]] || (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
+    LAST_EVID="PTY_SOCKET_НЕ_ТЕРМИНАЛ :: $LAST_EVID"
+    bad "171 PTY: под сокетом ребёнок не получил терминал и не отрисовался"; return
   fi
-  if (( seen_sock != 0 )); then
-    LAST_EVID="ВХОД_НАСЛЕДОВАН сокетом=$seen_sock :: $LAST_EVID"
-    bad "171 вход проб: подставной получил СОКЕТ -- вход наследуется от вызывающего"; return
+  ok "171 PTY: при сокете вызывающего ребёнок получил терминал на stdin/stdout/stderr"
+}
+
+# Размер ожидается из единственного объявления конвейера. Процессы, оставленные
+# мутацией, снимает сам зуб; иначе красный контроль загрязнил бы следующий прогон.
+pty_probe_file() {
+  cat > "$1" <<'PTYPROBE'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+case, driver, directory, cols, rows = sys.argv[1:]
+directory = Path(directory)
+out = directory / "bytes"
+status = directory / "status"
+pids_file = directory / "pids"
+process = None
+pids = []
+
+def alive(pid):
+    result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode not in (0, 1):
+        raise RuntimeError("ps failed: " + result.stderr)
+    state = result.stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+def launch(code, seconds=3, command=None):
+    global process
+    argv = [sys.executable, driver, "--cols", cols, "--rows", rows,
+            "--seconds", str(seconds), "--out", str(out), "--status", str(status),
+            "--", *(command if command is not None else [sys.executable, "-c", code])]
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return process
+
+def finish(limit=6):
+    stdout, stderr = process.communicate(timeout=limit)
+    return process.returncode, stderr.decode("utf-8", "replace")
+
+def fail(cause, detail):
+    print(cause + " :: " + detail)
+    sys.exit(1)
+
+try:
+    if case == "size":
+        launch("import os; s=os.get_terminal_size(0); print('SIZE',s.columns,s.lines)")
+        rc, err = finish()
+        data = out.read_bytes() if out.exists() else b""
+        if rc != 0 or f"SIZE {cols} {rows}".encode() not in data:
+            fail("PTY_SIZE_LOST", f"rc={rc} bytes={data!r} stderr={err}")
+        print(f"PTY_SIZE_OK SIZE {cols} {rows}")
+    elif case == "timeout":
+        code = '''import os, signal, time
+from pathlib import Path
+p = Path(%r)
+child = os.fork()
+if child == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    p.write_text(str(os.getppid()) + ' ' + str(os.getpid()))
+    while True: time.sleep(1)
+while not p.exists(): time.sleep(0.01)
+print('TREE_READY', flush=True)
+while True: time.sleep(1)
+''' % str(pids_file)
+        launch(code, seconds=1)
+        try:
+            rc, err = finish()
+        except subprocess.TimeoutExpired:
+            fail("PTY_TIMEOUT_SURVIVOR", "driver did not return after its deadline")
+        if not pids_file.exists():
+            fail("PTY_TIMEOUT_NO_CONTROL", "child tree never reported its pids")
+        pids = [int(x) for x in pids_file.read_text().split()]
+        deadline = time.monotonic() + 1
+        while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        survivors = [pid for pid in pids if alive(pid)]
+        if survivors:
+            fail("PTY_TIMEOUT_SURVIVOR", f"alive={survivors}")
+        if rc != 1 or not status.read_text().startswith("signaled "):
+            fail("PTY_TIMEOUT_STATUS", f"rc={rc} status={status.read_text()!r} stderr={err}")
+        print("PTY_TIMEOUT_OK rc=1 live_children=0 status=" + status.read_text().strip())
+    elif case == "stream":
+        code = "import os,time; from pathlib import Path; Path(%r).write_text(str(os.getpid())); print('EARLY_BYTES',flush=True); time.sleep(20)" % str(pids_file)
+        launch(code, seconds=5)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            data = out.read_bytes() if out.exists() else b""
+            if b"EARLY_BYTES" in data:
+                break
+            time.sleep(0.02)
+        pids = [int(pids_file.read_text())] if pids_file.exists() else []
+        if not pids or not all(alive(pid) for pid in pids) or process.poll() is not None:
+            fail("PTY_STREAM_NO_CONTROL", "child is not alive during capture check")
+        if b"EARLY_BYTES" not in data:
+            fail("PTY_STREAM_LATE", f"live_child=1 bytes={data!r}")
+        print("PTY_STREAM_OK live_child=1 bytes=EARLY_BYTES")
+    elif case == "unavailable":
+        launch("", command=[str(directory / "command-does-not-exist")])
+        rc, err = finish()
+        text = status.read_text() if status.exists() else ""
+        if rc != 2 or not err.strip() or text != "instrument unavailable\n":
+            fail("PTY_REFUSAL_FAIL_OPEN", f"rc={rc} status={text!r} stderr={err}")
+        print("PTY_REFUSAL_OK rc=2 status=" + text.strip() + " reason=" + err.strip())
+    else:
+        raise RuntimeError("unknown probe case: " + case)
+finally:
+    if pids_file.exists():
+        pids = [int(x) for x in pids_file.read_text().split()]
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=3)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+PTYPROBE
+}
+
+pty_probe_case() {   # сценарий, имя пробы, метка успеха
+  local n="$1" name="$2" marker="$3" out rc
+  gate_prepare "s$n"
+  gate_carved_or_bad "$n" || return
+  source "$GATE_D/frag/gate_screen.sh"
+  pty_probe_file "$GATE_D/probe.py"
+  out=$(python3 "$GATE_D/probe.py" "$name" "$K/tools/pty-run.py" "$GATE_D" \
+          "${GATE_SCREEN[0]}" "${GATE_SCREEN[1]}" 2>&1 9>&-); rc=$?
+  LAST_EVID="$out"
+  if (( rc != 0 )) || [[ "$out" != *"$marker"* ]]; then
+    bad "$n PTY $name: $out"; return
   fi
-  if [[ "$GATE_OUT" != *"script form bsd"* ]]; then
-    LAST_EVID="ФОРМА_НЕ_ЗАМЕРЕНА :: $LAST_EVID"
-    bad "171 вход проб: под сокетом форма script не замерена"; return
-  fi
-  if (( GATE_RC != 0 )) || [[ "$GATE_OUT" != *"came up in a throwaway home"* ]]; then
-    LAST_EVID="ВЕРДИКТ_НЕ_УСПЕХ :: $LAST_EVID"
-    bad "171 вход проб: под сокетом стадия не дошла до успеха"; return
-  fi
-  ok "171 вход проб различителя закреплён: сокет вызывающего до script не доходит"
+  ok "$n $out"
+}
+
+scenario_237() { pty_probe_case 237 size PTY_SIZE_OK; }
+scenario_238() { pty_probe_case 238 timeout PTY_TIMEOUT_OK; }
+scenario_239() { pty_probe_case 239 stream PTY_STREAM_OK; }
+scenario_240() { pty_probe_case 240 unavailable PTY_REFUSAL_OK; }
+
+scenario_241() {   # код образа не подменяется кодом прибора; пусто не равно нулю
+  local mode code
+  gate_prepare s241
+  gate_carved_or_bad 241 || return
+  for mode in b p s; do
+    case "$mode" in b) code=1 ;; p) code=127 ;; s) code=143 ;; esac
+    gate_call "$mode" run 12
+    LAST_EVID="mode=$mode rc=$GATE_RC :: $GATE_OUT"
+    if (( GATE_RC != 1 )) || [[ "$GATE_OUT" != *"drew its message and then exited $code"* ]]; then
+      LAST_EVID="PTY_CHILD_STATUS_LOST :: $LAST_EVID"
+      bad "241 PTY: код завершения образа не доехал ($code)"; return
+    fi
+  done
+  for mode in missing-status empty-status bad-status extra-status unterminated-status; do
+    gate_call e "$mode" 5
+    LAST_EVID="mode=$mode rc=$GATE_RC :: $GATE_OUT"
+    if (( GATE_RC != 2 )) || [[ "$GATE_OUT" != *"НЕ ИЗМЕРЕН"* ]]; then
+      LAST_EVID="PTY_STATUS_ABSENCE_ZERO :: $LAST_EVID"
+      bad "241 PTY: отсутствующий/негодный статус стал кодом образа ($mode)"; return
+    fi
+  done
+  ok "241 PTY: exited 1/127 и signaled 15 доехали; пять негодных статусов -- код 2"
 }
 
 # --- дверь обвала слоя промтов (#101) ---------------------------------------
@@ -6630,7 +6767,7 @@ scenario_164() {   # Т8: гейт ПРОПУСКАЕТСЯ на чужой па
   fi
   if [[ -n "$launch_skip" ]]; then
     LAST_EVID="ПРОПУСК_ВСЁ_РАВНО_ЗАПУСТИЛ :: $LAST_EVID"
-    bad "164 гейт: путь пропуска всё-таки позвал script"; return
+    bad "164 гейт: путь пропуска всё-таки позвал PTY"; return
   fi
   # Положительный контроль: без него пропуск незаметно стал бы умолчанием на
   # любой машине.
@@ -6688,10 +6825,8 @@ scenario_165() {   # Т9: подписант зовётся по ПАРЕ, а н
   ok "165 подписант: зовётся ровно на паре darwin/darwin, иначе объявленный пропуск"
 }
 
-scenario_166() {   # Т10: путь пропуска НЕ мерит форму `script`
-  # Подставной script не принимает НИ ОДНОЙ формы. На чужой цели стадия обязана
-  # объявить пропуск и дойти до конца: прибор, который прогону не нужен, не
-  # вправе его убить.
+scenario_166() {   # Т10: путь пропуска не требует PTY-прибора
+  # Недоступный прибор не вправе убить прогон на чужой цели.
   local out_skip rc_skip
   gate_prepare s166
   gate_carved_or_bad 166 || return
@@ -6699,20 +6834,20 @@ scenario_166() {   # Т10: путь пропуска НЕ мерит форму 
   LAST_EVID="чужая rc=$rc_skip [$(printf '%s' "$out_skip" | tr '\n' '|')]"
   if (( rc_skip != 0 )) || [[ "$out_skip" != *"Гейт интерфейса ПРОПУЩЕН"* ]]; then
     LAST_EVID="ФОРМА_МЕРЕНА_НА_ПРОПУСКЕ :: $LAST_EVID"
-    bad "166 замер формы: путь пропуска не дошёл до конца (rc=$rc_skip)"; return
+    bad "166 проверка прибора: путь пропуска не дошёл до конца (rc=$rc_skip)"; return
   fi
-  if [[ "$out_skip" == *"script form"* || "$out_skip" == *"НЕ ИЗМЕРЕН"* ]]; then
+  if [[ "$out_skip" == *"PTY unavailable"* || "$out_skip" == *"НЕ ИЗМЕРЕН"* ]]; then
     LAST_EVID="ФОРМА_МЕРЕНА_НА_ПРОПУСКЕ :: $LAST_EVID"
-    bad "166 замер формы: пропуск всё-таки мерил форму"; return
+    bad "166 проверка прибора: пропуск всё-таки проверял прибор"; return
   fi
   # Положительный контроль: иначе зуб доказывал бы, что замер выключен всегда.
   gate_call e none 5
   LAST_EVID="$LAST_EVID ;; своя rc=$GATE_RC [$(printf '%s' "$GATE_OUT" | tr '\n' '|')]"
-  if (( GATE_RC != 2 )) || [[ "$GATE_OUT" != *"не принял НИ ОДНОЙ известной формы"* ]]; then
+  if (( GATE_RC != 2 )) || [[ "$GATE_OUT" != *"отказ прибора"* ]]; then
     LAST_EVID="ЗАМЕР_ВЫКЛЮЧЕН_ВСЕГДА :: $LAST_EVID"
-    bad "166 замер формы: на своей паре замер не сработал (rc=$GATE_RC)"; return
+    bad "166 проверка прибора: на своей паре замер не сработал (rc=$GATE_RC)"; return
   fi
-  ok "166 замер формы: не исполняется на пропуске, исполняется на своей паре"
+  ok "166 проверка прибора: не исполняется на пропуске, исполняется на своей паре"
 }
 
 scenario_167() {   # Т12: чужой образ не занимает имя установки и не даёт .orig
@@ -7900,8 +8035,8 @@ MUT_FILE=(x
   claude-patch-all.real
   tools/corpus-tools-bench.real.sh tools/corpus-tools-bench.real.sh
   tools/corpus-tools-bench.real.sh
-  # Волна 41: форма `script` (безусловная BSD и безусловная util-linux), снятый
-  # отказ различителя, обе площадки `wait` под `set -e`, подмена ветки
+  # Гейт интерфейса: argv, пробелы в пути, отказ прибора,
+  # обе площадки ожидания ребёнка, подмена ветки
   # таймаута, неснятый дом гейта и защищённый код красного блока проверок.
   claude-patch-all.real claude-patch-all.real claude-patch-all.real
   claude-patch-all.real claude-patch-all.real claude-patch-all.real
@@ -7916,9 +8051,8 @@ MUT_FILE=(x
   # положительный контроль (170) -- саму заглушку: мутация снимает
   # ДОПИСЫВАНИЕ метки в образ.
   tools/sweep.sh tools/sweep.sh claude-patch-all.sh
-  # Вход проб различителя формы `script` (#100). Жертва -- НАСТОЯЩИЙ конвейер:
-  # mk_kit переименовывает его в .real, а имя .sh занимает заглушка.
-  claude-patch-all.real
+  # Сокет вызывающего не подменяет терминал ребёнка.
+  tools/pty-run.py
   # Дверь обвала слоя промтов и её различитель публикации (#101): жертва --
   # НАСТОЯЩИЙ конвейер, вырезаемый сценариями во фрагменты.
   claude-patch-all.real claude-patch-all.real claude-patch-all.real
@@ -8231,11 +8365,13 @@ MUT_PAT=(x
   '    index\(skip, " " \$1 " "\) \{ next \}\n    index\(\$0, root\) && \$0 ~ re \{ print \$1 \}'
   '    \$2 != p \{ next \}'
   # Волна 41: гейт интерфейса.
-  '    if \[\[ "\$GATE_SCRIPT_FORM" == utillinux \]\]; then'
-  '    if \[\[ "\$GATE_SCRIPT_FORM" == utillinux \]\]; then'
-  'if \(\( ul == 1 && bsd == 0 \)\)'
-  'GATE_EXITED=1\n      GATE_RC=0\n      wait \$GATE_PID 2>/dev/null \|\| GATE_RC=\$\?'
-  'GATE_EXITED=1\n          GATE_RC=0\n          wait \$GATE_PID 2>/dev/null \|\| GATE_RC=\$\?'
+  'CLAUDE_CODE_CHILD_SESSION=1'
+  '\-\-\ "\$GATE_HOME/run\.sh"'
+  '\ \ \ \ return\ 2\
+\ \ fi\
+\ \ local\ GATE_STATUS'
+  'GATE_EXITED=1\n      GATE_RC=0\n      wait \$GATE_PID 2>/dev/null \|\| GATE_TOOL_RC=\$\?'
+  'GATE_EXITED=1\n          GATE_RC=0\n          wait \$GATE_PID 2>/dev/null \|\| GATE_TOOL_RC=\$\?'
   '      if \[\[ \$GATE_EXITED -eq 1 \]\]; then'
   '      rm -rf "\$GATE_HOME"\n      ;;'
   'python3 "\$BLOCK" "\$IMG" "\$PATCH_SRC" \|\| __rc_block=\$\?'
@@ -8253,7 +8389,7 @@ MUT_PAT=(x
   '  if \(\( TEETH_DONE == 0 \)\) && \(\( rc == 0 \)\) && \[\[ -f "\$STATE/bin/\$v\.wave\.bin" \]\]; then'
   '    if \[\[ "\$__teeth_ours" == "БИТО" \|\| "\$__teeth_ours" == "0" \]\]; then'
   '  printf '\''%s\\n'\'' '\''baseURL:/\^claude/i\.test\('\'' >> "\$target"'
-  '  if script -q -c true /dev/null </dev/null >/dev/null 2>&1; then ul=1; fi'
+  '\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ os\.execvp\(args\.command\[0\],\ args\.command\)'
   '    200\)    printf'
   '    сеть-недоступна\)'
   '    нечем\)'
@@ -8604,11 +8740,13 @@ MUT_REP=(x
   '    index($0, root) && $0 ~ re { print $1 }'
   '    0 { next }'
   # Волна 41: гейт интерфейса.
-  '    if false; then'
-  '    if true; then'
-  'if (( ul == 1 ))'
-  'GATE_EXITED=1; GATE_RC=0; wait $GATE_PID 2>/dev/null; GATE_RC=$?'
-  'GATE_EXITED=1; GATE_RC=0; wait $GATE_PID 2>/dev/null; GATE_RC=$?'
+  'CLAUDE_CODE_CHILD_SESSION=0'
+  '-- $GATE_HOME/run.sh'
+  '    return 1
+  fi
+  local GATE_STATUS'
+  'GATE_EXITED=0; GATE_RC=0; wait $GATE_PID 2>/dev/null || GATE_TOOL_RC=$?'
+  'GATE_EXITED=0; GATE_RC=0; wait $GATE_PID 2>/dev/null || GATE_TOOL_RC=$?'
   '      if true; then'
   '      ;;'
   'python3 "$BLOCK" "$IMG" "$PATCH_SRC"'
@@ -8626,7 +8764,7 @@ MUT_REP=(x
   '  if (( TEETH_DONE == 0 )) && (( rc != 3 )) && [[ -f "$STATE/bin/$v.wave.bin" ]]; then'
   '    if false; then'
   '  true'
-  '  if script -q -c true /dev/null >/dev/null 2>&1; then ul=1; fi'
+  '                    os.dup2(os.open(os.devnull, os.O_RDONLY), 0); os.execvp(args.command[0], args.command)'
   '    999)    printf'
   '    сеть-недоступнаX)'
   '    нечемX)'
@@ -9102,9 +9240,9 @@ MUT_CAUSE=(x
   'ИСКЛЮЧЕНИЕ_PID_СНЯТО'
   'ОПОЗНАНИЕ_НЕ_ПО_РОДСТВУ'
   # Волна 41: гейт интерфейса.
-  'ЗАПУСК_НЕ_ТОЙ_ФОРМЫ'
-  'ЗАПУСК_НЕ_ТОЙ_ФОРМЫ'
-  'ОБЕ_ФОРМЫ_НЕ_ОТКАЗ'
+  'PTY_ЗАПУСК_НЕ_УСПЕХ'
+  'PTY_ПРОБЕЛЫ_НЕ_ДОЕХАЛИ'
+  'PTY_ОТКАЗ_НЕ_КОД_2'
   'ВЕТКА_БЕЗ_ОТРИСОВКИ_НЕДОСТУПНА'
   'ВЕТКА_ОТРИСОВАЛ_И_УМЕР_НЕДОСТУПНА'
   'ВЕТКА_ТАЙМАУТА_ПОДМЕНЕНА'
@@ -9124,7 +9262,7 @@ MUT_CAUSE=(x
   'СВОДКА_МОЛЧИТ'
   'ОТКАЗА_НЕТ'
   'ПРИБОР_НЕ_ЗВАЛСЯ'
-  'ВХОД_НАСЛЕДОВАН'
+  'PTY_SOCKET_НЕ_ТЕРМИНАЛ'
   'ХОЗЯИН_НЕ_НАЗВАН'
   'СЕТЬ_НЕ_НАЗВАНА'
   'НЕТ_CURL_НЕ_НАЗВАН'
@@ -9272,6 +9410,47 @@ MUT_CAUSE=(x
   'СНЯТАЯ_ГВАРДИЯ_235'
   'СНЯТАЯ_ГВАРДИЯ_236')
 
+# PTY: размер, дерево, поток, отказ и два канала статуса.
+MUT_FILE+=(
+  'tools/pty-run.py'
+  'tools/pty-run.py'
+  'tools/pty-run.py'
+  'tools/pty-run.py'
+  'claude-patch-all.real'
+  'claude-patch-all.real')
+MUT_PAT+=(
+  'fcntl\.ioctl\(0,\ termios\.TIOCSWINSZ,\
+\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ struct\.pack\("HHHH",\ args\.rows,\ args\.cols,\ 0,\ 0\)\)'
+  'os\.killpg\(pid,\ signum\)'
+  '"wb",\ buffering=0'
+  '\ \ \ \ \ \ \ \ return\ 2\
+'
+  '\ \ \ \ GATE_RC=\$\(\(10\#\$\{BASH_REMATCH\[1\]\}\)\)'
+  '\ \ if\ \[\[\ !\ \-f\ "\$GATE_STATUS"\ \]\]\ \|\|\ !\ \{')
+MUT_REP+=(
+  'None'
+  'os.kill(pid, signum)'
+  '"wb", buffering=1048576'
+  '        return 0
+'
+  '    GATE_RC=$GATE_TOOL_RC'
+  '  [[ -f "$GATE_STATUS" ]] || printf "exited 0\n" > "$GATE_STATUS"
+  if [[ ! -f "$GATE_STATUS" ]] || ! {')
+MUT_SCENARIO+=(
+  '237'
+  '238'
+  '239'
+  '240'
+  '241'
+  '241')
+MUT_CAUSE+=(
+  'PTY_SIZE_LOST'
+  'PTY_TIMEOUT_SURVIVOR'
+  'PTY_STREAM_LATE'
+  'PTY_REFUSAL_FAIL_OPEN'
+  'PTY_CHILD_STATUS_LOST'
+  'PTY_STATUS_ABSENCE_ZERO')
+
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь
 # ИМЕНЕМ: сценарий 21 -- позитивный контроль вердикта («чистый лог проходит»).
@@ -9335,6 +9514,10 @@ python_heredoc_bodies() {   # файл-жертва, каталог для те�
     pre=${line%%#*}
     [[ "$pre" == *python3* ]] || continue
     [[ "$pre" =~ (^|[^A-Za-z0-9_])python3([^A-Za-z0-9_]|$) ]] || continue
+    # python3 как хвост пути (`cat > "$1/python3" <<'TAG'`) -- не интерпретатор:
+    # иначе страж кормит py_compile башовый стаб гейта и объявляет невалидной
+    # любую мутацию этой жертвы.
+    [[ "$pre" =~ /python3([^A-Za-z0-9_]|$) ]] && continue
     rest=${pre#*python3}
     mid=${rest%<<*}
     [[ "$mid" == *[\|\;\&]* ]] && continue
