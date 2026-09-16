@@ -194,9 +194,9 @@ CASE_K_SCENARIOS=1; CASE_K_MUTATIONS=1
 CASE_L_SCENARIOS=4; CASE_L_MUTATIONS=4
 CASE_M_SCENARIOS=9; CASE_M_MUTATIONS=11
 CASE_N_SCENARIOS=80; CASE_N_MUTATIONS=87
-CASE_V_SCENARIOS=8; CASE_V_MUTATIONS=3
-EXPECTED_SCENARIOS=102
-EXPECTED_MUTATIONS=106
+CASE_V_SCENARIOS=10; CASE_V_MUTATIONS=4
+EXPECTED_SCENARIOS=104
+EXPECTED_MUTATIONS=107
 if (( EXPECTED_SCENARIOS != CASE_K_SCENARIOS + CASE_L_SCENARIOS + CASE_M_SCENARIOS + CASE_N_SCENARIOS + CASE_V_SCENARIOS
       || EXPECTED_MUTATIONS != CASE_K_MUTATIONS + CASE_L_MUTATIONS + CASE_M_MUTATIONS + CASE_N_MUTATIONS + CASE_V_MUTATIONS )); then
   echo "build-path-probe: ОТКАЗ -- объявленная сумма разошлась со вкладами случаев:" >&2
@@ -3399,7 +3399,7 @@ __v_field() {   # вывод прибора, имя поля -> значение
 # тем же способом, каким tools/corpus-tools-bench.sh гоняет вырезанную стадию
 # гейта интерфейса.
 case_v() {
-  local d home kit built other out rc mrc __rp_rc=0 __rp_out __v5a __exp_active
+  local d home kit built other out rc mrc __rp_rc=0 __rp_out __v5a __exp_active __v9out kit2
   local __v_scn=0 __v_mut=0
   echo "case v: --activation measures the launcher; the stage announces or refuses"
   d="$ROOT/activation"; rm -rf "$d"
@@ -3407,7 +3407,11 @@ case_v() {
   mkdir -p "$home/.local/bin" "$d/tmp" "$kit"
   # --repoint отказывает образу без маркера, а сценарий ниже зовёт именно его:
   # игрушечная сборка несёт маркер.
-  printf 'prefix %s suffix\n' "$OUR_MARKER" > "$built"
+  # CONSTRAINT: сборка обязана быть ИСПОЛНИМОЙ: свидетель запуска проводит
+  # активное имя при MATCH=yes, и неисполнимый текст краснил бы v2/v5 чужой
+  # причиной (launch_failed вместо yes).
+  { printf '#!/bin/sh\necho "prefix %s suffix"\n' "$OUR_MARKER"; } > "$built"
+  chmod +x "$built"
   printf 'foreign pristine image\n' > "$other"
 
   ln -s "$other" "$home/.local/bin/claude"
@@ -3460,6 +3464,43 @@ case_v() {
     ok 'v5 a copy launcher compares by digest: equal bytes yes, one byte at equal size no'
   else
     bad "v5 the copy comparison answered wrong (equal=$__v5a, rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  # Свидетель ИСПОЛНЕНИЯ: совпадение байтов не доказывает, что имя, которое
+  # зовёт человек, запускается. Продукт -- исполняемый скрипт, активное имя
+  # указывает на него: прибор обязан и согласиться (MATCH=yes), и увидеть запуск
+  # (LAUNCH=ok с непустой первой строкой вывода).
+  cat > "$d/built-ok" <<'BIN_V9'
+#!/bin/sh
+echo "toy 9.9.9-witness"
+BIN_V9
+  chmod +x "$d/built-ok"
+  rm -f "$home/.local/bin/claude"; ln -s "$d/built-ok" "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$d/built-ok" 2>&1)"; rc=$?
+  __v9out="$(__v_field "$out" LAUNCH_OUT)"
+  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == yes && "$(__v_field "$out" LAUNCH)" == ok && -n "$__v9out" ]]; then
+    ok 'v9 a launchable active name answers MATCH=yes, LAUNCH=ok and a first output line'
+  else
+    bad "v9 the launch witness answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_scn=$((__v_scn+1))
+
+  # Обратная сторона свидетеля: байты совпали, но запуск отдаёт ненулевой код.
+  # Вердикт обязан быть launch_failed, а не «нет» -- байты-то совпали, и «активна
+  # другая версия» было бы ложью.
+  cat > "$d/built-no" <<'BIN_V10'
+#!/bin/sh
+echo "toy refuses to start" >&2
+exit 3
+BIN_V10
+  chmod +x "$d/built-no"
+  rm -f "$home/.local/bin/claude"; ln -s "$d/built-no" "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$d/built-no" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCH)" == fail && "$(__v_field "$out" MATCH)" == launch_failed ]]; then
+    ok 'v10 bytes match but the launch fails -> LAUNCH=fail and MATCH=launch_failed'
+  else
+    bad "v10 the failed launch answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
   fi
   __v_scn=$((__v_scn+1))
 
@@ -3604,6 +3645,43 @@ MUT_V3
     ok 'the control reddens v8 by its own cause: the unknown-value branch gone, the stage stays silent'
   else
     bad "the v8 control did NOT redden (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  __v_mut=$((__v_mut+1))
+
+  # Отрицательный контроль свидетеля: проверка кода возврата запуска погашена
+  # (условие успеха всегда-истинно). Кит -- ОТДЕЛЬНАЯ чистая копия: общий $kit
+  # уже мутирован безусловным MATCH=yes, и две мутации в одном файле смешали бы
+  # причины. На падающем бинаре мутант отвечает LAUNCH=ok -- то есть v10,
+  # ждущий fail, краснел бы ровно здесь.
+  kit2="$d/kit-launch"; rm -rf "$kit2"; mkdir -p "$kit2"
+  cp "$HERE/claude_patch.py" "$HERE/patch_claude_routing.py" "$kit2/"
+  python3 - "$kit2/claude_patch.py" <<'MUT_V4'
+import sys
+p = sys.argv[1]
+t = open(p, encoding='utf-8').read()
+NEEDLE = 'if proc.returncode == 0 and out_first:'
+if t.count(NEEDLE) != 1:
+    sys.stderr.write('МУТАЦИЯ НЕ ПРИМЕНИЛАСЬ: якорь условия успеха найден %d раз\n' % t.count(NEEDLE))
+    sys.exit(2)
+open(p, 'w', encoding='utf-8').write(t.replace(NEEDLE, 'if True:', 1))
+MUT_V4
+  mrc=$?
+  if [[ $mrc -ne 0 ]]; then
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- якорь мутации свидетеля уехал" >&2
+    __DONE=1; exit 2
+  fi
+  victim_parses "$kit2/claude_patch.py" || {
+    echo "  ОТКАЗ: контроль случая (v) НЕ ИЗМЕРЯЛ -- мутация сломала разбор жертвы ($kit2/claude_patch.py)" >&2
+    __DONE=1; exit 2
+  }
+  rm -f "$home/.local/bin/claude"; ln -s "$d/built-no" "$home/.local/bin/claude"
+  out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$kit2/claude_patch.py" --activation "$d/built-no" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCH)" == ok && "$(__v_field "$out" MATCH)" == yes ]]; then
+    ok 'the control reddens v10 by its own cause: a failing launch answers LAUNCH=ok'
+  elif [[ $rc -ne 0 ]]; then
+    bad "the v10 control reddened by a FOREIGN cause: $(printf '%s' "$out" | grep -m1 'ERROR\|ПРОВАЛ')"
+  else
+    bad 'the v10 control did NOT redden: the returncode check still bites'
   fi
   __v_mut=$((__v_mut+1))
 

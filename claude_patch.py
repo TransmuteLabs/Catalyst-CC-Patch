@@ -903,10 +903,43 @@ def main(argv: list[str]) -> None:
             kind = "missing"
             active = ""
             match = "unknown"
+        # The launch witness runs `link`, not `built`: the name the human calls
+        # is what must work, and only that name answers for the activation.
+        # A failed launch answers launch_failed, not MATCH=no -- the bytes DID
+        # match, so "another version is active" would be a lie; the unknown-
+        # verdict branch of the announcing stage in claude-patch-all.sh owns
+        # the refusal for a verdict it does not know.
+        launch = "skipped"
+        launch_out = ""
+        if match == "yes":
+            try:
+                proc = subprocess.run([str(link), "--version"], capture_output=True,
+                                      text=True, errors="replace", timeout=120)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                proc = None
+                # A launch that could not even start is a FAILED launch, not a
+                # skipped one: skipped means "not attempted" (MATCH was not
+                # yes), and printing it here would contradict MATCH=launch_failed
+                # in the same block.
+                launch = "fail"
+                launch_out = str(error).splitlines()[0] if str(error) else repr(error)
+            if proc is not None:
+                out_first = (proc.stdout.strip() or proc.stderr.strip()).splitlines()
+                if proc.returncode == 0 and out_first:
+                    launch = "ok"
+                    launch_out = out_first[0]
+                else:
+                    launch = "fail"
+                    launch_out = (out_first[0] if out_first
+                                  else f"exit {proc.returncode}: no output")
+            if launch != "ok":
+                match = "launch_failed"
         print(f"LAUNCHER={link}")
         print(f"LAUNCHER_KIND={kind}")
         print(f"ACTIVE={active}")
         print(f"BUILT={built}")
+        print(f"LAUNCH={launch}")
+        print(f"LAUNCH_OUT={launch_out}")
         # MATCH=no never reddens here: whether it is a fault depends on the run
         # MODE (--update promises the activation, --target does not), and only
         # the caller knows its mode. Exiting non-zero would fail a legal
