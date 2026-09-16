@@ -8,16 +8,25 @@ by a separate pass, by age.
 
   compact.py [--dir D] [--older-than-hours N] [--dry-run]
 
+Архив (сжатые <имя>.json.gz) растёт неограниченно; его горизонт -- возрастная
+граница с обязательной машиночитаемой отметкой horizon.json рядом с каталогом
+записей (подробности -- у prune_archive_horizon). Рубеж задаёт ручка окружения
+$CLAUDE_JUDGE_ARCHIVE_DAYS (сутки, умолчание 180).
+
 Idempotent: already-compacted ones are skipped, the source is deleted only
 after the archive has been written and read back.
 
 Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
   0  проход завершён (что считать «записью» и что «мусором», решают правила
-     ниже; пропуск пустого каталога -- тоже 0: нечего уплотнять -- не отказ)
+     ниже; пропуск пустого каталога -- тоже 0: нечего уплотнять -- не отказ;
+     пустой список кандидатов горизонта -- тоже 0: ПУСТО не есть НОЛЬ)
+  1  отказ по существу: горизонт архива не может ни унести, ни отметиться --
+     не читается каталог или метка времени архива, не читается либо не пишется
+     отметка горизонта, мусор в ручке окружения; причина -- словами в stderr
   2  контракт вызова нарушен: argparse отверг аргументы (питон отдаёт 2 сам)
 Круг 28, F-10: шапка заведена, чтобы объявленный код был виден вызывающему.
 """
-import argparse, glob, gzip, json, os, re, shutil, sys, time
+import argparse, glob, gzip, json, math, os, re, shutil, sys, time
 
 # argparse-типы общих числовых ручек живут в replay.py: его уже импортируют
 # validate.py и adjudicate.py, и второй копии типа не должно быть (круг 26,
@@ -33,6 +42,29 @@ import replay
 # ВТОРЫМ признаком рядом с проверкой pid -- номера переиспользуются, и одна
 # проверка pid оставляла сироту с чужим живым номером навсегда (круг 21, F-10).
 TMP_HELD_SECONDS = 24 * 3600
+
+# Горизонт архива: возрастная граница его роста. Дом решения назначен авторами
+# ядра (tweakcc-patch.js, блок о records_keep): «если когда-нибудь понадобится
+# граница, её место у владельца архива -- compact.py, где живут правила
+# возраста». Граница ПО ВОЗРАСТУ, а не по количеству: архив -- доказательная
+# база замеров, «последние N штук» выкашивает историю неравномерно -- густо
+# там, где прогонов было много, пусто там, где их было мало.
+HORIZON_DAYS_ENV = 'CLAUDE_JUDGE_ARCHIVE_DAYS'
+# Умолчание щедрое намеренно: цена хранения дешевле исчезнувшей улики замера,
+# который уже никто не повторит. Оценка ядра («около 7 КБ на сжатую запись --
+# порядок сотен мегабайт за годы») ЗАМЕРОМ НЕ ПОДТВЕРЖДЕНА и здесь не
+# наследуется: 16.09.2026 боевой дом держал 6940 архивов на 176 МБ за 17.3
+# суток -- 26 КБ на запись и ~10 МБ в сутки. При этом умолчании архив
+# стабилизируется около 73 тыс. файлов и ~1.9 ГБ; это ПОТОЛОК взамен прежней
+# бесконечности, и менять его следует пересчитав от свежего замера, а не от
+# унаследованного числа.
+HORIZON_DAYS_DEFAULT = 180.0
+# Потолок -- век: конечность той же природы, что у --older-than-hours (876000 ч).
+HORIZON_DAYS_MAX = 36500.0
+# Отметка горизонта -- не журнал: рост ограничен этим числом записей прогона
+# (голова -- последнее состояние, хвост -- история до этого предела).
+HORIZON_KEEP_RUNS = 32
+HORIZON_MARK_NAME = 'horizon.json'
 
 
 def _clip(v, n=400):
@@ -318,6 +350,158 @@ def fold_journal_shards(journal_path, dry_run=False):
 
 
 
+class HorizonRefusal(Exception):
+    """Отказ прибора горизонта: унести нельзя или нельзя отметиться (код 1)."""
+
+
+def _horizon_days():
+    """Сутки горизонта из ручки окружения.
+
+    Мусор в ручке -- отказ, а не молчаливое умолчание: откат к 180 суткам
+    превращал бы опечатку владельца в тихое «всё в порядке». Разбор -- тот же
+    bounded_float, что у --older-than-hours: вторая копия парсера числовой
+    ручки -- путь к трём читателям с тремя недосмотрами (круг 26, K-13/K-14).
+    """
+    raw = os.environ.get(HORIZON_DAYS_ENV)
+    if raw is None:
+        return HORIZON_DAYS_DEFAULT
+    parse = replay.bounded_float(HORIZON_DAYS_ENV, 0, HORIZON_DAYS_MAX)
+    try:
+        return parse(raw)
+    except argparse.ArgumentTypeError as exc:
+        raise HorizonRefusal(str(exc))
+
+
+def _horizon_mark_entries(data):
+    """Записи отметки с проверкой формы: чужая структура -- отказ, не догадка.
+
+    Отметку пишет только этот проход, но лежит она в общем доме: молча
+    перезаписать непонятное -- стереть единственное объяснение чужих пропаж.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get('runs'), list):
+        raise HorizonRefusal('отметка горизонта: верхний уровень не {"runs": [...]}')
+    for entry in data['runs']:
+        if not isinstance(entry, dict):
+            raise HorizonRefusal('отметка горизонта: запись не объект')
+        for field in ('horizon_epoch', 'run_epoch'):
+            value = entry.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or not math.isfinite(value):
+                raise HorizonRefusal(
+                    f'отметка горизонта: поле {field} не конечное число')
+        removed = entry.get('removed')
+        if isinstance(removed, bool) or not isinstance(removed, int):
+            raise HorizonRefusal('отметка горизонта: поле removed не целое')
+    return data['runs']
+
+
+def _horizon_mark_read(mark_path):
+    """Отметка горизонта: отсутствующая -- пустая история, битая -- отказ."""
+    try:
+        with open(mark_path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        raise HorizonRefusal(f'отметка горизонта не читается: {mark_path}: {exc}')
+    return _horizon_mark_entries(data)
+
+
+def _horizon_merged(previous, entry, keep=HORIZON_KEEP_RUNS):
+    """Голова -- текущий прогон, хвост обрезан: рост отметки ограничен keep."""
+    return [entry] + list(previous)[: keep - 1]
+
+
+def _horizon_write_mark(mark_path, runs):
+    """Атомарная запись отметки: tmp + replace, как у архива (та же гонка двух
+    своих проходов -- последний replace оставляет валидный JSON всегда)."""
+    tmp = f'{mark_path}.tmp.{os.getpid()}'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump({'runs': runs}, fh, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, mark_path)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise HorizonRefusal(f'отметка горизонта не пишется: {mark_path}: {exc}')
+
+
+def prune_archive_horizon(records_dir, dry_run=False):
+    """Прополка архива по возрасту с обязательной отметкой горизонта.
+
+    Архив -- имена, КОТОРЫМИ кончающиеся на .json.gz. Положительный список
+    здесь не «допустимость», а разграничение владельцев: горячие .json держит
+    окно ядра (records_keep), обломки <имя>.json.gz.tmp.<pid> -- прополка tmp
+    этого же прохода; подстрока '.json.gz' вместо суффикса отдала бы горизонту
+    чужое имя. Отметка пишется ДО снятия: отказ отметиться обязан случиться
+    раньше, чем унесена первая запись, иначе появится удаление без объяснения.
+    Исчезнувший под руками файл -- ожидаемый исход (гонка с прополкой ядра и со
+    вторым своим проходом), а не отказ: тот же договор, что у цикла сжатия.
+    """
+    counters = {'taken': 0, 'vanished': 0, 'bytes': 0}
+    days = _horizon_days()
+    now = time.time()
+    edge = now - days * 86400.0
+    mark_path = os.path.join(
+        os.path.dirname(os.path.abspath(records_dir)), HORIZON_MARK_NAME)
+    try:
+        names = sorted(os.listdir(records_dir))
+    except FileNotFoundError:
+        # Тот же договор, что у сжатия (шапка): отсутствующий каталог -- не отказ.
+        print('горизонт архива: каталога нет -- нечего пропалывать')
+        return counters
+    except OSError as exc:
+        raise HorizonRefusal(f'каталог архива не читается: {records_dir}: {exc}')
+    candidates = []
+    for name in names:
+        if not name.endswith('.json.gz'):
+            continue
+        path = os.path.join(records_dir, name)
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            # Снял соперничающий уборщик -- уже достигнутая цель, не потеря.
+            counters['vanished'] += 1
+            continue
+        except OSError as exc:
+            raise HorizonRefusal(f'метка времени архива не читается: {path}: {exc}')
+        if st.st_mtime > edge:
+            continue
+        candidates.append((path, name, st.st_size))
+    entry = {'horizon_epoch': edge, 'removed': len(candidates), 'run_epoch': now}
+    if not dry_run:
+        runs = _horizon_mark_read(mark_path)
+        _horizon_write_mark(mark_path, _horizon_merged(runs, entry))
+    for path, name, size in candidates:
+        if dry_run:
+            print(f'унёс бы архив: {name}  {size} байт')
+            counters['taken'] += 1
+            counters['bytes'] += size
+            continue
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            # Соперничающий уборщик успел раньше -- не отказ и не потеря.
+            counters['vanished'] += 1
+            continue
+        counters['taken'] += 1
+        counters['bytes'] += size
+    if not dry_run and counters['vanished']:
+        # Унесено меньше запланированного (часть унесла чужая рука): финальная
+        # отметка обязана нести фактическое число, а не план.
+        entry['removed'] = counters['taken']
+        _horizon_write_mark(mark_path, _horizon_merged(runs, entry))
+    # Ноль печатается тоже: молчащее число ничем не лучше молчащего разбора.
+    print(f"горизонт архива: унесено {counters['taken']}, "
+          f"исчезли {counters['vanished']}, байт {counters['bytes']}, рубеж "
+          f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(edge))}")
+    return counters
+
+
 def main():
     p = argparse.ArgumentParser()
     # Лестница дома -- та же, что у ядра (круг 21, F-8).
@@ -587,6 +771,19 @@ def main():
           f'сирот tmp убрано: {orphans}, tmp при живом pid: {tmp_held}, '
           f'освобождено: {saved/1048576:.2f} МБ')
 
+    # Горизонт идёт ПОСЛЕ цикла сжатия, и порядок здесь несущий: сжатие
+    # создаёт архивы, горизонт их уносит. В обратном порядке запись, сжатая
+    # этим же проходом, успевала бы попасть в кандидаты того же прогона.
+    prune_archive_horizon(a.dir, dry_run=a.dry_run)
+
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except HorizonRefusal as exc:
+        # Отказ прибора отделён от работы: «унести нельзя» и «уносить нечего»
+        # -- разные исходы, и второй никогда не маскирует первый. Причина
+        # словами в stderr, код 1 (шапка файла), без трейсбека: адресат этой
+        # строки -- журнал launchd, а не отладчик.
+        print(f'ОТКАЗ ГОРИЗОНТА: {exc}', file=sys.stderr)
+        sys.exit(1)

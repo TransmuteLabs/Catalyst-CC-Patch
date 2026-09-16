@@ -46,11 +46,13 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPACT = ROOT / "judge" / "compact.py"
 PATCHER = ROOT / "claude_patch.py"
 BENCH = Path(__file__).resolve()
-EXPECTED_SCENARIOS = 50
+# Волна 205 добавила сценарии 51-56 (горизонт архива compact.py); счётчик
+# растёт вместе с ними по тому же правилу, что и раньше (круг 25, E-4).
+EXPECTED_SCENARIOS = 56
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 60
+EXPECTED_MUTATIONS = 66
 SUMMARY_RE = re.compile(
     r"сжато: (?P<done>\d+), пропущено: (?P<skipped>\d+), "
     r"исчезли под руками: (?P<vanished>\d+), "
@@ -59,6 +61,10 @@ SUMMARY_RE = re.compile(
     r"сирот tmp убрано: (?P<orphans>\d+), "
     r"tmp при живом pid: (?P<tmp_held>\d+), "
     r"освобождено: [-0-9.]+ МБ"
+)
+HORIZON_RE = re.compile(
+    r"горизонт архива: унесено (?P<arch_taken>\d+), "
+    r"исчезли (?P<arch_vanished>\d+), байт (?P<arch_bytes>\d+), рубеж \S+"
 )
 
 
@@ -115,6 +121,12 @@ def make_old(path: Path) -> None:
     os.utime(path, (stamp, stamp))
 
 
+def age_to(path: Path, days: float) -> None:
+    """Метка времени файла на N суток в прошлое: возраст -- ось горизонта."""
+    stamp = time.time() - days * 86400
+    os.utime(path, (stamp, stamp))
+
+
 def write_archive(path: Path, value: dict[str, object]) -> None:
     with gzip.open(path, "wt", encoding="utf-8") as stream:
         json.dump(value, stream)
@@ -140,6 +152,7 @@ def run_compact(
     older_than_hours: float = 0,
     dry_run: bool = False,
     home: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[dict[str, int], str]:
     """Прогон compact.py в ИЗОЛИРОВАННОМ доме проб.
 
@@ -166,11 +179,11 @@ def run_compact(
     в живой журнал пользователя.
     """
     if home is not None:
-        return _compact_once(home, directory, older_than_hours, dry_run)
+        return _compact_once(home, directory, older_than_hours, dry_run, extra_env)
     # Дом без предмета: свой каталог на прогон, чтобы состояние не перетекало
     # между сценариями и не оставалось после стенда.
     with tempfile.TemporaryDirectory() as raw:
-        return _compact_once(Path(raw), directory, older_than_hours, dry_run)
+        return _compact_once(Path(raw), directory, older_than_hours, dry_run, extra_env)
 
 
 def _compact_once(
@@ -178,6 +191,7 @@ def _compact_once(
     directory: Path,
     older_than_hours: float,
     dry_run: bool,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[dict[str, int], str]:
     command = [
         sys.executable,
@@ -192,7 +206,12 @@ def _compact_once(
     if dry_run:
         command.append("--dry-run")
     env = dict(os.environ)
+    # Ручка горизонта снимается всегда: постороннее значение в окружении стенда
+    # подменяло бы умолчание 180 и делало сценарии зависимыми от машины.
+    env.pop("CLAUDE_JUDGE_ARCHIVE_DAYS", None)
     env["CLAUDE_PROBES_DIR"] = str(home)
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         command, capture_output=True, text=True, errors="replace", env=env,
     )
@@ -201,7 +220,39 @@ def _compact_once(
     matches = list(SUMMARY_RE.finditer(result.stdout))
     require(len(matches) == 1, f"итоговая строка compact.py не распознана\n{output}")
     counters = {name: int(value) for name, value in matches[0].groupdict().items()}
+    hmatches = list(HORIZON_RE.finditer(result.stdout))
+    require(len(hmatches) == 1, f"строка горизонта compact.py не распознана\n{output}")
+    counters.update(
+        {name: int(value) for name, value in hmatches[0].groupdict().items()
+         if name != "arch_edge"})
     return counters, output
+
+
+def run_compact_raw(
+    home: Path,
+    directory: Path,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Прогон compact.py БЕЗ требования кода 0: путь отказа -- предмет сценария."""
+    command = [
+        sys.executable,
+        str(COMPACT),
+        "--home",
+        str(home),
+        "--dir",
+        str(directory),
+        "--older-than-hours",
+        "0",
+    ]
+    env = dict(os.environ)
+    env.pop("CLAUDE_JUDGE_ARCHIVE_DAYS", None)
+    env["CLAUDE_PROBES_DIR"] = str(home)
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        command, capture_output=True, text=True, errors="replace", env=env,
+    )
 
 
 def require_counters(counters: dict[str, int], **expected: int) -> None:
@@ -1935,6 +1986,247 @@ def scenario_50() -> None:
         require_counters(counters, done=0, skipped=1)
 
 
+# --- волна 205: горизонт архива compact.py -----------------------------------
+#
+# Граница роста архива назначена авторами ядра ВЛАДЕЛЬЦУ архива (tweakcc-patch.js,
+# блок о records_keep: «если когда-нибудь понадобится граница, её место у
+# compact.py, где живут правила возраста»). Зубы ниже держат эту границу:
+# возраст, а не количество; ручка окружения; надгробие; отказ прибора; гонки.
+
+
+def scenario_51() -> None:
+    """Возраст решает, ручка задаёт рубеж: старше унесено, моложе остаётся.
+
+    Граница ПО ВОЗРАСТУ, а не «последние N штук»: архив -- доказательная база
+    замеров, количество выкашивает историю неравномерно. Рубеж -- ручка
+    окружения $CLAUDE_JUDGE_ARCHIVE_DAYS с умолчанием 180 суток.
+    """
+    for days_env, expect_old, expect_young in (
+        (None, False, True),      # умолчание 180: 200 суток унесено, 100 остаётся
+        ("90", False, False),     # ручка сужает рубеж: унесены ОБЕ
+        ("300", True, True),      # ручка расширяет рубеж: остаются ОБЕ
+    ):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            records = base / "records"
+            records.mkdir()
+            old = records / "old.json.gz"
+            young = records / "young.json.gz"
+            write_archive(old, {"marker": "old"})
+            write_archive(young, {"marker": "young"})
+            age_to(old, 200)
+            age_to(young, 100)
+            extra = None if days_env is None else {"CLAUDE_JUDGE_ARCHIVE_DAYS": days_env}
+            counters, _ = run_compact(records, home=base, extra_env=extra)
+            label = days_env or "умолчание 180"
+            require(old.exists() is expect_old,
+                    f"рубеж {label}: архив старше горизонта не унесён: {old.name}")
+            require(young.exists() is expect_young,
+                    f"рубеж {label}: архив моложе горизонта не остался: {young.name}")
+            taken = (0 if expect_old else 1) + (0 if expect_young else 1)
+            require_counters(counters, arch_taken=taken, arch_vanished=0)
+            if taken:
+                require(counters["arch_bytes"] > 0,
+                        "унесённые архивы не дали ни одного байта")
+
+
+def scenario_52() -> None:
+    """Горячие .json горизонтом не трогаются вовсе: их владелец -- ядро.
+
+    Окно ядра (records_keep) держит несжатые записи по своему счётчику; второй
+    владелец на том же файле -- дефект. Сухой прогон выбирает его потому, что
+    боевой прогон успевает СЖАТЬ старый .json раньше горизонта, и у горизонта
+    тот уже не .json.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        records = base / "records"
+        records.mkdir()
+        hot = records / "hot.json"
+        write_record(hot, "hot")
+        age_to(hot, 400)
+        counters, output = run_compact(records, home=base, older_than_hours=24,
+                                       dry_run=True)
+        require(hot.exists(), "dry-run удалил горячий .json")
+        require("сжал бы: hot.json" in output,
+                "фикстура не дошла до сжатия: dry-run её не назвал")
+        require("унёс бы архив: hot.json" not in output,
+                f"горизонт тронул горячий .json: {hot.name} -- его владелец ядро")
+        require_counters(counters, arch_taken=0)
+
+
+def scenario_53() -> None:
+    """Обломок <имя>.json.gz.tmp.<pid> не считается архивом горизонта.
+
+    У обломка свой владелец -- прополка tmp выше по этому же проходу; положить
+    его в кандидаты горизонта значило бы снять чужое имя. Обломок состарен
+    ЗАВЕДОМО больше рубежа: иначе его защищал бы сам возраст, а не форма имени.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        records = base / "records"
+        records.mkdir()
+        frag = records / f"frag.json.gz.tmp.{dead_pid()}"
+        frag.write_text("tmp", encoding="utf-8")
+        age_to(frag, 400)
+        old = records / "old.json.gz"
+        write_archive(old, {"marker": "old"})
+        age_to(old, 400)
+        counters, output = run_compact(records, home=base, dry_run=True)
+        require(f"снёс бы сироту tmp: {frag.name}" in output,
+                "прополка tmp не назвала обломок -- фикстура вне её поля зрения")
+        require(f"унёс бы архив: {old.name}" in output,
+                "горизонт не назвал настоящий архив кандидатом")
+        require(f"унёс бы архив: {frag.name}" not in output,
+                f"обломок tmp назван архивом горизонта: {frag.name}")
+        require_counters(counters, arch_taken=1, orphans=1)
+        require(frag.exists() and old.exists(), "dry-run что-то удалил")
+        counters, _ = run_compact(records, home=base)
+        require(not frag.exists(), "боевой прогон не снял обломок tmp")
+        require(not old.exists(), "боевой прогон не унёс настоящий архив")
+        require_counters(counters, orphans=1, arch_taken=1)
+
+
+def scenario_54() -> None:
+    """Надгробие пишется и несёт метку, до которой пропалывали.
+
+    Указатель улики в журнале уже умеет отличать «улики нет» от «улика на
+    месте» (#172); без отметки «улику законно унёс горизонт» стал бы третьим,
+    неразличимым значением того же указателя. Отметка -- не журнал: рост
+    ограничен числом прогонов HORIZON_KEEP_RUNS, голова -- последний прогон.
+    """
+    module = import_tool("compact")
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        records = base / "records"
+        records.mkdir()
+        old = records / "old.json.gz"
+        young = records / "young.json.gz"
+        write_archive(old, {"marker": "old"})
+        write_archive(young, {"marker": "young"})
+        age_to(old, 200)
+        age_to(young, 10)
+        started = time.time()
+        counters, _ = run_compact(records, home=base)
+        require_counters(counters, arch_taken=1)
+        require(not old.exists() and young.exists(), "фикстура прогона не сошлась")
+        mark = base / "horizon.json"
+        require(mark.is_file(), "отметка горизонта не написана")
+        data = json.loads(mark.read_text(encoding="utf-8"))
+        runs = data.get("runs")
+        require(isinstance(runs, list) and len(runs) == 1,
+                f"отметка не несёт записи прогона: {data!r}")
+        entry = runs[0]
+        require(entry.get("removed") == 1,
+                f"отметка не несёт число унесённых: {entry!r}")
+        require(abs(entry.get("horizon_epoch", 0) - (started - 180 * 86400)) < 300,
+                f"метка рубежа не сходится с умолчанием 180 суток: {entry!r}")
+        require(started - 300 <= entry.get("run_epoch", 0) <= time.time() + 300,
+                f"время прогона вне окна прогона: {entry!r}")
+        # Рост ограничен: хвост истории обрезан до HORIZON_KEEP_RUNS записей,
+        # голова -- текущий прогон.
+        fabricated = [{"horizon_epoch": float(i), "removed": 0, "run_epoch": float(i)}
+                      for i in range(80)]
+        fresh = {"horizon_epoch": 1.0, "removed": 2, "run_epoch": 2.0}
+        merged = module._horizon_merged(fabricated, fresh, module.HORIZON_KEEP_RUNS)
+        require(len(merged) == module.HORIZON_KEEP_RUNS,
+                f"история отметки не обрезана до {module.HORIZON_KEEP_RUNS}: {len(merged)}")
+        require(merged[0] is fresh, "голова истории -- не текущий прогон")
+        # Повторный прогон ДОПИСЫВАЕТ запись, а не перезаписывает историю.
+        write_archive(old, {"marker": "old2"})
+        age_to(old, 200)
+        run_compact(records, home=base)
+        runs2 = json.loads(mark.read_text(encoding="utf-8"))["runs"]
+        require(len(runs2) == 2, f"повторный прогон не дописал запись: {runs2!r}")
+        require(runs2[0].get("removed") == 1 and runs2[1].get("removed") == 1,
+                f"записи истории не несут свои числа: {runs2!r}")
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        records = base / "records"
+        records.mkdir()
+        aged = records / "aged.json.gz"
+        write_archive(aged, {"marker": "aged"})
+        age_to(aged, 200)
+        run_compact(records, home=base, dry_run=True)
+        require(not (base / "horizon.json").exists(),
+                "dry-run написал отметку горизонта: сухой прогон не пишет ничего")
+
+
+def scenario_55() -> None:
+    """Отказ прибора отличим: ненулевой код с причиной, а не «нечего уносить».
+
+    ПУСТО != НОЛЬ: пустой список кандидатов -- штатный прогон, нечитаемый
+    каталог, непишущаяся отметка и мусор в ручке -- отказ по существу (код 1),
+    причём отказ обязан случиться ДО первого снятия.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        records = base / "records"
+        records.mkdir()
+        aged = records / "aged.json.gz"
+        write_archive(aged, {"marker": "aged"})
+        age_to(aged, 200)
+        os.chmod(records, 0)
+        try:
+            done = run_compact_raw(base, records)
+        finally:
+            os.chmod(records, 0o755)
+        require(done.returncode == 1,
+                f"нечитаемый каталог дал rc={done.returncode}, ожидался 1")
+        require("ОТКАЗ" in done.stderr and "не читается" in done.stderr,
+                f"отказ не назвал причину словами: {done.stderr.strip()!r}")
+        require(aged.exists(), "нечитаемый каталог всё же что-то унёс")
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        records = base / "records"
+        records.mkdir()
+        aged = records / "aged.json.gz"
+        write_archive(aged, {"marker": "aged"})
+        age_to(aged, 200)
+        os.chmod(base, 0o555)
+        try:
+            done = run_compact_raw(base, records)
+        finally:
+            os.chmod(base, 0o755)
+        require(done.returncode == 1,
+                f"непишущаяся отметка дала rc={done.returncode}, ожидался 1")
+        require("ОТКАЗ" in done.stderr and "не пишется" in done.stderr,
+                f"отказ не назвал причину словами: {done.stderr.strip()!r}")
+        require(aged.exists(),
+                "прогон унёс архив, не сумев отметиться: удаление без объяснения")
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        records = base / "records"
+        records.mkdir()
+        done = run_compact_raw(base, records,
+                               extra_env={"CLAUDE_JUDGE_ARCHIVE_DAYS": "месяц"})
+        require(done.returncode == 1,
+                f"мусор в ручке дал rc={done.returncode}, ожидался 1")
+        require("CLAUDE_JUDGE_ARCHIVE_DAYS" in done.stderr,
+                f"отказ не назвал ручку: {done.stderr.strip()!r}")
+
+
+def scenario_56() -> None:
+    """Исчезнувший под руками архив -- ожидаемый исход, а не отказ.
+
+    Свойство пинится ФОРМОЙ и это объявлено (тот же приём, что у сценариев
+    17-18 и 27): подменить или убрать файл между stat и unlink ВНУТРИ чужого
+    процесса стенду нечем. Пинится ветка снятия: гонка с прополкой ядра и со
+    вторым своим проходом -- тот же класс, что у цикла сжатия (см. комментарий
+    у него в compact.py), исчезнувшее -- цель прогона, а не его поломка.
+    """
+    text = COMPACT.read_text(encoding="utf-8")
+    start = text.find("os.unlink(path)")
+    require(start >= 0, "ветка снятия архива горизонта не найдена по якорю")
+    arm = text[start:start + 400]
+    require("except FileNotFoundError:" in arm,
+            "снятие архива горизонта не ловит исчезновение файла")
+    require("HorizonRefusal" not in arm and "ОТКАЗ" not in arm,
+            "исчезнувший под руками архив снова становится отказом")
+    require("vanished'] += 1" in arm,
+            "исчезнувший под руками архив не считается своим счётчиком")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -1989,6 +2281,12 @@ def run_scenarios() -> int:
         (48, scenario_48),
         (49, scenario_49),
         (50, scenario_50),
+        (51, scenario_51),
+        (52, scenario_52),
+        (53, scenario_53),
+        (54, scenario_54),
+        (55, scenario_55),
+        (56, scenario_56),
     ]
     mismatches = 0
     for number, case in cases:
@@ -2782,6 +3080,85 @@ def mutation_m60(root: Path) -> None:
     )
 
 
+# M61-M66 -- зубы волны 205: горизонт архива compact.py (возрастная граница
+# роста, надгробие, отказ прибора, гонки).
+def mutation_m61(root: Path) -> None:
+    # Сравнение с рубежом вырвано: возраст перестаёт решать, старший архив
+    # остаётся на диске -- рост ничем не ограничен снова.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if st.st_mtime > edge:\n            continue\n",
+        "        if True:\n            continue\n",
+        "M61",
+    )
+
+
+def mutation_m62(root: Path) -> None:
+    # Горизонт распространён на горячие .json: у них уже есть владелец --
+    # окно ядра (records_keep), два владельца на одном файле -- дефект.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if not name.endswith('.json.gz'):\n            continue\n",
+        "        if not (name.endswith('.json') or name.endswith('.json.gz')):\n"
+        "            continue\n",
+        "M62",
+    )
+
+
+def mutation_m63(root: Path) -> None:
+    # Подстрока вместо суффикса: обломок <имя>.json.gz.tmp.<pid> попадает в
+    # кандидаты горизонта, хотя у него другой владелец (прополка tmp).
+    replace_once(
+        root / "judge" / "compact.py",
+        "        if not name.endswith('.json.gz'):\n            continue\n",
+        "        if '.json.gz' not in name:\n            continue\n",
+        "M63",
+    )
+
+
+def mutation_m64(root: Path) -> None:
+    # Отметка горизонта не пишется: удаление уходит без объяснения, указатель
+    # улики в журнале снова двусмысленен.
+    replace_once(
+        root / "judge" / "compact.py",
+        "        runs = _horizon_mark_read(mark_path)\n"
+        "        _horizon_write_mark(mark_path, _horizon_merged(runs, entry))\n",
+        "        runs = []\n        pass  # M64: отметка не пишется\n",
+        "M64",
+    )
+
+
+def mutation_m65(root: Path) -> None:
+    # Отказ прибора проглатывается: ненулевой код заменён молчаливым нулём --
+    # ровно fail-open, который запрещает шапка compact.py.
+    replace_once(
+        root / "judge" / "compact.py",
+        # Якорь -- ровно несущая строка (выход кодом 1), а не окружающий её
+        # текст: якорь по форме сообщения ломался бы от правки слов в нём,
+        # и мутация молча переставала бы мерить (#75, круг 26).
+        "        sys.exit(1)\n",
+        "        pass\n",
+        "M65",
+    )
+
+
+def mutation_m66(root: Path) -> None:
+    # Исчезнувший под руками архив становится отказом: гонка с прополкой ядра
+    # снова роняет ночной проход.
+    replace_once(
+        root / "judge" / "compact.py",
+        # Якорь -- снятие архива и заголовок его ветки гонки (os.unlink(path)
+        # в файле ровно один). Тело ветки в якорь не входит: комментарий и
+        # счётчик внутри неё -- форма, а мутация мерит поведение.
+        "            os.unlink(path)\n"
+        "        except FileNotFoundError:\n",
+        "            os.unlink(path)\n"
+        "        except FileNotFoundError:\n"
+        "            raise HorizonRefusal('архив исчез под руками')\n",
+        "M66",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -2843,6 +3220,12 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M58", mutation_m58, 49, "отказ назвал не оба кандидата раскладки"),
     ("M59", mutation_m59, 50, "порванная строка не названа координатой"),
     ("M60", mutation_m60, 50, "итог со счётом порванных строк напечатан"),
+    ("M61", mutation_m61, 51, "архив старше горизонта не унесён"),
+    ("M62", mutation_m62, 52, "горизонт тронул горячий .json"),
+    ("M63", mutation_m63, 53, "обломок tmp назван архивом горизонта"),
+    ("M64", mutation_m64, 54, "отметка горизонта не написана"),
+    ("M65", mutation_m65, 55, "нечитаемый каталог дал rc=0"),
+    ("M66", mutation_m66, 56, "исчезнувший под руками архив снова становится отказом"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно
