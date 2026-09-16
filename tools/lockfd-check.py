@@ -96,7 +96,11 @@ INTERPRETERS = {"python3", "python", "node", "bash", "sh", "perl", "dash", "zsh"
 INLINE_OPTS = {"-c", "-e", "-E", "-", "-m", "-p", "--eval", "--print"}
 TOOL_PATH = re.compile(r"(?:tools|scripts)/[\w.+-]+\.(?:py|js|sh)\b|claude-patch-all[\w.-]*\.sh")
 EXEC_OPEN = re.compile(r"^exec\s+(\d)>{1,2}(?![&=])")
+OPEN_TOK = re.compile(r"(?<!\d)(\d)>{1,2}(?![&=])")
 EXEC_CLOSE = re.compile(r"^exec\s+(\d)>&-")
+# Слова, печатающие своё раскрытие вместо исполнения (см. место применения).
+DATA_WORDS = {"printf", "echo", ":", "true", "false", "read", "test", "[",
+              "local", "declare", "typeset", "export", "readonly"}
 CLOSE_TOK = re.compile(r"(?<!\d)(\d)>&-")
 HEREDOC = re.compile(r"<<(?!<)-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -354,6 +358,24 @@ def closed_fds(tokens):
             if t.kind == "word" and CLOSE_TOK.fullmatch(t.text)}
 
 
+def opened_fds(tokens):
+    """ВСЕ дескрипторы, открытые одним `exec`.
+
+    CONSTRAINT: именно все. Прежняя редакция брала первое открытие строки и
+    молча роняла остальные: `exec 9>"$L" 8>"$S"` оставлял восьмой вне учёта, и
+    вызов, не закрывший его, отказа не получал -- гейт, не видящий дескриптора,
+    выглядит ровно как гейт, который его проверил.
+    """
+    fds = set()
+    for t in tokens:
+        if t.kind != "word" or CLOSE_TOK.fullmatch(t.text):
+            continue
+        m = OPEN_TOK.match(t.text)
+        if m:
+            fds.add(int(m.group(1)))
+    return fds
+
+
 def unquote(tok):
     return tok.strip("\"'")
 
@@ -454,17 +476,29 @@ def scan_file(path, is_data_file):
             if m and commands[0].text == "exec":
                 opens.difference_update(closed_fds(commands))
                 continue
-            m = EXEC_OPEN.match(s)
-            if m and commands[0].text == "exec":
-                opens.add(int(m.group(1)))
-                open_events += 1
-                continue
+            if commands[0].text == "exec":
+                opened = opened_fds(commands)
+                if opened:
+                    opens.update(opened)
+                    open_events += 1
+                    continue
             word, _ = command_word(s)
+            head = unquote(word)
+            word_arrays = set(array_refs(word))
             uses = []
             for token in commands:
                 for name, offset in array_refs(token.text, with_lines=True):
                     origins = arrays.get(name)
-                    if origins or (origins is None and name in set(array_refs(word))):
+                    # ПЕЧАТЬ раскрытия -- данные, а не запуск: `printf "…${A[@]}"`
+                    # потомка не порождает, наследовать дескриптор некому, и
+                    # отказ на этой форме удостоверял бы неверную семантику.
+                    # Список закрыт и держит только слова, про которые это
+                    # доказуемо; всякое иное командное слово остаётся
+                    # консервативным -- раскрытие в чужой обёртке запуском быть
+                    # может, и пропуск здесь дороже лишнего отказа.
+                    if name not in word_arrays and head in DATA_WORDS:
+                        continue
+                    if origins or (origins is None and name in word_arrays):
                         source = ",".join(map(str, sorted(origins))) if origins else "неизвестна"
                         line = token.line + offset
                         uses.append((line, f"массив {name}, присваивание: {source}; раскрытие: {line}"))
@@ -652,9 +686,22 @@ SELF_CASES = [
      ['массив A, присваивание: 2; раскрытие: 4']),
     ("array-continuation-expansion-closed",
      'exec 9>"$L"\nA=(python3 tools/x.py)\nexec env X=1 \\\n "${A[@]}" 9>&-\n', []),
-    ("array-multiline-word-expansion-line",
-     'exec 9>"$L"\nA=(python3 tools/x.py)\nprintf "prefix\n${A[@]}"\n', [(4, 9)],
-     ['массив A, присваивание: 2; раскрытие: 4']),
+    # Печать раскрытия -- ДАННЫЕ: `printf` сохранённую команду не запускает,
+    # наследовать дескриптор некому. Прежняя редакция ждала тут отказа, то есть
+    # разметка удостоверяла неверную семантику (найдено аудитом 16.09).
+    ("array-multiline-word-printed-is-data",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\nprintf "prefix\n${A[@]}"\n', []),
+    # Консервативность при этом сохраняется: чужая обёртка запуском быть может.
+    ("array-expansion-under-wrapper-line",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\nrun_wrapper "${A[@]}"\n', [(3, 9)],
+     ['массив A, присваивание: 2; раскрытие: 3']),
+    ("array-expansion-under-wrapper-closed",
+     'exec 9>"$L"\nA=(python3 tools/x.py)\nrun_wrapper "${A[@]}" 9>&-\n', []),
+    # Один `exec` открывает ДВА дескриптора: закрытие одного не снимает второй.
+    ("exec-two-fds-one-closed",
+     'exec 9>"$L" 8>"$S"\nbash tools/x.sh 9>&-\n', [(2, 8)]),
+    ("exec-two-fds-both-closed",
+     'exec 9>"$L" 8>"$S"\nbash tools/x.sh 9>&- 8>&-\n', []),
     ("group-global-close-persists",
      'exec 9>"$L"\n{ exec 9>&-; }\nbash tools/x.sh\n', []),
     ("group-boundary-close-temporary",
