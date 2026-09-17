@@ -26,11 +26,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # transcript marker.
 VER="${1:-}"
 if [ -z "$VER" ]; then
+  # Пустой список установленных версий допустим: отказ обрабатывает следующая
+  # строка, требуя версию явным доводом.
   VER="$(ls -1 "$HOME/.local/share/claude/versions" 2>/dev/null \
-        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)" || true
 fi
 [ -n "$VER" ] || { echo "не удалось определить версию; передайте её первым доводом" >&2; exit 1; }
-STAMP="$(date +%Y%m%d)"
+STAMP="$(date +%Y%m%d)" || { printf 'ПРИБОР НЕДОСТУПЕН: не получена календарная дата штампа комплекта\n' >&2; exit 2; }
 NAME="claude-patch-kit-$VER"
 OUT="$ROOT/dist/$NAME-$STAMP.tar.gz"
 # The tmp archive name must never outlive a killed build: a tar interrupted
@@ -84,7 +86,10 @@ __exit_guard() {
 trap __exit_guard EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-STAGE="$(mktemp -d)/$NAME"
+# Пустой путь mktemp уходит в склейку STAGE и в rm -rf через dirname.
+__tmpd="$(mktemp -d)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+[ -n "$__tmpd" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+STAGE="$__tmpd/$NAME"
 # The judge canon lives in the project; ~/.claude/judge is the DEPLOYMENT.
 # The kit is built from the canon: otherwise whatever someone edited on the
 # live machine would ride into the archive, and the project would diverge from
@@ -105,7 +110,7 @@ mkdir -p "$STAGE/judge" "$STAGE/idle-watch" "$STAGE/docs" "$STAGE/tools"
 ROOT_SKIP=""
 for f in "$ROOT"/*; do
   [ -f "$f" ] || continue
-  b="$(basename "$f")"
+  b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
   case "$ROOT_SKIP" in *" $b "*) continue;; esac
   cp "$f" "$STAGE/$b"
 done
@@ -121,7 +126,7 @@ done
 # переживания перезагрузки, но в комплект не едет.
 for f in "$ROOT/docs"/*.md; do
   [ -f "$f" ] || continue
-  b="$(basename "$f")"
+  b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
   case "$b" in brief-*) continue;; esac
   cp "$f" "$STAGE/docs/$b"
 done
@@ -140,7 +145,7 @@ done
 # from the home or not exist at all.
 for f in "$JUDGE"/*; do
   [ -f "$f" ] || continue
-  b="$(basename "$f")"
+  b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
   case "$b" in *.pyc) continue;; esac
   cp "$f" "$STAGE/judge/$b"
 done
@@ -152,7 +157,7 @@ if [ -d "$JUDGE/bench" ]; then
   mkdir -p "$STAGE/judge/bench"
   for f in "$JUDGE/bench"/*; do
     [ -f "$f" ] || continue
-    b="$(basename "$f")"
+    b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
     case "$b" in *.jsonl|*.pyc) continue;; esac
     cp "$f" "$STAGE/judge/bench/$b"
   done
@@ -190,14 +195,19 @@ done
 miss_tools=0
 for f in "$ROOT/tools"/*; do
   [ -f "$f" ] || continue
-  b="$(basename "$f")"
+  b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
   [ -f "$STAGE/tools/$b" ] || { echo "ОШИБКА: tools/$b живёт на диске, но в комплект не кладётся" >&2; miss_tools=1; }
 done
 [ "$miss_tools" = 0 ] || exit 1
 
 # The number of checks in the README must match the number of checks in the
 # pipeline: that exact divergence was the symptom of the stale documentation.
-N="$(sed -n '/^checks = {/,/^}/p' "$ROOT/claude-patch-all.sh" | grep -cE "^    '")"
+# grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+# Имя счётчика НЕ __rc: под этим именем ловушка выхода несёт код возврата
+# прогона (её первая строка), и общее имя сломало бы код при любой правке тела.
+N="$(sed -n '/^checks = {/,/^}/p' "$ROOT/claude-patch-all.sh" | grep -cE "^    '")" || __checks_rc=$?
+[ "${__checks_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт проверок конвейера отказал (код %s)\n' "$__checks_rc" >&2; exit 2; }
+__checks_rc=0
 # The pattern follows the README's LANGUAGE, and that is the trap: while the
 # README was Russian the numeral had three inflected forms, a shared stem
 # prefix missed one of them, and the gate cried wolf. Translating the README
@@ -231,7 +241,7 @@ done
 # списку имён, и всё начнётся сначала.
 for f in "$ROOT"/*; do
   [ -f "$f" ] || continue
-  b="$(basename "$f")"
+  b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
   case "$ROOT_SKIP" in *" $b "*) continue;; esac
   [ -f "$STAGE/$b" ] || { echo "ОШИБКА: $b живёт в корне, но в комплект не кладётся" >&2; miss=1; }
 done
@@ -240,14 +250,14 @@ done
 # branch the list falling behind the tree was not noticed at all.
 for f in "$ROOT/docs"/*.md; do
   [ -f "$f" ] || continue
-  b="$(basename "$f")"
+  b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
   case "$b" in brief-*) continue;; esac
   [ -f "$STAGE/docs/$b" ] || { echo "ОШИБКА: docs/$b живёт на диске, но в комплект не кладётся" >&2; miss=1; }
 done
 for home in judge idle-watch; do
   for f in "$ROOT/$home"/*; do
     [ -f "$f" ] || continue
-    b="$(basename "$f")"
+    b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
     case "$SKIP" in *" $b "*) continue;; esac
     [ -f "$STAGE/$home/$b" ] || { echo "ОШИБКА: $home/$b живёт на диске, но в комплект не кладётся" >&2; miss=1; }
   done
@@ -258,7 +268,7 @@ done
 # the copy above skips them too, so the two rules must not drift apart.
 for f in "$ROOT/judge/bench"/*; do
   [ -f "$f" ] || continue
-  b="$(basename "$f")"
+  b="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
   case "$b" in *.jsonl|*.pyc) continue;; esac
   [ -f "$STAGE/judge/bench/$b" ] || { echo "ОШИБКА: judge/bench/$b живёт на диске, но в комплект не кладётся" >&2; miss=1; }
 done
