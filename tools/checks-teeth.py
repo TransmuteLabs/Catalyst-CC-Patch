@@ -56,6 +56,11 @@ RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 31
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
 EXPECTED_ENTRY_TEETH = 2
+# Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
+# Это мутации скрипта, декларации и патча, а не образа.
+# EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
+# README/D37 разъедется с таблицей, а README этой волне править нельзя.
+EXPECTED_INAPPLICABLE_TEETH = 8
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.
@@ -239,6 +244,359 @@ def edits_m2(base: bytes) -> list[tuple[int, bytes]]:
 
 
 DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2, "M2": edits_m2}
+
+
+STEP29_CEILING = "the mod-API model budget ceiling is operator-set"
+STEP29_WARNING = "the mod-API budget warning derives from that ceiling"
+STEP29_BOTH = (STEP29_CEILING, STEP29_WARNING)
+
+# Якоря мутаций -- НЕСУЩИЕ строки блока проверок / WITNESSES патча.
+# Код под мутацию не подгоняется: пропавший якорь -- отказ прибора.
+I1_ANCHOR = '_NOTE_FMT = "  [NOTE] {name}: {ver} step 29: {reason}"'
+I1_REPL = '_NOTE_FMT = "  [NOTX] {name}: {ver} step 29: {reason}"'
+I2_ANCHOR = (
+    "    if _all_dead:\n"
+    "        if declared:\n"
+    "            return {'status': 'note', 'ver': ver, 'reason': declared[1]}"
+)
+I2_REPL = (
+    "    if _all_dead:\n"
+    "        return {'status': 'note', 'ver': ver, 'reason': 'unconditional'}\n"
+    "        if declared:\n"
+    "            return {'status': 'note', 'ver': ver, 'reason': declared[1]}"
+)
+I3_ANCHOR = "if declared:\n        return {'status': 'fail', 'fail_kind': 'stale'"
+I3_REPL = "if False:\n        return {'status': 'fail', 'fail_kind': 'stale'"
+I4_ANCHOR = "_all_dead = all(w.encode('utf-8') not in d for w in _witnesses)"
+I4_REPL = "_all_dead = any(w.encode('utf-8') not in d for w in _witnesses)"
+I5_ANCHOR = (
+    "  const WITNESSES = [\n"
+    '    "the session\'s model budget for this plugin is spent",\n'
+    "    ' session tokens spent',\n"
+    "    'budget for this plugin',\n"
+    "    'new Map,n=new Map;return{reserve:',\n"
+    "    'budgets.model',\n"
+    "  ];"
+)
+I5_REPL = (
+    "  const WITNESSES = [\n"
+    '    "the session\'s model budget for this plugin is XXXXX",\n'
+    "    ' session tokens XXXXX',\n"
+    "    'budget for this XXXXXX',\n"
+    "    'new Map,n=new Map;return{XXXXXXX:',\n"
+    "    'budgets.XXXXX',\n"
+    "  ];"
+)
+I4_WITNESS = b"budgets.model"
+I4_WITNESS_REPL = b"budgets.modex"
+I6_ANCHOR = (
+    '_FLOOR_WITHDRAW_FMT = "ПОЛ: запись выведена из сверки: {name}: {ver} step {step}: {reason}"'
+)
+I6_REPL = (
+    '_FLOOR_WITHDRAW_FMT = "ПОЛ: запись выведенx из сверки: {name}: {ver} step {step}: {reason}"'
+)
+I6_PHRASE = "ПОЛ: запись выведена из сверки"
+I7_ANCHOR = "_WITHDRAW_UNDECLARED_RED = False"
+I7_REPL = "_WITHDRAW_UNDECLARED_RED = True"
+I8_ANCHOR = "if dver != _WITHDRAW_VERSION:\n        continue"
+I8_REPL = "if False:\n        continue"
+
+
+def _version_image(ver: str, *, orig: bool = False) -> Path:
+    """273 собранный (наш след жив); 274 и пол -- пристинный. orig=True -- всегда .orig."""
+    base = Path.home() / ".local" / "share" / "claude" / "versions"
+    built = base / ver
+    orig_p = base / f"{ver}.orig"
+    if orig or ver == "2.1.274":
+        if orig_p.is_file():
+            return orig_p
+        if built.is_file():
+            return built
+    else:
+        if built.is_file():
+            return built
+        if orig_p.is_file():
+            return orig_p
+    raise Refusal(f"нет образа {ver} в {base}")
+
+
+def _parse_registry(out: str) -> dict[str, str]:
+    """Имя проверки -> OK|FAIL|NOTE. Прочие строки реестра игнорируются."""
+    st: dict[str, str] = {}
+    for line in out.splitlines():
+        s = line.strip()
+        m = re.match(r"\[(OK|FAIL|NOTE)\] (.*)$", s)
+        if not m:
+            continue
+        tag, rest = m.group(1), m.group(2)
+        name = rest.split(":", 1)[0] if tag == "NOTE" else rest
+        st[name] = tag
+    return st
+
+
+def _step29_tags(out: str) -> dict[str, str]:
+    st = _parse_registry(out)
+    return {n: st.get(n, "") for n in STEP29_BOTH}
+
+
+def _run_checks(script: Path, image: Path, patch: Path,
+                runner: Path | None = None) -> subprocess.CompletedProcess:
+    r = runner if runner is not None else RUNNER
+    return subprocess.run(
+        ["bash", str(r), "--script", str(script), str(image), str(patch)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+
+
+def _run_floor(script: Path, image: Path, patch: Path,
+               runner: Path | None = None) -> subprocess.CompletedProcess:
+    r = runner if runner is not None else RUNNER
+    return subprocess.run(
+        ["bash", str(r), "--floor", "--script", str(script), str(image), str(patch)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+
+
+def _once_replace(text: str, old: str, new: str, what: str) -> str:
+    n = text.count(old)
+    if n != 1:
+        raise Refusal(f"{what}: якорь встречается {n} раз, ждали 1")
+    return text.replace(old, new, 1)
+
+
+def _temp_kit(*, decl_text: str | None = None, script_repl=None, patch_repl=None,
+              runner_repl=None):
+    """Снимок кита: скрипт + патч + дом декларации + раннер пола. Правка только снимка."""
+    td = Path(tempfile.mkdtemp(prefix="checks-teeth-inapp."))
+    script_dst = td / "claude-patch-all.sh"
+    patch_dst = td / "tweakcc-patch.js"
+    tools = td / "tools"
+    tools.mkdir()
+    shutil.copy2(ROOT / "claude-patch-all.sh", script_dst)
+    shutil.copy2(ROOT / "tweakcc-patch.js", patch_dst)
+    runner_dst = tools / "checks-on-image.sh"
+    shutil.copy2(ROOT / "tools" / "checks-on-image.sh", runner_dst)
+    runner_dst.chmod(0o755)
+    decl_path = tools / "our-patch-inapplicable.txt"
+    if decl_text is None:
+        src = ROOT / "tools" / "our-patch-inapplicable.txt"
+        if not src.is_file():
+            raise Refusal(f"нет дома декларации: {src}")
+        decl_text = src.read_text(encoding="utf-8")
+    decl_path.write_text(decl_text, encoding="utf-8")
+    if script_repl:
+        old, new = script_repl
+        script_dst.write_text(
+            _once_replace(script_dst.read_text(encoding="utf-8"), old, new, "скрипт"),
+            encoding="utf-8",
+        )
+    if patch_repl:
+        old, new = patch_repl
+        patch_dst.write_text(
+            _once_replace(patch_dst.read_text(encoding="utf-8"), old, new, "патч"),
+            encoding="utf-8",
+        )
+    if runner_repl:
+        old, new = runner_repl
+        runner_dst.write_text(
+            _once_replace(runner_dst.read_text(encoding="utf-8"), old, new, "раннер"),
+            encoding="utf-8",
+        )
+    return td, script_dst, patch_dst
+
+
+def _kit_decl_text() -> str:
+    src = ROOT / "tools" / "our-patch-inapplicable.txt"
+    if not src.is_file():
+        raise Refusal(f"нет дома декларации: {src}")
+    return src.read_text(encoding="utf-8")
+
+
+def _decl_without_274(text: str) -> str:
+    keep = [ln for ln in text.splitlines(True) if not ln.startswith("2.1.274\t29\t")]
+    return "".join(keep)
+
+
+def _decl_with_273(text: str) -> str:
+    extra = "2.1.273\t29\tзуб I3: декларация на версии, где предмет жив\n"
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + extra
+
+
+def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
+    """None -- зуб поймал свою мутацию. Строка -- прошла молча / прибор."""
+    mid = row["id"]
+    td = None
+    img_copy = None
+    try:
+        if mid == "I1":
+            img = _version_image("2.1.274")
+            td, script, patch = _temp_kit()
+            ctrl = _run_checks(script, img, patch)
+            if "[NOTE]" not in (ctrl.stdout or ""):
+                return "контроль: на 2.1.274 с декларацией [NOTE] нет"
+            tags = _step29_tags(ctrl.stdout or "")
+            if any(tags[n] != "NOTE" for n in STEP29_BOTH):
+                return f"контроль: шаг 29 не NOTE {tags}"
+            shutil.rmtree(td, ignore_errors=True)
+            td, script, patch = _temp_kit(script_repl=(I1_ANCHOR, I1_REPL))
+            mut = _run_checks(script, img, patch)
+            if "[NOTE]" in (mut.stdout or ""):
+                return "печать убрана, а [NOTE] остался -- форматтер не единственный источник"
+            return None
+
+        if mid == "I2":
+            img = _version_image("2.1.274")
+            td, script, patch = _temp_kit(decl_text=_decl_without_274(_kit_decl_text()))
+            ctrl = _run_checks(script, img, patch)
+            tags = _step29_tags(ctrl.stdout or "")
+            out = (ctrl.stdout or "") + (ctrl.stderr or "")
+            if any(tags[n] != "FAIL" for n in STEP29_BOTH):
+                return f"контроль: без декларации шаг 29 не FAIL {tags}"
+            if "объявить неприменимость" not in out:
+                return "контроль: нет готовой строки для вставки в дом"
+            shutil.rmtree(td, ignore_errors=True)
+            td, script, patch = _temp_kit(
+                decl_text=_decl_without_274(_kit_decl_text()),
+                script_repl=(I2_ANCHOR, I2_REPL),
+            )
+            mut = _run_checks(script, img, patch)
+            mt = _step29_tags(mut.stdout or "")
+            mout = (mut.stdout or "") + (mut.stderr or "")
+            if all(mt[n] == "FAIL" for n in STEP29_BOTH) and "объявить неприменимость" in mout:
+                return "декларация не читается, а отказ без строки остался -- ветка безусловного NOTE не сработала"
+            if any(mt[n] == "NOTE" for n in STEP29_BOTH) and "объявить неприменимость" not in mout:
+                return None
+            return f"после мутации безусловного NOTE исход не тот {mt}"
+
+        if mid == "I3":
+            img = _version_image("2.1.273")
+            td, script, patch = _temp_kit(decl_text=_decl_with_273(_kit_decl_text()))
+            ctrl = _run_checks(script, img, patch)
+            tags = _step29_tags(ctrl.stdout or "")
+            out = (ctrl.stdout or "") + (ctrl.stderr or "")
+            if any(tags[n] != "FAIL" for n in STEP29_BOTH):
+                return f"контроль: декларация на 2.1.273 не отказала {tags}"
+            if "пережила причину" not in out:
+                return "контроль: нет отказа «пережила причину»"
+            shutil.rmtree(td, ignore_errors=True)
+            td, script, patch = _temp_kit(
+                decl_text=_decl_with_273(_kit_decl_text()),
+                script_repl=(I3_ANCHOR, I3_REPL),
+            )
+            mut = _run_checks(script, img, patch)
+            mt = _step29_tags(mut.stdout or "")
+            mout = (mut.stdout or "") + (mut.stderr or "")
+            if all(mt[n] == "OK" for n in STEP29_BOTH) and "пережила причину" not in mout:
+                return None
+            return f"после снятия отказа «пережила причину» исход не зелёный {mt}"
+
+        if mid == "I4":
+            img = _version_image("2.1.273")
+            handle, img_copy = tempfile.mkstemp(
+                prefix="checks-teeth.%d." % os.getpid(), suffix=".bin")
+            os.close(handle)
+            shutil.copyfile(img, img_copy)
+            raw = Path(img_copy).read_bytes()
+            if raw.count(I4_WITNESS) < 1:
+                raise Refusal("I4: якорь свидетеля budgets.model не найден в образе")
+            if I4_WITNESS_REPL in raw:
+                raise Refusal("I4: замена свидетеля уже есть в образе")
+            Path(img_copy).write_bytes(raw.replace(I4_WITNESS, I4_WITNESS_REPL))
+            td, script, patch = _temp_kit()
+            ctrl = _run_checks(script, Path(img_copy), patch)
+            tags = _step29_tags(ctrl.stdout or "")
+            if any(tags[n] != "OK" for n in STEP29_BOTH):
+                return f"контроль: один мёртвый свидетель уже роняет проверку {tags}"
+            shutil.rmtree(td, ignore_errors=True)
+            td, script, patch = _temp_kit(script_repl=(I4_ANCHOR, I4_REPL))
+            mut = _run_checks(script, Path(img_copy), patch)
+            mt = _step29_tags(mut.stdout or "")
+            if all(mt[n] == "FAIL" for n in STEP29_BOTH):
+                return None
+            return f"порог any() не покраснил шаг 29 {mt}"
+
+        if mid == "I5":
+            img = _version_image("2.1.273")
+            td, script, patch = _temp_kit(patch_repl=(I5_ANCHOR, I5_REPL))
+            mut = _run_checks(script, img, patch)
+            mt = _step29_tags(mut.stdout or "")
+            if all(mt[n] == "FAIL" for n in STEP29_BOTH):
+                return None
+            return f"WITNESSES в патче изменены, шаг 29 не FAIL {mt} -- список не из src"
+
+        if mid == "I6":
+            img = _version_image("2.1.274")
+            td, script, patch = _temp_kit()
+            runner = td / "tools" / "checks-on-image.sh"
+            ctrl = _run_floor(script, img, patch, runner)
+            cout = (ctrl.stdout or "") + (ctrl.stderr or "")
+            if I6_PHRASE not in cout:
+                return "контроль: пол на 2.1.274 не объявил вывод записи из сверки"
+            if ctrl.returncode != 0:
+                return f"контроль: пол на 2.1.274 с декларацией не сошёлся rc={ctrl.returncode}"
+            shutil.rmtree(td, ignore_errors=True)
+            td, script, patch = _temp_kit(runner_repl=(I6_ANCHOR, I6_REPL))
+            runner = td / "tools" / "checks-on-image.sh"
+            mut = _run_floor(script, img, patch, runner)
+            mout = (mut.stdout or "") + (mut.stderr or "")
+            if I6_PHRASE in mout:
+                return "печать вывода из сверки убрана, а фраза осталась"
+            return None
+
+        if mid == "I7":
+            img = _version_image("2.1.274")
+            td, script, patch = _temp_kit(decl_text=_decl_without_274(_kit_decl_text()))
+            runner = td / "tools" / "checks-on-image.sh"
+            ctrl = _run_floor(script, img, patch, runner)
+            if ctrl.returncode == 0:
+                return "контроль: пол на 2.1.274 без декларации сошёлся -- красную DECLARED вывел молча"
+            shutil.rmtree(td, ignore_errors=True)
+            td, script, patch = _temp_kit(
+                decl_text=_decl_without_274(_kit_decl_text()),
+                runner_repl=(I7_ANCHOR, I7_REPL),
+            )
+            runner = td / "tools" / "checks-on-image.sh"
+            mut = _run_floor(script, img, patch, runner)
+            if mut.returncode == 0:
+                return None
+            return (f"пол выводит незелёную DECLARED без декларации, а мутация "
+                    f"не сделала пол зелёным rc={mut.returncode}")
+
+        if mid == "I8":
+            img = _version_image("2.1.273", orig=True)
+            td, script, patch = _temp_kit()
+            runner = td / "tools" / "checks-on-image.sh"
+            ctrl = _run_floor(script, img, patch, runner)
+            cout = (ctrl.stdout or "") + (ctrl.stderr or "")
+            if ctrl.returncode != 0:
+                return f"контроль: пол на 2.1.273.orig не сошёлся rc={ctrl.returncode}"
+            if I6_PHRASE in cout:
+                return "контроль: пол на 2.1.273 вывел запись по чужой декларации 274"
+            shutil.rmtree(td, ignore_errors=True)
+            td, script, patch = _temp_kit(runner_repl=(I8_ANCHOR, I8_REPL))
+            runner = td / "tools" / "checks-on-image.sh"
+            mut = _run_floor(script, img, patch, runner)
+            mout = (mut.stdout or "") + (mut.stderr or "")
+            if mut.returncode != 0 and I6_PHRASE in mout:
+                return None
+            return (f"игнор версии декларации не покраснил пол 273 "
+                    f"rc={mut.returncode} phrase={I6_PHRASE in mout}")
+
+        raise Refusal(f"{mid}: нет раннера для этого id")
+    finally:
+        if td is not None:
+            shutil.rmtree(td, ignore_errors=True)
+        if img_copy is not None:
+            try:
+                os.unlink(img_copy)
+            except FileNotFoundError:
+                pass
 
 
 def pipeline_lock_path() -> str:
@@ -482,9 +840,20 @@ def main() -> int:
             print(f"checks-teeth: ОТКАЗ ПРИБОРА -- нет таких строк: {sorted(unknown)}",
                   file=sys.stderr)
             return 2
-    if len(rows) != EXPECTED_MUTATIONS:
-        print(f"checks-teeth: ОТКАЗ -- мутаций {len(rows)}, объявлено {EXPECTED_MUTATIONS}",
+    n_img = sum(1 for r in rows if r["kind"] in ("literal", "derived"))
+    n_inapp = sum(1 for r in rows if r["kind"] == "inapplicable")
+    n_other = len(rows) - n_img - n_inapp
+    if n_other:
+        print(f"checks-teeth: ОТКАЗ -- неизвестный kind у {n_other} строк",
               file=sys.stderr)
+        return 4
+    if n_img != EXPECTED_MUTATIONS:
+        print(f"checks-teeth: ОТКАЗ -- мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}",
+              file=sys.stderr)
+        return 4
+    if n_inapp != EXPECTED_INAPPLICABLE_TEETH:
+        print(f"checks-teeth: ОТКАЗ -- зубов неприменимости {n_inapp}, "
+              f"объявлено {EXPECTED_INAPPLICABLE_TEETH}", file=sys.stderr)
         return 4
 
     # Контроль: названный образ обязан быть ЗЕЛЁНЫМ до мутаций. Иначе краснота
@@ -504,9 +873,13 @@ def main() -> int:
 
     base = image.read_bytes()
     jobs = []
+    inapp_rows = []
     try:
         for row in rows:
             if picked is not None and row["id"] not in picked:
+                continue
+            if row["kind"] == "inapplicable":
+                inapp_rows.append(row)
                 continue
             if row["kind"] == "derived":
                 edits = DERIVED[row["id"]](base)
@@ -524,23 +897,24 @@ def main() -> int:
 
     bad = 0
     try:
-        with ProcessPoolExecutor(max_workers=opts.jobs) as pool:
-            for mid, check, red, want in pool.map(run_one, jobs):
-                if check not in red:
-                    bad += 1
-                    print(f"checks-teeth: МУТАЦИЯ {mid}: ПРОШЛА МОЛЧА -- «{check}» осталась зелёной",
-                          flush=True)
-                    if red:
-                        print("    покраснели вместо неё: " + ", ".join(red), flush=True)
-                elif sorted(red) != want:
-                    bad += 1
-                    others = [n for n in red if n not in want]
-                    missing = [n for n in want if n not in red]
-                    print(f"checks-teeth: МУТАЦИЯ {mid}: КРАСНЫЕ НЕ ТЕ, ЧТО ОБЪЯВЛЕНЫ -- "
-                          + ("лишние: " + ", ".join(others) + " " if others else "")
-                          + ("не покраснели: " + ", ".join(missing) if missing else ""), flush=True)
-                else:
-                    print(f"checks-teeth: МУТАЦИЯ {mid}: RED «{'» + «'.join(want)}»", flush=True)
+        if jobs:
+            with ProcessPoolExecutor(max_workers=opts.jobs) as pool:
+                for mid, check, red, want in pool.map(run_one, jobs):
+                    if check not in red:
+                        bad += 1
+                        print(f"checks-teeth: МУТАЦИЯ {mid}: ПРОШЛА МОЛЧА -- «{check}» осталась зелёной",
+                              flush=True)
+                        if red:
+                            print("    покраснели вместо неё: " + ", ".join(red), flush=True)
+                    elif sorted(red) != want:
+                        bad += 1
+                        others = [n for n in red if n not in want]
+                        missing = [n for n in want if n not in red]
+                        print(f"checks-teeth: МУТАЦИЯ {mid}: КРАСНЫЕ НЕ ТЕ, ЧТО ОБЪЯВЛЕНЫ -- "
+                              + ("лишние: " + ", ".join(others) + " " if others else "")
+                              + ("не покраснели: " + ", ".join(missing) if missing else ""), flush=True)
+                    else:
+                        print(f"checks-teeth: МУТАЦИЯ {mid}: RED «{'» + «'.join(want)}»", flush=True)
     except BrokenProcessPool:
         # Воркер умер (SIGKILL/OOM): мутации НЕ ИЗМЕРЕНЫ. Класс 2, а не 1 --
         # по таблице инструмента 1 значит «мутация прошла молча», и свип
@@ -548,7 +922,25 @@ def main() -> int:
         print("checks-teeth: НЕ МЕРИЛ -- воркер умер (SIGKILL/OOM), "
               "мутации не измерены", file=sys.stderr, flush=True)
         return 2
-    print(f"checks-teeth: ИТОГ мутаций={len(jobs)} прошло молча/чужой дверью={bad}", flush=True)
+
+    for row in inapp_rows:
+        try:
+            reason = run_inapplicable_tooth(row)
+        except Refusal as exc:
+            print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
+            return 2
+        want = [row["check"]]
+        want += [x.strip() for x in row["also"].split(";") if x.strip()]
+        if reason:
+            bad += 1
+            print(f"checks-teeth: МУТАЦИЯ {row['id']}: ПРОШЛА МОЛЧА -- {reason}",
+                  flush=True)
+        else:
+            print(f"checks-teeth: МУТАЦИЯ {row['id']}: RED «{'» + «'.join(want)}»",
+                  flush=True)
+
+    print(f"checks-teeth: ИТОГ мутаций={len(jobs) + len(inapp_rows)} "
+          f"прошло молча/чужой дверью={bad}", flush=True)
     lock.close()                       # замок снимается ПОСЛЕ последнего замера
     return 0 if bad == 0 else 1
 

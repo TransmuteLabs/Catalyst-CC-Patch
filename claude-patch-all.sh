@@ -6647,7 +6647,7 @@ fi
 # --- 5. verify ---------------------------------------------------------------
 echo "==> Verifying"
 python3 - "$BIN" "$OUR_PATCH" <<'PY'
-import re, sys
+import os, re, sys
 d = open(sys.argv[1], 'rb').read()
 src = open(sys.argv[2], encoding='utf-8').read()
 ID = rb'[A-Za-z_$][\w$]*'
@@ -8034,6 +8034,90 @@ def _mod_budget_warning_derives_from_the_ceiling(d):
     return bool(re.search(rb'var ' + ID + rb'=' + re.escape(cap) + rb'\*' + ID + rb';', d))
 
 
+def _step29_witnesses_from_src(src):
+    """Свидетели шага 29 извлекаются из исходника патча; копия в проверке запрещена."""
+    m = re.search(
+        r"step\('29 mod-API session model budget ceiling becomes operator-set'"
+        r".*?const WITNESSES = \[(.*?)\];",
+        src,
+        re.S,
+    )
+    if not m:
+        print('ОТКАЗ ПРИБОРА: якорь WITNESSES шага 29 пропал из исходника патча',
+              file=sys.stderr)
+        sys.exit(2)
+    body = m.group(1)
+    witnesses = [a or b for a, b in re.findall(
+        r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'', body)]
+    if not witnesses:
+        print('ОТКАЗ ПРИБОРА: WITNESSES шага 29 извлечён пустым', file=sys.stderr)
+        sys.exit(2)
+    return witnesses
+
+
+def _read_inapplicable(path):
+    """Дом декларации. Неразобранная строка и дубль пары -- отказ прибора."""
+    if not os.path.isfile(path):
+        print('ОТКАЗ ПРИБОРА: нет дома декларации неприменимости: ' + path,
+              file=sys.stderr)
+        sys.exit(2)
+    rows = {}
+    with open(path, encoding='utf-8') as fh:
+        for n, line in enumerate(fh, 1):
+            raw = line.rstrip('\n')
+            if not raw.strip() or raw.lstrip().startswith('#'):
+                continue
+            parts = raw.split('\t')
+            if len(parts) != 3 or not all(parts):
+                print(f'ОТКАЗ ПРИБОРА: неразобранная строка {n} в {path}',
+                      file=sys.stderr)
+                sys.exit(2)
+            key = (parts[0], parts[1])
+            if key in rows:
+                print(f'ОТКАЗ ПРИБОРА: две строки на пару {parts[0]} × {parts[1]} '
+                      f'(строки {rows[key][0]} и {n})', file=sys.stderr)
+                sys.exit(2)
+            rows[key] = (n, parts[2])
+    return rows
+
+
+def _image_version(d):
+    found = set(re.findall(rb'// Version: ([0-9]+\.[0-9]+\.[0-9]+)', d))
+    if len(found) != 1:
+        print('ОТКАЗ ПРИБОРА: версия в образе неоднозначна или отсутствует '
+              f'(различных: {len(found)})', file=sys.stderr)
+        sys.exit(2)
+    return found.pop().decode()
+
+
+_NOTE_FMT = "  [NOTE] {name}: {ver} step 29: {reason}"
+
+
+def _step29_verdict(d, src):
+    """Таблица исходов шага 29: note / proceed / fail."""
+    _witnesses = _step29_witnesses_from_src(src)
+    # CONSTRAINT: порог «предмета нет» -- ВСЕ свидетели мертвы. Один
+    # переформулированный литерал не имеет права отключать проверку.
+    _all_dead = all(w.encode('utf-8') not in d for w in _witnesses)
+    ver = _image_version(d)
+    # CONSTRAINT: вызов блока -- (образ, патч); дом декларации рядом с патчем,
+    # версия читается из байтов образа, третьего argv нет.
+    _inapplicable_rows = _read_inapplicable(
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
+                     'tools', 'our-patch-inapplicable.txt'))
+    declared = _inapplicable_rows.get((ver, '29'))
+    if _all_dead:
+        if declared:
+            return {'status': 'note', 'ver': ver, 'reason': declared[1]}
+        ready = (ver + '\t29\t'
+                 'апстрим удалил механизм бюджета мод-API '
+                 '(все свидетели шага 29 мертвы); предмета правки в этой сборке нет')
+        return {'status': 'fail', 'fail_kind': 'undeclared', 'ver': ver, 'ready': ready}
+    if declared:
+        return {'status': 'fail', 'fail_kind': 'stale', 'ver': ver, 'reason': declared[1]}
+    return {'status': 'proceed'}
+
+
 # Отказ мод-API по пределу maxTokens ОДНОГО вызова -- вторая дверь той комнаты
 # и единственный дом имени предела. Имя берётся ИЗ сравнения внутри сторожа:
 # на 2.1.270 оно `sMt` на darwin и `cMt` на linux (измерено), вшитое имя
@@ -8477,6 +8561,8 @@ _probe_full = d
 _probe_dup = re.findall(rb'/\*__ccCore0\*/[\s\S]*?/\*__ccCore1\*/', d)
 for _b in _probe_dup[1:]:
     d = d.replace(_b, b'', 1)
+
+_S29 = _step29_verdict(_probe_full, src)
 
 checks = {
     'routing (claude-* -> subscription)': _routing_agrees_with_connection(d),
@@ -9754,8 +9840,14 @@ checks = {
     # 2026-09-14. With the handle unset the ceiling is Infinity, so no limit
     # exists; the second record guards the premise that keeps the derived
     # warning silent with it.
-    'the mod-API model budget ceiling is operator-set': _mod_budget_ceiling_is_operator_set(d),
-    'the mod-API budget warning derives from that ceiling': _mod_budget_warning_derives_from_the_ceiling(d),
+    'the mod-API model budget ceiling is operator-set': (
+        'note' if _S29['status'] == 'note' else
+        False if _S29['status'] == 'fail' else
+        _mod_budget_ceiling_is_operator_set(d)),
+    'the mod-API budget warning derives from that ceiling': (
+        'note' if _S29['status'] == 'note' else
+        False if _S29['status'] == 'fail' else
+        _mod_budget_warning_derives_from_the_ceiling(d)),
     # The SECOND door of the same room. Lifting only the process budget leaves
     # a mechanism that may call the model forever but never get a reply longer
     # than 8192 tokens, and the judge's own recorded attempts ask for 24000 --
@@ -9793,7 +9885,15 @@ if len(checks) != EXPECTED_CHECKS:
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
     sys.exit(1)
 for name, ok in checks.items():
-    print(f"  [{'OK' if ok else 'FAIL'}] {name}")
+    if ok == 'note':
+        print(_NOTE_FMT.format(name=name, ver=_S29['ver'], reason=_S29['reason']))
+    else:
+        print(f"  [{'OK' if ok else 'FAIL'}] {name}")
+if _S29.get('fail_kind') == 'undeclared':
+    print('объявить неприменимость:')
+    print(_S29['ready'])
+elif _S29.get('fail_kind') == 'stale':
+    print(f"декларация неприменимости пережила причину: {_S29['ver']} step 29")
 sys.exit(0 if all(checks.values()) else 1)
 PY
 

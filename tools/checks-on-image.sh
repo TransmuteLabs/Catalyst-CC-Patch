@@ -181,7 +181,7 @@ fi
 # тоже находка: значит устарело объявление, и его надо прочитать заново, а не
 # подогнать.
 python3 - "$BLOCK" "$IMG" "$PATCH_SRC" <<'FLOOR_PY'
-import subprocess, sys
+import os, re, subprocess, sys
 
 block, img, patch_src = sys.argv[1], sys.argv[2], sys.argv[3]
 # Объявленные исключения. Каждое -- со своей причиной, и причина проверяема.
@@ -213,6 +213,50 @@ DECLARED = {
         'сторожит стоковую посылку шага 30 -- зелена на стоке по замыслу',
 }
 
+# CONSTRAINT: имена проверок шага, которые декларация может вывести из сверки.
+# Пол не угадывает по подстроке.
+_STEP_CHECKS = {
+    '29': (
+        'the mod-API model budget ceiling is operator-set',
+        'the mod-API budget warning derives from that ceiling',
+    ),
+}
+
+_FLOOR_WITHDRAW_FMT = "ПОЛ: запись выведена из сверки: {name}: {ver} step {step}: {reason}"
+
+
+def _image_version(path):
+    data = open(path, 'rb').read()
+    found = set(re.findall(rb'// Version: ([0-9]+\.[0-9]+\.[0-9]+)', data))
+    if len(found) != 1:
+        sys.stderr.write('ПОЛ НЕ ИЗМЕРЕН: версия в образе неоднозначна или отсутствует '
+                         '(различных: %d)\n' % len(found))
+        sys.exit(2)
+    return found.pop().decode()
+
+
+def _read_inapplicable(path):
+    if not os.path.isfile(path):
+        sys.stderr.write('ПОЛ НЕ ИЗМЕРЕН: нет дома декларации неприменимости: %s\n' % path)
+        sys.exit(2)
+    rows = {}
+    with open(path, encoding='utf-8') as fh:
+        for n, line in enumerate(fh, 1):
+            raw = line.rstrip('\n')
+            if not raw.strip() or raw.lstrip().startswith('#'):
+                continue
+            parts = raw.split('\t')
+            if len(parts) != 3 or not all(parts):
+                sys.stderr.write('ПОЛ НЕ ИЗМЕРЕН: неразобранная строка %d в %s\n' % (n, path))
+                sys.exit(2)
+            key = (parts[0], parts[1])
+            if key in rows:
+                sys.stderr.write('ПОЛ НЕ ИЗМЕРЕН: две строки на пару %s × %s\n' % key)
+                sys.exit(2)
+            rows[key] = parts[2]
+    return rows
+
+
 out = subprocess.run([sys.executable, block, img, patch_src],
                      capture_output=True, text=True, errors="replace")
 green, red = [], []
@@ -230,9 +274,36 @@ if not green and not red:
                      + (out.stdout or out.stderr)[-2000:] + '\n')
     sys.exit(2)
 
+ver = _image_version(img)
+decl_path = os.path.join(os.path.dirname(os.path.abspath(patch_src)),
+                         'tools', 'our-patch-inapplicable.txt')
+decl_rows = _read_inapplicable(decl_path)
+# CONSTRAINT: ключ -- версия ЭТОГО образа. Строка на 2.1.274 не выводит
+# запись, когда меряем 2.1.273.
+_WITHDRAW_VERSION = ver
+withdrawn = {}
+for (dver, step), reason in decl_rows.items():
+    if dver != _WITHDRAW_VERSION:
+        continue
+    for name in _STEP_CHECKS.get(step, ()):
+        withdrawn[name] = (step, reason)
+
+# CONSTRAINT: незелёная DECLARED-запись сама по себе не выводится -- только
+# пара (эта версия × шаг) из дома. Иначе пол зеленеет на 274 без декларации,
+# приняв красное за «предмета нет».
+_WITHDRAW_UNDECLARED_RED = False
+if _WITHDRAW_UNDECLARED_RED:
+    for n in DECLARED:
+        if n not in green:
+            withdrawn[n] = ('0', 'unconditional')
+
+for name, (step, reason) in withdrawn.items():
+    print(_FLOOR_WITHDRAW_FMT.format(name=name, ver=ver, step=step, reason=reason))
+
 extra = [n for n in green if n not in DECLARED]
-missing = [n for n in DECLARED if n not in green]
-if extra or missing:
+missing = [n for n in DECLARED if n not in green and n not in withdrawn]
+stale_withdraw = [n for n in withdrawn if n in green]
+if extra or missing or stale_withdraw:
     print('ПОЛ ПРОВЕРОК НЕ СОШЁЛСЯ (образ: %s)' % img)
     for n in extra:
         print('  зелена на стоке, а не объявлена: %s' % n)
@@ -240,6 +311,9 @@ if extra or missing:
     for n in missing:
         print('  объявлена зелёной на стоке, но красна: %s' % n)
         print('    -- объявление устарело; прочитать причину заново')
+    for n in stale_withdraw:
+        print('  выведена из сверки, но зелена на стоке: %s' % n)
+        print('    -- декларация чужой версии или пережила причину')
     sys.exit(1)
 print('ПОЛ ПРОВЕРОК СОШЁЛСЯ: на пристинном образе зелёных %d из %d, все объявлены'
       % (len(green), len(green) + len(red)))
