@@ -2801,13 +2801,101 @@ step('22 judge consulted before a subagent dispatch', () => {
   // for a reminder: from inside the executing tool the message array is
   // unreachable at all (injections are collected only AFTER the whole batch),
   // so a judge-style throw is wrong here by construction, not by taste.
-  const nrx = new RegExp(
-    `(?:^|[^.\\w$])(${ID})\\(\\{mode:"task-notification",agentId:(${ID})\\(\\)`,
+  // Both names are taken from their DEFINITIONS, never from a consumer call.
+  // A consumer only proves the letters mean something SOMEWHERE: in a
+  // code-split bundle the one consumer this patch used to read sat in a
+  // foreign chunk (module 515 on 2.1.274) whose import of the same names made
+  // the splice resolve by coincidence, not by proof. The queue's definition
+  // IS the arrow assignment; the session id's is the whole function body,
+  // which contains no literal name at all -- every identifier position is a
+  // capture, so no minifier rename can unseat the locator.
+  const tvRx = new RegExp(
+    `(${ID})=\\(\\.\\.\\.${ID}\\)=>${ID}\\(\\)\\.enqueuePendingNotification`,
+    'g',
   );
-  const nm = js.match(nrx);
-  if (!nm) fail('pending-notification queue not found');
-  const TV = siteName(nm[1], 'notification queue');
-  const DI = siteName(nm[2], 'session id');
+  const tvHits = [...js.matchAll(tvRx)];
+  if (tvHits.length !== 1) {
+    fail(
+      `the pending-notification queue must have exactly one assignment ` +
+        `definition (<name>=(...args)=><fn>().enqueuePendingNotification), ` +
+        `found ${tvHits.length}`,
+    );
+  }
+  const TV = siteName(tvHits[0][1], 'notification queue');
+  const diRx = new RegExp(
+    `function (${ID})\\(\\)\\{let e=${ID}\\(\\)\\?\\.sessionId;` +
+      `if\\(e\\)return ${ID}\\(e\\);let t=${ID}\\(\\);` +
+      `return t\\.identity\\.mainAgentId\\(t\\.id\\)\\}`,
+    'g',
+  );
+  const diHits = [...js.matchAll(diRx)];
+  if (diHits.length !== 1) {
+    fail(
+      `the session-id accessor must have exactly one definition body ` +
+        `(reads ?.sessionId, falls back to identity.mainAgentId), ` +
+        `found ${diHits.length}`,
+    );
+  }
+  const DI = siteName(diHits[0][1], 'session id');
+  // The export clause is a second, independent witness of the same name: its
+  // right side (`mainAgentId`) is an API name the minifier never touches, so
+  // the clause survives every rebuild. Two witnesses that disagree mean one of
+  // them no longer names this function -- that is a refusal, not a choice.
+  const exRx = new RegExp(`(${ID}) as mainAgentId`, 'g');
+  const exHits = [...js.matchAll(exRx)];
+  if (exHits.length !== 1) {
+    fail(
+      `expected exactly one export witness of the session-id name ` +
+        `(<name> as mainAgentId), found ${exHits.length}`,
+    );
+  }
+  if (exHits[0][1] !== DI) {
+    fail(
+      `the two witnesses of the session-id name disagree: the definition ` +
+        `body names '${DI}', the export clause names '${exHits[0][1]}'`,
+    );
+  }
+  // PROVENANCE, not just discovery. The queue is spliced only into blocks at
+  // the dispatch site, so its definition must share that module -- a queue
+  // defined elsewhere would make the spliced calls resolve to whatever those
+  // letters mean in the home, or to nothing.
+  const [tvLo, tvHi] = moduleSliceAround(js, tvHits[0].index);
+  const [homeLo, homeHi] = moduleSliceAround(js, m.index);
+  if (tvLo !== homeLo || tvHi !== homeHi) {
+    fail(
+      `the notification queue '${TV}' is defined outside the home module of ` +
+        `the watcher/form blocks -- the spliced queue calls would not ` +
+        `resolve it there`,
+    );
+  }
+  // The session id reaches every home through the core, and its definition
+  // legitimately lives in a third module (so on every measured version), so
+  // the binding is proven by the home's OWN import clause carrying the name
+  // -- the clause the bundle already resolves at load time. A home that is
+  // itself the defining module needs no import.
+  const [diLo, diHi] = moduleSliceAround(js, diHits[0].index);
+  for (const [label, at] of [['watcher', m.index], ['judge', headAt]]) {
+    const [hLo, hHi] = moduleSliceAround(js, at);
+    if (hLo === diLo && hHi === diHi) continue;
+    let imported = false;
+    for (const im of js.slice(hLo, hHi).matchAll(/import\{([^}]*)\}from(?:"[^"]+"|'[^']+')/g)) {
+      for (let entry of im[1].split(',')) {
+        entry = entry.trim();
+        if (!entry) continue;
+        const asAt = /^(\S+)\s+as\s+(\S+)$/.exec(entry);
+        // The spliced text spells the LOCAL binding, which is the name after
+        // `as` when the import renames one.
+        if ((asAt ? asAt[2] : entry) === DI) imported = true;
+      }
+    }
+    if (!imported) {
+      fail(
+        `the session-id name '${DI}' is neither defined in the ${label} ` +
+          `home's module nor imported by it -- the spliced core would not ` +
+          `resolve the name there`,
+      );
+    }
+  }
 
   // The session-title accessor. The locator requires an ARGUMENT: in the hook
   // schemas the same property name carries a zod string
@@ -4726,8 +4814,8 @@ step('22 judge consulted before a subagent dispatch', () => {
   for (const [holder, block] of [['watcher', watchBlock], ['form', formBlock]]) {
     for (const [what, name, where] of [
       ['single-shot query engine', qm[1], `typeof ${qm[1]}===`],
-      ['notification queue', nm[1], `${nm[1]}({value:`],
-      ['session id', nm[2], `agentId:${nm[2]}()`],
+      ['notification queue', TV, `${TV}({value:`],
+      ['session id', DI, `agentId:${DI}()`],
       ['session title accessor', tm[1], `let __v=${tm[1]}(__i)`],
     ]) {
       if (!block.includes(where)) {
