@@ -5438,7 +5438,10 @@ scenario_245() {   # список чужой платформы на этой м
   local out rc foreign foreign_plat host_plat pin
   host_plat=$(cd "$K" && python3 -c 'import claude_patch; print(claude_patch.npm_platform_pkg())') \
     || { printf 'ПРИБОР НЕДОСТУПЕН: пакет платформы хозяина не получен\n' >&2; exit 2; }
-  pin=$(awk '/^900 /{print $3; exit}' "$C/versions.txt")
+  # Код и пустота -- РАЗНЫЕ отказы: awk возвращает 0 и при отсутствии строки 900,
+  # поэтому одной проверки непустоты мало, а одной проверки кода -- тоже.
+  pin=$(awk '/^900 /{print $3; exit}' "$C/versions.txt") \
+    || { printf 'ПРИБОР НЕДОСТУПЕН: список версий не прочитан\n' >&2; exit 2; }
   [ -n "$pin" ] || { printf 'ПРИБОР НЕДОСТУПЕН: пин игрушечной 900 не прочитан\n' >&2; exit 2; }
   if [[ "$host_plat" == *linux-x64* ]]; then
     foreign=corpus-versions.txt
