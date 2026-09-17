@@ -20,8 +20,8 @@ KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # прибора стала бы невидимой.
 REAL_KIT=$KIT
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=11
-EXPECTED_MUTATIONS=12
+EXPECTED_SCENARIOS=19
+EXPECTED_MUTATIONS=20
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -33,7 +33,7 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19)
 # Улика, по которой признаётся СВОЯ причина покраснения: подстрока LAST_EVID
 # сценария. Дом перечня мутаций ОДИН -- EXPECTED_MUTATIONS; и обход
 # self_check, и эта таблица, и MUT_SCENARIO обязаны сойтись с ним длиной.
@@ -42,7 +42,10 @@ MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11)
 # а строки о ней не было НИ ОДНОЙ (перечень = проекция, четвёртый случай).
 MUT_EVID=(x 'второй=0' 'diff_rc=0' 'B=3' 'НЕ_НАЗВАНА' 'rc=1' 'rc=0' \
           'ПУТЬ_ОТКАЗА_ЗАВИС' 'СИРОТА_ЗАГЛУШКИ' 'ОДНО_НАПРАВЛЕНИЕ' 'исходник=0' \
-          'вне_истории=0' 'СЛОВО_РАЗОШЛОСЬ_С_ДЕЛОМ')
+          'вне_истории=0' 'СЛОВО_РАЗОШЛОСЬ_С_ДЕЛОМ' 'запускает НЕ' \
+          'ПРИЧИНА_НЕ_НАЗВАНА' 'РАСХОЖДЕНИЕ_НЕ_НАЗВАНО' 'ПРЕДМЕТ_НЕ_НАЗВАН' \
+          'ВЛАДЕЛЕЦ_НЕ_УЗНАН' 'НЕПОКРЫТИЕ_НЕ_НАЗВАНО' 'НЕДОСТУПЕН_НЕ_НАЗВАН' \
+          'ПЛАТФОРМА_НЕ_НАЗВАНА')
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -131,6 +134,12 @@ make_env() {
   export CLAUDE_JUDGE_TOOLS_DIR="$root/home/judge"
   export CLAUDE_LAUNCH_AGENTS_DIR="$root/home/agents"
   export PROBES_SYNC_LOCK="$root/home/probes-sync.lock"
+  # CONSTRAINT: платформа владельца расписания пинится Дарвином для каждого
+  # сценария, который не ставит свою: без пина Linux-машина позвала бы
+  # НАСТОЯЩИЙ crontab, а стенд не имеет права читать боевые расписания --
+  # подмена прибора только через CLAUDE_CRONTAB_CMD и только в сценариях
+  # 15-18, где заглушка лежит во временном каталоге стенда.
+  export CLAUDE_SCHEDULE_PLATFORM=Darwin
   mkdir -p "$CLAUDE_CONFIG_DIR" "$CLAUDE_LAUNCH_AGENTS_DIR"
 }
 
@@ -690,6 +699,240 @@ scenario_7() {   # путь отказа обязан КОНЧАТЬСЯ, а н�
   ok '7 первый писатель не вошёл в cp: путь отказа кончился в бюджете и не бросил сироту'
 }
 
+# ВЛАДЕЛЕЦ РАСПИСАНИЯ (волна 235): сверка была слепа по платформе (владелец
+# искался только циклом по *judge-compact.plist, которого на Linux нет по
+# построению) и молчала при нуле владельцев (скобка вместо вердикта, exit 0 --
+# снос расписания на машине с предметом неотличим от исправности). Сценарии
+# 12-19 держат ОБЕ беды: платформа подменяется дверцей
+# CLAUDE_SCHEDULE_PLATFORM, прибор -- CLAUDE_CRONTAB_CMD; ветка чужой
+# платформы мертва на живой машине, и зуб в мёртвой ветке ничего не меряет.
+scenario_12() {
+  local root script plist out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s12.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '12 владелец Darwin: исходная раскатка отказала'; return; }
+  # Фикстура -- заполненный агент: цель указывает на раскатанный compact.py,
+  # аргументы покрывают весь набор проб. Имя обязано кончаться на
+  # judge-compact.plist -- по этому хвосту сверка и ищет владельца.
+  plist="$CLAUDE_LAUNCH_AGENTS_DIR/bench.judge-compact.plist"
+  { printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+    printf '<plist version="1.0">\n<dict>\n'
+    printf '<key>Label</key><string>bench.judge-compact</string>\n'
+    printf '<key>ProgramArguments</key>\n<array>\n'
+    printf '<string>/usr/bin/python3</string>\n'
+    printf '<string>%s/compact.py</string>\n' "$CLAUDE_JUDGE_TOOLS_DIR"
+    printf '<string>--probe</string>\n'
+    printf '<string>judge,failover</string>\n'
+    printf '</array>\n</dict>\n</plist>\n'; } > "$plist"
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Darwin bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 0 ]]; then
+    bad "12 владелец Darwin: верный агент обязан давать зелёную сверку, получили $rc"; return
+  fi
+  if [[ "$out" != *"запускает раскатанный compact.py"* \
+     || "$out" != *"покрывает пробу judge"* \
+     || "$out" != *"покрывает пробу failover"* ]]; then
+    bad '12 владелец Darwin: цель или покрытие не названы зелёными строками'; return
+  fi
+  if [[ "$out" == *расходится* ]]; then
+    bad '12 владелец Darwin: верный агент покрасил сверку'; return
+  fi
+  ok '12 владелец Darwin: цель верна, обе пробы набора покрыты, сверка зелёная'
+}
+
+scenario_13() {
+  local root script out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s13.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '13 без владельца Darwin: исходная раскатка отказала'; return; }
+  # Каталог агентов пуст, предмета прополки нет: нулевой предмет обязан быть
+  # зелёным, но С названной причиной и механизмом -- молчание не различимо
+  # с исправностью.
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Darwin bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 0 ]]; then
+    bad "13 без владельца Darwin: пустой предмет обязан быть зелёным, получили $rc"; return
+  fi
+  if [[ "$out" != *"(владельца расписания нет; предмета тоже нет: записей 0, шардов 0 — заводить нечего. Владельцем на Darwin будет launchd-агент)"* ]]; then
+    LAST_EVID="ПРИЧИНА_НЕ_НАЗВАНА $LAST_EVID"
+    bad '13 без владельца Darwin: зелёность не назвала причину и механизм'; return
+  fi
+  ok '13 без владельца Darwin: нулевой предмет зелёен с названной причиной'
+}
+
+scenario_14() {
+  local root script out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s14.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '14 без владельца Darwin: исходная раскатка отказала'; return; }
+  mkdir -p "$CLAUDE_PROBES_DIR/judge/records"
+  printf '{}' > "$CLAUDE_PROBES_DIR/judge/records/rec-1.json"
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Darwin bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="РАСХОЖДЕНИЕ_НЕ_НАЗВАНО $LAST_EVID"
+    bad "14 без владельца Darwin: предмет без владельца обязан краснить (1), получили $rc"; return
+  fi
+  if [[ "$out" != *"расходится: владельца расписания нет, а предмет прополки есть (записей 1, шардов 0)"* ]]; then
+    LAST_EVID="ПРЕДМЕТ_НЕ_НАЗВАН $LAST_EVID"
+    bad '14 без владельца Darwin: расхождение не назвало предмет живым счётом'; return
+  fi
+  ok '14 без владельца Darwin: предмет прополки без владельца назван счётом и краснит'
+}
+
+scenario_15() {
+  local root script stub out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s15.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '15 без владельца Linux: исходная раскатка отказала'; return; }
+  # Код 1 -- ШТАТНОЕ «таблицы нет»: заглушка обязана отвечать кодом прибора,
+  # а не выходить из строя. Настоящий crontab не зовётся: подмена прибором
+  # стенда, фикстуры только во временном каталоге.
+  stub="$root/stub"; mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$stub/crontab"
+  chmod +x "$stub/crontab"
+  mkdir -p "$CLAUDE_PROBES_DIR/judge/records"
+  printf '{}' > "$CLAUDE_PROBES_DIR/judge/records/rec-1.json"
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Linux CLAUDE_CRONTAB_CMD="$stub/crontab" bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="РАСХОЖДЕНИЕ_НЕ_НАЗВАНО $LAST_EVID"
+    bad "15 без владельца Linux: предмет без владельца обязан краснить (1), получили $rc"; return
+  fi
+  if [[ "$out" != *"расходится: владельца расписания нет, а предмет прополки есть (записей 1, шардов 0)"* ]]; then
+    LAST_EVID="ПРЕДМЕТ_НЕ_НАЗВАН $LAST_EVID"
+    bad '15 без владельца Linux: расхождение не назвало предмет живым счётом'; return
+  fi
+  ok '15 без владельца Linux: crontab-таблицы нет, предмет назван счётом и краснит'
+}
+
+scenario_16() {
+  local root script stub cron_line out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s16.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '16 владелец Linux: исходная раскатка отказала'; return; }
+  stub="$root/stub"; mkdir -p "$stub"
+  cron_line="17 * * * * $CLAUDE_JUDGE_TOOLS_DIR/compact.py --probe judge,failover"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$cron_line" > "$stub/crontab"
+  chmod +x "$stub/crontab"
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Linux CLAUDE_CRONTAB_CMD="$stub/crontab" bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 0 ]]; then
+    bad "16 владелец Linux: строка с целью и полным покрытием обязана давать зелёную сверку, получили $rc"; return
+  fi
+  if [[ "$out" != *"расписание crontab запускает раскатанный compact.py"* ]]; then
+    LAST_EVID="ВЛАДЕЛЕЦ_НЕ_УЗНАН $LAST_EVID"
+    bad '16 владелец Linux: строка-владелец не распознана сверкой'; return
+  fi
+  if [[ "$out" != *"расписание crontab покрывает пробу judge"* \
+     || "$out" != *"расписание crontab покрывает пробу failover"* ]]; then
+    LAST_EVID="ВЛАДЕЛЕЦ_НЕ_УЗНАН $LAST_EVID"
+    bad '16 владелец Linux: покрытие проб набора не названо зелёными строками'; return
+  fi
+  ok '16 владелец Linux: строка crontab с целью и полным покрытием зелёная'
+}
+
+scenario_17() {
+  local root script stub cron_line out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s17.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '17 покрытие Linux: исходная раскатка отказала'; return; }
+  stub="$root/stub"; mkdir -p "$stub"
+  cron_line="17 * * * * $CLAUDE_JUDGE_TOOLS_DIR/compact.py --probe judge"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$cron_line" > "$stub/crontab"
+  chmod +x "$stub/crontab"
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Linux CLAUDE_CRONTAB_CMD="$stub/crontab" bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕПОКРЫТИЕ_НЕ_НАЗВАНО $LAST_EVID"
+    bad "17 покрытие Linux: частичное покрытие обязано краснить (1), получили $rc"; return
+  fi
+  if [[ "$out" != *"расходится: расписание crontab не покрывает пробу failover"* ]]; then
+    LAST_EVID="НЕПОКРЫТИЕ_НЕ_НАЗВАНО $LAST_EVID"
+    bad '17 покрытие Linux: непокрытая проба набора не названа по имени'; return
+  fi
+  ok '17 покрытие Linux: непокрытая проба набора названа и краснит'
+}
+
+scenario_18() {
+  local root script stub out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s18.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '18 отказ прибора Linux: исходная раскатка отказала'; return; }
+  stub="$root/stub"; mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\nexit 2\n' > "$stub/crontab"
+  chmod +x "$stub/crontab"
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Linux CLAUDE_CRONTAB_CMD="$stub/crontab" bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕДОСТУПЕН_НЕ_НАЗВАН $LAST_EVID"
+    bad "18 отказ прибора Linux: неизмеримое обязано краснить (1), получили $rc"; return
+  fi
+  if [[ "$out" != *"ПРИБОР НЕДОСТУПЕН: crontab -l вернул код 2"* ]]; then
+    LAST_EVID="НЕДОСТУПЕН_НЕ_НАЗВАН $LAST_EVID"
+    bad '18 отказ прибора Linux: отказ прибора не назван с кодом'; return
+  fi
+  ok '18 отказ прибора Linux: код 2 краснит сверку как ПРИБОР НЕДОСТУПЕН'
+}
+
+scenario_19() {
+  local root script out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s19.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '19 чужая платформа: исходная раскатка отказала'; return; }
+  out=$(CLAUDE_SCHEDULE_PLATFORM=Plan9 bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="ПЛАТФОРМА_НЕ_НАЗВАНА $LAST_EVID"
+    bad "19 чужая платформа: неизвестная платформа обязана краснить (1), получили $rc"; return
+  fi
+  if [[ "$out" != *"расходится: прибор не знает владельца расписания для платформы Plan9"* ]]; then
+    LAST_EVID="ПЛАТФОРМА_НЕ_НАЗВАНА $LAST_EVID"
+    bad '19 чужая платформа: незнакомая платформа не названа в вердикте'; return
+  fi
+  ok '19 чужая платформа: незнакомая платформа названа и краснит (fail-closed)'
+}
+
 # Правило открытия -- ЕДИНСТВЕННЫЙ дом tools/heredoc-anchor.py (у этой копии
 # никогда не было ни отсева стаба, ни якоря мутации); инструмент берётся из
 # НАСТОЯЩЕГО кита (REAL_KIT), а не из переназначаемого KIT. Отказ инструмента
@@ -808,6 +1051,50 @@ elif number == 12:
     old = ('  for ((__i=0; __i<__pairs; __i++)); do printf \'%s\\n\' "${PAIR_N[$__i]}"; done\n')
     new = ('  for ((__i=0; __i<__pairs; __i++)); do printf \'%s\\n\' "${PAIR_N[$__i]}"; done\n'
            '  printf \'%s\\n\' "${PAIR_N[$((__pairs-1))]}"  # mutation: set over-reported\n')
+elif number == 13:
+    # Сверка цели владельца расписания инвертируется: верно заполненный агент
+    # объявляется чужим. Сценарий 12 держит зелёное состояние владельца, и его
+    # краснота обязана прийти строкой цели, а не посторонним кодом.
+    old, new = ('        if grep -qF "$TOOLS_HOME/compact.py" "$__pl"; then\n',
+                '        if false; then  # mutation: schedule target always diverges\n')
+elif number == 14:
+    # Зелёный вердикт нулевого предмета замолкает: код возврата не меняется,
+    # но причина и механизм не называются -- ровно то молчание, что чинила
+    # волна 235 (беда B).
+    old, new = ('      echo "(владельца расписания нет; предмета тоже нет: записей $__sched_rec, шардов $__sched_shard — заводить нечего. Владельцем на $SCHEDULE_PLATFORM будет $__sched_owner_kind)"\n',
+                '      :  # mutation: zero-subject reason silenced\n')
+elif number == 15:
+    # Предметный вердикт слепнет: предмет прополки при отсутствии владельца
+    # снова читается как зелёное -- красная строка не печатается, код
+    # выравнивается на ноль (беда B, Darwin-нога).
+    old, new = ('    if [[ "$((__sched_rec+__sched_shard))" -gt 0 ]]; then\n',
+                '    if false; then  # mutation: subject verdict blinded\n')
+elif number == 16:
+    # Linux-ветка владельца мертвеет: платформа Linux падает в умолчание
+    # «не знает владельца», и предметный вердикт не выполняется вовсе (беда A).
+    old, new = ('    Linux)\n',
+                '    Linux-Never)  # mutation: linux owner branch dead\n')
+elif number == 17:
+    # Распознавание строки-владельца выключается: crontab отвечает кодом 0,
+    # но ни одна строка не признаётся владельцем -- зелёные строки владельца
+    # исчезают при неизменном коде возврата.
+    old, new = ('          [[ "$__cline" == *"$TOOLS_HOME/compact.py"* ]] || continue\n',
+                '          continue  # mutation: crontab owner line never matched\n')
+elif number == 18:
+    # Покрытие проверяет только первую пробу набора: частичное покрытие снова
+    # зелёное -- зуб сценария 17 существует именно против этой слепоты.
+    old, new = ('  for __probe in $SCHEDULE_PROBES; do\n',
+                '  for __probe in judge; do  # mutation: coverage checks first probe only\n')
+elif number == 19:
+    # Отказ прибора проглатывается: код 2 читается как ответ 0, неизмеримое
+    # становится молчаливым зелёным -- fail-closed выключен целиком.
+    old, new = ('      __cron_out="$("$CRONTAB_CMD" -l)" || __cron_rc=$?\n',
+                '      __cron_out="$("$CRONTAB_CMD" -l)" || __cron_rc=0  # mutation: instrument failure swallowed\n')
+elif number == 20:
+    # Незнакомая платформа замолкает: расхождение остаётся (DIFFERS растёт),
+    # но вердикт не называет причину -- читатель видит счёт без имени беды.
+    old, new = ('      echo "расходится: прибор не знает владельца расписания для платформы $SCHEDULE_PLATFORM"\n',
+                '      :  # mutation: unknown platform silent\n')
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)

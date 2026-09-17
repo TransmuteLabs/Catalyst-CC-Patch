@@ -59,6 +59,14 @@ PROBES_HOME="${CLAUDE_PROBES_DIR:-$CLAUDE_HOME_DIR/probes}"
 # оператора увело бы сверку с настоящего дома на выдуманный.
 TOOLS_HOME="${CLAUDE_JUDGE_TOOLS_DIR:-$CLAUDE_HOME_DIR/judge}"
 LAUNCH_AGENTS_DIR="${CLAUDE_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+# CONSTRAINT: платформа владельца расписания -- ЖИВОЙ признак (uname -s), а не
+# вывод из пути. Дверца CLAUDE_SCHEDULE_PLATFORM обязательна: без неё ветка
+# чужой платформы мертва на этой машине всегда, и зуб стенда в мёртвой ветке
+# ничего не меряет (#237).
+SCHEDULE_PLATFORM="${CLAUDE_SCHEDULE_PLATFORM:-$(uname -s)}"
+# CONSTRAINT: crontab зовётся ТОЛЬКО этой командой и ТОЛЬКО чтением (`-l`);
+# подмена -- CLAUDE_CRONTAB_CMD для стенда, боевые таблицы сверка не пишет.
+CRONTAB_CMD="${CLAUDE_CRONTAB_CMD:-crontab}"
 
 # pairs of "path in the canon : path in the home", the home is filled in by group
 PROBE_FILES=(probes.toml judge/prompt.md judge/body.json idle-watch/prompt.md)
@@ -83,6 +91,10 @@ TOOL_BENCH_FILES=(bench/test_recstore.py bench/test_line_from_mod.py)
 # ~/Library/LaunchAgents живой машины (круг 21, F-4).
 PLIST_NAME=com.transmutelabs.judge-compact.plist
 PLIST_HOME="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
+# CONSTRAINT: набор проб владельца расписания -- ОДИН дом для ОБОИХ своих
+# потребителей: сверки покрытия владельцем и счёта предмета прополки. Литерал
+# пробы в одном из двух мест разошёлся бы с другим при появлении третьей пробы.
+SCHEDULE_PROBES="judge failover"
 
 MODE="${1:---diff}"
 case "$MODE" in --to-home|--from-home|--diff|--list) ;; *) echo "не понял режим: $MODE" >&2; __DONE=1; exit 2 ;; esac
@@ -473,37 +485,103 @@ fi
 # с домом бессмысленно вдвойне: такого файла в доме нет никогда, и нога молчала
 # всегда. Проверяемо и важно другое -- КУДА показывает реально заведённый агент:
 # исполняются те байты, на которые он указывает, а не те, что заверил стенд.
-if [[ "$MODE" == "--diff" ]]; then
-  __agents=0
-  for __pl in "$LAUNCH_AGENTS_DIR"/*judge-compact.plist; do
-    [[ -f "$__pl" ]] || continue
-    __agents=$((__agents+1))
-    if grep -qF "$TOOLS_HOME/compact.py" "$__pl"; then
-      echo "агент $(basename "$__pl") запускает раскатанный compact.py"
+# Владелец расписания -- функция ПЛАТФОРМЫ (Darwin: launchd-агент; Linux:
+# пользовательский crontab; прочее -- НАЗВАННОЕ расхождение, не молчание) и
+# ПРЕДМЕТА: зелёным без владельца может быть только машина, где нет и
+# предмета прополки, -- иначе молчание неотличимо от исправности.
+sched_cover_check() {  # $1 подпись владельца в строках отчёта, $2 строка аргументов вызова
+  local __who="$1" __args="$2" __probe
+  for __probe in $SCHEDULE_PROBES; do
+    if grep -q -- '--probe' <<<"$__args" && grep -qF "$__probe" <<<"$__args"; then
+      echo "$__who покрывает пробу $__probe"
     else
-      echo "расходится: агент $(basename "$__pl") запускает НЕ $TOOLS_HOME/compact.py"
-      DIFFERS=$((DIFFERS+1))
-    fi
-    # Вторая проверка ТОГО ЖЕ агента -- покрытие ПРОБ (волна 227b): сверка цели
-    # видит только путь к инструменту, и машина, где агент остался на умолчании
-    # judge, выглядела зелёной, а журнал лестницы failover не пропалывал никто.
-    # Сверяются ИМЕННО элементы <string> блока ProgramArguments: слово failover
-    # в XML-комментарии внутри массива ничего не доказывает -- аргумент обязан
-    # назвать пробу, а владелец прополки один на все журналы. `|| true` обязателен:
-    # под set -e код подстановки становится кодом присваивания, и plist без
-    # блока аргументов ронял бы всю сверку вместо красной строки о непокрытии
-    # (fail-closed -- пустой набор аргументов красит).
-    __args=$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$__pl" \
-             | grep -o '<string>[^<]*</string>' || true)
-    if grep -q -- '--probe' <<<"$__args" && grep -qF 'failover' <<<"$__args"; then
-      echo "агент $(basename "$__pl") покрывает пробу failover"
-    else
-      echo "расходится: агент $(basename "$__pl") не покрывает пробу failover"
+      echo "расходится: $__who не покрывает пробу $__probe"
       DIFFERS=$((DIFFERS+1))
     fi
   done
-  if [[ "$__agents" -eq 0 ]]; then
-    echo "(агента launchd *judge-compact.plist нет — сжатие журналов не заведено)"
+}
+if [[ "$MODE" == "--diff" ]]; then
+  __sched_owners=0
+  __sched_owner_known=1
+  __sched_owner_kind='launchd-агент'
+  case "$SCHEDULE_PLATFORM" in
+    Darwin)
+      for __pl in "$LAUNCH_AGENTS_DIR"/*judge-compact.plist; do
+        [[ -f "$__pl" ]] || continue
+        __sched_owners=$((__sched_owners+1))
+        if grep -qF "$TOOLS_HOME/compact.py" "$__pl"; then
+          echo "агент $(basename "$__pl") запускает раскатанный compact.py"
+        else
+          echo "расходится: агент $(basename "$__pl") запускает НЕ $TOOLS_HOME/compact.py"
+          DIFFERS=$((DIFFERS+1))
+        fi
+        # Вторая проверка ТОГО ЖЕ агента -- покрытие ПРОБ (волна 227b): сверка цели
+        # видит только путь к инструменту, и машина, где агент остался на умолчании
+        # judge, выглядела зелёной, а журнал лестницы failover не пропалывал никто.
+        # Сверяются ИМЕННО элементы <string> блока ProgramArguments: слово пробы
+        # в XML-комментарии внутри массива ничего не доказывает -- аргумент обязан
+        # назвать пробу, а владелец прополки один на все журналы. `|| true` обязателен:
+        # под set -e код подстановки становится кодом присваивания, и plist без
+        # блока аргументов ронял бы всю сверку вместо красной строки о непокрытии
+        # (fail-closed -- пустой набор аргументов красит).
+        __args=$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$__pl" \
+                 | grep -o '<string>[^<]*</string>' || true)
+        sched_cover_check "агент $(basename "$__pl")" "$__args"
+      done
+      ;;
+    Linux)
+      # CONSTRAINT: владелец -- именно пользовательский crontab, а не таймер
+      # `systemctl --user`: при Linger=no пользовательские таймеры не переживают
+      # выход из сессии и простаивают молча, тогда как crond на площадке
+      # active+enabled и не требует ни прав администратора, ни включения linger
+      # (замер 17.09, Catalyst-programs/2026-09-17-linux-schedule-owner-235/
+      # MEASURE-linux-journals-235.md).
+      __cron_rc=0
+      __cron_out="$("$CRONTAB_CMD" -l)" || __cron_rc=$?
+      if [[ "$__cron_rc" -ne 0 && "$__cron_rc" -ne 1 ]]; then
+        # Код 1 у crontab -l -- ШТАТНОЕ «таблицы нет»; любой иной код -- отказ
+        # прибора, и неизмеримое не имеет права быть зелёным (fail-closed).
+        printf 'ПРИБОР НЕДОСТУПЕН: crontab -l вернул код %s\n' "$__cron_rc"
+        DIFFERS=$((DIFFERS+1))
+        __sched_owner_known=0
+      else
+        while IFS= read -r __cline; do
+          [[ "$__cline" == *"$TOOLS_HOME/compact.py"* ]] || continue
+          __sched_owners=$((__sched_owners+1))
+          echo "расписание crontab запускает раскатанный compact.py"
+          sched_cover_check 'расписание crontab' "$__cline"
+        done <<<"$__cron_out"
+      fi
+      __sched_owner_kind='пользовательский crontab'
+      ;;
+    *)
+      __sched_owner_known=0
+      echo "расходится: прибор не знает владельца расписания для платформы $SCHEDULE_PLATFORM"
+      DIFFERS=$((DIFFERS+1))
+      ;;
+  esac
+  if [[ "$__sched_owner_known" -eq 1 && "$__sched_owners" -eq 0 ]]; then
+    # Счёт предмета -- ЖИВОЙ: файлы records и шарды журнала по каждой пробе
+    # набора; отсутствие каталога -- ноль, а не ошибка (машина без пробы
+    # законна). ПУСТО != НОЛЬ: числа печатаются в обеих строках вердикта.
+    __sched_rec=0
+    __sched_shard=0
+    for __p in $SCHEDULE_PROBES; do
+      if [[ -d "$PROBES_HOME/$__p/records" ]]; then
+        for __rf in "$PROBES_HOME/$__p/records"/*; do
+          if [[ -f "$__rf" ]]; then __sched_rec=$((__sched_rec+1)); fi
+        done
+      fi
+      for __sh in "$PROBES_HOME/$__p"/journal.jsonl.shard.*; do
+        if [[ -f "$__sh" ]]; then __sched_shard=$((__sched_shard+1)); fi
+      done
+    done
+    if [[ "$((__sched_rec+__sched_shard))" -gt 0 ]]; then
+      echo "расходится: владельца расписания нет, а предмет прополки есть (записей $__sched_rec, шардов $__sched_shard)"
+      DIFFERS=$((DIFFERS+1))
+    else
+      echo "(владельца расписания нет; предмета тоже нет: записей $__sched_rec, шардов $__sched_shard — заводить нечего. Владельцем на $SCHEDULE_PLATFORM будет $__sched_owner_kind)"
+    fi
   fi
   echo "(журналы, записи и метки не синхронизируются — они данные машины, а не исходник)"
 fi
