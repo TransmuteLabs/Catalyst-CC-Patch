@@ -222,3 +222,37 @@ if (!bodyUser || bodyUser.content !== TEMPLATE_FRAME) {
   process.exit(1);
 }
 console.log('РАМКА ОДИНАКОВА НА ВСЕХ ТРЁХ ПУТЯХ');
+
+// Every carrier-gated splice (judge dispatch, judge turn-stash, judge system-
+// prompt rule, form, idle) stands DOWN when its CLAUDE_*_CARRIER=mod -- ceding
+// the probe to the function-hooks mod. But the mod runs in a SEPARATE realm
+// (Bun Worker + VM), so a globalThis liveness marker it sets is invisible to
+// this spliced code; process.env is the only shared channel. CARRIER=mod alone
+// does not prove the mod loaded: with the function-hooks door shut the mod
+// CANNOT have loaded, so standing down on CARRIER alone would leave NO probe at
+// all. The guard requires the door (CLAUDE_CODE_ENABLE_FUNCTION_HOOKS) open too.
+// This class parses fine when the guard is dropped -- node --check, tsc and
+// splice-parity all stay green -- so its removal is invisible to every other
+// check. Assert it structurally here. Count is pinned: a NEW carrier-gated
+// splice must also carry the door guard, then raise this number.
+const CARRIER_GATES = 5;
+const nCarrier = (src.match(/String\(process\.env\.CLAUDE_(?:JUDGE|FORM|IDLE)_CARRIER\?\?""\)/g) || []).length;
+const nGuard = (src.match(/return __c!=="mod"\|\|\(__d!=="1"&&__d!=="true"\)/g) || []).length;
+const nDoorDecl = (src.match(/__d=String\(process\.env\.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS\?\?""\)/g) || []).length;
+const nBare = (src.match(/return __c!=="mod"\}\)\(\)/g) || []).length;
+if (nCarrier === 0) {
+  console.error('ДВЕРНОЙ СТОРОЖ НЕ ИЗМЕРЕН: ни одного carrier-гейта не найдено — якорь пропал');
+  process.exit(2);
+}
+if (nCarrier !== CARRIER_GATES || nGuard !== CARRIER_GATES ||
+    nDoorDecl !== CARRIER_GATES || nBare !== 0) {
+  console.error('ДВЕРНОЙ СТОРОЖ CARRIER-ГЕЙТОВ РАЗОШЁЛСЯ: carrier=' + nCarrier +
+    ', guard=' + nGuard + ', doorDecl=' + nDoorDecl + ', bare(без сторожа)=' + nBare +
+    '; ожидалось carrier=guard=doorDecl=' + CARRIER_GATES + ', bare=0. ' +
+    'Каждый гейт, стоящий в standby при CARRIER=mod, обязан также проверять ' +
+    'открытую дверцу CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, иначе CARRIER=mod при ' +
+    'закрытой дверце оставляет пробу без носителя.');
+  process.exit(1);
+}
+console.log('ДВЕРНОЙ СТОРОЖ CARRIER-ГЕЙТОВ НА МЕСТЕ: ' + CARRIER_GATES +
+  ' гейтов, все несут проверку дверцы function-hooks');

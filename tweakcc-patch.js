@@ -2318,7 +2318,7 @@ step('21 current turn reachable at tool dispatch', () => {
   // core's declaration list, spelled out here because this site sits outside
   // the core function's scope.
   const stash =
-    '((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()?((globalThis.__ccJudgeTurn??=new Map()),' +
+    '((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();let __d=String(process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS??"").trim().toLowerCase();return __c!=="mod"||(__d!=="1"&&__d!=="true")})()?((globalThis.__ccJudgeTurn??=new Map()),' +
     'globalThis.__ccJudgeTurn.set($5.id,$2.includes($3)?$2.slice():[...$2,$3]),' +
     'globalThis.__ccJudgeTurn.size>64&&(()=>{' +
     'let __k=globalThis.__ccJudgeTurn.keys().next().value;' +
@@ -4322,10 +4322,19 @@ step('22 judge consulted before a subagent dispatch', () => {
     // (каноническая форма -- __envon в списке деклараций ядра; здесь инлайн,
     // потому что место врезки вне области видимости ядра). Непустая строка
     // истинна, и CLAUDE_JUDGE=0 прежде ВКЛЮЧАЛ пробу.
-    // CONSTRAINT: CLAUDE_JUDGE_CARRIER=mod stands this splice down so the
-    // function-hooks carrier can own the judge without a double consultation.
-    // Unset (default) keeps the splice. The splice is not deleted.
-    'if((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()' +
+    // CONSTRAINT: this splice stands down ONLY when CLAUDE_JUDGE_CARRIER=mod AND
+    // the function-hooks door (CLAUDE_CODE_ENABLE_FUNCTION_HOOKS) reads open.
+    // CARRIER=mod alone does not prove the mod loaded, and with the door shut the
+    // mod CANNOT have loaded, so standing down on CARRIER alone would leave no
+    // judge at all (the latent gap this closes). The mod hook runs in a SEPARATE
+    // realm (Bun Worker + VM wrapper), so a globalThis liveness marker it sets is
+    // invisible here; process.env is the only channel both realms share, hence the
+    // env gate rather than a global. The door check is STRICT (open only on
+    // 1/true): an unrecognised value keeps the splice ACTIVE -- at worst a double
+    // consultation, never a missing judge. Residual not observable from this realm:
+    // door open but the mod threw at registration / plugin disabled -> splice still
+    // stands down. Unset CARRIER keeps the splice (door-independent). Not deleted.
+    'if((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();let __d=String(process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS??"").trim().toLowerCase();return __c!=="mod"||(__d!=="1"&&__d!=="true")})()' +
       // CONSTRAINT: the identity clause is PER-SHAPE, and on the factory shape
       // it is omitted rather than faked. There `$2` is a patch-time literal
       // (see SLOT_TOOL) because the SITE proves the tool, so a runtime name
@@ -4484,7 +4493,7 @@ step('22 judge consulted before a subagent dispatch', () => {
           '__K(c.brief_head,"iu").test(String(t??"").split("\\n")[0]))return "brief";' +
       'if(__K(c.report_path,"u").test(String(p??"")))return "report";' +
       'return null};' +
-    'if((()=>{let __s=String(process.env.CLAUDE_FORM??"").trim().toLowerCase();if(__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_FORM_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()&&$4?.agentContext?.agentType==="main")' +
+    'if((()=>{let __s=String(process.env.CLAUDE_FORM??"").trim().toLowerCase();if(__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_FORM_CARRIER??"").trim().toLowerCase();let __d=String(process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS??"").trim().toLowerCase();return __c!=="mod"||(__d!=="1"&&__d!=="true")})()&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Form]",dirName:"form",arm:!0,label:"FORM",' +
       'rx:"PASS|WARN|REFUSE",act:"REFUSE|WARN",' +
@@ -4635,7 +4644,7 @@ step('22 judge consulted before a subagent dispatch', () => {
     // Волна 31 (K-3): тот же типизированный читатель для выключателя
     // наблюдателя -- CLAUDE_IDLE=0 обязан значить ВЫКЛ, инлайн по той же
     // причине области видимости (каноническая форма -- __envon в ядре).
-    'if((()=>{let __s=String(process.env.CLAUDE_IDLE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_IDLE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()&&$4?.agentContext?.agentType==="main")' +
+    'if((()=>{let __s=String(process.env.CLAUDE_IDLE??"").trim().toLowerCase();if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;let __c=String(process.env.CLAUDE_IDLE_CARRIER??"").trim().toLowerCase();let __d=String(process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS??"").trim().toLowerCase();return __c!=="mod"||(__d!=="1"&&__d!=="true")})()&&$4?.agentContext?.agentType==="main")' +
     'await globalThis.__ccProbe({' +
       'tag:"[Watch]",dirName:"idle-watch",arm:!1,label:"FLEET",' +
       // Its own vocabulary: the watcher has nothing to permit or forbid; it
@@ -5266,7 +5275,7 @@ step('26 dispatch-cancellation rule in the system prompt', () => {
   const insertion =
     ',...((()=>{let __s=String(process.env.CLAUDE_JUDGE??"").trim().toLowerCase();' +
     'if(__s===""||__s==="0"||__s==="false"||__s==="off"||__s==="no")return !1;' +
-    'let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();return __c!=="mod"})()' +
+    'let __c=String(process.env.CLAUDE_JUDGE_CARRIER??"").trim().toLowerCase();let __d=String(process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS??"").trim().toLowerCase();return __c!=="mod"||(__d!=="1"&&__d!=="true")})()' +
     `&&${OPTS}?.agentContext?.agentType==="main"?` +
     '[' + JSON.stringify(RULE) + ']' +
     ':[])';
