@@ -978,7 +978,8 @@ mutate() {
     7|8) file="$root/kit/tools/probes-sync-bench.sh" ;;
     *) file="$root/kit/scripts/probes-sync.sh" ;;
   esac
-  python3 - "$file" "$n" <<'PY'
+  local __pyrc=0
+  python3 - "$file" "$n" 2>"$root/mutate.err" <<'PY' || __pyrc=$?
 import sys
 path, number = sys.argv[1], int(sys.argv[2])
 text = open(path, encoding='utf-8').read()
@@ -989,7 +990,7 @@ elif number == 2:
 elif number == 3:
     # Сравнение метки старта выключается: живость снова решает один kill -0,
     # переиспользованный номер читается как живой владелец.
-    old, new = ('           || [[ "$(LC_ALL=C ps -o lstart= -p "$__opid" 2>/dev/null)" == "$__ostart" ]]; then\n',
+    old, new = ('           || [[ "$__ps_lstart" == "$__ostart" ]]; then\n',
                 '           || true; then  # mutation: label ignored, kill -0 decides\n')
 elif number == 4:
     # Обход возвращается к одной домашней стороне: обломок на канонной
@@ -1038,8 +1039,7 @@ elif number == 11:
     # Нога отслеживаемости выключается ЦЕЛИКОМ: файл, лежащий в каталоге
     # канона, но не попавший в индекс, снова читается как занесённый --
     # ровно ложное зелёное, которое дала строка `judge/bench/` в .gitignore.
-    old = ('    elif [[ "$TRACK_CENSUS" == \'да\' ]] \\\n'
-           '         && [[ -z "$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" ]]; then\n')
+    old = '    elif [[ "$TRACK_CENSUS" == \'да\' ]]; then\n'
     new = '    elif false; then  # mutation: repo census blinded\n'
 elif number == 12:
     # Перечень начинает ПЕРЕсчитывать набор: последняя пара называется дважды.
@@ -1104,6 +1104,14 @@ if count != 1:
     raise SystemExit(2)
 open(path, 'w', encoding='utf-8').write(text.replace(old, new, 1))
 PY
+  # Код питоньего этапа обязан быть прочитан: при ненайденном якоре правка НЕ
+  # ВНОСИТСЯ, жертва остаётся валидной, и прогон сценария на нетронутом ките
+  # даёт зелёное, неотличимое от «зуб слеп». Отказ прибора не имеет права
+  # читаться как вердикт о зубе -- отсюда отдельный код 3.
+  if (( __pyrc != 0 )); then
+    say "  НЕИЗМЕРИМО мутация $n: правка не внесена (код $__pyrc): $(cat "$root/mutate.err")"
+    return 3
+  fi
   # Круг 25, E-3: замена сломала разбор -- прибор не может мерить. До стража
   # текст влетал в жертву свободно, и сломанный разбор держался только на
   # случайности (следи этой таблицы привязаны к коду возврата). Отдельный
@@ -1117,12 +1125,19 @@ PY
 }
 
 self_check() {
-  local n root before reddened=0
+  local n root before reddened=0 unmeasurable=0 mrc
   for ((n = 1; n <= EXPECTED_MUTATIONS; n++)); do
     root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-mut.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
     [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
     mk_kit "$root/kit"
-    if ! mutate "$root" "$n"; then rm -rf "$root"; return 2; fi
+    mrc=0; mutate "$root" "$n" || mrc=$?
+    # Код 3 -- правка не внесена: этот зуб неизмерим, но остальные измеримы,
+    # и обход продолжается. Остановка здесь оставила бы хвост таблицы НЕ
+    # ИЗМЕРЕННЫМ, а счёт покраснений -- ложно полным.
+    if (( mrc == 3 )); then unmeasurable=$((unmeasurable + 1)); rm -rf "$root"; continue; fi
+    # Код 2 -- разбор жертвы сломан: замена невалидна, прибор чинится до
+    # следующего вердикта.
+    if (( mrc != 0 )); then rm -rf "$root"; return 2; fi
     local saved_kit="$KIT"
     KIT="$root/kit"; before=$FAILED; LAST_EVID=''
     run_scenario "${MUT_SCENARIO[$n]}" || { say "  ОТКАЗ ПРИБОРА: сценария ${MUT_SCENARIO[$n]} нет (мутация $n)"; rm -rf "$root"; return 2; }
@@ -1140,7 +1155,7 @@ self_check() {
     fi
     rm -rf "$root"
   done
-  say "probes-sync-bench: SELF-CHECK мутаций=$EXPECTED_MUTATIONS покраснели=$reddened"
+  say "probes-sync-bench: SELF-CHECK мутаций=$EXPECTED_MUTATIONS покраснели=$reddened неизмеримо=$unmeasurable"
   [[ $reddened -eq $EXPECTED_MUTATIONS ]]
 }
 
