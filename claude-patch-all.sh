@@ -3034,8 +3034,19 @@ if NEG.search('if { echo x; } > "$f"; then'):
 #
 # 3a (строчное): local|declare|typeset|export|readonly ИМЯ=$(...) --
 # статус берёт builtin (всегда 0), errexit бессилен.
-# 3b (файловое): файл с ИМЯ=$(...) обязан иметь errexit (`set -e` /
-# `set -o errexit` в любой форме), иначе форма без -e даёт rc=0.
+# 3b (строчное, волна 3 #219): красна подстановка-присваивание, чей код
+# возврата не проверен НИ ОДНИМ из трёх измеренных способов: (а) `||`/`&&`
+# на той же строке -- после подстановки или внутри её тела; (б) следующая
+# исполняемая команда -- захват `ИМЯ=$?` (той же строкой после `;` или
+# следующей исполняемой строкой); (в) подстановка в условном контексте
+# (`if [!] ИМЯ=$(...); then`). Файл и его строка `set` в критерий НЕ
+# входят: errexit закрывал класс оптом и ломал идиому захвата кода --
+# из 235 мест волны 1 под errexit не сломалось НИ ОДНО, а сломались два
+# CAP-места (tree-run.sh:383, bun-drift.sh:315), где команда + `rc=$?`
+# умерла до захвата; fs-meta.sh источается тремя хозяевами, и строка
+# `set` внутри него переключала бы режим конвейеру вслепую (волна 2 #219,
+# MEASURE-errexit-risk-219w2.md). Проглатывание закрывается явной
+# проверкой кода на месте, а не режимом файла.
 # 3c (строчное): $(...) в if/elif/while/[[/[ /case, чей код отбрасывается.
 #
 # Исключения (иначе ложные): $((...)) подстановкой не является;
@@ -3063,7 +3074,6 @@ VERIFIED_IF = re.compile(
     r'=(?:\$\(|"\$\(|\'\$\()(?!\()')
 IF_WORD = re.compile(r'^(?:if|elif|while)(?![A-Za-z0-9_])\s+(.*)$')
 CASE_WORD = re.compile(r'^case(?![A-Za-z0-9_])\s+(\S+)')
-SET_LINE = re.compile(r'^set(?![A-Za-z0-9_])')
 
 
 def skip_balanced_paren(s, open_at):
@@ -3299,17 +3309,153 @@ def extract_double_brackets(s):
     return out
 
 
-def enables_errexit(line):
-    s = line.strip()
-    if s.startswith('#') or not SET_LINE.match(s):
-        return False
-    if re.search(r'-o\s+errexit\b', s):
-        return True
-    return re.search(r'(^|\s)-[a-zA-Z]*e', s) is not None
+def split_commands_marked(s):
+    # Как split_simple_commands, но каждая часть несёт разделитель, которым
+    # она отделена от СЛЕДУЮЩЕЙ: None (конец строки), ';', '&&', '||'.
+    # Разделитель нужен проверке (б): захват кода -- это `;`-соседство,
+    # а `&&`/`||` -- уже проверка (а).
+    parts, cmd_start, i, quote, n, dbl = [], 0, 0, None, len(s), 0
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+                i += 1
+                continue
+            if s.startswith('$(', i):
+                i = skip_dollar_sub(s, i)
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            quote = "'"
+            i += 1
+            continue
+        if c == '"':
+            quote = '"'
+            i += 1
+            continue
+        if s.startswith('$(', i):
+            i = skip_dollar_sub(s, i)
+            continue
+        if s.startswith('[[', i):
+            dbl += 1
+            i += 2
+            continue
+        if dbl and s.startswith(']]', i):
+            dbl -= 1
+            i += 2
+            continue
+        if dbl:
+            i += 1
+            continue
+        if s.startswith('&&', i) or s.startswith('||', i):
+            parts.append((s[cmd_start:i], s[i:i + 2]))
+            i += 2
+            cmd_start = i
+            continue
+        if c == ';':
+            parts.append((s[cmd_start:i], ';'))
+            i += 1
+            cmd_start = i
+            continue
+        i += 1
+    parts.append((s[cmd_start:], None))
+    return parts
 
 
-def file_has_errexit(text):
-    return any(enables_errexit(l) for l in text.split('\n'))
+RC_CAPTURE = re.compile(r'^' + IDENT + r'=\$\?$')
+
+
+def line_has_guard(s):
+    # Проверка (а): `||`/`&&` на той же строке -- на уровне строки ПОСЛЕ
+    # подстановки или внутри её тела. Кавычки отслеживаются ПО КОНТЕКСТУ:
+    # внутри $(...) разбор начинается заново, поэтому контексты лежат на
+    # стеке и снимаются закрывающей скобкой. `||`/`&&` ДО первой подстановки
+    # код этой подстановки не проверяют -- не индульгенция.
+    ctx, first_sub, i, n = [None], None, 0, len(s)
+    while i < n:
+        q, c = ctx[-1], s[i]
+        if q == "'":
+            if c == "'":
+                ctx[-1] = None
+            i += 1
+            continue
+        if q == '"':
+            if c == '\\':
+                i += 2
+                continue
+            # $(...) внутри кавычек разбирается ЗАНОВО: контекст кладётся на
+            # стек, и `||` в его теле -- это гард, а не текст строки
+            if s.startswith('$((', i):
+                i = skip_dollar_sub(s, i)
+                continue
+            if s.startswith('$(', i):
+                if first_sub is None:
+                    first_sub = i
+                ctx.append(None)
+                i += 2
+                continue
+            if c == '"':
+                ctx[-1] = None
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            ctx[-1] = "'"
+            i += 1
+            continue
+        if c == '"':
+            ctx[-1] = '"'
+            i += 1
+            continue
+        if s.startswith('$((', i):
+            i = skip_dollar_sub(s, i)
+            continue
+        if s.startswith('$(', i):
+            if first_sub is None:
+                first_sub = i
+            ctx.append(None)
+            i += 2
+            continue
+        if s.startswith('&&', i) or s.startswith('||', i):
+            if len(ctx) > 1 or first_sub is not None:
+                return True
+            i += 2
+            continue
+        if c == ')' and len(ctx) > 1:
+            ctx.pop()
+            i += 1
+            continue
+        i += 1
+    return False
+
+
+def next_capture_line(lines, idx):
+    # Проверка (б), межстрочная форма: следующая ИСПОЛНЯЕМАЯ строка
+    # (пустые и целиком-комментарийные пропускаются). Заголовок функции
+    # захватом не бывает: пара «заголовок + x=$? трапа» -- ложный случай,
+    # устранённый ещё классификатором волны 2 (bun-drift.sh:59:60).
+    j = idx + 1
+    while j < len(lines):
+        t = lines[j].strip()
+        if t and not t.startswith('#'):
+            return t
+        j += 1
+    return ''
 
 
 def is_3a_command(cmd):
@@ -3371,13 +3517,35 @@ def hits_3a(text):
 
 
 def hits_3b(text):
-    if file_has_errexit(text):
-        return []
-    seen, out = set(), []
-    for n, line, cmd in _iter_cmds(text):
-        if n not in seen and is_3b_command(cmd):
-            seen.add(n)
-            out.append((n, line))
+    # Волна 3 #219: критерий построчный. Единица -- строка-место (как и в
+    # волне 1); строка красна, когда НИ одна из трёх проверок кода не сошлась.
+    lines = text.split('\n')
+    out = []
+    for idx, line in enumerate(lines):
+        if line.lstrip().startswith('#'):
+            continue
+        marked = split_commands_marked(line)
+        site = None
+        for j, (part, _sep) in enumerate(marked):
+            if is_3b_command(part):
+                site = j
+                break
+        if site is None:
+            continue
+        # (а) `||`/`&&` на той же строке: после подстановки или внутри неё
+        if line_has_guard(line):
+            continue
+        # (б) захват кода той же строкой: `;`-соседство, НЕ `&&`/`||`
+        if marked[site][1] == ';' and RC_CAPTURE.match(
+                marked[site + 1][0].strip()):
+            continue
+        # (б) захват кода следующей исполняемой строкой
+        if site == len(marked) - 1 and RC_CAPTURE.match(
+                next_capture_line(lines, idx).split(';')[0].strip()):
+            continue
+        # (в) условный контекст исключён ещё перечислением мест:
+        # is_verified_if и головы if/while/case не доходят сюда
+        out.append((idx + 1, line))
     return out
 
 
@@ -3401,10 +3569,26 @@ if hits_3a('local x\nx=' + '$(cmd)\n'):
 
 _s3b = 'v=' + '$(cmd)\n'
 if not hits_3b(_s3b):
-    print("ГЕЙТ 3b СЛЕП: он не видит v=$(cmd) без errexit")
+    print("ГЕЙТ 3b СЛЕП: он не видит v=$(cmd) без проверки кода")
     sys.exit(1)
-if hits_3b('set -euo pipefail\nv=' + '$(cmd)\n'):
-    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: файл с errexit для него тоже находка")
+if not hits_3b('set -euo pipefail\nv=' + '$(cmd)\n'):
+    print("ГЕЙТ 3b СЛЕП: строка set -e не проверяет код подстановки -- "
+          "правило построчное, индульгенции по файлу нет")
+    sys.exit(1)
+if hits_3b('v=' + '$(cmd) || die "отказ"\n'):
+    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: || после подстановки -- код проверен")
+    sys.exit(1)
+if hits_3b('v="' + '$(cmd || true)"\n'):
+    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: || внутри подстановки -- код проверен")
+    sys.exit(1)
+if hits_3b('v=' + '$(cmd); rc=' + '$?\n'):
+    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: захват rc=$? той же строкой -- код проверен")
+    sys.exit(1)
+if hits_3b('v=' + '$(cmd)\nrc=' + '$?\n'):
+    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: захват rc=$? следующей строкой -- код проверен")
+    sys.exit(1)
+if not hits_3b('v=' + '$(cmd)\necho x\nrc=' + '$?\n'):
+    print("ГЕЙТ 3b СЛЕП: захват через строку кода подстановки уже не ловит")
     sys.exit(1)
 
 _s3c_a = 'if [[ "'
@@ -3508,8 +3692,9 @@ for dirpath, dirnames, filenames in os.walk(root):
             snip = line.strip()
             if len(snip) > 120:
                 snip = snip[:117] + "..."
-            bad.append(f"{rel}:{n}: 3b ИМЯ=$" + "(...) при файле без errexit -- "
-                       f"фатальная подстановка даст пустую строку и rc=0 -- {snip}")
+            bad.append(f"{rel}:{n}: 3b код подстановки не проверен -- ни "
+                       f"||/&& на строке, ни захвата кода, ни условного "
+                       f"контекста -- {snip}")
         for n, line in hits_3c(text):
             n3c += 1
             snip = line.strip()

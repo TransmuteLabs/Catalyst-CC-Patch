@@ -244,7 +244,8 @@ scenario_2() {
   bash "$script" --to-home >/dev/null 2>&1 || {
     LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
     bad '2 стадии: исходная раскатка отказала'; return; }
-  dead=$(dead_pid)
+  dead=$(dead_pid) || { LAST_EVID="мёртвый PID не добыт (dead_pid rc=$?)"; rm -rf "$root"
+    bad '2 стадии: свободный мёртвый PID не добыт -- номер стадии взять нечем'; return; }
   stale="$CLAUDE_PROBES_DIR/probes.toml.sync-new.$dead"
   sleep 30 & live_holder=$!
   live="$CLAUDE_PROBES_DIR/probes.toml.sync-new.$live_holder"
@@ -290,11 +291,22 @@ scenario_3() {
   # метки двух процессов, родившихся в одну секунду, СОВПАДАЮТ, поэтому между
   # смертью держателя и рождением чужака выдерживается зазор больше секунды.
   sleep 60 & dead_holder=$!
-  dead_start=$(LC_ALL=C ps -o lstart= -p "$dead_holder" 2>/dev/null)
+  # Ненулевой код ps здесь ОЖИДАН в гонке: держатель мог умереть до снимка.
+  # Код проверяется на месте: пустая метка без имени причины сливалась бы
+  # с «метки совпали» ниже и прятала сломанный снимок за чужим вердиктом.
+  dead_start=$(LC_ALL=C ps -o lstart= -p "$dead_holder" 2>/dev/null) || {
+    LAST_EVID="метку держателя снять не удалось (ps rc=$?)"
+    kill "$dead_holder" 2>/dev/null; wait "$dead_holder" 2>/dev/null
+    rm -rf "$root"
+    bad '3 замок с меткой старта: метку умирающего держателя снять не удалось'; return; }
   kill "$dead_holder" 2>/dev/null; wait "$dead_holder" 2>/dev/null
   sleep 1.5
   sleep 60 & live=$!
-  live_start=$(LC_ALL=C ps -o lstart= -p "$live" 2>/dev/null)
+  live_start=$(LC_ALL=C ps -o lstart= -p "$live" 2>/dev/null) || {
+    LAST_EVID="метку чужака снять не удалось (ps rc=$?)"
+    kill "$live" 2>/dev/null; wait "$live" 2>/dev/null
+    rm -rf "$root"
+    bad '3 замок с меткой старта: метку живого чужака снять не удалось'; return; }
   if [[ -z "$dead_start" || -z "$live_start" || "$dead_start" == "$live_start" ]]; then
     kill "$live" 2>/dev/null; wait "$live" 2>/dev/null
     LAST_EVID="dead_start=[$dead_start] live_start=[$live_start]"
@@ -354,7 +366,8 @@ scenario_4() {
   bash "$script" --to-home >/dev/null 2>&1 || {
     LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
     bad '4 стадия на канонной стороне: исходная раскатка отказала'; return; }
-  dead=$(dead_pid)
+  dead=$(dead_pid) || { LAST_EVID="мёртвый PID не добыт (dead_pid rc=$?)"; rm -rf "$root"
+    bad '4 стадия на канонной стороне: свободный мёртвый PID не добыт -- номер стадии взять нечем'; return; }
   # --from-home кладёт стадии на КАНОННУЮ сторону (dst="$A", дерево
   # репозитория): обломок прошлого прогона имитируется файлом именно там.
   stale="$root/kit/probes/probes.toml.sync-new.$dead"
