@@ -21,7 +21,8 @@ pick_image() {
   fi
   command -v claude
 }
-IMG="$(pick_image)"
+# Пустой образ допустим: следующая проверка требует исполняемый путь и называет отказ.
+IMG="$(pick_image)" || true
 if [[ -z "$IMG" || ! -x "$IMG" ]]; then
   echo "claude-mods: no executable image" >&2
   exit 2

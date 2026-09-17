@@ -131,7 +131,7 @@ trim() {
 
 normalize_ver() {
   local v
-  v=$(trim "$1")
+  v=$(trim "$1") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализована строка версии\n' >&2; return 2; }
   case "$v" in
     bun-v*) v="${v#bun-v}" ;;
     bun-*) v="${v#bun-}" ;;
@@ -175,7 +175,7 @@ read_stub() {
   if [[ "$saw" -eq 0 ]]; then
     refuse_missing "ПРИБОР: в мета нет ключа stub ($meta)"
   fi
-  found=$(trim "$found")
+  found=$(trim "$found") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализовано значение stub\n' >&2; exit 2; }
   if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$found" ]]; then
     refuse_missing "ПРИБОР: ключ stub в мета пуст ($meta) — пусто не ноль"
   fi
@@ -203,7 +203,7 @@ read_stub_from_image() {
   if [[ $rc -ne 0 ]]; then
     refuse_missing "ПРИБОР: stub-version отказал для образа $image (rc=$rc)"
   fi
-  out=$(trim "$out")
+  out=$(trim "$out") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализован stub образа\n' >&2; exit 2; }
   if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$out" ]]; then
     refuse_missing "ПРИБОР: stub-version дал пусто ($image) — пусто не ноль"
   fi
@@ -226,7 +226,7 @@ measure_one() {
     return 4
   fi
   out="${out%%$'\n'*}"
-  out=$(trim "$out")
+  out=$(trim "$out") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализован вывод --version\n' >&2; exit 2; }
   if [[ "$REFUSE_VER_EMPTY" -eq 1 && -z "$out" ]]; then
     return 5
   fi
@@ -307,7 +307,7 @@ measure() {
       refuse_missing "ПРИБОР: нужен --tree (извлечённое дерево с .tree-meta) — без него bun образа мерить нечем"
     fi
     read_stub_from_image "$image"
-    stub_n=$(normalize_ver "$STUB_RAW")
+    stub_n=$(normalize_ver "$STUB_RAW") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализована версия stub образа\n' >&2; exit 2; }
     if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$stub_n" ]]; then
       refuse_missing "ПРИБОР: stub не нормализуется: $STUB_RAW"
     fi
@@ -317,7 +317,7 @@ measure() {
     [[ -d "$tree" ]] || refuse_missing "ПРИБОР: нет дерева: $tree"
     meta="$tree/.tree-meta"
     read_stub "$meta"
-    stub_n=$(normalize_ver "$STUB_RAW")
+    stub_n=$(normalize_ver "$STUB_RAW") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализована версия stub дерева\n' >&2; exit 2; }
     if [[ "$REFUSE_STUB_EMPTY" -eq 1 && -z "$stub_n" ]]; then
       refuse_missing "ПРИБОР: stub не нормализуется: $STUB_RAW"
     fi
@@ -325,17 +325,18 @@ measure() {
   fi
 
   collect_which
-  if [[ -z "$(trim "${WHICH_LIST:-}")" ]]; then
+  __which_trim=$(trim "${WHICH_LIST:-}") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализован список копий bun\n' >&2; exit 2; }
+  if [[ -z "$__which_trim" ]]; then
     refuse_missing "ПРИБОР: bun не найден (which -a bun пуст) — пусто не ноль, «совпадают» этим не объявить"
   fi
 
   while IFS= read -r line || [[ -n "$line" ]]; do
-    line=$(trim "$line")
+    line=$(trim "$line") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализована строка списка копий bun\n' >&2; exit 2; }
     [[ -z "$line" ]] && continue
     path="$line"
     path_seen "$path" && continue
     COPY_PATHS+=("$path")
-    real=$(resolve_path "$path")
+    real=$(resolve_path "$path") || { printf 'ПРИБОР НЕДОСТУПЕН: не разрешён путь копии bun\n' >&2; exit 2; }
     measure_one "$path"
     rc=$?
     if [[ $rc -ne 0 ]]; then
@@ -343,7 +344,7 @@ measure() {
       COPY_VERS+=("")
       continue
     fi
-    nver=$(normalize_ver "$MEASURE_VER")
+    nver=$(normalize_ver "$MEASURE_VER") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализована версия копии bun\n' >&2; exit 2; }
     printf 'КОПИЯ path=%s real=%s version=%s\n' "$path" "$real" "$nver"
     COPY_VERS+=("$nver")
     if [[ -n "$nver" ]] && ! ver_seen "$nver"; then
@@ -356,7 +357,7 @@ measure() {
   fi
 
   exec_path=$(command -v bun) || exec_path=""
-  exec_path=$(trim "$exec_path")
+  exec_path=$(trim "$exec_path") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализован путь исполняемого bun\n' >&2; exit 2; }
   [[ -n "$exec_path" ]] || die2 "ПРИБОР: command -v bun пуст при непустом which -a — исполняемый bun не назван"
 
   exec_ver=""
@@ -375,8 +376,8 @@ measure() {
     if [[ $rc -ne 0 || ( "$REFUSE_VER_EMPTY" -eq 1 && -z "$MEASURE_VER" ) ]]; then
       die2 "ПРИБОР: исполняемый bun не дал --version: $exec_path"
     fi
-    exec_ver=$(normalize_ver "$MEASURE_VER")
-    real=$(resolve_path "$exec_path")
+    exec_ver=$(normalize_ver "$MEASURE_VER") || { printf 'ПРИБОР НЕДОСТУПЕН: не нормализована версия исполняемого bun\n' >&2; exit 2; }
+    real=$(resolve_path "$exec_path") || { printf 'ПРИБОР НЕДОСТУПЕН: не разрешён путь исполняемого bun\n' >&2; exit 2; }
     printf 'КОПИЯ path=%s real=%s version=%s\n' "$exec_path" "$real" "$exec_ver"
   fi
   exec_n="$exec_ver"
@@ -384,7 +385,7 @@ measure() {
     die2 "ПРИБОР: исполняемый bun дал пустую версию: $exec_path — пусто не ноль"
   fi
 
-  real=$(resolve_path "$exec_path")
+  real=$(resolve_path "$exec_path") || { printf 'ПРИБОР НЕДОСТУПЕН: не разрешён путь исполняемого bun\n' >&2; exit 2; }
   printf 'ИСПОЛНЯЕМЫЙ path=%s real=%s version=%s\n' "$exec_path" "$real" "$exec_n"
 
   if [[ ${#UNIQ_VERS[@]} -gt 1 ]]; then
@@ -472,7 +473,8 @@ tooth_pass() {
 tooth_1() {
   TOOTH_N=1 TOOTH_NAME='совпадают' TOOTH_RC=0
   local fx tree out err rc path
-  fx=$(mktemp -d "$WORK/fx1.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx1.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   tree="$fx/tree"
   write_fake_bun "$fx/bin/bun" "1.4.2"
   write_meta "$tree/.tree-meta" "bun-v1.4.2"
@@ -496,7 +498,8 @@ tooth_1() {
 tooth_2() {
   TOOTH_N=2 TOOTH_NAME='расходятся' TOOTH_RC=0
   local fx tree out err rc path verdict
-  fx=$(mktemp -d "$WORK/fx2.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx2.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   tree="$fx/tree"
   write_fake_bun "$fx/bin/bun" "1.4.2"
   write_meta "$tree/.tree-meta" "bun-v1.4.3"
@@ -519,7 +522,8 @@ tooth_2() {
 tooth_3() {
   TOOTH_N=3 TOOTH_NAME='отказ-пустого' TOOTH_RC=0
   local fx tree out err rc path
-  fx=$(mktemp -d "$WORK/fx3.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx3.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   tree="$fx/tree"
   write_meta "$tree/.tree-meta" "bun-v1.4.2"
   path="$BASEPATH"
@@ -556,7 +560,8 @@ tooth_3() {
 tooth_4() {
   TOOTH_N=4 TOOTH_NAME='несколько-копий' TOOTH_RC=0
   local fx tree out err rc path
-  fx=$(mktemp -d "$WORK/fx4.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx4.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   tree="$fx/tree"
   write_fake_bun "$fx/bin1/bun" "1.4.2"
   write_fake_bun "$fx/bin2/bun" "1.3.14"
@@ -595,7 +600,8 @@ tooth_5() {
     tooth_pass
     return 0
   fi
-  fx=$(mktemp -d "$WORK/fx5.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx5.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   copy="$fx/bun-drift.sh"
   cp "$TOOL" "$copy"
   if ! python3 - "$copy" <<'PY'
@@ -629,7 +635,8 @@ PY
 tooth_6() {
   TOOTH_N=6 TOOTH_NAME='нечитаемая-мета' TOOTH_RC=0
   local fx tree out err rc path
-  fx=$(mktemp -d "$WORK/fx6.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx6.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   tree="$fx/tree"
   write_fake_bun "$fx/bin/bun" "1.4.2"
   write_meta "$tree/.tree-meta" "bun-v1.4.2"
@@ -655,7 +662,8 @@ tooth_6() {
 tooth_7() {
   TOOTH_N=7 TOOTH_NAME='пусто-не-ноль' TOOTH_RC=0
   local fx tree out err rc path
-  fx=$(mktemp -d "$WORK/fx7.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx7.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   tree="$fx/tree"
   write_fake_bun "$fx/bin/bun" ""
   write_meta "$tree/.tree-meta" ""
@@ -680,7 +688,8 @@ tooth_7() {
 tooth_9() {
   TOOTH_N=9 TOOTH_NAME='image-ключ' TOOTH_RC=0
   local fx img out err rc path
-  fx=$(mktemp -d "$WORK/fx9.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx9.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   write_fake_bun "$fx/bin/bun" "1.4.2"
   printf 'bun-v1.4.2\n' > "$fx/img"
   img="$fx/img"
@@ -704,7 +713,8 @@ tooth_9() {
 tooth_8() {
   TOOTH_N=8 TOOTH_NAME='пустой-version' TOOTH_RC=0
   local fx tree out err rc path
-  fx=$(mktemp -d "$WORK/fx8.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx8.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   tree="$fx/tree"
   write_fake_bun "$fx/bin/bun" ""
   write_meta "$tree/.tree-meta" "bun-v1.4.2"
@@ -1079,14 +1089,15 @@ self_check() {
   command -v python3 >/dev/null || die2 "ПРИБОР: нет python3 — --self-check не может мерить"
   local orig="$HERE/bun-drift.sh"
   [[ -f "$orig" ]] || orig="${BASH_SOURCE[0]}"
-  WORK=$(mktemp -d "${BUN_DRIFT_SELF_WORK:-${TMPDIR:-/tmp}}/bun-drift-self.XXXXXX")
+  WORK=$(mktemp -d "${BUN_DRIFT_SELF_WORK:-${TMPDIR:-/tmp}}/bun-drift-self.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог self-check\n' >&2; exit 2; }
+  [ -n "$WORK" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога self-check пуст\n' >&2; exit 2; }
   TREE_EXTRACT="${TREE_EXTRACT:-$HERE/tree-extract.py}"
   export TREE_EXTRACT
   cp "$orig" "$WORK/bun-drift.sh"
   TOOL=$WORK/bun-drift.sh
   SNAP=$WORK/bun-drift.sh.snap
   cp "$TOOL" "$SNAP"
-  SNAP_HASH=$(sha256_of "$SNAP")
+  SNAP_HASH=$(sha256_of "$SNAP") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток снимка прибора\n' >&2; exit 2; }
 
   local n list_len=${#TEETH_LIST[@]} green=0 redctl=0 ran=0
   if [[ "$GUARD_TEETH_LIST" -eq 1 && "$list_len" -ne "$EXPECTED_TEETH" ]]; then
@@ -1114,7 +1125,7 @@ self_check() {
   say "bun-drift --self-check: красный контроль (мутация → именной красный → снимок+sha256)"
   for n in "${TEETH_LIST[@]}"; do
     cp "$SNAP" "$TOOL"
-    now=$(sha256_of "$TOOL")
+    now=$(sha256_of "$TOOL") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток копии до мутации\n' >&2; exit 2; }
     if [[ "$now" != "$SNAP_HASH" ]]; then
       say "ЗУБ $n красный-контроль: sha256 копии до мутации разошёлся с снимком"
       return 1
@@ -1134,7 +1145,7 @@ self_check() {
     fi
     say "ЗУБ $n красный-контроль: мутация покраснела именным красным"
     cp "$SNAP" "$TOOL"
-    now=$(sha256_of "$TOOL")
+    now=$(sha256_of "$TOOL") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток копии после восстановления\n' >&2; exit 2; }
     if [[ "$now" != "$SNAP_HASH" ]]; then
       say "ЗУБ $n красный-контроль: sha256 после восстановления разошёлся"
       say "  now $now vs $SNAP_HASH"

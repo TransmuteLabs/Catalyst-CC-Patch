@@ -328,7 +328,9 @@ __ps_children() {
 say() { printf '%s\n' "$*"; }
 require_no_real_run
 
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/corpus-bench.XXXXXX")
+# Пустой путь mktemp ушёл бы в rm -rf трапа уборки и во все склейки путей.
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/corpus-bench.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан рабочий каталог стенда\n' >&2; exit 2; }
+[ -n "$ROOT" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь рабочего каталога стенда пуст\n' >&2; exit 2; }
 # Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
 # EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
 # `set -u`, `${x:?}`, bad substitution) -- провал невидим вызывающему
@@ -413,8 +415,12 @@ mk_corpus() {   # каталог-назначение
   toy_image "$dir/corpus/0.0.900.pristine" 0.0.900
   toy_image "$dir/corpus/0.0.901.pristine" 0.0.901
   local h900 h901
-  h900=$(shasum -a 256 "$dir/corpus/0.0.900.pristine" | awk '{print $1}')
-  h901=$(shasum -a 256 "$dir/corpus/0.0.901.pristine" | awk '{print $1}')
+  # Труба шасумма не несёт код первого звена: пустой дайджест -- единственный
+  # его свидетель, пустой пин отравил бы все сценарии корпуса.
+  h900=$(shasum -a 256 "$dir/corpus/0.0.900.pristine" | awk '{print $1}') || { printf 'ПРИБОР НЕДОСТУПЕН: не вычислен дайджест образа 0.0.900\n' >&2; exit 2; }
+  [ -n "$h900" ] || { printf 'ПРИБОР НЕДОСТУПЕН: дайджест образа 0.0.900 пуст\n' >&2; exit 2; }
+  h901=$(shasum -a 256 "$dir/corpus/0.0.901.pristine" | awk '{print $1}') || { printf 'ПРИБОР НЕДОСТУПЕН: не вычислен дайджест образа 0.0.901\n' >&2; exit 2; }
+  [ -n "$h901" ] || { printf 'ПРИБОР НЕДОСТУПЕН: дайджест образа 0.0.901 пуст\n' >&2; exit 2; }
   # Платформа называется и здесь: разбор списка её ТРЕБУЕТ, и игрушечный
   # список без неё проверял бы дверь платформы, а не свой предмет.
   local plat
@@ -554,9 +560,12 @@ unless() { [[ "$tweak" == "$1" ]] || printf '%s\n' "$2"; }
 # STUB_SLEEP: держать сам прогон заглушки N секунд -- окно для сигналов,
 # адресованных СВИПУ, пока идёт версия (сценарий 91).
 [[ -z "${STUB_SLEEP:-}" ]] || sleep "$STUB_SLEEP"
-ver=$(awk '{print $2; exit}' "$target" 2>/dev/null)
+ver=$(awk '{print $2; exit}' "$target" 2>/dev/null) || { printf 'заглушка конвейера: цель %s не читается -- поле дыма не наполнить\n' "$target" >&2; exit 2; }
 [[ "$tweak" != otherver ]] || ver=0.0.999
-sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}')
+# Труба шасумма не несёт код первого звена: пустой дайджест -- единственный
+# его свидетель, маркер дайджеста без значения лгал бы свипу.
+sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}') || { printf 'заглушка конвейера: дайджест цели %s не вычислен\n' "$target" >&2; exit 2; }
+[ -n "$sha" ] || { printf 'заглушка конвейера: дайджест цели %s пуст\n' "$target" >&2; exit 2; }
 # Баннер прогона tweakcc: полный, либо частичный (режимы parttw*); NOTE
 # конвейера об объявленных непроходах печатает только parttw, а
 # parttw_undeclared оставляет частичный баннер без неё.
@@ -705,7 +714,7 @@ STUB
     echo "  заглушка не смогла бы повторить якорь, и свип мерил бы пустую область." >&2
     exit 2
   fi
-  __anchor_line=$(sed -n "/^TW_RESULTS_ANCHOR='/p" "$dir/tools/tw-layer.sh")
+  __anchor_line=$(sed -n "/^TW_RESULTS_ANCHOR='/p" "$dir/tools/tw-layer.sh") || { printf 'ПРИБОР НЕДОСТУПЕН: якорь блока результатов не вырезан из носителя\n' >&2; exit 2; }
   if ! python3 - "$dir/claude-patch-all.sh" TW_RESULTS_ANCHOR "$__anchor_line" <<'INJECT'
 import io, sys
 path, name, line = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -725,13 +734,16 @@ INJECT
   # ЯКОРЕМ, поэтому лестница у них одна -- разные требования развели бы
   # строгость стенда со строгостью свипа.
   for __sec_name in __TW_CODE_SECTIONS __TW_PROMPT_SECTIONS TWEAKCC_HOME_ORIGIN_NAME; do
-    __sec_hits=$(grep -a -c "^${__sec_name}=" "$dir/claude-patch-all.real")
+    # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+    __sec_hits=$(grep -a -c "^${__sec_name}=" "$dir/claude-patch-all.real") || __g_rc=$?
+    [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт присваиваний %s не получен (код %s)\n' "$__sec_name" "$__g_rc" >&2; exit 2; }
+    __g_rc=0
     if [[ "$__sec_hits" != 1 ]]; then
       echo "corpus-tools-bench: в ките присваиваний $__sec_name $__sec_hits, а нужно ровно одно --" >&2
       echo "  заглушка повторила бы не ту строку, которую исполняет конвейер." >&2
       exit 2
     fi
-    __sec_line=$(sed -n "/^${__sec_name}='/p" "$dir/claude-patch-all.real")
+    __sec_line=$(sed -n "/^${__sec_name}='/p" "$dir/claude-patch-all.real") || { printf 'ПРИБОР НЕДОСТУПЕН: константа %s не вырезана из конвейера\n' "$__sec_name" >&2; exit 2; }
     if [[ -z "$__sec_line" ]]; then
       echo "corpus-tools-bench: в ките нет присваивания $__sec_name --" >&2
       echo "  заглушке нечем повторить константу кита, мерить нечем." >&2
@@ -1072,7 +1084,7 @@ scenario_8() {   # метка происхождения видит неотсл
   # свернувшая те же две строки в функцию с локальным именем, сделала сценарий
   # вечно красным, хотя проверяемое свойство не менялось.
   local repo fn out
-  fn=$(awk '/^kit_state\(\) \{/{f=1} f{print} f && /^\}/{exit}' "$K/tools/sweep.sh")
+  fn=$(awk '/^kit_state\(\) \{/{f=1} f{print} f && /^\}/{exit}' "$K/tools/sweep.sh") || { printf 'ПРИБОР НЕДОСТУПЕН: kit_state не вырезан из свипа\n' >&2; exit 2; }
   # Проверка вырезки идёт по имени ВХОДА функции, а не по её содержимому:
   # опора на конкретное выражение внутри делала мутацию этого выражения
   # неотличимой от «якорь не найден», то есть съедала собственный зуб.
@@ -1080,12 +1092,14 @@ scenario_8() {   # метка происхождения видит неотсл
     LAST_EVID="ЯКОРЬ_НЕ_НАЙДЕН"
     bad "8 метка происхождения: kit_state в sweep.sh не вырезан по якорю"; return
   fi
-  repo=$(mktemp -d "$ROOT/gitrepo.XXXXXX")
+  # repo работает git: пустой путь ушёл бы в cd и подмену SRC_KIT.
+  repo=$(mktemp -d "$ROOT/gitrepo.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог фикстуры git\n' >&2; exit 2; }
+  [ -n "$repo" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь фикстуры git пуст\n' >&2; exit 2; }
   ( cd "$repo" && git init -q . && echo a > a.txt && git add a.txt \
       && git -c user.email=b@b -c user.name=b commit -qm init ) >/dev/null 2>&1
   echo untracked > "$repo/b.txt"
   out=$(SRC_KIT="$repo" bash -c "$fn
-kit_state")
+kit_state") || { printf 'ПРИБОР НЕДОСТУПЕН: вырезанный kit_state не исполнился\n' >&2; exit 2; }
   if [[ "$out" == *"+dirty"* ]]; then
     LAST_EVID="метка=[$out]"
     ok "8 метка происхождения видит неотслеживаемый файл"
@@ -1140,7 +1154,7 @@ scenario_11() {   # наполнитель НЕ пинит то, что лежи
   sed -i.bak 's/^901 0.0.901 .*/901 0.0.901 -/' "$C/versions.diskpin.txt"; rm -f "$C/versions.diskpin.txt.bak"
   local out rc pin
   out=$(run_fetch "$K" "$C/corpus" "$C/versions.diskpin.txt"); rc=$?
-  pin=$(awk '$1=="901"{print $3}' "$C/versions.diskpin.txt")
+  pin=$(awk '$1=="901"{print $3}' "$C/versions.diskpin.txt") || { printf 'ПРИБОР НЕДОСТУПЕН: пин из списка не прочитан\n' >&2; exit 2; }
   LAST_EVID="pin=[$pin] rc=$rc :: $out"
   if [[ "$pin" != "-" ]]; then
     LAST_EVID="ПИН_ЗАПИСАН_С_ДИСКА pin=[$pin]"
@@ -1161,7 +1175,9 @@ scenario_12() {   # обход списка не обрывается на пе�
   sed -i.bak -e 's/^900 0.0.900 .*/900 0.0.900 -/' -e 's/^901 0.0.901 .*/901 0.0.901 -/' \
     "$C/versions.both.txt"; rm -f "$C/versions.both.txt.bak"
   local out
-  out=$(run_fetch "$K" "$C/corpus" "$C/versions.both.txt")
+  # Код наполнителя здесь не предмет: обе версии обязаны быть названы и в
+  # отказе -- вердикт ниже судит только текст вывода.
+  out=$(run_fetch "$K" "$C/corpus" "$C/versions.both.txt") || true
   toy_image "$C/corpus/0.0.900.pristine" 0.0.900
   toy_image "$C/corpus/0.0.901.pristine" 0.0.901
   LAST_EVID="$out"
@@ -1205,7 +1221,9 @@ scenario_16() {   # пин в верхнем регистре -- ТОТ ЖЕ х�
 }
 
 scenario_17() {   # образ не прочитать -- причина называется своя
-  if [[ "$(id -u)" == "0" ]]; then
+  # uid вынесен из условия: внутри [[ ]] код подстановки не виден.
+  __euid=$(id -u) || { printf 'ПРИБОР НЕДОСТУПЕН: uid хозяина не получен\n' >&2; exit 2; }
+  if [[ "$__euid" == "0" ]]; then
     LAST_EVID="под root"
     bad "17 нечитаемый образ: стенд идёт под root, права ничего не запрещают"; return
   fi
@@ -1316,7 +1334,7 @@ scenario_32() {   # разбор вернул пусто -- отказ НАЗЫ�
   # можно только подменив разбор -- потому подмена и делается здесь, в копии
   # кита, и снимается сразу.
   local out rc saved
-  saved=$(cat "$K/tools/corpus-list.py")
+  saved=$(cat "$K/tools/corpus-list.py") || { printf 'ПРИБОР НЕДОСТУПЕН: живой разбор списка не прочитан для подмены\n' >&2; exit 2; }
   printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$K/tools/corpus-list.py"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   printf '%s' "$saved" > "$K/tools/corpus-list.py"
@@ -1409,9 +1427,11 @@ scenario_37() {   # имя файла корпуса -- ОДИН дом
   if (( grc >= 2 )); then
     __instrument_dead "grep -rl по суффиксу корпуса (сценарий 37)" "$grc"
   fi
+  # Пустой перечень чужих суффиксов -- штатный исход (зелёный вердикт ниже);
+  # конвейер фильтров кончается tr, его код всегда ноль.
   stray=$(printf '%s\n' "$hits" \
           | grep -v 'corpus-file-name\.sh$' | grep -v 'corpus-tools-bench' \
-          | sed "s|^$K/||" | sed "s|^$KIT/||" | tr '\n' ' ')
+          | sed "s|^$K/||" | sed "s|^$KIT/||" | tr '\n' ' ') || true
   LAST_EVID="суффикс написан вне общего дома: $stray"
   if [[ -n "${stray// /}" ]]; then
     bad "37 имя файла корпуса: суффикс написан ещё и в: $stray"; return
@@ -1429,9 +1449,14 @@ scenario_38() {   # форма имени замка одна во всех до
   # сборки в копии лежит под именем `build-path-probe.real.sh` (на каноническом
   # имени -- заглушка предполёта), и его дом здесь считается по этой копии:
   # мутация правит именно её.
+  # Список домов может быть пуст -- это предмет вердикта ниже (n != 4);
+  # конвейер поиска кончается sort, его код всегда ноль.
   homes=$(grep -rl 'claude-patch-all\.\$(id -u)\.lock' \
-            "$KIT/claude-patch-all.sh" "$K/tools" 2>/dev/null | sort)
-  n=$(printf '%s\n' "$homes" | grep -c .)
+            "$KIT/claude-patch-all.sh" "$K/tools" 2>/dev/null | sort) || true
+  # grep -c возвращает 1 при нуле подсчитанных строк -- это счёт, не отказ.
+  n=$(printf '%s\n' "$homes" | grep -c .) || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт домов формы замка не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   for f in $homes; do
     # Ручку обязана называть ТА ЖЕ строка: слово CLAUDE_PATCH_LOCK живёт в
     # зондах ещё и внутри CLAUDE_PATCH_LOCK_HELD_BY, и проверка по файлу
@@ -1457,7 +1482,9 @@ scenario_39() {   # снимок кита убирается и на отказ�
   mkdir -p "$K/непрочитаемое"; chmod 000 "$K/непрочитаемое"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   chmod 755 "$K/непрочитаемое"; rmdir "$K/непрочитаемое"
-  leftover=$(__glob_list "$S"/kit.*)
+  # Перечень обломков строится силами самой оболочки; пусто (снимков нет) --
+  # штатный исход, ниже читается явной проверкой.
+  leftover=$(__glob_list "$S"/kit.*) || true
   LAST_EVID="rc=$rc :: $out :: $([[ -n "${leftover// /}" ]] && printf 'ОСТАЛСЯ_СНИМОК=%s' "$leftover")"
   if (( rc == 0 )) || [[ "$out" != *"не снять снимок кита"* ]]; then
     bad "39 уборка снимка: копирование не отказало (rc=$rc)"; return
@@ -1658,12 +1685,19 @@ scenario_66() {   # стенд, позванный ИЗ свипа, меряет
   # Образец СКЛЕИВАЕТСЯ: написанный дословно, он был бы вторым вхождением
   # объявления в этом же файле -- и счёт «ровно одно объявление» никогда не
   # сошёлся бы, а мутация зубов правила бы не то место (измерено 2026-08-28).
-  decl=$(grep -c "SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP""_SELF -u SWEEP_LAST_N)" "$src")
-  uses=$(grep -c '"${SWEEP_ENV_SCRUB\[@\]}"' "$src")
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  decl=$(grep -c "SWEEP_ENV_SCRUB=(env -u SWEEP_LEADER -u SWEEP_KIT -u SWEEP""_SELF -u SWEEP_LAST_N)" "$src") || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт объявлений скруббера не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
+  uses=$(grep -c '"${SWEEP_ENV_SCRUB\[@\]}"' "$src") || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт использований скруббера не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   # Третья половина -- САМОСНЯТИЕ. Образец склеен по той же причине и вдобавок
   # якорится на начало строки: сама строка пина начинается с пробелов и себя не
   # считает.
-  self=$(grep -c "^unset SWEEP_LEADER SWEEP_KIT SWEEP""_SELF SWEEP_LAST_N$" "$src")
+  self=$(grep -c "^unset SWEEP_LEADER SWEEP_KIT SWEEP""_SELF SWEEP_LAST_N$" "$src") || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт самоснятий не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   # Шесть пусковых, и каждый обязан снимать бухгалтерию: run_sweep, run_fetch,
   # launch_sweep, фоновый наполнитель сигнальной ноги (волна 25B), пусковой
   # форк-запаски (волна 26) и пусковой своей сессии (сценарий 87). Число --
@@ -1733,7 +1767,7 @@ CARVE
   fi
   list="$C/pin69.txt"
   { echo "# platform: x"; echo "900 0.0.900 -"; } > "$list"
-  before=$(tr '\n' '|' < "$list")
+  before=$(tr '\n' '|' < "$list") || { printf 'ПРИБОР НЕДОСТУПЕН: список пина не перечитан до прогона\n' >&2; exit 2; }
   out=$(python3 "$carved" "$list" 0.0.999 deadbeef 2>&1); rc=$?
   LAST_EVID="rc=$rc :: $out :: список=$(tr '\n' '|' < "$list")"
   if (( rc != 2 )); then
@@ -1746,7 +1780,11 @@ CARVE
   # Одиннадцатый сайт того же класса, найденный при ремонте десяти: `ls` тут
   # стоял УСЛОВИЕМ, и его ненулевой код означал сразу и «обломка нет», и
   # «прибор сломан» -- вторая ветка молча давала зелёное.
-  if [[ "$(tr '\n' '|' < "$list")" != "$before" ]] || [[ -n "$(__glob_list "$list".new*)" ]]; then
+  # Перечитание и перечень обломков вынесены из условия: их код не виден
+  # внутри [[ ]]; пустой перечень обломков -- штатный исход, ниже читается -n.
+  __list_now=$(tr '\n' '|' < "$list") || { printf 'ПРИБОР НЕДОСТУПЕН: список пина не перечитан после отказа\n' >&2; exit 2; }
+  __list_new=$(__glob_list "$list".new*) || true
+  if [[ "$__list_now" != "$before" ]] || [[ -n "$__list_new" ]]; then
     bad "69 пин без строки: список тронут при отказе"; return
   fi
   ok "69 пин версии, которой нет в списке -- класс «записывать некуда»"
@@ -1799,7 +1837,10 @@ scenario_71() {   # операторская ручка пропуска не п
     LAST_EVID="НЕТ_КОПИИ_СТЕНДА :: $src"
     bad "71 форма ручек: в копии кита нет самого стенда"; return
   fi
-  amb=$(grep -c 'SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP''_PROBE:-}"' "$src")
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  amb=$(grep -c 'SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP''_PROBE:-}"' "$src") || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт своих имён ручки не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   # Своё имя стоит у КАЖДОГО пускового: run_sweep, launch_sweep (сигнальная
   # нога, волна 25B) и пусковой форк-запаски (волна 26). Число -- часть пина.
   if [[ "$amb" != "3" ]]; then
@@ -1815,14 +1856,15 @@ scenario_71() {   # операторская ручка пропуска не п
 mk_lastn_corpus() {   # каталог
   local d=$1 v plat h
   rm -rf "$d"; mkdir -p "$d/corpus"
-  plat=$(grep '^# platform:' "$C/versions.txt")
+  plat=$(grep '^# platform:' "$C/versions.txt") || { printf 'ПРИБОР НЕДОСТУПЕН: строка платформы не найдена в игрушечном списке\n' >&2; exit 2; }
   { echo "# игрушечный список набора"
     echo "$plat"
     # Порядок строк НЕ по номеру: свип обязан брать последние по ВЕРСИИ, а не
     # хвост файла (строку в список дописывают руками).
     for v in 913 910 916 912 914 911 915; do
       toy_image "$d/corpus/0.0.$v.pristine" "0.0.$v"
-      h=$(shasum -a 256 "$d/corpus/0.0.$v.pristine" | awk '{print $1}')
+      h=$(shasum -a 256 "$d/corpus/0.0.$v.pristine" | awk '{print $1}') || { printf 'ПРИБОР НЕДОСТУПЕН: не вычислен дайджест образа 0.0.%s\n' "$v" >&2; exit 2; }
+      [ -n "$h" ] || { printf 'ПРИБОР НЕДОСТУПЕН: дайджест образа 0.0.%s пуст\n' "$v" >&2; exit 2; }
       echo "$v 0.0.$v $h"
     done
   } > "$d/versions.txt"
@@ -1836,7 +1878,10 @@ scenario_73() {   # набор по умолчанию -- пять САМЫХ Н
   local d out rc n sum
   d="$C/lastn"; mk_lastn_corpus "$d"
   out=$(run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
-  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 91[0-9]: exit=')
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 91[0-9]: exit=') || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт измеренных версий не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   sum="$d/corpus/state/log/sweep-summary.txt"
   LAST_EVID="rc=$rc :: измерено=$n :: $out"
   if (( rc != 0 )); then
@@ -1867,7 +1912,10 @@ scenario_74() {   # ручка набора достижима: ноль -- ве
   local d out rc n
   d="$C/lastn"; mk_lastn_corpus "$d"
   out=$(BENCH_LAST_N=0 run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
-  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 91[0-9]: exit=')
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 91[0-9]: exit=') || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт измеренных версий не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   LAST_EVID="rc=$rc :: измерено=$n :: $out"
   if (( rc != 0 )); then
     bad "74 ручка набора: прогон отказал ($rc)"; return
@@ -2166,7 +2214,9 @@ scenario_48() {   # номер группы пишется только под �
   wait_holder_ready "$S/sweep.lock" || exit 2
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
-  after=$(cat "$S/sweep.pgid" 2>/dev/null)
+  # Запись номера группы мог перезаписать сам предмет -- ниже сверяется
+  # содержимое с ЧУЖОЙ_НОМЕР, а не факт чтения.
+  after=$(cat "$S/sweep.pgid" 2>/dev/null) || true
   LAST_EVID="rc=$rc :: pgid=$([[ "$after" == "ЧУЖОЙ_НОМЕР" ]] && echo не тронут || echo "ПЕРЕПИСАН_БЕЗ_ЗАМКА($after)") :: $out"
   if (( rc == 0 )); then
     bad "48 номер группы: свип не отказал на занятом замке -- сценарий не воспроизведён"; return
@@ -2186,7 +2236,9 @@ scenario_49() {   # сводку не записать -- отказ, а не ч
   printf '# ЗЕЛЁНЫЙ_ВЕРДИКТ_ПРОШЛОГО\n' > "$S/log/sweep-summary.txt"
   chmod 444 "$S/log/sweep-summary.txt"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  kept=$(cat "$S/log/sweep-summary.txt" 2>/dev/null)
+  # Сводку мог обесценить сам предмет (перезаписать/снести) -- ниже сверяется
+  # содержимое, а не факт чтения.
+  kept=$(cat "$S/log/sweep-summary.txt" 2>/dev/null) || true
   chmod 644 "$S/log/sweep-summary.txt" 2>/dev/null
   LAST_EVID="rc=$rc :: сводка=$kept :: $out"
   if (( rc == 0 )); then
@@ -2204,7 +2256,11 @@ scenario_50() {   # обломки прошлых прогонов убираю�
   # то, что старше суток: свежий снимок принадлежит живому прогону.
   local S out rc stale fresh
   S="$C/corpus/state"; mkdir -p "$S"
-  stale=$(mktemp -d "$S/kit.XXXXXX"); fresh=$(mktemp -d "$S/kit.XXXXXX")
+  # Пустые пути mktemp уходили бы в touch -t и rm -rf ниже.
+  stale=$(mktemp -d "$S/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог суточного снимка\n' >&2; exit 2; }
+  [ -n "$stale" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь суточного снимка пуст\n' >&2; exit 2; }
+  fresh=$(mktemp -d "$S/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог свежего снимка\n' >&2; exit 2; }
+  [ -n "$fresh" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь свежего снимка пуст\n' >&2; exit 2; }
   touch -t 202601010000 "$stale"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
   LAST_EVID="rc=$rc :: старый=$([[ -e "$stale" ]] && echo ОСТАЛСЯ_ОБЛОМОК || echo убран) :: свежий=$([[ -e "$fresh" ]] && echo цел || echo СНЕСЛИ_ЧУЖОЙ) :: $out"
@@ -2263,11 +2319,14 @@ CARVE
   fi
   list="$C/pinme.txt"
   { echo "# platform: x"; echo "900 0.0.900 -"; echo "901 0.0.901 -"; } > "$list"
-  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}')
+  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}') || { printf 'ПРИБОР НЕДОСТУПЕН: не вычислен дайджест пристинного образа 900\n' >&2; exit 2; }
+  [ -n "$h900" ] || { printf 'ПРИБОР НЕДОСТУПЕН: дайджест пристинного образа 900 пуст\n' >&2; exit 2; }
   out=$(python3 "$carved" "$list" 0.0.900 "$h900" 2>&1); rc=$?
   # Обломок ищется ГЛОБОМ: имя стадии несёт pid (круг 21, E-5/F-6), и точное
   # `$list.new` перестало бы находить что-либо -- проверка ушла бы в пустоту.
-  __leftover=$(__glob_list "$list".new*)
+  # Перечень обломков строится силами самой оболочки; пусто (обломка нет) --
+  # штатный исход, ниже читается -n.
+  __leftover=$(__glob_list "$list".new*) || true
   LAST_EVID="rc=$rc :: $out :: временный=${__leftover:+ОСТАЛСЯ_ВРЕМЕННЫЙ }${__leftover:-убран} :: $(tr '\n' '|' < "$list")"
   if (( rc != 0 )); then
     bad "52 запись списка: блок отказал ($rc): $out"; return
@@ -2384,7 +2443,12 @@ scenario_60() {   # вторая половина предполёта: стен
   fi
   # Оба прогона: сценарии И зубы. Один вызов вместо двух оставил бы беззубый
   # стенд зелёным ровно так же, как его отсутствие.
-  if [[ "$(grep -c 'стенд звался' "$mark")" != "2" ]]; then
+  # Счёт вынесен из условия: код grep внутри [[ ]] не виден; grep -c
+  # возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  __calls=$(grep -c 'стенд звался' "$mark") || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт вызовов стенда не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
+  if [[ "$__calls" != "2" ]]; then
     LAST_EVID="ЗВАЛСЯ_НЕ_ДВАЖДЫ :: $(tr '\n' '|' < "$mark")"
     bad "60 предполёт: стенд позван не дважды (прогон + зубы)"; return
   fi
@@ -2444,8 +2508,10 @@ scenario_57() {   # страж живых прогонов -- одна форм�
   # исполняет и lock-probe, вырезая её отдельно; поэтому форма пинится
   # сравнением, и расхождение двух домов -- находка, а не стиль.
   local a b
-  a=$(guard_form "$K/tools/sweep.sh")
-  b=$(guard_form "$K/tools/corpus-tools-bench.real.sh")
+  # Вырезка блока может дать пусто -- это предмет проверки ниже (блок не
+  # вырезан); конвейер функции кончается sed, его код всегда ноль.
+  a=$(guard_form "$K/tools/sweep.sh") || true
+  b=$(guard_form "$K/tools/corpus-tools-bench.real.sh") || true
   if [[ -z "$a" || -z "$b" ]]; then
     LAST_EVID="ФОРМА_СТРАЖА_РАЗОШЛАСЬ: блок не вырезан (свип=${#a} симв., стенд=${#b} симв.)"
     bad "57 страж живых: блок не найден в одном из домов"; return
@@ -2481,12 +2547,14 @@ scenario_84() {   # снимок кита не сносится из-под жи
   local out rc left users
   out=$(STUB_LINGER=1 BENCH_KIT_DRAIN=2 \
         run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  left=$(ls -d "$C/corpus/state"/kit.?????? 2>/dev/null | head -1)
+  # Снимка может не быть (убран) -- предмет вердикта ниже по -z; конвейер
+  # кончается head, его код всегда ноль.
+  left=$(ls -d "$C/corpus/state"/kit.?????? 2>/dev/null | head -1) || true
   # Жилец -- ОДИН процесс с путём снимка в argv (read -t встроен, ребёнка
   # sleep нет): раньше убивался только носитель пути, а голый sleep доживал
   # сиротой. Жильцы -- не дети сценария, wait недоступен: смерть
   # подтверждается поллингом с бюджетом.
-  users=$(__ps_matching "$C/corpus/state" 'read -t 25')
+  users=$(__ps_matching "$C/corpus/state" 'read -t 25') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск жильцов снимка не выполнен\n' >&2; exit 2; }
   local __u __still __n
   if [[ -n "$users" ]]; then
     kill $users 2>/dev/null
@@ -2524,22 +2592,27 @@ scenario_85() {   # предусловие: чужой прогон -- да, с�
   local inside outside mine_pid other_pid got form
   inside="$C/fake85"; mkdir -p "$inside"
   printf '#!/bin/sh\nsleep 30\n' > "$inside/claude-patch-all.sh"
-  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside85.XXXXXX")
+  # Пустой путь mktemp ушёл бы в rm -rf декорации ниже.
+  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside85.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан внешний каталог декорации\n' >&2; exit 2; }
+  [ -n "$outside" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь внешнего каталога декорации пуст\n' >&2; exit 2; }
   printf '#!/bin/sh\nsleep 30\n' > "$outside/claude-patch-all.sh"
   # `9>&-`: оба живут по 30 секунд и убиваются без ожидания выхода -- с копией
   # дескриптора они держали бы замок стенда после его выхода.
   bash "$inside/claude-patch-all.sh" 9>&- & mine_pid=$!
   bash "$outside/claude-patch-all.sh" 9>&- & other_pid=$!
   sleep 1
-  got=$(real_run_pids)
+  got=$(real_run_pids) || { printf 'ПРИБОР НЕДОСТУПЕН: снимок живых прогонов не получен\n' >&2; exit 2; }
   kill "$mine_pid" "$other_pid" 2>/dev/null
   wait "$mine_pid" 2>/dev/null; wait "$other_pid" 2>/dev/null
   rm -rf "$outside"
   # Считается ТОЛЬКО внутри real_run_pids: строка этого же сценария содержит тот
   # же литерал (иначе grep считал бы сам себя, и счёт зависел бы от правок
   # сценария, а не от предмета).
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
   form=$(sed -n '/^real_run_pids() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh" \
-         | grep -cF 'index($0, r) { print $1 }')
+         | grep -cF 'index($0, r) { print $1 }') || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт вычитания своих не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   LAST_EVID="ответ=[$(printf '%s' "$got" | tr '\n' ' ')] свой=$mine_pid чужой=$other_pid форма=$form"
   if printf '%s\n' "$got" | grep -qx "$mine_pid"; then
     LAST_EVID="СВОЙ_НЕ_ВЫЧТЕН :: $LAST_EVID"
@@ -2564,13 +2637,17 @@ scenario_86() {   # отметка настоящего прогона пере�
   # читает и прерывает прогон классом 3. Форма в копии -- зуб к этой половине:
   # живой abort_if_real_run исполняется из живого файла и мутации недоступен.
   local outside pid out rc marker sub_rc form
-  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside86.XXXXXX")
+  # Пустой путь mktemp ушёл бы в rm -rf декорации ниже.
+  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside86.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан внешний каталог декорации\n' >&2; exit 2; }
+  [ -n "$outside" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь внешнего каталога декорации пуст\n' >&2; exit 2; }
   printf '#!/bin/sh\nsleep 30\n' > "$outside/claude-patch-all.sh"
   bash "$outside/claude-patch-all.sh" 9>&- & pid=$!
   sleep 1
   out=$(require_no_real_run "проба сценария 86"); rc=$?
   marker=НЕТ
-  [[ -e "$ROOT/.real-run" ]] && marker=$(tr '\n' ' ' < "$ROOT/.real-run")
+  if [[ -e "$ROOT/.real-run" ]]; then
+    marker=$(tr '\n' ' ' < "$ROOT/.real-run") || { printf 'ПРИБОР НЕДОСТУПЕН: отметка настоящего прогона не прочитана\n' >&2; exit 2; }
+  fi
   ( abort_if_real_run ) >/dev/null 2>&1; sub_rc=$?
   # Отметка снимается ДО ok/bad: иначе они прервут прогон на этом сценарии.
   rm -f "$ROOT/.real-run"
@@ -2578,7 +2655,9 @@ scenario_86() {   # отметка настоящего прогона пере�
   rm -rf "$outside"
   # Якорь на начало строки: определения ok/bad стоят с нулевой колонки, а
   # строка этого сценария -- с отступом, и сама в счёт не попадает.
-  form=$(grep -cE '^(ok|bad)\(\) +\{ abort_if_real_run;' "$K/tools/corpus-tools-bench.real.sh")
+  form=$(grep -cE '^(ok|bad)\(\) +\{ abort_if_real_run;' "$K/tools/corpus-tools-bench.real.sh") || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт чтений отметки не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   LAST_EVID="rc=$rc отметка=$marker чтение=$sub_rc форма=$form :: $out"
   if (( rc != 3 )); then
     LAST_EVID="КЛАСС_НЕ_ТОТ :: $LAST_EVID"
@@ -2601,7 +2680,10 @@ scenario_86() {   # отметка настоящего прогона пере�
 
 scenario_87() {   # S13: лидер группы получает свою сессию через ребёнка
   local root record out pid sess
-  root=$(mktemp -d "$ROOT/session87.XXXXXX"); mkdir -p "$root/bin" "$root/state"
+  # Пустой путь mktemp ушёл бы в rm -rf записи сессии ниже.
+  root=$(mktemp -d "$ROOT/session87.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сессии\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь каталога сессии пуст\n' >&2; exit 2; }
+  mkdir -p "$root/bin" "$root/state"
   record="$root/record"
   # Сессию читает `os.getsid`, а не `ps`: на этом Darwin `ps -o sess=` печатает
   # 0 и обычному процессу, и отделённому через setsid, а ключевого слова `sid`
@@ -2617,7 +2699,9 @@ SH87
   "${SWEEP_ENV_SCRUB[@]}" \
     SESSION_RECORD="$record" PATH="$root/bin:$PATH" \
     perl -e 'use POSIX (); POSIX::setpgid(0,0); exec "/bin/bash", $ARGV[0], "999"' "$K/tools/sweep.sh" >/dev/null 2>&1 9>&-
-  out=$(cat "$record" 2>/dev/null); pid=${out%% *}; sess=${out##* }
+  # Записи может не быть (свип не дошёл до перехватчика) -- это отдельный
+  # вердикт «не измерена» ниже по пустым pid/sess.
+  out=$(cat "$record" 2>/dev/null) || true; pid=${out%% *}; sess=${out##* }
   rm -rf "$root"
   # «Не смог измерить» отделено от «измерил и разошлось»: без разделения
   # отсутствие python3 или отказ свипа до перехватчика читались бы как
@@ -2731,11 +2815,11 @@ scenario_90() {   # S3: сигнал в дренаже не стартует е�
     bad "90 S3 прогон не дошёл до дренажа -- сценарий не измерен"; return
   fi
   sleep 1
-  t0=$(date +%s)
+  t0=$(date +%s) || { printf 'ПРИБОР НЕДОСТУПЕН: не получена метка начала дренажа\n' >&2; exit 2; }
   kill -TERM "$pid" 2>/dev/null
   wait "$pid"; rc=$?
-  t1=$(date +%s)
-  linger=$(__ps_matching "$C/corpus/state" 'read -t 25')
+  t1=$(date +%s) || { printf 'ПРИБОР НЕДОСТУПЕН: не получена метка конца дренажа\n' >&2; exit 2; }
+  linger=$(__ps_matching "$C/corpus/state" 'read -t 25') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск жильца дренажа не выполнен\n' >&2; exit 2; }
   [[ -n "$linger" ]] && { kill $linger 2>/dev/null; sleep 0.3; }
   rm -rf "$C/corpus/state"/kit.?????? 2>/dev/null
   if (( rc != 143 )); then
@@ -2765,7 +2849,7 @@ scenario_91() {   # S4: точечный TERM отчитывается кодо�
     sleep 1
     kill -TERM "$pid" 2>/dev/null
     wait "$pid"; rc=$?
-    out=$(cat "$log")
+    out=$(cat "$log") || { printf 'ПРИБОР НЕДОСТУПЕН: лог свипа не прочитан\n' >&2; exit 2; }
     if (( rc != 143 )); then
       LAST_EVID="СВИП_НЕ_143 rc=$rc оболочка=$([[ "$out" == *"ошибка оболочки выше"* ]] && echo НАЗВАНА || echo нет) :: $(tail -3 "$log" | tr '\n' '|')"
       bad "91 S4 свип: точечный TERM дал код $rc, ждали 143"; return
@@ -2795,7 +2879,7 @@ for i in range(150):
 with open(sys.argv[1] + '/rows.txt', 'w') as fh:
     fh.write('\n'.join(rows) + '\n')
 PY91
-  plat=$(sed -n 's/^# platform: //p' "$C/versions.txt")
+  plat=$(sed -n 's/^# platform: //p' "$C/versions.txt") || { printf 'ПРИБОР НЕДОСТУПЕН: платформа игрушечного списка не прочитана\n' >&2; exit 2; }
   { echo "# platform: $plat"; cat "$fdir/rows.txt"; } > "$fdir/versions.txt"
   rm -f "$fdir/rows.txt"
   log="$C/s91-fetch.log"
@@ -2804,7 +2888,9 @@ PY91
   fpid=$!
   n=0; c=0
   while (( n < 300 )); do
-    c=$(grep -ac '^уже есть' "$log" 2>/dev/null); c=${c:-0}
+    # Лог создаёт сам фоновый наполнитель; в гонке старта он ещё не читается --
+  # пустой счёт легален, бюджет цикла ниже исчерпает ожидание.
+  c=$(grep -ac '^уже есть' "$log" 2>/dev/null) || true; c=${c:-0}
     (( c >= 30 )) && break
     sleep 0.1; n=$(( n + 1 ))
   done
@@ -2814,7 +2900,7 @@ PY91
   fi
   kill -TERM "$fpid" 2>/dev/null
   wait "$fpid"; rc=$?
-  out=$(cat "$log")
+  out=$(cat "$log") || { printf 'ПРИБОР НЕДОСТУПЕН: лог наполнителя не прочитан\n' >&2; exit 2; }
   if (( rc != 143 )); then
     LAST_EVID="НАПОЛНИТЕЛЬ_НЕ_143 rc=$rc оболочка=$([[ "$out" == *"ошибка оболочки выше"* ]] && echo НАЗВАНА || echo нет) :: $(tail -3 "$log" | tr '\n' '|')"
     bad "91 S4 наполнитель: точечный TERM дал код $rc, ждали 143"; return
@@ -2847,8 +2933,10 @@ PY91
     sleep 0.5
     kill -TERM "$pid" 2>/dev/null
     wait "$pid"; rc=$?
-    out=$(cat "$log")
-    local orph=$(__ps_matching "$C/s91tmp" 'sleep 120')
+    out=$(cat "$log") || { printf 'ПРИБОР НЕДОСТУПЕН: лог зонда пути не прочитан\n' >&2; exit 2; }
+    # local отделён от присваивания: статус builtin гасил бы код подстановки.
+    local orph
+    orph=$(__ps_matching "$C/s91tmp" 'sleep 120') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск осиротевшего держателя зонда не выполнен\n' >&2; exit 2; }
     [[ -n "$orph" ]] && kill $orph 2>/dev/null
   else
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
@@ -2907,8 +2995,8 @@ scenario_93() {   # S6: смерть воркера зубов -- код 2, а �
   # его работы невозможно: копия игрушечного образа делается мгновенно.
   local tdir rid anchor img cpid wpid n rc out wk snap psout leftover p
   tdir="$C/s93tmp"; rm -rf "$tdir"; mkdir -p "$tdir"
-  rid=$(awk -F'\t' '$3=="literal"{print $1; exit}' "$K/tools/checks-mutations.tsv")
-  anchor=$(awk -F'\t' -v id="$rid" '$1==id{print $4}' "$K/tools/checks-mutations.tsv")
+  rid=$(awk -F'\t' '$3=="literal"{print $1; exit}' "$K/tools/checks-mutations.tsv") || { printf 'ПРИБОР НЕДОСТУПЕН: literal-строка таблицы мутаций не прочитана\n' >&2; exit 2; }
+  anchor=$(awk -F'\t' -v id="$rid" '$1==id{print $4}' "$K/tools/checks-mutations.tsv") || { printf 'ПРИБОР НЕДОСТУПЕН: якорь literal-строки не прочитан\n' >&2; exit 2; }
   if [[ -z "$anchor" ]]; then
     LAST_EVID="ЯКОРЬ_ТАБЛИЦЫ_ПОТЕРЯН"
     bad "93 S6: в таблице мутаций нет literal-строки -- прибор не мерил"; return
@@ -2918,8 +3006,11 @@ scenario_93() {   # S6: смерть воркера зубов -- код 2, а �
   # копия. Проверка стоит ПЕРВОЙ -- снятый механизм отвечает раньше и дешевле,
   # чем поднятый пул.
   local kinform
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
   kinform=$(sed -n '/^__ps_children() {$/,/^}$/p' "$K/tools/corpus-tools-bench.real.sh" \
-            | grep -cF '$2 != p { next }')
+            | grep -cF '$2 != p { next }') || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт формы опознания воркера не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   if [[ "$kinform" != "1" ]]; then
     LAST_EVID="ОПОЗНАНИЕ_НЕ_ПО_РОДСТВУ форма=$kinform"
     bad "93 S6: в копии стенда воркер пула опознаётся не по родству"; return
@@ -3005,7 +3096,7 @@ S93R
   while (( n < 300 )); do
     # Родство -- единственный дом в __ps_children (мутация 178 целит туда).
     # Здесь только фильтр интерпретатора: баш двери входа вычёркивается.
-    snap=$(__ps_children "$cpid" 'resource_tracker')
+    snap=$(__ps_children "$cpid" 'resource_tracker') || { printf 'ПРИБОР НЕДОСТУПЕН: снимок потомков прибора зубов не получен\n' >&2; exit 2; }
     wpid=""
     if [[ -n "$snap" ]]; then
       psout=$(__ps_snapshot) || __instrument_dead "снимок ps (фильтр python-воркера с93)" "$?"
@@ -3016,7 +3107,7 @@ S93R
     fi
     if [[ "$wpid" == *$'\n'* ]]; then
       kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
-      leftover=$(__ps_matching "$tdir" '.'); leftover="$leftover $(__ps_matching "$img" '.')"
+      leftover=$(__ps_matching "$tdir" '.') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск выживших процессов прибора не выполнен\n' >&2; exit 2; }; leftover="$leftover $(__ps_matching "$img" '.')"
       for p in $leftover; do kill -KILL "$p" 2>/dev/null; done
       mv "$C/s93-runner-orig" "$K/tools/checks-on-image.sh"
       LAST_EVID="ПРИБОР_НЕ_МЕРИТ ПОТОМКОВ_БОЛЬШЕ_ОДНОГО :: $(printf '%s' "$wpid" | tr '\n' ' ')"
@@ -3027,20 +3118,20 @@ S93R
   done
   if [[ -z "$wpid" ]]; then
     kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
-    leftover=$(__ps_matching "$tdir" '.'); leftover="$leftover $(__ps_matching "$img" '.')"
+    leftover=$(__ps_matching "$tdir" '.') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск выживших процессов прибора не выполнен\n' >&2; exit 2; }; leftover="$leftover $(__ps_matching "$img" '.')"
     for p in $leftover; do kill -KILL "$p" 2>/dev/null; done
     mv "$C/s93-runner-orig" "$K/tools/checks-on-image.sh"
     LAST_EVID="ПРИБОР_НЕ_МЕРИТ :: $(tail -3 "$C/s93.log" | tr '\n' '|')"
     bad "93 S6: воркер не поднялся -- сценарий не измерен"; return
   fi
-  wk=$(__ps_children "$wpid")
+  wk=$(__ps_children "$wpid") || { printf 'ПРИБОР НЕДОСТУПЕН: поиск детей воркера не выполнен\n' >&2; exit 2; }
   kill -9 "$wpid" 2>/dev/null
   wait "$cpid"; rc=$?
   [[ -n "$wk" ]] && kill -9 $wk 2>/dev/null
-  leftover=$(__ps_matching "$tdir" '.'); leftover="$leftover $(__ps_matching "$img" '.')"
+  leftover=$(__ps_matching "$tdir" '.') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск выживших процессов прибора не выполнен\n' >&2; exit 2; }; leftover="$leftover $(__ps_matching "$img" '.')"
   for p in $leftover; do kill -KILL "$p" 2>/dev/null; done
   mv "$C/s93-runner-orig" "$K/tools/checks-on-image.sh"
-  out=$(cat "$C/s93.log")
+  out=$(cat "$C/s93.log") || { printf 'ПРИБОР НЕДОСТУПЕН: лог прибора зубов не прочитан\n' >&2; exit 2; }
   if (( rc == 1 )); then
     LAST_EVID="КОД_НЕ_2 rc=1 (мутация прошла молча) :: $(tail -4 "$C/s93.log" | tr '\n' '|')"
     bad "93 S6 смерть воркера: код 1 -- «мутация прошла молча» вместо «не мерил»"; return
@@ -3060,7 +3151,7 @@ S93R
 scenario_94() {   # S7: обломки checks-teeth.<мёртвый pid> убираются на старте
   local tdir dead out rc
   tdir="$C/s94tmp"; rm -rf "$tdir"; mkdir -p "$tdir"
-  dead=$(dead_pid)
+  dead=$(dead_pid) || { printf 'ПРИБОР НЕДОСТУПЕН: мёртвый pid не получен для обломка воркера\n' >&2; exit 2; }
   printf 'debris' > "$tdir/checks-teeth.$dead.abc.bin"
   printf 'live'   > "$tdir/checks-teeth.$$.def.bin"
   out=$(TMPDIR="$tdir" CLAUDE_PATCH_LOCK="$PLOCK" \
@@ -3110,7 +3201,7 @@ scenario_95() {   # S10: сигнал зонду в case_x -- боевой за�
     sleep 0.5
   }
   cleanup_probe_x() {
-    orph=$(__ps_matching "$C/s95tmp" 'sleep 120')
+    orph=$(__ps_matching "$C/s95tmp" 'sleep 120') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск сироты при уборке не выполнен\n' >&2; exit 2; }
     [[ -n "$orph" ]] && kill $orph 2>/dev/null
     mv "$stub_save" "$K/claude-patch-all.sh"
     rm -rf "$C/s95tmp"/cc-build-path-probe.* 2>/dev/null
@@ -3132,7 +3223,7 @@ scenario_95() {   # S10: сигнал зонду в case_x -- боевой за�
   run_probe_x "$C/s95-term.log"
   kill -TERM "$PROBE_PID" 2>/dev/null
   wait "$PROBE_PID"; rc=$?
-  orph=$(__ps_matching "$C/s95tmp" 'sleep 120')
+  orph=$(__ps_matching "$C/s95tmp" 'sleep 120') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск сироты после TERM не выполнен\n' >&2; exit 2; }
   # Снимок ДО cleanup_probe_x: та вложенная функция ПЕРЕЗАПИСЫВАЕТ orph своим
   # замером уборки, и проверка ниже читала бы уже пусто -- сирота, убитая
   # строкой выше, выглядела бы отсутствующей на любой мутации.
@@ -3149,7 +3240,7 @@ scenario_95() {   # S10: сигнал зонду в case_x -- боевой за�
 
 scenario_96() {   # S11: обломки .part.<мёртвый pid> убираются на старте наполнителя
   local dead out rc
-  dead=$(dead_pid)
+  dead=$(dead_pid) || { printf 'ПРИБОР НЕДОСТУПЕН: мёртвый pid не получен для обломка .part\n' >&2; exit 2; }
   printf 'debris' > "$C/corpus/0.0.900.pristine.part.$dead"
   printf 'live'   > "$C/corpus/0.0.900.pristine.part.$$"
   out=$(run_fetch "$K" "$C/corpus" "$C/versions.txt"); rc=$?
@@ -3174,8 +3265,11 @@ scenario_96() {   # S11: обломки .part.<мёртвый pid> убираю�
 scenario_97() {   # S12: обломок с меткой на СУТКИ ВПЕРЁД убирается прополкой
   local out rc future fresh
   mkdir -p "$S"
-  future=$(mktemp -d "$S/kit.XXXXXX")
-  fresh=$(mktemp -d "$S/kit.XXXXXX")
+  # Пустые пути mktemp уходили бы в touch -t и rm -rf ниже.
+  future=$(mktemp -d "$S/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог обломка из будущего\n' >&2; exit 2; }
+  [ -n "$future" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь обломка из будущего пуст\n' >&2; exit 2; }
+  fresh=$(mktemp -d "$S/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог свежего обломка\n' >&2; exit 2; }
+  [ -n "$fresh" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь свежего обломка пуст\n' >&2; exit 2; }
   python3 - "$future" <<'PY97'
 import os, sys, time
 p = sys.argv[1]
@@ -3239,7 +3333,9 @@ scenario_98() {   # волна 26, D-2: ребёнок форк-запаски, 
     bad "98 D2 прогон не записал номер группы -- форк-запаска не измерена"; return ;; esac
   # Обёртка обязана оставаться лидером СВОЕЙ группы: иначе setsid внутри свипа
   # прошёл бы без форка, и мерилась бы смерть свипа напрямую, а не запаска.
-  pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+  # Пустой номер группы -- предмет вердикта ниже (обёртка не лидер); конвейер
+  # кончается tr, его код всегда ноль.
+  pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || true
   sleep 1
   kill -9 -- -"$pgid" 2>/dev/null
   wait "$pid" 2>/dev/null; rc=$?
@@ -3265,7 +3361,7 @@ scenario_99() {   # волна 26, D-4: пустая метка lstart -- фай
   # отказала бы весь прогон с диагнозом «номер группы переиспользован»).
   local stubdir realps log pid rc n out saw
   stubdir="$C/s99ps"; rm -rf "$stubdir"; mkdir -p "$stubdir"
-  realps=$(command -v ps)
+  realps=$(command -v ps) || { printf 'ПРИБОР НЕДОСТУПЕН: настоящий ps не найден на хозяине\n' >&2; exit 2; }
   cat > "$stubdir/ps" <<PS99
 #!/bin/sh
 case " \$* " in
@@ -3284,7 +3380,7 @@ PS99
     sleep 0.2; n=$(( n + 1 ))
   done
   wait "$pid"; rc=$?
-  out=$(cat "$log")
+  out=$(cat "$log") || { printf 'ПРИБОР НЕДОСТУПЕН: лог прогона с подменным ps не прочитан\n' >&2; exit 2; }
   rm -rf "$stubdir"
   if (( rc != 0 )); then
     LAST_EVID="ПРОГОН_УБИТ_ПУСТОЙ_МЕТКОЙ rc=$rc saw=$saw :: $(tail -3 "$log" | tr '\n' '|')"
@@ -3449,13 +3545,20 @@ scenario_81() {   # стадия чужого прогона не уноситс
   { echo "# platform: x"; echo "900 0.0.900 -"; } > "$list"
   stray="$list.new"
   echo "стадия чужого прогона" > "$stray"
-  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}')
+  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}') || { printf 'ПРИБОР НЕДОСТУПЕН: не вычислен дайджест пристинного образа 900\n' >&2; exit 2; }
+  [ -n "$h900" ] || { printf 'ПРИБОР НЕДОСТУПЕН: дайджест пристинного образа 900 пуст\n' >&2; exit 2; }
   out=$(python3 "$carved" "$list" 0.0.900 "$h900" 2>&1); rc=$?
   LAST_EVID="rc=$rc :: $out :: чужая стадия=$(cat "$stray" 2>/dev/null || echo СНЕСЕНА)"
   if (( rc != 0 )); then
     bad "81 стадия чужого прогона: блок отказал ($rc): $out"; return
   fi
-  if [[ ! -f "$stray" || "$(cat "$stray")" != "стадия чужого прогона" ]]; then
+  # Чужая стадия читается только при существующем файле: -f в вердикте ниже
+  # остаётся первой половиной условия, пустой.cat сюда не доходит.
+  __stray_body=-
+  if [[ -f "$stray" ]]; then
+    __stray_body=$(cat "$stray") || { printf 'ПРИБОР НЕДОСТУПЕН: чужая стадия не прочитана\n' >&2; exit 2; }
+  fi
+  if [[ ! -f "$stray" || "$__stray_body" != "стадия чужого прогона" ]]; then
     LAST_EVID="ЧУЖАЯ_СТАДИЯ_СНЕСЕНА"
     bad "81 стадия чужого прогона снесена -- имя стадии не несёт pid"; return
   fi
@@ -3475,7 +3578,8 @@ scenario_82() {   # сорванное переименование не ост�
   fi
   list="$C/pin82.txt"
   { echo "# platform: x"; echo "900 0.0.900 -"; } > "$list"
-  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}')
+  h900=$(shasum -a 256 "$C/corpus/0.0.900.pristine" | awk '{print $1}') || { printf 'ПРИБОР НЕДОСТУПЕН: не вычислен дайджест пристинного образа 900\n' >&2; exit 2; }
+  [ -n "$h900" ] || { printf 'ПРИБОР НЕДОСТУПЕН: дайджест пристинного образа 900 пуст\n' >&2; exit 2; }
   # Переименование подменяется падающим: другого способа попасть в окно
   # «стадия записана, ввод не удался» у стенда нет.
   out=$(python3 - "$carved" "$list" 0.0.900 "$h900" 2>&1 <<'WRAP'
@@ -3494,7 +3598,9 @@ sys.stderr.write('переименование НЕ сорвалось -- при
 sys.exit(2)
 WRAP
 ); rc=$?
-  leftover=$(__glob_list "$list".new*)
+  # Перечень обломков строится силами самой оболочки; пусто (обломка нет) --
+  # штатный исход, ниже читается -n.
+  leftover=$(__glob_list "$list".new*) || true
   LAST_EVID="rc=$rc :: $out :: обломок=${leftover:-убран}"
   if (( rc == 2 )); then
     LAST_EVID="ПОДМЕНА_НЕ_СРАБОТАЛА"
@@ -3515,7 +3621,10 @@ scenario_103() {   # SWEEP_LAST_N=08 -- десятичные восемь
   local d out rc n
   d="$C/lastn-08"; mk_decimal_corpus "$d"
   out=$(BENCH_LAST_N=08 run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
-  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 9[0-9][0-9]: exit=')
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 9[0-9][0-9]: exit=') || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт измеренных версий не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   LAST_EVID="rc=$rc :: измерено=$n :: $out"
   if (( rc != 0 )) || [[ "$n" != 8 ]]; then
     LAST_EVID="НЕ_ДЕСЯТИЧНЫЕ_ВОСЕМЬ rc=$rc измерено=$n :: $out"
@@ -3526,7 +3635,9 @@ scenario_103() {   # SWEEP_LAST_N=08 -- десятичные восемь
 
 scenario_104() {   # любой будущий путь к пустому SRC обязан отказать кодом 5
   local k out rc changed
-  k=$(mktemp -d "$ROOT/kit.empty.XXXXXX")
+  # Пустой путь mktemp ушёл бы в cp -R ниже.
+  k=$(mktemp -d "$ROOT/kit.empty.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан пустой каталог кита\n' >&2; exit 2; }
+  [ -n "$k" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь пустого каталога кита пуст\n' >&2; exit 2; }
   # В self-check $K уже несёт мутацию жертвы; повторный mk_kit скопировал бы
   # живое дерево и незаметно выбросил именно ту правку, зубы которой меряются.
   cp -R "$K/." "$k/"
@@ -3542,7 +3653,7 @@ else:
     p.write_text(s.replace(old, '    SRC=() # test fixture: force the generic empty-set guard', 1))
     print(1)
 PY_EMPTY
-)
+) || { printf 'ПРИБОР НЕДОСТУПЕН: правка копии свипа на пустой набор не исполнена\n' >&2; exit 2; }
   if [[ "$changed" != 1 ]]; then
     LAST_EVID="УСЛОВИЕ_НЕ_ДОСТИГНУТО: не удалось заставить SRC опустеть"
     bad "104 пустой набор: прибор не подготовил путь"; return
@@ -3560,12 +3671,13 @@ PY_EMPTY
 mk_decimal_corpus() {   # каталог; двенадцать версий для отличия 10 от восьмеричных 8
   local d=$1 v plat h
   rm -rf "$d"; mkdir -p "$d/corpus"
-  plat=$(grep '^# platform:' "$C/versions.txt")
+  plat=$(grep '^# platform:' "$C/versions.txt") || { printf 'ПРИБОР НЕДОСТУПЕН: строка платформы не найдена в игрушечном списке\n' >&2; exit 2; }
   { echo "# игрушечный десятичный список"
     echo "$plat"
     for v in 920 921 922 923 924 925 926 927 928 929 930 931; do
       toy_image "$d/corpus/0.0.$v.pristine" "0.0.$v"
-      h=$(shasum -a 256 "$d/corpus/0.0.$v.pristine" | awk '{print $1}')
+      h=$(shasum -a 256 "$d/corpus/0.0.$v.pristine" | awk '{print $1}') || { printf 'ПРИБОР НЕДОСТУПЕН: не вычислен дайджест образа 0.0.%s\n' "$v" >&2; exit 2; }
+      [ -n "$h" ] || { printf 'ПРИБОР НЕДОСТУПЕН: дайджест образа 0.0.%s пуст\n' "$v" >&2; exit 2; }
       echo "$v 0.0.$v $h"
     done
   } > "$d/versions.txt"
@@ -3575,7 +3687,10 @@ scenario_105() {   # ведущие нули не меняют десятичн�
   local d out rc n
   d="$C/lastn-0010"; mk_decimal_corpus "$d"
   out=$(BENCH_LAST_N=0010 run_sweep "$K" "$d/corpus" "$d/versions.txt"); rc=$?
-  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 9[0-9][0-9]: exit=')
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  n=$(printf '%s\n' "$out" | grep -c '^SWEEP 9[0-9][0-9]: exit=') || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт измеренных версий не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   LAST_EVID="rc=$rc :: измерено=$n :: $out"
   if (( rc != 0 )) || [[ "$n" != 10 ]]; then
     LAST_EVID="ВОСЬМЕРИЧНЫЕ_ВОСЕМЬ rc=$rc :: измерено=$n :: $out"
@@ -3587,7 +3702,9 @@ scenario_105() {   # ведущие нули не меняют десятичн�
 scenario_106() {   # суточный снимок с живым жильцом не сносится прополкой
   local state stale holder out rc left alive
   state="$C/corpus/state"; mkdir -p "$state"
-  stale=$(mktemp -d "$state/kit.XXXXXX")
+  # Пустой путь mktemp стал бы живым съёмком в прополке.
+  stale=$(mktemp -d "$state/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог суточного обломка\n' >&2; exit 2; }
+  [ -n "$stale" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь суточного обломка пуст\n' >&2; exit 2; }
   cat > "$stale/hold.sh" <<'HOLD'
 #!/usr/bin/env bash
 while :; do sleep 1; done
@@ -3612,7 +3729,9 @@ HOLD
 
 scenario_107() {   # автоцель патчера -- только полное имя версии
   local d out rc
-  d=$(mktemp -d "$ROOT/patch-target.XXXXXX")
+  # Пустой путь mktemp ушёл бы в запуск испытуемого модуля ниже.
+  d=$(mktemp -d "$ROOT/patch-target.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог цели патчера\n' >&2; exit 2; }
+  [ -n "$d" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь каталога цели патчера пуст\n' >&2; exit 2; }
   out=$(python3 - "$K/claude_patch.py" "$d" <<'PY_TARGET'
 import importlib.util
 import os
@@ -3661,7 +3780,9 @@ PY_TARGET
 
 scenario_108() {   # промежуточный backup принадлежит процессу-писателю
   local d driver p1 p2 r1 r2 t1 t2 final out
-  d=$(mktemp -d "$ROOT/backup-race.XXXXXX")
+  # Пустой путь mktemp ушёл бы в rm -rf гонки ниже.
+  d=$(mktemp -d "$ROOT/backup-race.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог гонки backup\n' >&2; exit 2; }
+  [ -n "$d" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь каталога гонки backup пуст\n' >&2; exit 2; }
   printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' > "$d/A"
   printf 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n' > "$d/B"
   driver="$d/driver.py"
@@ -3690,7 +3811,9 @@ PY_BACKUP
   python3 "$driver" "$K/claude_patch.py" "$d/A" "$d/backup" "$d" >"$d/one.log" 2>&1 & p1=$!
   python3 "$driver" "$K/claude_patch.py" "$d/B" "$d/backup" "$d" >"$d/two.log" 2>&1 & p2=$!
   wait "$p1"; r1=$?; wait "$p2"; r2=$?
-  t1=$(cat "$d/ready.$p1" 2>/dev/null); t2=$(cat "$d/ready.$p2" 2>/dev/null)
+  # Файлы барьера может не быть (драйвер не дошёл / барьер сорван) -- это
+  # предмет вердикта ниже по -z; чтение с уже стоящим глушением ошибок.
+  t1=$(cat "$d/ready.$p1" 2>/dev/null) || true; t2=$(cat "$d/ready.$p2" 2>/dev/null) || true
   final=bad
   cmp -s "$d/backup" "$d/A" 2>/dev/null && final=A
   cmp -s "$d/backup" "$d/B" 2>/dev/null && final=B
@@ -3713,14 +3836,14 @@ scenario_109() {   # env-ручки читаются одной строгой �
     LAST_EVID="ZERO_ПРОПУСТИЛ_ЗОНД rc=$rc mark=$([[ -e "$mark" ]] && echo есть || echo нет) :: $out"
     bad "109 env-ручки: SWEEP_SKIP_BUILD_PROBE=0 обязан запускать зонд"; return
   fi
-  helper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/sweep.sh")
+  helper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/sweep.sh") || { printf 'ПРИБОР НЕДОСТУПЕН: читатель __envon не вырезан из свипа\n' >&2; exit 2; }
   out=$(bash -c "$helper"$'\n''TEST_FLAG=true; __envon TEST_FLAG; a=$?; TEST_FLAG=false; __envon TEST_FLAG; b=$?; TEST_FLAG=ага; __envon TEST_FLAG >/dev/null 2>&1; c=$?; printf "%s/%s/%s\n" "$a" "$b" "$c"'); hrc=$?
-  phelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/claude-patch-all.real")
-  pout=$(bash -c "$phelper"$'\n''CLAUDE_PATCH_SKIP_MODELS=true; __envon CLAUDE_PATCH_SKIP_MODELS; printf "%s\n" "$?"')
-  lhelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/lock-probe.sh")
-  lout=$(bash -c "$lhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"')
-  bhelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/build-path-probe.real.sh")
-  bout=$(bash -c "$bhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"')
+  phelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/claude-patch-all.real") || { printf 'ПРИБОР НЕДОСТУПЕН: читатель __envon не вырезан из конвейера\n' >&2; exit 2; }
+  pout=$(bash -c "$phelper"$'\n''CLAUDE_PATCH_SKIP_MODELS=true; __envon CLAUDE_PATCH_SKIP_MODELS; printf "%s\n" "$?"') || { printf 'ПРИБОР НЕДОСТУПЕН: вырезанный читатель конвейера не исполнился\n' >&2; exit 2; }
+  lhelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/lock-probe.sh") || { printf 'ПРИБОР НЕДОСТУПЕН: читатель __envon не вырезан из зонда замка\n' >&2; exit 2; }
+  lout=$(bash -c "$lhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"') || { printf 'ПРИБОР НЕДОСТУПЕН: вырезанный читатель зонда замка не исполнился\n' >&2; exit 2; }
+  bhelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/tools/build-path-probe.real.sh") || { printf 'ПРИБОР НЕДОСТУПЕН: читатель __envon не вырезан из зонда пути\n' >&2; exit 2; }
+  bout=$(bash -c "$bhelper"$'\n''KEEP_ROOT=0; __envon KEEP_ROOT; a=$?; KEEP_ROOT=ага; __envon KEEP_ROOT >/dev/null 2>&1; b=$?; printf "%s/%s\n" "$a" "$b"') || { printf 'ПРИБОР НЕДОСТУПЕН: вырезанный читатель зонда пути не исполнился\n' >&2; exit 2; }
   # Раньше здесь стоял греп ФОРМЫ вызова -- и он запинил форму `__envon ИМЯ; rc=$?`,
   # которая под `set -e` обрывает скрипт молча на невыставленной ручке (измерено на
   # приёмке волны 31: установка проходила, конвейер объявлял отказ 1 сразу после
@@ -3743,14 +3866,20 @@ scenario_109() {   # env-ручки читаются одной строгой �
               "tools/lock-probe.sh KEEP_ROOT" \
               "tools/build-path-probe.real.sh KEEP_ROOT"; do
     sfile="${pair%% *}"; sknob="${pair##* }"
-    site=$(grep -B1 -E "^__envon $sknob(;| \|\|) " "$K/$sfile" | grep -v '^--$')
+    # grep -v возвращает 1, когда после фильтра не осталось строк, -- это
+    # «сайта нет», предмет continue ниже, а не отказ прибора.
+    site=$(grep -B1 -E "^__envon $sknob(;| \|\|) " "$K/$sfile" | grep -v '^--$') || __g_rc=$?
+    [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: поиск сайта чтения ручки %s отказал (код %s)\n' "$sknob" "$__g_rc" >&2; exit 2; }
+    __g_rc=0
     [[ "$site" == *"__envon $sknob"* ]] || continue
     found=$((found+1))
-    shelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/$sfile")
+    shelper=$(awk '/^__envon\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$K/$sfile") || { printf 'ПРИБОР НЕДОСТУПЕН: читатель __envon не вырезан из %s\n' "$sfile" >&2; exit 2; }
+    # Отказ внутреннего bash -- сам предмет замера: сайт чтения ручки может
+    # оборваться под set -e, и выживание судится по метке ДОШЛИ в выводе.
     sout=$(env -u "$sknob" bash -c "set -euo pipefail
 $shelper
 $site
-printf ДОШЛИ" 2>&1)
+printf ДОШЛИ" 2>&1) || true
     [[ "$sout" == *ДОШЛИ* ]] && survived=$((survived+1))
   done
   LAST_EVID="helper_rc=$hrc sweep=$out patch=$pout lock=$lout build=$bout найдено=$found выжили=$survived"
@@ -3979,7 +4108,9 @@ scenario_116() {   # расклад крестиков ПО СЕКЦИЯМ и Я
   if (( rc != 0 )); then
     bad "116 расклад крестиков: зелёный прогон не состоялся (код $rc)"; return
   fi
-  line=$(grep -a 'twcode=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twcode=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД :: $line"
   if [[ "$line" != *"tweakcc=4 twcode=3 twprompt=1 twmiss=2"* ]]; then
     bad "116 расклад крестиков: в сводке не «tweakcc=4 twcode=3 twprompt=1 twmiss=2»; было: $line"
@@ -4064,7 +4195,9 @@ scenario_121() {   # промахов накладок нет -- поле обя
   if (( rc != 0 )); then
     bad "121 лог без промахов накладок: зелёный прогон не состоялся (код $rc)"; return
   fi
-  line=$(grep -a 'twmiss=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twmiss=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД :: $line"
   if [[ "$line" != *"twmiss=0"* ]]; then
     bad "121 лог без промахов накладок: в сводке не «twmiss=0»; было: $line"; return
@@ -4107,7 +4240,9 @@ scenario_123() {   # ответ «сошлись» засчитан полем t
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twoff=1"* ]]; then
     bad "123 дверь выключенных правок: в сводке не «twoff=1»; было: $line"; return
@@ -4127,7 +4262,9 @@ scenario_124() {   # слепая ручка: считается СВОЯ две
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(STUB_TWEAK=blindtwboth run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twlevel=1 twoff=1"* ]]; then
     bad "124 слепая ручка: в сводке не «twlevel=1 twoff=1»; было: $line"; return
@@ -4147,7 +4284,9 @@ scenario_125() {   # ответ «объявления нет, выключен�
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(STUB_TWEAK=emptyoff run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twoff=1"* ]]; then
     bad "125 пустое объявление: в сводке не «twoff=1»; было: $line"; return
@@ -4249,7 +4388,9 @@ scenario_130() {   # сумма крестиков ПРОИЗВОДНА от р�
   if (( rc != 0 )); then
     bad "130 галочка в списке плана: зелёный прогон не состоялся (код $rc)"; return
   fi
-  line=$(grep -a 'twcode=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twcode=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="СУММА :: $line"
   if [[ "$line" != *"tweakcc=4 twcode=3 twprompt=1"* ]]; then
     bad "130 сумма не производна от расклада; было: $line"
@@ -4267,7 +4408,9 @@ scenario_131() {   # ответ «сошлись с объявлением» з�
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a 'twinert=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twinert=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twinert=1"* ]]; then
     bad "131 дверь инертных правок: в сводке не «twinert=1»; было: $line"; return
@@ -4286,7 +4429,9 @@ scenario_132() {   # ответ «не объявлено и не измерен
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(STUB_TWEAK=emptyinert run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a 'twinert=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twinert=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twinert=1"* ]]; then
     bad "132 пустая сходимость инертных: в сводке не «twinert=1»; было: $line"; return
@@ -4306,7 +4451,9 @@ scenario_133() {   # слепая ручка: ТРИ двери, три поля
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(STUB_TWEAK=blindtwboth run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a 'twinert=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twinert=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twlevel=1 twoff=1 twinert=1"* ]]; then
     bad "133 слепая ручка: в сводке не «twlevel=1 twoff=1 twinert=1»; было: $line"; return
@@ -4333,7 +4480,9 @@ scenario_135() {   # собственный счёт якорей назван �
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twanchor="* ]]; then
     LAST_EVID="ПОЛЕ_TWANCHOR_НЕТ :: $line"
@@ -4353,7 +4502,9 @@ scenario_136() {   # ответ часового формы засчитан п�
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twform="* ]]; then
     LAST_EVID="ПОЛЕ_TWFORM_НЕТ :: $line"
@@ -4373,7 +4524,9 @@ scenario_137() {   # ответ двери непрошедших накладо
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twpfail="* ]]; then
     LAST_EVID="ПОЛЕ_TWPFAIL_НЕТ :: $line"
@@ -4397,7 +4550,9 @@ scenario_138() {   # слепая ручка: каждой двери -- сво�
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(STUB_TWEAK=blindtwboth run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twlevel=1 twoff=1 twinert=1 twanchor=1 twform=1 twpfail=1"* ]]; then
     bad "138 слепая ручка: в сводке не «twlevel=1 twoff=1 twinert=1 twanchor=1 twform=1 twpfail=1»; было: $line"; return
@@ -4426,7 +4581,9 @@ scenario_139() {   # СВОЙ часовой формы у свипа: стро�
     bad "139 нарушитель формы: в вердикте нет причины часового свипа; было: $(printf '%s' "$out" | grep -a 'SWEEP 900' | head -1)"
     return
   fi
-  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1) || true
   if [[ "$line" != *"twunsect=1"* ]]; then
     LAST_EVID="ПОЛЕ_TWUNSECT_НЕТ :: $line"
     bad "139 нарушитель формы: в сводке не «twunsect=1»; было: $line"; return
@@ -4448,7 +4605,9 @@ scenario_142() {   # ЧЕТВЁРТЫЙ терминальный ответ дв
   local out rc line summary
   summary="$S/log/sweep-summary.txt"
   out=$(STUB_TWEAK=originoff run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
-  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1)
+  # Поля в сводке может не быть -- предмет проверки ниже; поиск кончается
+  # head, его код всегда ноль, отсутствие читается сравнением строки.
+  line=$(grep -a 'twoff=' "$summary" 2>/dev/null | head -1) || true
   LAST_EVID="РАСКЛАД(rc=$rc) :: $line"
   if [[ "$line" != *"twoff=1"* ]]; then
     bad "142 дом создан прогоном: в сводке не «twoff=1»; было: $line"; return
@@ -4468,7 +4627,7 @@ scenario_143() {   # третья ветка выбора дома: свип К�
   # расхождение писателя с читателем ровно на той машине, ради которой отметка
   # и заведена.
   local out rc name origin home
-  name=$(LC_ALL=C sed -n "s/^TWEAKCC_HOME_ORIGIN_NAME='\(.*\)'\$/\1/p" "$K/claude-patch-all.real")
+  name=$(LC_ALL=C sed -n "s/^TWEAKCC_HOME_ORIGIN_NAME='\(.*\)'\$/\1/p" "$K/claude-patch-all.real") || { printf 'ПРИБОР НЕДОСТУПЕН: имя отметки происхождения не вырезано из конвейера\n' >&2; exit 2; }
   if [[ -z "$name" ]]; then
     LAST_EVID="ИМЯ_ОТМЕТКИ_НЕ_ПРОЧИТАНО :: $K/claude-patch-all.real"
     bad "143 отметка происхождения: имя не прочитано из конвейера"; return
@@ -4487,7 +4646,7 @@ scenario_143() {   # третья ветка выбора дома: свип К�
     LAST_EVID="ОТМЕТКИ_НЕТ :: $(ls -a "$home" 2>&1 | tr '\n' '|')"
     bad "143 отметка происхождения: файла «${name}» в созданном доме нет"; return
   fi
-  origin=$(head -1 "$home/$name")
+  origin=$(head -1 "$home/$name") || { printf 'ПРИБОР НЕДОСТУПЕН: отметка происхождения не прочитана\n' >&2; exit 2; }
   if [[ "$origin" != "sweep-created "* ]]; then
     LAST_EVID="ОТМЕТКА_БЕЗ_ФОРМЫ :: $origin"
     bad "143 отметка происхождения: первая строка не называет происхождение: $origin"; return
@@ -4511,9 +4670,12 @@ scenario_144() {   # обе сводки называют ОДИН набор д
   if (( rc != 0 )); then
     bad "144 две сводки: зелёный прогон не состоялся (код $rc)"; return
   fi
-  machine=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1)
-  human=$(printf '%s\n' "$out" | grep -a '^SWEEP 900: ' | head -1)
-  group=$(printf '%s\n' "$machine" | LC_ALL=C sed -n 's/.* twmiss=[0-9]* \(.*\) ours=.*/\1/p')
+  # Машино-человеческие строки могут отсутствовать -- это предмет вердиктов
+  # ниже; оба поиска кончаются head/sed, чей код всегда ноль, а отсутствие
+  # читается явными сравнениями.
+  machine=$(grep -a '^900 ' "$summary" 2>/dev/null | head -1) || true
+  human=$(printf '%s\n' "$out" | grep -a '^SWEEP 900: ' | head -1) || true
+  group=$(printf '%s\n' "$machine" | LC_ALL=C sed -n 's/.* twmiss=[0-9]* \(.*\) ours=.*/\1/p') || true
   if [[ -z "$group" || "$group" != *"="* ]]; then
     LAST_EVID="ГРУППА_НЕ_ВЫРЕЗАНА :: $machine"
     bad "144 две сводки: группа дверей не вырезана из машинной строки"; return
@@ -4798,18 +4960,21 @@ scenario_149() {   # детектор процессов не возвращае
   # единого дефекта в детекторе. Бюджет тот же, что у соседних ожиданий.
   local n=0
   while (( n < 300 )); do
-    seen=$(__ps_matching "$dir" 'read -t 20')
+    seen=$(__ps_matching "$dir" 'read -t 20') || { printf 'ПРИБОР НЕДОСТУПЕН: поиск держателя в цикле ожидания не выполнен\n' >&2; exit 2; }
     [[ -n "$seen" ]] && break
     sleep 0.1; n=$(( n + 1 ))
   done
-  excl=$(__ps_matching "$dir" 'read -t 20' "$holder")
+  excl=$(__ps_matching "$dir" 'read -t 20' "$holder") || { printf 'ПРИБОР НЕДОСТУПЕН: повторный поиск держателя с исключением не выполнен\n' >&2; exit 2; }
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   rm -rf "$dir"
   # Считается ТОЛЬКО внутри __ps_matching: строка этого же сценария содержит
   # тот же литерал, и счёт по всему файлу зависел бы от правок сценария, а не
   # от предмета (тот же приём, что в сценарии 85).
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
   form=$(sed -n '/^__ps_matching() {$/,/^}$/p' "$K/tools/corpus-tools-bench.real.sh" \
-         | grep -cF 'index(skip, " " $1 " ") { next }')
+         | grep -cF 'index(skip, " " $1 " ") { next }') || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт исключения pid не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   LAST_EVID="держатель=$holder найден=[$(printf '%s' "$seen" | tr '\n' ' ')] с_исключением=[$(printf '%s' "$excl" | tr '\n' ' ')] форма=$form"
   if ! printf '%s\n' "$seen" | grep -qx "$holder"; then
     LAST_EVID="ДЕТЕКТОР_СЛЕП :: $LAST_EVID"
@@ -4928,7 +5093,7 @@ SOCKPY
 
 gate_prepare() {   # имя каталога сценария
   GATE_D="$C/$1"; rm -rf "$GATE_D"; mkdir -p "$GATE_D/frag" "$GATE_D/stub"
-  GATE_CARVED=$(gate_carve "$GATE_D/frag")
+  GATE_CARVED=$(gate_carve "$GATE_D/frag") || { printf 'ПРИБОР НЕДОСТУПЕН: стадия гейта интерфейса не вырезана\n' >&2; exit 2; }
   GATE_BIN="$GATE_D/fake-bin"; gate_fake_bin "$GATE_BIN"
   gate_stub_python "$GATE_D/stub"
   GATE_DRV="$GATE_D/drv.sh"; gate_drv_file "$GATE_DRV"
@@ -4939,11 +5104,13 @@ gate_prepare() {   # имя каталога сценария
 gate_host_pair() { ( source "$GATE_D/frag/__host_os_arch.sh"; __host_os_arch ); }
 
 gate_call() {   # режим образа, режим прибора, бюджет, [цель]
-  GATE_H=$(mktemp -d "$GATE_D/home.XXXXXX")
+  # Пустой путь mktemp уходил бы в rm -rf дома гейта ниже.
+  GATE_H=$(mktemp -d "$GATE_D/home.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный дом гейта\n' >&2; exit 2; }
+  [ -n "$GATE_H" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного дома гейта пуст\n' >&2; exit 2; }
   mkdir -p "$GATE_H/cfg" "$GATE_H/proj"
   local target="${4:-$(gate_host_pair)}" gate_path="$GATE_D/stub:$PATH" tool
   local gate_python
-  gate_python="$(type -P python3)"
+  gate_python="$(type -P python3)" || { printf 'ПРИБОР НЕДОСТУПЕН: интерпретатор PTY-прибора не найден на хозяине\n' >&2; exit 2; }
   if [[ "$2" == no-python ]]; then
     mkdir -p "$GATE_D/bare"
     for tool in bash uname tr rm; do ln -sf "$(type -P "$tool")" "$GATE_D/bare/$tool"; done
@@ -4979,7 +5146,9 @@ scenario_150() {   # единственная форма прибора, argv и
   gate_prepare s150
   gate_carved_or_bad 150 || return
   gate_call e run 5
-  launch=$(gate_launch_line)
+  # Пустая строка запуска -- законный исход (PTY не звали); конвейер функции
+  # кончается tail, его код всегда ноль, отсутствие проверяется ниже.
+  launch=$(gate_launch_line) || true
   LAST_EVID="rc=$GATE_RC запуск=[$launch] :: $GATE_OUT"
   if [[ "$launch" != *"/pty-run.py --cols "* || "$launch" != *" --status "* || "$launch" != *" -- $GATE_H/run.sh" ]]; then
     LAST_EVID="PTY_ARGV_НЕ_ДОЕХАЛ :: $LAST_EVID"
@@ -5232,7 +5401,7 @@ door_carved_or_bad() {   # номер сценария
 
 door_prepare() {   # имя каталога сценария
   DOOR_D="$C/$1"; rm -rf "$DOOR_D"; mkdir -p "$DOOR_D/frag" "$DOOR_D/stub" "$DOOR_D/bare"
-  DOOR_CARVED=$(door_carve "$DOOR_D/frag")
+  DOOR_CARVED=$(door_carve "$DOOR_D/frag") || { printf 'ПРИБОР НЕДОСТУПЕН: фрагменты двери обвала не вырезаны\n' >&2; exit 2; }
   cat > "$DOOR_D/stub/curl" <<'CURL45'
 #!/usr/bin/env bash
 # Подставной `curl` двери: печатает КОД, названный сценарием, и ничего не качает.
@@ -5461,7 +5630,7 @@ w48_carve() {   # каталог, имена функций... -> печатае
 
 note_prepare() {   # имя каталога сценария
   NOTE_D="$C/$1"; rm -rf "$NOTE_D"; mkdir -p "$NOTE_D/f"
-  NOTE_CARVED=$(w48_carve "$NOTE_D/f" "${NOTE_FUNCS[@]}")
+  NOTE_CARVED=$(w48_carve "$NOTE_D/f" "${NOTE_FUNCS[@]}") || { printf 'ПРИБОР НЕДОСТУПЕН: фрагменты диагноста платформы не вырезаны\n' >&2; exit 2; }
   cat > "$NOTE_D/drv.sh" <<'NOTEDRV'
 set -euo pipefail
 source "$1"; source "$2"; source "$3"
@@ -5485,7 +5654,8 @@ note_host_pair() {
 }
 
 note_host_form() {   # форма заголовка, СОВПАДАЮЩАЯ с хозяином, либо «НЕТ»
-  case "$(note_host_pair)" in
+  __hp=$(note_host_pair) || { printf 'ПРИБОР НЕДОСТУПЕН: пара хозяина не получена\n' >&2; exit 2; }
+  case "$__hp" in
     darwin-arm64) printf 'macho-arm64\n' ;;
     darwin-x64)   printf 'macho-x64\n' ;;
     linux-x64)    printf 'elf-x64\n' ;;
@@ -5499,7 +5669,8 @@ note_host_form() {   # форма заголовка, СОВПАДАЮЩАЯ с 
 note_foreign_form() {   # «форма пара», ЗАВЕДОМО чужая этому хозяину
   # Форма выбирается ОТ хозяина, а не прибивается: зуб, прибитый к win32,
   # зеленел бы на маке и краснел бы на windows-хозяине по причине прибора.
-  if [[ "$(note_host_pair)" == win32-arm64 ]]; then
+  __hp=$(note_host_pair) || { printf 'ПРИБОР НЕДОСТУПЕН: пара хозяина не получена\n' >&2; exit 2; }
+  if [[ "$__hp" == win32-arm64 ]]; then
     printf 'elf-x64 linux-x64\n'
   else
     printf 'pe-arm64 win32-arm64\n'
@@ -5519,8 +5690,9 @@ note_call() {   # форма заголовка -> NOTE_OUT/NOTE_RC
 scenario_186() {   # чужая платформа: причина НАЗВАНА, и это не приговор байтам
   local ff fp hp
   note_prepare s186; note_carved_or_bad 186 || return
-  ff=$(note_foreign_form); fp="${ff#* }"; ff="${ff%% *}"
-  hp=$(note_host_pair)
+  ff=$(note_foreign_form) || { printf 'ПРИБОР НЕДОСТУПЕН: чужая пара платформы не построена\n' >&2; exit 2; }
+  fp="${ff#* }"; ff="${ff%% *}"
+  hp=$(note_host_pair) || { printf 'ПРИБОР НЕДОСТУПЕН: пара хозяина не получена\n' >&2; exit 2; }
   note_call "$ff"
   # Порядок «причина раньше кода» -- констрейнт волны 47, объяснён в сценарии 172.
   if [[ "$NOTE_OUT" != *"ПРИЧИНА: образ собран под $fp, а хозяин $hp"* ]]; then
@@ -5541,7 +5713,8 @@ scenario_186() {   # чужая платформа: причина НАЗВАН�
 scenario_187() {   # своя платформа: причина НЕ в платформе, и это сказано вслух
   local hf hp
   note_prepare s187; note_carved_or_bad 187 || return
-  hf=$(note_host_form); hp=$(note_host_pair)
+  hf=$(note_host_form) || { printf 'ПРИБОР НЕДОСТУПЕН: форма хозяина не получена\n' >&2; exit 2; }
+  hp=$(note_host_pair) || { printf 'ПРИБОР НЕДОСТУПЕН: пара хозяина не получена\n' >&2; exit 2; }
   if [[ "$hf" == "НЕТ" ]]; then
     LAST_EVID="ХОЗЯИН_НЕ_НАЗВАН пара=[$hp]"
     bad "187 диагност платформы: пара хозяина «${hp}» не разобрана -- фикстуру не выбрать"; return
@@ -5584,7 +5757,7 @@ scenario_188() {   # детектор ОТКАЗАЛ: диагност созн�
 
 why_prepare() {   # имя каталога сценария
   WHY_D="$C/$1"; rm -rf "$WHY_D"; mkdir -p "$WHY_D/f"
-  WHY_CARVED=$(w48_carve "$WHY_D/f" "${WHY_FUNCS[@]}")
+  WHY_CARVED=$(w48_carve "$WHY_D/f" "${WHY_FUNCS[@]}") || { printf 'ПРИБОР НЕДОСТУПЕН: классификатор поводов не вырезан\n' >&2; exit 2; }
   cat > "$WHY_D/drv.sh" <<'WHYDRV'
 set -euo pipefail
 source "$1"
@@ -5707,7 +5880,7 @@ scenario_194() {   # __ver_from_bytes: образ без отметки верс
   # делает её свойством самой двери.
   local d out rc carved
   d="$C/s194"; rm -rf "$d"; mkdir -p "$d/f"
-  carved=$(w48_carve "$d/f" __ver_from_bytes)
+  carved=$(w48_carve "$d/f" __ver_from_bytes) || { printf 'ПРИБОР НЕДОСТУПЕН: дом версии-из-байтов не вырезан\n' >&2; exit 2; }
   if [[ "$carved" != 1 ]]; then
     LAST_EVID="ФРАГМЕНТ_НЕ_ВЫРЕЗАН(вырезано $carved из 1)"
     bad "194 версия из байтов: фрагмент не вырезан -- прибор смотрит не туда"; return
@@ -5723,7 +5896,7 @@ VBFLAT
   cat > "$d/drv.sh" <<'VBDRV'
 set -euo pipefail
 source "$1"
-V="$(__ver_from_bytes "$2")"
+V="$(__ver_from_bytes "$2")" || { printf 'драйвер с194: дом версии-из-байтов упал на %s\n' "$2" >&2; exit 2; }
 printf 'ВЕРСИЯ=[%s]\n' "$V"
 printf 'ЖИВ\n'
 VBDRV
@@ -5764,7 +5937,7 @@ scenario_193() {   # img_ver: ни отказ образа, ни его болт
   d="$C/s193"; rm -rf "$d"; mkdir -p "$d/f"
   # Вырезаются ОБЕ функции: значение img_ver теперь достаёт единственный дом
   # первого слова, и фрагмент без него был бы прибором, меряющим свою же дыру.
-  carved=$(w48_carve "$d/f" __first_word img_ver)
+  carved=$(w48_carve "$d/f" __first_word img_ver) || { printf 'ПРИБОР НЕДОСТУПЕН: фрагменты img_ver не вырезаны\n' >&2; exit 2; }
   if [[ "$carved" != 2 ]]; then
     LAST_EVID="ФРАГМЕНТ_НЕ_ВЫРЕЗАН(вырезано $carved из 2)"
     bad "193 img_ver: фрагменты не вырезаны -- прибор смотрит не туда"; return
@@ -5846,7 +6019,7 @@ scenario_178() {   # обязательные инструменты: отсут
   # ровно как `node`, и дверь обязана называть его ЗДЕСЬ.
   local d carved out rc
   d="$C/s178"; rm -rf "$d"; mkdir -p "$d"
-  carved=$(tools_door_carve "$d")
+  carved=$(tools_door_carve "$d") || { printf 'ПРИБОР НЕДОСТУПЕН: дверь инструментов не вырезана из конвейера\n' >&2; exit 2; }
   if [[ "$carved" != "4" ]]; then
     LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$carved из 4"
     bad "178 дверь инструментов: не вырезана из конвейера -- прибор не мерит"; return
@@ -6240,8 +6413,10 @@ scenario_222() {   # внутрицикловая стадия корпусны�
   mark="$C/teeth-corpus.called"; rm -f "$mark"
   out=$(STUB_TEETH_CORPUS_MARK="$mark" run_sweep "$K" "$C/corpus" "$C/versions.txt" 900 901); rc=$?
   sum="$S/log/sweep-summary.txt"
-  calls=$(grep -a -c 'корпусный прибор звался' "$mark" 2>/dev/null)
-  npaths=$(tr ' ' '\n' < "$mark" 2>/dev/null | grep -c 'bin/.*\.wave\.bin$')
+  # Файла метки может не быть (прибор не звался) -- это предмет вердикта ниже
+  # по -e; счётчики тогда пусты и явными сравнениями не читаются.
+  calls=$(grep -a -c 'корпусный прибор звался' "$mark" 2>/dev/null) || true
+  npaths=$(tr ' ' '\n' < "$mark" 2>/dev/null | grep -c 'bin/.*\.wave\.bin$') || true
   LAST_EVID="rc=$rc :: mark=$([[ -e "$mark" ]] && echo есть || echo НЕТ) :: вызовов=$calls путей=$npaths :: $(cat "$mark" 2>/dev/null | tr '\n' '|') :: $out"
   if (( rc != 0 )) || [[ "$out" != *"SWEEP DONE"* ]]; then
     bad "222 стадия корпусных зубов: прогон отказал ($rc) -- дверь не измерена"; return
@@ -6467,8 +6642,11 @@ scenario_157() {   # красный блок проверок отвечает �
   printf 'не образ\n' > "$C/s157.img"
   out=$(bash "$K/tools/checks-on-image.sh" --script "$K/claude-patch-all.real" \
           "$C/s157.img" "$K/tweakcc-patch.js" 2>&1 9>&-); rc=$?
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
   form=$(grep -cF 'python3 "$BLOCK" "$IMG" "$PATCH_SRC" || __rc_block=$?' \
-           "$K/tools/checks-on-image.sh")
+           "$K/tools/checks-on-image.sh") || __g_rc=$?
+  [ "${__g_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: счёт формы кода блока не получен (код %s)\n' "$__g_rc" >&2; exit 2; }
+  __g_rc=0
   LAST_EVID="rc=$rc форма=$form :: $(printf '%s' "$out" | tail -3 | tr '\n' '|')"
   if (( rc != 1 )); then
     LAST_EVID="КОД_НЕ_КОД_БЛОКА :: $LAST_EVID"
@@ -6542,13 +6720,13 @@ scenario_158() {   # Т1: пара ЦЕЛИ читается из ОБРАЗА, 
               pe-x64:win32-x64 pe-arm64:win32-arm64; do
     want="${form#*:}"; form="${form%%:*}"
     cp_mkhead "$d/$form.img" "$form"
-    got=$(cp_img_probe "$d/$form.img")
+    got=$(cp_img_probe "$d/$form.img") || { printf 'ПРИБОР НЕДОСТУПЕН: детектор платформы не ответил на заголовок %s\n' "$form" >&2; exit 2; }
     [[ "$got" == "$want" ]] || bad_forms="$bad_forms ${form}(ждали ${want}, было «${got}»)"
   done
   # Положительный контроль: детектор, который принимает ВСЁ, доказывал бы лишь
   # то, что он что-то печатает.
   cp_mkhead "$d/garbage.img" 'мусор'
-  answer=$(cp_img_probe "$d/garbage.img")
+  answer=$(cp_img_probe "$d/garbage.img") || { printf 'ПРИБОР НЕДОСТУПЕН: детектор платформы не ответил на мусорный заголовок\n' >&2; exit 2; }
   LAST_EVID="формы:${bad_forms:- все сошлись} мусор=[$answer]"
   if [[ -n "$bad_forms" ]]; then
     LAST_EVID="ПАРА_НЕ_ТА :: $LAST_EVID"
@@ -6569,7 +6747,7 @@ scenario_159() {   # Т2: универсальный образ -- ОТКАЗ с
   d="$C/s159"; rm -rf "$d"; mkdir -p "$d"
   for form in fat-magic fat-cigam fat-magic64 fat-cigam64; do
     cp_mkhead "$d/$form.img" "$form"
-    answer=$(cp_img_probe "$d/$form.img")
+    answer=$(cp_img_probe "$d/$form.img") || { printf 'ПРИБОР НЕДОСТУПЕН: детектор платформы не ответил на fat-заголовок %s\n' "$form" >&2; exit 2; }
     [[ "$answer" == "ОТКАЗ 1 "*"universal (fat)"* ]] \
       || bad_forms="$bad_forms ${form}([${answer}])"
   done
@@ -6583,6 +6761,8 @@ scenario_159() {   # Т2: универсальный образ -- ОТКАЗ с
 
 scenario_160() {   # Т3: musl невидим детектору, но не сравнению имён пакетов
   local out
+  # Не-ноль пробы -- сам предмет замера: ниже вердикт читает метки musl/чужая/
+  # своя в выводе, а не код возврата.
   out=$(CPK="$K" python3 - <<'MATCH40C'
 import os, sys
 sys.path.insert(0, os.environ['CPK'])
@@ -6593,7 +6773,7 @@ print('musl=%s чужая=%s своя=%s' % (
     c.platform_matches(p + 'darwin-arm64', ('linux', 'x64')),
     c.platform_matches(p + 'linux-x64', ('linux', 'x64'))))
 MATCH40C
-)
+) || true
   LAST_EVID="$out"
   if [[ "$out" != *"musl=True"* ]]; then
     LAST_EVID="MUSL_НЕ_СОШЁЛСЯ :: $LAST_EVID"
@@ -6744,7 +6924,7 @@ tools_door_run() {   # каталог карвинга, имя прогона, �
 scenario_163() {   # Т7: codesign требуется ТОГДА И ТОЛЬКО ТОГДА, когда хозяин darwin
   local d carved out_lin rc_lin out_dar rc_dar out_ctl rc_ctl
   d="$C/s163"; rm -rf "$d"; mkdir -p "$d"
-  carved=$(tools_door_carve "$d")
+  carved=$(tools_door_carve "$d") || { printf 'ПРИБОР НЕДОСТУПЕН: дверь инструментов не вырезана из конвейера\n' >&2; exit 2; }
   if [[ "$carved" != "4" ]]; then
     LAST_EVID="ЯКОРЬ_ПОТЕРЯН вырезано=$carved из 4"
     bad "163 дверь инструментов: не вырезана из конвейера -- прибор не мерит"; return
@@ -6779,7 +6959,9 @@ scenario_164() {   # Т8: гейт ПРОПУСКАЕТСЯ на чужой па
   gate_prepare s164
   gate_carved_or_bad 164 || return
   gate_call e ul 5 "win32-arm64"; out_skip="$GATE_OUT"; rc_skip=$GATE_RC
-  launch_skip=$(gate_launch_line)
+  # Пустая строка запуска -- штатный исход пути пропуска (зуб ниже требует
+  # именно пусто); конвейер функции кончается tail, его код всегда ноль.
+  launch_skip=$(gate_launch_line) || true
   LAST_EVID="чужая rc=$rc_skip запуск=[$launch_skip] [$(printf '%s' "$out_skip" | tr '\n' '|')]"
   if (( rc_skip != 0 )) || [[ "$out_skip" != *"Гейт интерфейса ПРОПУЩЕН"* ]]; then
     LAST_EVID="ПРОПУСК_НЕ_ОБЪЯВЛЕН :: $LAST_EVID"
@@ -6879,6 +7061,8 @@ scenario_167() {   # Т12: чужой образ не занимает имя у
   # месте. Дом версий уводится в свой каталог через XDG_DATA_HOME.
   local out home
   home="$C/s167"; rm -rf "$home"; mkdir -p "$home"
+  # Не-ноль пробы -- сам предмет замера: ниже вердикт читает метки в выводе
+  # (ЧУЖОЙ_*/СВОЙ_*), а не код возврата.
   out=$(CPK="$K" CPH="$home" python3 - <<'DLONLY40C' 2>&1
 import os, sys
 from pathlib import Path
@@ -6905,8 +7089,10 @@ c.main(['--download-only', '0.0.901', '--platform', host])
 print('СВОЙ_ИМЯ_УСТАНОВКИ=%s' % (vdir / '0.0.901').exists())
 print('СВОЙ_ORIG=%s' % (vdir / '0.0.901.orig').exists())
 DLONLY40C
-)
-  LAST_EVID="$(printf '%s' "$out" | tr '\n' '|')"
+) || true
+  # Печь следа из встроенных printf/tr отказать не может; пустой след не мешает
+  # вердикту ниже, который читает сами метки в $out.
+  LAST_EVID="$(printf '%s' "$out" | tr '\n' '|')" || true
   if [[ "$out" != *"ЧУЖОЙ_ИМЯ_УСТАНОВКИ=False"* || "$out" != *"ЧУЖОЙ_ORIG=False"* ]]; then
     LAST_EVID="ЧУЖОЙ_ЗАНЯЛ_ИМЯ_УСТАНОВКИ :: $LAST_EVID"
     bad "167 чужая платформа: образ занял имя установки или стал .orig"; return
@@ -6938,7 +7124,7 @@ CONF_FUNCS=(__tw_prompt_conflicts __tw_prompt_outage __tw_prompt_dl_error __tw_p
 
 conf_prepare() {   # имя каталога сценария
   CONF_D="$C/$1"; rm -rf "$CONF_D"; mkdir -p "$CONF_D/frag"
-  CONF_CARVED=$(w48_carve "$CONF_D/frag" "${CONF_FUNCS[@]}")
+  CONF_CARVED=$(w48_carve "$CONF_D/frag" "${CONF_FUNCS[@]}") || { printf 'ПРИБОР НЕДОСТУПЕН: фрагменты двери конфликтов не вырезаны\n' >&2; exit 2; }
   # Фикстуры вывода форка. Блок синхронизации («Skipped/Updated/WARNING»)
   # печатается ДО якоря результатов, и дверь читает его по всему выводу --
   # как и живой конвейер, которому TWEAKCC_OUT достаётся целиком.
@@ -7187,7 +7373,7 @@ scenario_202() {   # снятое глушение: на нечитаемом в
   # грепу-голове, как сценарий 184 вырезает верхнеуровневый кусок конвейера.
   local d carved out rc
   d="$C/s202"; rm -rf "$d"; mkdir -p "$d/frag"
-  carved=$(w48_carve "$d/frag" __tw_prompt_notfound __tw_prompt_conflicts)
+  carved=$(w48_carve "$d/frag" __tw_prompt_notfound __tw_prompt_conflicts) || { printf 'ПРИБОР НЕДОСТУПЕН: фрагменты чтений вывода слоя не вырезаны\n' >&2; exit 2; }
   if (( carved != 2 )); then
     LAST_EVID="ФРАГМЕНТЫ_НЕ_ВЫРЕЗАНЫ вырезано=$carved из 2"
     bad "202 stderr замеров: фрагменты не вырезаны -- прибор смотрит не туда"; return
@@ -7248,8 +7434,8 @@ scenario_203() {   # ПАРА литералов пина распаковщик
   src="$K/claude-patch-all.real"
   def_site=$(grep -c -F 'CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-' "$src" || true)
   cmp_site=$(grep -c -F '"$CATALYST_TWEAKCC_SHA" == "' "$src" || true)
-  def_sha=$(sed -n 's/^CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-\([0-9a-f]\{40\}\)}"$/\1/p' "$src")
-  cmp_sha=$(sed -n 's/^ *&& "$CATALYST_TWEAKCC_SHA" == "\([0-9a-f]\{40\}\)" \]\] \\$/\1/p' "$src")
+  def_sha=$(sed -n 's/^CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-\([0-9a-f]\{40\}\)}"$/\1/p' "$src") || { printf 'ПРИБОР НЕДОСТУПЕН: SHA умолчания не вырезан из конвейера\n' >&2; exit 2; }
+  cmp_sha=$(sed -n 's/^ *&& "$CATALYST_TWEAKCC_SHA" == "\([0-9a-f]\{40\}\)" \]\] \\$/\1/p' "$src") || { printf 'ПРИБОР НЕДОСТУПЕН: SHA сверки не вырезан из конвейера\n' >&2; exit 2; }
   LAST_EVID="умолчание=[${def_sha:-НЕ_РАЗОБРАН}] сверка=[${cmp_sha:-НЕ_РАЗОБРАН}] сайтов умолчания=$def_site сверки=$cmp_site"
   if (( def_site != 1 )); then
     LAST_EVID="САЙТ_УМОЛЧАНИЯ_НЕ_ОДИН :: $LAST_EVID"
@@ -7347,6 +7533,7 @@ scenario_206() {   # СВЯЗКА таблицы кодов зонда с вет
     LAST_EVID="НЕТ_КОПИИ_ЗОНДА :: $K/tools/build-path-probe.real.sh"
     bad "206 связка кодов: в снимке кита нет настоящего зонда"; return
   fi
+  # Питон сам печатает вердикт и выходит нулём; не-ноль -- отказ самого ценза.
   verdict=$(python3 - "$K/tools/build-path-probe.real.sh" "$K/tools/sweep.sh" <<'PY206'
 import io
 import re
@@ -7397,7 +7584,7 @@ if not declared:
     raise SystemExit
 print('СХОДИТСЯ:%s' % ','.join(declared))
 PY206
-)
+) || { printf 'ПРИБОР НЕДОСТУПЕН: ценз связки кодов зонда не исполнился\n' >&2; exit 2; }
   LAST_EVID="$verdict"
   case "$verdict" in
     СХОДИТСЯ:*)
@@ -7510,7 +7697,9 @@ s19_mut_fixture() {   # образец, замена -- той же дисцип
 scenario_208() {   # образ 267-формы: шаг применяется, хвост телеметрии нетронут
   local out
   s19_prepare s208
-  out=$(s19_run)
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
   LAST_EVID="$out"
   if [[ "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
     LAST_EVID="ШАГ_УПАЛ :: $out"
@@ -7533,7 +7722,9 @@ scenario_209() {   # якорь: вхождений константы с пре
   # Второй кандидат -- приманка ПЕРВЫМ по тексту: снятая дверь обязана увести
   # разбор на приманку, а не на настоящий сайт позади неё.
   s19_mut_fixture '^' 'break q}throw z("tengu_streaming_fallback_to_non_streaming",1);'
-  out=$(s19_run)
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
   LAST_EVID="$out"
   if [[ "$out" != *"found 2"* ]]; then
     LAST_EVID="ЯКОРЬ_НЕ_СЧИТЕН :: $out"
@@ -7546,7 +7737,9 @@ scenario_210() {   # объект запроса не разобрался -- с
   local out
   s19_prepare s210
   s19_mut_fixture ',\{model:St\(' ',{modex:St('
-  out=$(s19_run)
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
   LAST_EVID="$out"
   if [[ "$out" != *"the request options object not found"* ]]; then
     LAST_EVID="ОПТС_НЕ_ОТКАЗАН :: $out"
@@ -7559,7 +7752,9 @@ scenario_211() {   # контроль формы объекта телеметр
   local out
   s19_prepare s211
   s19_mut_fixture ',attemptNumber:hf' ''
-  out=$(s19_run)
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
   LAST_EVID="$out"
   if [[ "$out" != *"the telemetry object is not the partial-finalize one"* ]]; then
     LAST_EVID="КОНТРОЛЬ_НЕ_ОТКАЗАН :: $out"
@@ -7572,7 +7767,9 @@ scenario_212() {   # брошенное значение ищется в хво�
   local out
   s19_prepare s212
   s19_mut_fixture '\}\),Iw\}' '})}'
-  out=$(s19_run)
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
   LAST_EVID="$out"
   if [[ "$out" != *"the thrown value not found"* ]]; then
     LAST_EVID="БРОСОК_НЕ_НАЙДЕН :: $out"
@@ -7585,7 +7782,9 @@ scenario_213() {   # переписываемая область перед бр
   local out
   s19_prepare s213
   s19_mut_fixture 'error:"server_error"' 'error:"server_error_x"'
-  out=$(s19_run)
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
   LAST_EVID="$out"
   if [[ "$out" != *"region not found before the telemetry throw"* ]]; then
     LAST_EVID="РЕГИОН_НЕ_ОТКАЗАН :: $out"
@@ -7649,7 +7848,7 @@ run_guard_probe() {   # <тег> <зонд под tools/>: печать выво
 # накладывается по рабочей копии, восстановление -- mv сохранённой заглушки.
 guard_pipeline_with_marker() {   # <куда сохранить заглушку>
   local save=$1 marker
-  marker=$(grep -a "^TWEAKCC_PROBE_CFG_MARKER=" "$K/claude-patch-all.real")
+  marker=$(grep -a "^TWEAKCC_PROBE_CFG_MARKER=" "$K/claude-patch-all.real") || { printf 'ПРИБОР НЕДОСТУПЕН: маркер конфига зонда не найден в конвейере\n' >&2; exit 2; }
   cp "$K/claude-patch-all.sh" "$save"
   { cat "$save"; printf '%s\n' "$marker"; } > "$K/claude-patch-all.sh"
 }
@@ -9558,14 +9757,16 @@ mutate() {   # номер
   # Образец обязан встречаться РОВНО раз. Два совпадения -- и правится первое,
   # то есть, возможно, не то место, а мутация всё равно «применилась»: сценарий
   # покраснел бы по теневому совпадению, доказав чужое правило.
-  hits=$(PAT="$pat" perl -0ne 'my $n = () = /$ENV{PAT}/g; print $n' "$f")
+  # mutate зовут в ||-контексте: exit убил бы самопроверку целиком, поэтому
+  # здесь return 2 -- тот же класс «прибор не мерит», но его ведёт вызывающий.
+  hits=$(PAT="$pat" perl -0ne 'my $n = () = /$ENV{PAT}/g; print $n' "$f") || { printf 'ПРИБОР НЕДОСТУПЕН: совпадения образца мутации не сосчитаны\n' >&2; return 2; }
   if [[ "$hits" != "1" ]]; then
     say "  ПРОВАЛ мутация $n: образец встречается $hits раз в ${MUT_FILE[$n]}"
     return 1
   fi
-  before=$(cat "$f")
+  before=$(cat "$f") || { printf 'ПРИБОР НЕДОСТУПЕН: жертва мутации не прочитана до правки\n' >&2; return 2; }
   PAT="$pat" REP="$rep" perl -0pi -e 's/$ENV{PAT}/$ENV{REP}/' "$f" || return 1
-  after=$(cat "$f")
+  after=$(cat "$f") || { printf 'ПРИБОР НЕДОСТУПЕН: жертва мутации не прочитана после правки\n' >&2; return 2; }
   # Правка, ничего не изменившая, «применяется» молча: perl не жалуется на
   # несовпавший шаблон. Такая мутация объявляет сценарий беззубым по ложной
   # причине -- поэтому применение доказывается сравнением, а не кодом возврата.
@@ -9630,7 +9831,11 @@ self_check() {
   for n in $(seq 1 $EXPECTED_MUTATIONS); do
     local kdir cdir before_failed ctl_red ctl_evid
     # --- КОНТРОЛЬ: тот же сценарий на ЧИСТОМ ките, мутации нет ---------------
-    kdir=$(mktemp -d "$ROOT/kit.XXXXXX"); cdir=$(mktemp -d "$ROOT/corp.XXXXXX")
+    # Пустой путь mktemp ушёл бы в rm -rf ниже; return 2 -- вызывающий различает.
+    kdir=$(mktemp -d "$ROOT/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог контрольного кита\n' >&2; return 2; }
+    [ -n "$kdir" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь контрольного кита пуст\n' >&2; return 2; }
+    cdir=$(mktemp -d "$ROOT/corp.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан контрольный каталог корпуса\n' >&2; return 2; }
+    [ -n "$cdir" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь контрольного корпуса пуст\n' >&2; return 2; }
     mk_kit "$kdir"; mk_corpus "$cdir"
     K="$kdir"; use_corpus "$cdir"
     before_failed=$FAILED
@@ -9647,7 +9852,12 @@ self_check() {
       continue
     fi
     # --- ИЗМЕРЕНИЕ: свежий кит, мутация, тот же сценарий ---------------------
-    kdir=$(mktemp -d "$ROOT/kit.XXXXXX"); cdir=$(mktemp -d "$ROOT/corp.XXXXXX")
+    # Пустой путь mktemp ушёл бы в rm -rf ниже; self_check зовут в ||-контексте,
+    # поэтому здесь return 2 -- вызывающий различает класс самопроверки.
+    kdir=$(mktemp -d "$ROOT/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог кита мутации\n' >&2; return 2; }
+    [ -n "$kdir" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь каталога кита мутации пуст\n' >&2; return 2; }
+    cdir=$(mktemp -d "$ROOT/corp.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог корпуса мутации\n' >&2; return 2; }
+    [ -n "$cdir" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь каталога корпуса мутации пуст\n' >&2; return 2; }
     mk_kit "$kdir"; mk_corpus "$cdir"
     K="$kdir"; use_corpus "$cdir"
     local mrc=0
@@ -9703,7 +9913,9 @@ if [[ "${1:-}" == "--self-check" ]]; then
 fi
 
 check_mut_tables || exit 4
-K=$(mktemp -d "$ROOT/kit.XXXXXX"); use_corpus "$(mktemp -d "$ROOT/corp.XXXXXX")"
+K=$(mktemp -d "$ROOT/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог копии кита\n' >&2; exit 2; }
+[ -n "$K" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь копии кита пуст\n' >&2; exit 2; }
+use_corpus "$(mktemp -d "$ROOT/corp.XXXXXX")"
 mk_kit "$K"; mk_corpus "$C"
 # Версия оболочки -- часть условий прогона: текст фатальной ошибки подстановки
 # и поведение пустого массива под `set -u` у bash 3.2 и bash 4+ разные, и

@@ -142,7 +142,8 @@ set -u
 # claude-patch-all.sh; расхождение ловится сценарием стенда, а не чтением.
 __envon() {  # имя переменной; 0 истина, 1 ложь, 2 неизвестное значение
   local __name="$1" __raw="${!1-}" __value
-  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  # Пустой результат tr допустим: пустая строка — штатная ложь ручки (отсутствие значения); case ниже её принимает.
+  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]') || true
   case "$__value" in
     1|true|yes|on) return 0 ;;
     ''|0|false|no|off) return 1 ;;
@@ -283,7 +284,7 @@ LOGICAL_HELD=
 
 # Значение принадлежит конвейеру: дубль здесь сделал бы случай (k) зелёным по
 # маркеру, которого исполняющийся конвейер уже не использует.
-TWEAKCC_PROBE_CFG_MARKER="$(sed -n "s/^TWEAKCC_PROBE_CFG_MARKER='\\(.*\\)'$/\\1/p" "$PIPELINE")"
+TWEAKCC_PROBE_CFG_MARKER="$(sed -n "s/^TWEAKCC_PROBE_CFG_MARKER='\\(.*\\)'$/\\1/p" "$PIPELINE")" || { printf 'ПРИБОР НЕДОСТУПЕН: не извлечён маркер probe-config из конвейера\n' >&2; exit 2; }
 if [[ -z "$TWEAKCC_PROBE_CFG_MARKER" ]]; then
   echo "build-path-probe: ОТКАЗ -- не найден непустой TWEAKCC_PROBE_CFG_MARKER в $PIPELINE" >&2
   echo "  Прибор не знает, какое ccVersion является следом оборванного зонда." >&2
@@ -304,11 +305,15 @@ fi
 # ТЕКСТА прибора, как ценз случаев выше: мерить надо объявление, а не
 # питоновский рантайм. Пустой замер любой стороны -- смена формы объявления
 # («ценз недействителен»), а не «перечни разошлись»: пусто не ноль.
-__twsec_tab=$(printf '\t')
+__twsec_tab=$(printf '\t') || { printf 'ПРИБОР НЕДОСТУПЕН: не получен символ табуляции-разделителя секций\n' >&2; exit 2; }
 __twsec_from_pipeline() {   # <имя константы>: значение в __twsec_val; отказ -- код 2
   local __name="$1" __hits
   __twsec_val=''
-  __hits=$(grep -a -c "^${__name}=" "$PIPELINE")
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  # Имя счётчика НЕ __rc: под этим именем ловушка выхода несёт код возврата прогона.
+  __hits=$(grep -a -c "^${__name}=" "$PIPELINE") || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт присваиваний %s в конвейере отказал (код %s)\n' "$__name" "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
   case "$__hits" in ''|*[!0-9]*) __hits=0 ;; esac
   if (( __hits == 0 )); then
     echo "build-path-probe: ОТКАЗ -- в конвейере не найдено присваивание ${__name} --" >&2
@@ -321,7 +326,7 @@ __twsec_from_pipeline() {   # <имя константы>: значение в _
     echo "  bash исполнил бы последнее, а зонд сверил бы первое." >&2
     exit 2
   fi
-  __twsec_val="$(sed -n "s/^${__name}='\(.*\)'\$/\1/p" "$PIPELINE")"
+  __twsec_val="$(sed -n "s/^${__name}='\(.*\)'\$/\1/p" "$PIPELINE")" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано присваивание %s в конвейере\n' "$__name" >&2; exit 2; }
   if [[ -z "$__twsec_val" ]]; then
     echo "build-path-probe: ОТКАЗ -- присваивание ${__name} в конвейере не разобрано --" >&2
     echo "  Строка есть, но не в форме ${__name}='…': пустое перечисление --" >&2
@@ -335,11 +340,16 @@ __twsec_census_broken() {   # <что читалось> <детали>: собс
   echo "  замеру краснела бы «расхождением», не измерив ничего." >&2
   exit 2
 }
-__twsec_own_hits=$(grep -a -c -E '^CODE_SECTIONS = \[' "$0")
+__twsec_own_hits=$(grep -a -c -E '^CODE_SECTIONS = \[' "$0") || __gsub_rc=$?
+[ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт объявлений CODE_SECTIONS в тексте зонда отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+__gsub_rc=0
 if [[ "$__twsec_own_hits" != 1 ]]; then
   __twsec_census_broken 'перечень КОДА' "строк объявления ${__twsec_own_hits:-0}, нужно 1"
 fi
-__twsec_own_code="$(grep -a -E '^CODE_SECTIONS = \[' "$0")"
+# grep без -c возвращает 1 при нуле совпадений -- пустота ниже идёт в census_broken.
+__twsec_own_code="$(grep -a -E '^CODE_SECTIONS = \[' "$0")" || __gsub_rc=$?
+[ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: чтение объявления CODE_SECTIONS в тексте зонда отказало (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+__gsub_rc=0
 __twsec_own_code="${__twsec_own_code#CODE_SECTIONS = \[}"
 __twsec_own_code="${__twsec_own_code%]}"
 __twsec_sep='", "'
@@ -349,11 +359,15 @@ __twsec_own_code="${__twsec_own_code%\"}"
 if [[ -z "$__twsec_own_code" || "$__twsec_own_code" == *'"'* ]]; then
   __twsec_census_broken 'перечень КОДА' 'литерал не разбирается как список строк в двойных кавычках'
 fi
-__twsec_own_hits=$(grep -a -c -E '^PROMPT_SECTION = "' "$0")
+__twsec_own_hits=$(grep -a -c -E '^PROMPT_SECTION = "' "$0") || __gsub_rc=$?
+[ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт объявлений PROMPT_SECTION в тексте зонда отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+__gsub_rc=0
 if [[ "$__twsec_own_hits" != 1 ]]; then
   __twsec_census_broken 'перечень ПРОМТОВ' "строк объявления ${__twsec_own_hits:-0}, нужно 1"
 fi
-__twsec_own_prompt="$(grep -a -E '^PROMPT_SECTION = "' "$0")"
+__twsec_own_prompt="$(grep -a -E '^PROMPT_SECTION = "' "$0")" || __gsub_rc=$?
+[ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: чтение объявления PROMPT_SECTION в тексте зонда отказало (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+__gsub_rc=0
 __twsec_own_prompt="${__twsec_own_prompt#PROMPT_SECTION = \"}"
 __twsec_own_prompt="${__twsec_own_prompt%\"}"
 if [[ -z "$__twsec_own_prompt" || "$__twsec_own_prompt" == *'"'* ]]; then
@@ -389,8 +403,9 @@ case_k() {   # чужой probe-marker: отказ до снимка, игруш
   # «По построению» здесь уже стояло, и это было объявление без прибора:
   # выпавший сценарий или мутация уехали бы молча, а сумма EXPECTED_*
   # продолжала бы сходиться с объявленным вкладом.
-  local __k_scn=0 __k_mut=0
-  d="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe-k.XXXXXX")"
+  local __k_scn=0 __k_mut=0 __bn
+  d="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe-k.XXXXXX")" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$d" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   home="$d/home"; cfg="$home/.tweakcc/config.json"
   ver=9.9.9
   patched="$home/.local/share/claude/versions/$ver"
@@ -399,11 +414,11 @@ case_k() {   # чужой probe-marker: отказ до снимка, игруш
   printf '{"ccVersion":"%s","kept":"byte-for-byte"}\n' "$TWEAKCC_PROBE_CFG_MARKER" > "$cfg"
   printf 'prefix %s suffix\n' "$OUR_MARKER" > "$patched"
   printf 'pristine toy bytes\n' > "$pristine"
-  before="$(shasum -a 256 "$cfg" | awk '{print $1}')"
+  before="$(shasum -a 256 "$cfg" | awk '{print $1}')" || { printf 'ПРИБОР НЕДОСТУПЕН: не получена контрольная сумма игрушечного конфига до отказа\n' >&2; exit 2; }
   self="$HERE/tools/build-path-probe.sh"
 
   out="$(HOME="$home" TMPDIR="$d/tmp" bash "$self" --case r --version "$ver" 2>&1)"; rc=$?
-  after="$(shasum -a 256 "$cfg" | awk '{print $1}')"
+  after="$(shasum -a 256 "$cfg" | awk '{print $1}')" || { printf 'ПРИБОР НЕДОСТУПЕН: не получена контрольная сумма игрушечного конфига после отказа\n' >&2; exit 2; }
   if [[ $rc -ne 2 || "$out" != *"ccVersion is the build-path probe marker"* \
         || "$out" != *"has two possible meanings"* \
         || "$out" != *"SIGKILL does not run the probe's trap"* \
@@ -428,8 +443,9 @@ case_k() {   # чужой probe-marker: отказ до снимка, игруш
   cp -p "$self" "$d/kit/tools/build-path-probe.sh"
   ln -s "$PIPELINE" "$d/kit/claude-patch-all.sh"
   for f in "$HERE"/tools/*; do
-    [[ "$(basename "$f")" == build-path-probe.sh ]] && continue
-    ln -s "$f" "$d/kit/tools/$(basename "$f")"
+    __bn="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
+    [[ "$__bn" == build-path-probe.sh ]] && continue
+    ln -s "$f" "$d/kit/tools/$__bn"
   done
   mut="$d/kit/tools/build-path-probe.sh"
   python3 - "$mut" <<'PY_K_MUT'
@@ -452,7 +468,7 @@ PY_K_MUT
     return 1
   fi
   mout="$(HOME="$home" TMPDIR="$d/tmp" bash "$mut" --case r --version "$ver" 2>&1)"; mrc=$?
-  after="$(shasum -a 256 "$cfg" | awk '{print $1}')"
+  after="$(shasum -a 256 "$cfg" | awk '{print $1}')" || { printf 'ПРИБОР НЕДОСТУПЕН: не получена контрольная сумма игрушечного конфига после контроля\n' >&2; exit 2; }
   if [[ "$mout" != *"ccVersion is the build-path probe marker"* \
         && -n "$before" && "$before" == "$after" ]]; then
     echo "  RED    K mutation: removing the startup guard removes its own refusal text (child rc=$mrc)"
@@ -2625,7 +2641,8 @@ export CLAUDE_PATCH_LOCK_HELD_BY=$$
 # file makes grep print nothing at all, and only that case defaults to 0.
 marks() {
   local n
-  n=$(grep -c -a -F "$OUR_MARKER" "$1" 2>/dev/null)
+  # grep -c на отсутствующем/нечитаемом файле молчит и даёт ненулевой код; пустое ниже читается как 0 — штатный ответ «маркера нет».
+  n=$(grep -c -a -F "$OUR_MARKER" "$1" 2>/dev/null) || true
   case "$n" in ''|*[!0-9]*) echo 0 ;; *) echo "$n" ;; esac
 }
 
@@ -2636,11 +2653,15 @@ marks() {
 # nobody could see it until the probe was run for the first time.
 self_test_marks() {
   local d yes no
-  d="$(mktemp -d)"; yes="$d/yes"; no="$d/no"
+  d="$(mktemp -d)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$d" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  yes="$d/yes"; no="$d/no"
   printf '%s\n' "prefix ${OUR_MARKER} suffix" > "$yes"
   printf '%s\n' "nothing to see here" > "$no"
   local a b c
-  a="$(marks "$yes")"; b="$(marks "$no")"; c="$(marks "$d/absent")"
+  a="$(marks "$yes")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер на помеченном образце\n' >&2; exit 2; }
+  b="$(marks "$no")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер на чистом образце\n' >&2; exit 2; }
+  c="$(marks "$d/absent")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер на отсутствующем файле\n' >&2; exit 2; }
   rm -rf "$d"
   if [[ "$a" != 1 || "$b" != 0 || "$c" != 0 ]]; then
     echo "FATAL: marks() не различает помеченный и чистый файл (есть=$a нет=$b отсутствует=$c)" >&2
@@ -2660,7 +2681,9 @@ inode() {
 # оба, а не радоваться неравенству.
 is_inode() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 self_test_inode() {
-  local t; t="$(mktemp)"
+  local t
+  t="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл\n' >&2; exit 2; }
+  [ -n "$t" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного файла пуст\n' >&2; exit 2; }
   is_inode "$(inode "$t")" || { echo "ПРОВАЛ самопроверки inode(): живой файл не дал инода" >&2; rm -f "$t"; exit 1; }
   rm -f "$t"
   is_inode "$(inode "$t")" && { echo "ПРОВАЛ самопроверки inode(): исчезнувший файл дал инод" >&2; exit 1; }
@@ -2675,7 +2698,7 @@ self_test_inode
 # quietly pass.
 if [[ -z "$WANT_VER" ]]; then
   live="$(readlink "$HOME/.local/bin/claude" 2>/dev/null || true)"
-  WANT_VER="$(basename "${live:-}")"
+  WANT_VER="$(basename "${live:-}")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя версии из пути лаунчера\n' >&2; exit 2; }
 fi
 PATCHED="$VERSIONS/$WANT_VER"
 PRISTINE="$VERSIONS/$WANT_VER.orig"
@@ -2708,18 +2731,21 @@ if [[ -z "$WANT_VER" || ! -f "$PATCHED" || ! -f "$PRISTINE" ]]; then
   material_skip_exit
   exit 5
 fi
-if [[ "$(marks "$PATCHED")" == 0 ]]; then
+__marks="$(marks "$PATCHED")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер наших правок на живой сборке\n' >&2; exit 2; }
+if [[ "$__marks" == 0 ]]; then
   echo "SKIP: $PATCHED does not carry our patches, so case (a) has nothing to preserve" >&2
   material_skip_exit
   exit 5
 fi
-if [[ "$(marks "$PRISTINE")" != 0 ]]; then
+__marks="$(marks "$PRISTINE")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер наших правок на пристинной копии\n' >&2; exit 2; }
+if [[ "$__marks" != 0 ]]; then
   echo "SKIP: $PRISTINE is not pristine -- it carries our marker" >&2
   material_skip_exit
   exit 5
 fi
 
-ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe.XXXXXX")"
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cc-build-path-probe.XXXXXX")" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+[ -n "$ROOT" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
 BACKUP_SNAP="$ROOT/native-binary.backup.snapshot"
 [[ -f "$TWEAKCC_BACKUP" ]] && cp -p "$TWEAKCC_BACKUP" "$BACKUP_SNAP"
 TWEAKCC_CFG="$HOME/.tweakcc/config.json"
@@ -3058,14 +3084,15 @@ run_pipeline() {  # <script> <bindir> <logfile> [аргументы конвей
 
 # --- case a: live patched, pristine copy beside it ---------------------------
 case_a() {
-  local d log rc ino_before ino_after
-  d="$(stage_dir a)"; log="$ROOT/a.log"
+  local d log rc ino_before ino_after __marks
+  d="$(stage_dir a)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог стенда случая a\n' >&2; exit 2; }
+  log="$ROOT/a.log"
   cp -p "$PATCHED"  "$d/claude"
   cp -p "$PRISTINE" "$d/claude.orig"
-  ino_before="$(inode "$d/claude")"
+  ino_before="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели до прогона\n' >&2; exit 2; }
   echo "case a: live binary patched, pristine copy beside it"
   run_pipeline "$PIPELINE" "$d" "$log"; rc=$?
-  ino_after="$(inode "$d/claude")"
+  ino_after="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели после прогона\n' >&2; exit 2; }
 
   [[ $rc -eq 0 ]] && ok "pipeline finished (rc=0)" || bad "pipeline exited rc=$rc (see $log)"
   grep -q 'rebuilding from the pristine copy' "$log" \
@@ -3082,7 +3109,8 @@ case_a() {
   fi
   [[ -e "$d/claude.staging" ]] \
     && bad 'left a staging file behind' || ok 'no staging file left behind'
-  [[ "$(marks "$d/claude")" != 0 ]] \
+  __marks="$(marks "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер наших правок на приземлившейся сборке\n' >&2; exit 2; }
+  [[ "$__marks" != 0 ]] \
     && ok 'the build that landed carries our patches' \
     || bad 'the build that landed carries NO patches'
   # `marks` answers 0 for a stock file AND for one that is not there (its own
@@ -3091,22 +3119,26 @@ case_a() {
   # it -- and its disappearance is its own finding, with its own words.
   if [[ ! -f "$TWEAKCC_BACKUP" ]]; then
     bad "tweakcc's backup is GONE -- there is nothing to restore from"
-  elif [[ "$(marks "$TWEAKCC_BACKUP")" == 0 ]]; then
-    ok "tweakcc's backup is still stock"
   else
-    bad "tweakcc's backup now holds OUR build -- --restore would hand out patched bytes"
+    __marks="$(marks "$TWEAKCC_BACKUP")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер запасной копии tweakcc\n' >&2; exit 2; }
+    if [[ "$__marks" == 0 ]]; then
+      ok "tweakcc's backup is still stock"
+    else
+      bad "tweakcc's backup now holds OUR build -- --restore would hand out patched bytes"
+    fi
   fi
 }
 
 # --- case b: nothing to preserve ---------------------------------------------
 case_b() {
-  local d log rc ino_before ino_after
-  d="$(stage_dir b)"; log="$ROOT/b.log"
+  local d log rc ino_before ino_after __marks
+  d="$(stage_dir b)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог стенда случая b\n' >&2; exit 2; }
+  log="$ROOT/b.log"
   cp -p "$PRISTINE" "$d/claude"
-  ino_before="$(inode "$d/claude")"
+  ino_before="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели до прогона\n' >&2; exit 2; }
   echo "case b: live binary pristine, no copy beside it"
   run_pipeline "$PIPELINE" "$d" "$log"; rc=$?
-  ino_after="$(inode "$d/claude")"
+  ino_after="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели после прогона\n' >&2; exit 2; }
 
   [[ $rc -eq 0 ]] && ok "pipeline finished (rc=0)" || bad "pipeline exited rc=$rc (see $log)"
   grep -q 'building beside it into' "$log" \
@@ -3127,12 +3159,16 @@ case_b() {
   # отказывал с «нет пристинной копии рядом».
   if [[ ! -f "$d/claude.orig" ]]; then
     bad 'pristine bytes are gone: no .orig beside the build'
-  elif [[ "$(marks "$d/claude.orig")" != 0 ]]; then
-    bad '.orig carries our patches -- it is not a pristine copy'
   else
-    ok 'the live pristine bytes were kept as .orig'
+    __marks="$(marks "$d/claude.orig")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер пристинной копии .orig\n' >&2; exit 2; }
+    if [[ "$__marks" != 0 ]]; then
+      bad '.orig carries our patches -- it is not a pristine copy'
+    else
+      ok 'the live pristine bytes were kept as .orig'
+    fi
   fi
-  [[ "$(marks "$d/claude")" != 0 ]] \
+  __marks="$(marks "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер наших правок на приземлившейся сборке\n' >&2; exit 2; }
+  [[ "$__marks" != 0 ]] \
     && ok 'the build carries our patches' || bad 'the build carries NO patches'
 }
 
@@ -3143,7 +3179,7 @@ case_b() {
 # post-stage assertion -- is left alone, because the point is to prove case (a)'s
 # assertions detect THIS, not to disable the whole file.
 case_c() {
-  local d log rc ino_before ino_after kit reddened=0
+  local d log rc ino_before ino_after kit reddened=0 __marks
   kit="$ROOT/kit"; mkdir -p "$kit"
   # A directory of symlinks: `dirname "$0"` inside the pipeline must resolve to
   # something that has tweakcc-patch.js, tools/ and judge/ beside it, and the
@@ -3176,13 +3212,14 @@ case_c() {
     return
   fi
 
-  d="$(stage_dir c)"; log="$ROOT/c.log"
+  d="$(stage_dir c)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог стенда случая c\n' >&2; exit 2; }
+  log="$ROOT/c.log"
   cp -p "$PATCHED"  "$d/claude"
   cp -p "$PRISTINE" "$d/claude.orig"
-  ino_before="$(inode "$d/claude")"
+  ino_before="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели до прогона\n' >&2; exit 2; }
   echo "case c (negative control): same as (a), with 0b's trigger forced false"
   run_pipeline "$kit/claude-patch-all.sh" "$d" "$log"; rc=$?
-  ino_after="$(inode "$d/claude")"
+  ino_after="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели после прогона\n' >&2; exit 2; }
 
   # The REQUIRED red is named, and it is the one 0b is: without 0b the pipeline
   # cannot announce a staging rebuild. Counting "at least one" let any mutant
@@ -3195,7 +3232,8 @@ case_c() {
   elif [[ "$ino_before" == "$ino_after" ]]; then
     reddened=$((reddened+1)); note 'red' "patched in place (inode $ino_after)"
   fi
-  [[ "$(marks "$TWEAKCC_BACKUP")" != 0 ]] && { reddened=$((reddened+1)); note 'red' "tweakcc's backup poisoned"; }
+  __marks="$(marks "$TWEAKCC_BACKUP")" || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен маркер запасной копии tweakcc\n' >&2; exit 2; }
+  [[ "$__marks" != 0 ]] && { reddened=$((reddened+1)); note 'red' "tweakcc's backup poisoned"; }
   # Reported, never counted: a pipeline that refused says nothing about which
   # assertion has teeth, and it is the most likely way a future mutation goes
   # wrong without anyone noticing.
@@ -3220,12 +3258,13 @@ case_d() {
     bad 'case (d) needs the mutant kit built by case (c) -- run them together (--case cd)'
     return
   fi
-  d="$(stage_dir d)"; log="$ROOT/d.log"
+  d="$(stage_dir d)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог стенда случая d\n' >&2; exit 2; }
+  log="$ROOT/d.log"
   cp -p "$PRISTINE" "$d/claude"
-  ino_before="$(inode "$d/claude")"
+  ino_before="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели до прогона\n' >&2; exit 2; }
   echo "case d (negative control): same as (b), with 0b disabled"
   run_pipeline "$kit/claude-patch-all.sh" "$d" "$log"; rc=$?
-  ino_after="$(inode "$d/claude")"
+  ino_after="$(inode "$d/claude")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан инод цели после прогона\n' >&2; exit 2; }
 
   grep -q 'building beside it into' "$log" || { required=1; note 'red' 'staging branch not taken'; }
   if ! is_inode "$ino_before" || ! is_inode "$ino_after"; then
@@ -3406,6 +3445,7 @@ __v_field() {   # вывод прибора, имя поля -> значение
 case_v() {
   local d home kit built other out rc mrc __rp_rc=0 __rp_out __v5a __exp_active __v9out kit2
   local __v_scn=0 __v_mut=0
+  local __vf_match __vf_active __vf_kind __vf_launch
   echo "case v: --activation measures the launcher; the stage announces or refuses"
   d="$ROOT/activation"; rm -rf "$d"
   home="$d/home"; kit="$d/kit"; built="$d/built"; other="$d/other"
@@ -3420,9 +3460,11 @@ case_v() {
   printf 'foreign pristine image\n' > "$other"
 
   ln -s "$other" "$home/.local/bin/claude"
-  __exp_active="$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).resolve())' "$other")"
+  __exp_active="$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).resolve())' "$other")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен канонический путь активного лаунчера\n' >&2; exit 2; }
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
-  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == no && "$(__v_field "$out" ACTIVE)" == "$__exp_active" ]]; then
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  __vf_active="$(__v_field "$out" ACTIVE)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле ACTIVE ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_match" == no && "$__vf_active" == "$__exp_active" ]]; then
     ok 'v1 a launcher pointed at another file answers MATCH=no and names it in ACTIVE'
   else
     bad "v1 the foreign symlink answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
@@ -3431,7 +3473,8 @@ case_v() {
 
   __rp_out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --repoint "$built" 2>&1)" || __rp_rc=$?
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
-  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == yes ]]; then
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_match" == yes ]]; then
     ok 'v2 after --repoint onto the built file the answer is MATCH=yes'
   elif [[ $__rp_rc -ne 0 ]]; then
     bad "v2 the toy repoint failed (rc=$__rp_rc): $(printf '%s' "$__rp_out" | tr '\n' '|')"
@@ -3442,7 +3485,9 @@ case_v() {
 
   rm -f "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
-  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCHER_KIND)" == missing && "$(__v_field "$out" MATCH)" == unknown ]]; then
+  __vf_kind="$(__v_field "$out" LAUNCHER_KIND)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле LAUNCHER_KIND ответа активации\n' >&2; exit 2; }
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_kind" == missing && "$__vf_match" == unknown ]]; then
     ok 'v3 no launcher at all answers LAUNCHER_KIND=missing and MATCH=unknown'
   else
     bad "v3 the absent launcher answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
@@ -3451,7 +3496,9 @@ case_v() {
 
   ln -s "$d/gone" "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
-  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCHER_KIND)" == symlink && "$(__v_field "$out" MATCH)" == no ]]; then
+  __vf_kind="$(__v_field "$out" LAUNCHER_KIND)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле LAUNCHER_KIND ответа активации\n' >&2; exit 2; }
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_kind" == symlink && "$__vf_match" == no ]]; then
     ok 'v4 a dangling launcher answers MATCH=no, not unknown'
   else
     bad "v4 the dangling launcher answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
@@ -3462,10 +3509,13 @@ case_v() {
   cp "$built" "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
   __v5a=no
-  [[ $rc -eq 0 && "$(__v_field "$out" LAUNCHER_KIND)" == copy && "$(__v_field "$out" MATCH)" == yes ]] && __v5a=yes
+  __vf_kind="$(__v_field "$out" LAUNCHER_KIND)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле LAUNCHER_KIND ответа активации\n' >&2; exit 2; }
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  [[ $rc -eq 0 && "$__vf_kind" == copy && "$__vf_match" == yes ]] && __v5a=yes
   printf 'prefiy %s suffix\n' "$OUR_MARKER" > "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
-  if [[ $__v5a == yes && $rc -eq 0 && "$(__v_field "$out" MATCH)" == no ]]; then
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  if [[ $__v5a == yes && $rc -eq 0 && "$__vf_match" == no ]]; then
     ok 'v5 a copy launcher compares by digest: equal bytes yes, one byte at equal size no'
   else
     bad "v5 the copy comparison answered wrong (equal=$__v5a, rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
@@ -3483,8 +3533,10 @@ BIN_V9
   chmod +x "$d/built-ok"
   rm -f "$home/.local/bin/claude"; ln -s "$d/built-ok" "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$d/built-ok" 2>&1)"; rc=$?
-  __v9out="$(__v_field "$out" LAUNCH_OUT)"
-  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == yes && "$(__v_field "$out" LAUNCH)" == ok && -n "$__v9out" ]]; then
+  __v9out="$(__v_field "$out" LAUNCH_OUT)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле LAUNCH_OUT ответа активации\n' >&2; exit 2; }
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  __vf_launch="$(__v_field "$out" LAUNCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле LAUNCH ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_match" == yes && "$__vf_launch" == ok && -n "$__v9out" ]]; then
     ok 'v9 a launchable active name answers MATCH=yes, LAUNCH=ok and a first output line'
   else
     bad "v9 the launch witness answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
@@ -3502,7 +3554,9 @@ BIN_V10
   chmod +x "$d/built-no"
   rm -f "$home/.local/bin/claude"; ln -s "$d/built-no" "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$HERE/claude_patch.py" --activation "$d/built-no" 2>&1)"; rc=$?
-  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCH)" == fail && "$(__v_field "$out" MATCH)" == launch_failed ]]; then
+  __vf_launch="$(__v_field "$out" LAUNCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле LAUNCH ответа активации\n' >&2; exit 2; }
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_launch" == fail && "$__vf_match" == launch_failed ]]; then
     ok 'v10 bytes match but the launch fails -> LAUNCH=fail and MATCH=launch_failed'
   else
     bad "v10 the failed launch answered wrong (rc=$rc): $(printf '%s' "$out" | tr '\n' '|')"
@@ -3584,7 +3638,8 @@ MUT_V1
   }
   rm -f "$home/.local/bin/claude"; ln -s "$other" "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$kit/claude_patch.py" --activation "$built" 2>&1)"; rc=$?
-  if [[ $rc -eq 0 && "$(__v_field "$out" MATCH)" == yes ]]; then
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_match" == yes ]]; then
     ok 'the control reddens v1 by its own cause: an unconditional MATCH=yes on a foreign target'
   elif [[ $rc -ne 0 ]]; then
     bad "the v1 control reddened by a FOREIGN cause: $(printf '%s' "$out" | grep -m1 'ERROR\|ПРОВАЛ')"
@@ -3682,7 +3737,9 @@ MUT_V4
   }
   rm -f "$home/.local/bin/claude"; ln -s "$d/built-no" "$home/.local/bin/claude"
   out="$(HOME="$home" TMPDIR="$d/tmp" python3 "$kit2/claude_patch.py" --activation "$d/built-no" 2>&1)"; rc=$?
-  if [[ $rc -eq 0 && "$(__v_field "$out" LAUNCH)" == ok && "$(__v_field "$out" MATCH)" == yes ]]; then
+  __vf_launch="$(__v_field "$out" LAUNCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле LAUNCH ответа активации\n' >&2; exit 2; }
+  __vf_match="$(__v_field "$out" MATCH)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано поле MATCH ответа активации\n' >&2; exit 2; }
+  if [[ $rc -eq 0 && "$__vf_launch" == ok && "$__vf_match" == yes ]]; then
     ok 'the control reddens v10 by its own cause: a failing launch answers LAUNCH=ok'
   elif [[ $rc -ne 0 ]]; then
     bad "the v10 control reddened by a FOREIGN cause: $(printf '%s' "$out" | grep -m1 'ERROR\|ПРОВАЛ')"
@@ -3701,7 +3758,7 @@ case_r() {   # возврат заимствованного файла: обе 
   # Сборок нет: зуб бьёт по ТОЙ ЖЕ функции, которой cleanup возвращает живое
   # состояние tweakcc. Половина «невозможный возврат» и есть та ветка, которая
   # до волны 22 печатала WARNING и выходила нулём.
-  local d rc
+  local d rc __uid
   echo "case r: the restore of a borrowed file answers by result and leaves no debris"
   d="$ROOT/restore"; rm -rf "$d"; mkdir -p "$d/writable" "$d/locked"
   printf 'snapshot\n' > "$d/snap"
@@ -3721,7 +3778,8 @@ case_r() {   # возврат заимствованного файла: обе 
   chmod 500 "$d/locked"
   restore_one "$d/snap" "$d/locked/live" >/dev/null 2>&1; rc=$?
   chmod 700 "$d/locked"
-  if [[ "$(id -u)" == "0" ]]; then
+  __uid="$(id -u)" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен uid процесса\n' >&2; exit 2; }
+  if [[ "$__uid" == "0" ]]; then
     bad 'case (r) cannot measure as root: a read-only directory does not stop writes'
   elif (( rc != 0 )) && [[ ! -e "$d/locked/live.probe-restore" ]]; then
     ok 'an impossible restore answers non-zero and leaves no partial file'
@@ -3848,13 +3906,14 @@ MUTX
 case_p() {   # --target на НЕ пристинных байтах: отказ ДО того, как их трогают
   # Материал настоящий: $PATCHED -- образ, который несёт наши патчи (иначе зонд
   # не дошёл бы сюда, см. блок material). Подделывать вход не нужно и нельзя.
-  local d log rc before after kit changed logm rcm f
+  local d log rc before after kit changed logm rcm f __bn
   echo "case p: a --target run refuses non-pristine bytes before anything touches them"
-  d="$(stage_dir p)"; log="$ROOT/p.log"
+  d="$(stage_dir p)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог стенда случая p\n' >&2; exit 2; }
+  log="$ROOT/p.log"
   cp -p "$PATCHED" "$d/claude"
-  before="$(shasum -a 256 "$d/claude" | awk '{print $1}')"
+  before="$(shasum -a 256 "$d/claude" | awk '{print $1}')" || { printf 'ПРИБОР НЕДОСТУПЕН: не получена контрольная сумма цели до прогона\n' >&2; exit 2; }
   run_pipeline "$PIPELINE" "$d" "$log" --target "$d/claude"; rc=$?
-  after="$(shasum -a 256 "$d/claude" | awk '{print $1}')"
+  after="$(shasum -a 256 "$d/claude" | awk '{print $1}')" || { printf 'ПРИБОР НЕДОСТУПЕН: не получена контрольная сумма цели после прогона\n' >&2; exit 2; }
 
   [[ $rc -eq 4 ]] \
     && ok 'refused with code 4: the bytes are not the kind the flag names' \
@@ -3891,8 +3950,9 @@ case_p() {   # --target на НЕ пристинных байтах: отказ 
   kit="$ROOT/kit-p"; rm -rf "$kit"; mkdir -p "$kit/tools"
   for f in "$HERE"/* "$HERE"/.[!.]*; do
     [[ -e "$f" ]] || continue
-    [[ "$(basename "$f")" == tools ]] && continue
-    ln -sfn "$f" "$kit/$(basename "$f")"
+    __bn="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла из пути\n' >&2; exit 2; }
+    [[ "$__bn" == tools ]] && continue
+    ln -sfn "$f" "$kit/$__bn"
   done
   for f in "$HERE"/tools/*; do ln -sfn "$f" "$kit/tools/$(basename "$f")"; done
   rm -f "$kit/claude-patch-all.sh" "$kit/tools/emit-check.js"
@@ -3913,7 +3973,8 @@ STUB
     __DONE=1; exit 2
   fi
 
-  d="$(stage_dir p-control)"; logm="$ROOT/p-control.log"
+  d="$(stage_dir p-control)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог стенда контроля случая p\n' >&2; exit 2; }
+  logm="$ROOT/p-control.log"
   cp -p "$PATCHED" "$d/claude"
   run_pipeline "$kit/claude-patch-all.sh" "$d" "$logm" --target "$d/claude"; rcm=$?
   if [[ $rcm -eq 4 ]]; then
@@ -3963,7 +4024,7 @@ if [[ $FAILED -eq 0 ]]; then
   if [[ $__control_ran -eq 1 ]]; then
     echo "build path ($ALL_CASES): every assertion held, and the control shows they have teeth"
   else
-    __control_list=$(printf '%s' "$CONTROL_CASES" | sed 's/./&\//g; s/\/$//')
+    __control_list=$(printf '%s' "$CONTROL_CASES" | sed 's/./&\//g; s/\/$//') || { printf 'ПРИБОР НЕДОСТУПЕН: не собран перечень контрольных букв\n' >&2; exit 2; }
     echo "build path ($ALL_CASES): every assertion held; НИ ОДИН контроль (${__control_list}) не гонялся -- зубы не доказаны"
   fi
 else

@@ -398,8 +398,13 @@ else
       [[ "$__ostart" == "$__owner" ]] && __ostart=''
       __stale_dir=1
       if [[ -n "$__opid" ]] && kill -0 "$__opid" 2>/dev/null; then
-        if [[ -z "$__ostart" ]] \
-           || [[ "$(LC_ALL=C ps -o lstart= -p "$__opid" 2>/dev/null)" == "$__ostart" ]]; then
+        # ps отдаёт 1 на УЖЕ исчезнувший процесс -- это штатное «держатель
+        # умер между kill -0 и ps», сравнение ниже разбирает пустую строку;
+        # отказ прибора -- код выше единицы.
+        __ostart_now="$(LC_ALL=C ps -o lstart= -p "$__opid" 2>/dev/null)" || __lstart_rc=$?
+        [ "${__lstart_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: время старта держателя замка не прочитано (ps, код %s)\n' "$__lstart_rc" >&2; exit 2; }
+        __lstart_rc=0
+        if [[ -z "$__ostart" ]] || [[ "$__ostart_now" == "$__ostart" ]]; then
           __stale_dir=0
         fi
       fi
@@ -610,7 +615,9 @@ prune_config_backups() {
   local -a backups=()
   for f in "$HOME"/.claude.json.backup.*; do
     [[ -e "$f" ]] || continue
-    base="$(basename "$f")"
+    # Функция вызывается голым именем (без if/&&/$()): отказ прибора вправе
+    # ронять прогон отсюда.
+    base="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя копии конфига из пути\n' >&2; exit 2; }
     [[ "$base" =~ ^\.claude\.json\.backup\.[0-9]{8}-[0-9]{6}$ ]] || continue
     backups[${#backups[@]}]="$f"
   done
@@ -714,22 +721,44 @@ command -v node >/dev/null || { echo "ERROR: node is required (tweakcc runs on N
 # исполняется без кита рядом, то есть импортировать питон ей нечем.
 # печатает <ос>-<дуга> ХОЗЯИНА
 __host_os_arch() {
-  local os arch
-  case "$(uname -s)" in
+  local os arch __un_s __un_m
+  # «unknown» в ветке * -- ОБЪЯВЛЕННЫЙ ответ на неответивший uname (rc 1,
+  # пустой вывод): пара хозяина обязана существовать на любом хозяине.
+  # Отказ прибора -- код выше единицы.
+  __un_s="$(uname -s)" || __unos_rc=$?
+  [ "${__unos_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: ОС хозяина не опознана (uname, код %s)\n' "$__unos_rc" >&2; exit 2; }
+  __unos_rc=0
+  case "$__un_s" in
     Darwin)               os=darwin ;;
     Linux)                os=linux ;;
     MINGW*|MSYS*|CYGWIN*) os=win32 ;;
     *)                    os=unknown ;;
   esac
-  case "$(uname -m)" in
+  __un_m="$(uname -m)" || __unm_rc=$?
+  [ "${__unm_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: дуга хозяина не опознана (uname, код %s)\n' "$__unm_rc" >&2; exit 2; }
+  __unm_rc=0
+  case "$__un_m" in
     arm64|aarch64) arch=arm64 ;;
     x86_64|amd64)  arch=x64 ;;
     *)             arch=unknown ;;
   esac
   printf '%s-%s\n' "$os" "$arch"
 }
-__host_os()   { local p; p="$(__host_os_arch)"; printf '%s\n' "${p%%-*}"; }
-__host_arch() { local p; p="$(__host_os_arch)"; printf '%s\n' "${p#*-}"; }
+# Отказ прибора у этих двух обёрток осаждается ЗДЕСЬ (в подстановке) и
+# подхватывается ПРОВЕРЕННЫМ вызовом снаружи: у __host_needs_codesign выше и
+# у __HOST_PAIR/__host_pair ниже. Непроверенный вызов остался один -- строка
+# «хозяин $(__host_os)» в ветке else двери инструментов, куда прогон попадает
+# только после уже прошедшей проверки.
+__host_os() {
+  local p
+  p="$(__host_os_arch)" || { printf 'ПРИБОР НЕДОСТУПЕН: пара платформ хозяина не измерена\n' >&2; exit 2; }
+  printf '%s\n' "${p%%-*}"
+}
+__host_arch() {
+  local p
+  p="$(__host_os_arch)" || { printf 'ПРИБОР НЕДОСТУПЕН: пара платформ хозяина не измерена\n' >&2; exit 2; }
+  printf '%s\n' "${p#*-}"
+}
 
 # Пара ОБРАЗА -- у неё дом ОДИН и он питоновский (claude_patch.image_os_arch):
 # магические байты читает разборщик, а не оболочка. Отказ детектора (fat, не
@@ -761,8 +790,12 @@ PY_IMG_OS
 # УСТАНОВЛЕНА» вместе с его собственными словами. Дверь, назвавшая причину
 # наугад, вреднее немой: немая отправляет читать лог, а угадавшая -- чинить не то.
 __image_run_note() {   # <путь к образу> -> диагноз в stderr; код ВСЕГДА 0
-  local __p="$1" __out __host __rc=0
-  __host="$(__host_os_arch)"
+  local __p="$1" __out __host __rc=0 __host_rc=0
+  # Пара хозяина нужна диагносту только СЛОВОМ (строка «Хозяин: …» ниже).
+  # Контракт функции -- «код ВСЕГДА 0»: диагност не решает и не роняет,
+  # отказ измерения НАЗЫВАЕТСЯ в тексте, как и отказ детектора ниже.
+  __host="$(__host_os_arch)" || __host_rc=$?
+  (( __host_rc == 0 )) || __host="пара не измерена (код $__host_rc)"
   # stderr детектора СЛИВАЕТСЯ в переменную, а не гасится: `2>/dev/null` здесь
   # означал бы «причина неизвестна, и мы не покажем почему».
   __out="$(__image_os_arch "$__p" 2>&1)" || __rc=$?
@@ -793,7 +826,12 @@ __image_run_note() {   # <путь к образу> -> диагноз в stderr;
 # её по имени и прогнать ОБЕ ветки на подставном `uname`, не завися от того, на
 # каком хозяине он запущен (тот же приём, что у __gate_script_form).
 __host_needs_codesign() {   # код 0 -- нужен, 1 -- не нужен
-  [[ "$(__host_os)" == "darwin" ]]
+  local __hos
+  # Единственный вызов функции стоит голым `if` и ветвится по ВЕРДИКТУ 0/1;
+  # «прибор не измерил» -- вне этого домена и обязано ронять прогон кодом 2,
+  # а не выбираться молча в ветку «не нужен».
+  __hos="$(__host_os)" || { printf 'ПРИБОР НЕДОСТУПЕН: ОС хозяина не измерена\n' >&2; exit 2; }
+  [[ "$__hos" == "darwin" ]]
 }
 
 MISSING=()
@@ -815,10 +853,10 @@ fi
 # --- 0. optionally install a pristine Claude Code -----------------------------
 if [[ -n "$TARGET" ]]; then
   [[ -f "$TARGET" ]] || { echo "ERROR: --target $TARGET does not exist"; exit 1; }
-  BIN="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$TARGET")"
+  BIN="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$TARGET")" || { printf 'ПРИБОР НЕДОСТУПЕН: не разрешён полный путь цели\n' >&2; exit 2; }
 elif [[ $DO_UPDATE -eq 1 ]]; then
   echo "==> Installing a pristine Claude Code${UPDATE_VER:+ $UPDATE_VER}"
-  BIN="$(python3 "$INSTALLER" --download-only ${UPDATE_VER:+$UPDATE_VER} | tail -1)"
+  BIN="$(python3 "$INSTALLER" --download-only ${UPDATE_VER:+$UPDATE_VER} | tail -1)" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен путь скачанного образа\n' >&2; exit 2; }
 else
   # `command -v claude` returns the FIRST match on PATH, and the first match is
   # not necessarily a Claude Code image. This machine puts a shell wrapper ahead
@@ -944,7 +982,13 @@ else:
     sys.stderr.write('  Pass the image explicitly with --target /path/to/binary.\n')
 sys.exit(1)
 PY
-)"
+)" || __img_rc=$?
+# Код 1 -- ОТКАЗ ПО СУЩЕСТВУ (образа на PATH нет либо он не единственный):
+# разбор сам напечатал причину в stderr, и прогон умирает кодом 1 -- как и
+# до правки (тогда его убивал set -e). Код выше единицы -- отказ прибора.
+[ "${__img_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: авто-детект цели отказал (код %s)\n' "$__img_rc" >&2; exit 2; }
+[ "${__img_rc:-0}" -eq 0 ] || exit 1
+__img_rc=0
 fi
 
 # Три ветки выше выбрали цель тремя разными способами, и спрашивали с неё
@@ -984,7 +1028,7 @@ fi
 # digest lets a caller that did not pin anything still bind the run's verdict to
 # the bytes afterwards.
 sha_of() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
-HANDED_SHA="$(sha_of "$BIN")"
+HANDED_SHA="$(sha_of "$BIN")" || { printf 'ПРИБОР НЕДОСТУПЕН: не снята контрольная сумма цели\n' >&2; exit 2; }
 if [[ -z "$HANDED_SHA" ]]; then
   echo "ERROR: could not read $BIN to take its digest" >&2
   exit 1
@@ -1124,8 +1168,10 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]]; then
   elif grep -q -a -F "$OUR_MARKER" "$BIN.orig" || grep -q -a -F 'tweakcc' "$BIN.orig"; then
     ORIG_STATE="not pristine"
   else
-    LIVE_VER="$(img_ver "$BIN")"
-    ORIG_VER="$(img_ver "$BIN.orig")"
+    # img_ver объявляет «код ВСЕГДА 0» (пояс || true у неё в теле): пусто --
+    # законный ответ «образ не назвался», обе ветки -z ниже называют причину.
+    LIVE_VER="$(img_ver "$BIN")" || true
+    ORIG_VER="$(img_ver "$BIN.orig")" || true
     # ПРИЧИНА называется ИЗМЕРЕННАЯ. Слово «unreadable» одинаково описывало
     # битые байты и образ чужой платформы, а это РАЗНЫЕ поводы: у второго
     # чинить нечего. Действие ветки волна 48 не меняет -- только основание, --
@@ -1179,8 +1225,10 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]]; then
     # the live build: a silent DOWNGRADE presented as a rebuild. Ask both files
     # what they are; `--version` is offline and the pipeline already execs the
     # built image for the smoke check.
-    LIVE_VER="$(img_ver "$BIN")"
-    ORIG_VER="$(img_ver "$BIN.orig")"
+    # img_ver объявляет «код ВСЕГДА 0» (пояс || true у неё в теле): пусто --
+    # законный ответ «образ не назвался», обе ветки -z ниже называют причину.
+    LIVE_VER="$(img_ver "$BIN")" || true
+    ORIG_VER="$(img_ver "$BIN.orig")" || true
     if [[ -z "$LIVE_VER" || -z "$ORIG_VER" || "$LIVE_VER" != "$ORIG_VER" ]]; then
       echo "ERROR: $BIN.orig is not a pristine copy of the live build." >&2
       echo "  live=${LIVE_VER:-unreadable}  pristine copy=${ORIG_VER:-unreadable}" >&2
@@ -1218,7 +1266,7 @@ fi
 # `--only-ours` run this is the file 0c already hashed; a staging copy is hashed
 # again, because it is a different file and the announcement names a path.
 if [[ $STAGED_FROM_LIVE -eq 1 ]]; then
-  SOURCE_SHA="$(sha_of "$BIN")"
+  SOURCE_SHA="$(sha_of "$BIN")" || { printf 'ПРИБОР НЕДОСТУПЕН: не снята контрольная сумма источника сборки\n' >&2; exit 2; }
 else
   SOURCE_SHA="$HANDED_SHA"
 fi
@@ -1258,7 +1306,10 @@ TWEAKCC_KNOWN_MISSES="$HERE/tools/tweakcc-known-misses.txt"
 # случившийся непроход -- тоже отказ.
 __tw_reconcile_misses() {
   local __out="$1" __bin="$2"
-  local __ver __fa __fd __only_actual __only_declared __declared_rows
+  # __comm_rc объявлена local намеренно: без этого она пережила бы вызов в
+  # глобальной области, и следующий читатель `${__comm_rc:-0}` до первого
+  # присваивания получил бы код ЧУЖОГО прогона вместо своего.
+  local __ver __fa __fd __only_actual __only_declared __declared_rows __comm_rc=0
   # Слепая ручка ГАСИТ эту дверь, а не отменяет сверку. Прежде она отменяла:
   # вызов стоял только на ветке с выключенной ручкой, и вход «ручка=1,
   # крестиков нет, объявленный непроход НЕ случился» не печатал ничего --
@@ -1274,7 +1325,9 @@ __tw_reconcile_misses() {
   # Байты же есть всегда, и это тот самый образ, о котором идёт речь. Запускать
   # его ради `--version` тут нельзя: на этой стадии он уже правлен и ещё не
   # переподписан.
-  __ver="$(__ver_from_bytes "$__bin")"
+  # __ver_from_bytes объявляет «код ВСЕГДА 0» (пояс || true в её теле): пусто
+  # -- законный ответ, отказ ниже (regex на версию) называет случай сам.
+  __ver="$(__ver_from_bytes "$__bin")" || true
   if [[ ! "$__ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     echo "$__say: сверка непроходов tweakcc не может назвать версию образа." >&2
     echo "  В байтах $__bin нет отметки версии, а запись объявленного непрохода" >&2
@@ -1285,7 +1338,22 @@ __tw_reconcile_misses() {
     fi
     return 1
   fi
-  __fa="$(mktemp)"; __fd="$(mktemp)"
+  # Отказ mktemp -- отказ ПРИБОРА, а не вердикт сверки, и кодом 1 его отдавать
+  # нельзя: единица тут означает «непроходы разошлись», и вызывающий по ней
+  # объявил бы расхождение, которого никто не измерял. Поэтому третий код 2,
+  # который вызывающий (единственный, `if !` снят ради этого) разбирает
+  # отдельно. Пустой путь проверяется своей строкой: он уходит в
+  # перенаправления и в rm ниже.
+  # Причину печатает МЕСТО отказа, а не вызывающий: код 2 отдают несколько
+  # разных веток этой функции, и одна строка у вызывающего была бы верна лишь
+  # для одной из них, а на остальных путях называла бы чужую причину.
+  __fa="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: сверка непроходов tweakcc не получила временный файл\n' >&2; return 2; }
+  __fd="$(mktemp)" || { rm -f "$__fa"; printf 'ПРИБОР НЕДОСТУПЕН: сверка непроходов tweakcc не получила второй временный файл\n' >&2; return 2; }
+  if [[ -z "$__fa" || -z "$__fd" ]]; then
+    rm -f "$__fa" "$__fd"
+    printf 'ПРИБОР НЕДОСТУПЕН: mktemp вернул пустой путь временного файла сверки непроходов\n' >&2
+    return 2
+  fi
   # Разбор вывода ОДИН на весь кит -- __tw_layer_names. Вторая копия уже
   # разошлась с первой (LC_ALL=C не на всех ступенях, фильтра слоя нет вовсе),
   # и две двери сверяли бы разные множества одного вывода. Слой КОДА, а не оба:
@@ -1309,13 +1377,27 @@ __tw_reconcile_misses() {
   else
     : > "$__fd"
   fi
-  __only_actual="$(comm -23 "$__fa" "$__fd")"
-  __only_declared="$(comm -13 "$__fa" "$__fd")"
+  # comm в роли сбора разности: код 1 -- не отказ (пустой ответ разбирают
+  # проверки -n ниже), отказ прибора -- код выше единицы.
+  # Отказ отдаётся КОДОМ 2, а не `exit`: функцию зовут без подоболочки, и
+  # `exit` отсюда убил бы прогон на месте -- мимо уборки временных файлов
+  # здесь и мимо разбора кода у вызывающего, то есть объявленный этой
+  # функцией контракт трёх исходов был бы верен не для всех её веток.
+  __only_actual="$(comm -23 "$__fa" "$__fd")" || __comm_rc=$?
+  [ "${__comm_rc:-0}" -le 1 ] || { rm -f "$__fa" "$__fd"; printf 'ПРИБОР НЕДОСТУПЕН: разность непроходов не собрана (код %s)\n' "$__comm_rc" >&2; return 2; }
+  __comm_rc=0
+  __only_declared="$(comm -13 "$__fa" "$__fd")" || __comm_rc=$?
+  [ "${__comm_rc:-0}" -le 1 ] || { rm -f "$__fa" "$__fd"; printf 'ПРИБОР НЕДОСТУПЕН: разность объявлений не собрана (код %s)\n' "$__comm_rc" >&2; return 2; }
+  __comm_rc=0
+  # У sed и awk НЕТ кода «не найдено»: ноль даже при пустом выводе (пусто --
+  # «строк объявления нет», NOTE-блок ниже молчит), любое ненулевое -- отказ
+  # чтения. Временные файлы сносятся здесь: после кода 2 вызывающий до их
+  # уборки не доходит.
   __declared_rows="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_KNOWN_MISSES" 2>/dev/null \
     | awk -F'\t' -v v="$__ver" '
       /^[[:space:]]*#/ { next } NF==0 { next }
       $1==v { printf "  %s -- %s\n", $2, $3 }
-    ')"
+    ')" || { rm -f "$__fa" "$__fd"; printf 'ПРИБОР НЕДОСТУПЕН: строки объявленных непроходов не прочитаны\n' >&2; return 2; }
   rm -f "$__fa" "$__fd"
 
   local __bad=0
@@ -1455,7 +1537,9 @@ __tw_failed_any_names() {     # <вывод tweakcc> -> имена ✗ обои�
 # пуста, все счёта врут нулём); два и больше -- в один счёт попали две сборки.
 __tw_check_anchor() {         # <вывод tweakcc> -> 0 область определена, 1 отказ
   local __out="$1" __n
-  __n="$(tw_results_anchor_count "$__out")"; __n="${__n//[^0-9]/}"
+  # tw_results_anchor_count не отказывает (awk || echo 0 в её теле): любое
+  # не-число обнуляется ниже, а «не ровно один якорь» -- сам ответ двери.
+  __n="$(tw_results_anchor_count "$__out")" || true; __n="${__n//[^0-9]/}"
   [[ -n "$__n" ]] || __n=0
   if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]]; then
     if (( __n != 1 )); then
@@ -1491,7 +1575,9 @@ __tw_check_anchor() {         # <вывод tweakcc> -> 0 область опр�
 # сменил форму вывода -- не исполнялась ни одна ветка).
 __tw_check_result_rows() {    # <вывод tweakcc> -> 0 вывод прочитан, 1 отказ
   local __out="$1" __seen
-  __seen="$(__tw_result_rows_total "$__out")"; __seen="${__seen//[^0-9]/}"
+  # __tw_result_rows_total не отказывает (пояс || true в её теле): пусто --
+  # ноль строк, обнуление ниже и дверь читаемости -- весь разбор.
+  __seen="$(__tw_result_rows_total "$__out")" || true; __seen="${__seen//[^0-9]/}"
   [[ -n "$__seen" ]] || __seen=0
   if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]]; then
     echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь читаемости вывода tweakcc погашена (строк результата $__seen)" >&2
@@ -1644,8 +1730,10 @@ __tw_names_both() {
 __tw_inert_check_sign() {
   local __v="$1" __s="$2" __human="$3" __got="$4" __want="$5" __out="$6"
   local __miss __extra __alive __gone __swapped __bad=0
-  __miss="$(__tw_names_minus "$__got" "$__want")"
-  __extra="$(__tw_names_minus "$__want" "$__got")"
+  # Обе разности не отказывают (пояс || true в __tw_names_minus): пусто --
+  # «множества согласны», проверки -n ниже читают именно его.
+  __miss="$(__tw_names_minus "$__got" "$__want")" || true
+  __extra="$(__tw_names_minus "$__want" "$__got")" || true
   if [[ -n "$__miss" ]]; then
     # Фигурные скобки ОБЯЗАТЕЛЬНЫ: за подстановкой идёт не-ASCII кавычка, и bash
     # в не-UTF8 локали (так его зовут зубы) втягивает её первый байт в ИМЯ
@@ -1673,13 +1761,22 @@ __tw_inert_check_sign() {
   # ($TWEAKCC_EXPECTED_OFF). Всякий ДРУГОЙ исход отказывает: имя, измеренное
   # под ⊘ и объявленное ещё и как ≡, иначе жило бы в объявлении бессрочно.
   if [[ "$__s" == '≡' ]]; then
-    __extra="$(__tw_names_minus "$__extra" "$(__tw_off_code_names "$__out")")"
+    # Разность и перечень выключенных не отказывают (пояс || true в их
+    # телах): пусто -- «исход ○ объясняет всё», возврат ниже именно это и
+    # означает.
+    __extra="$(__tw_names_minus "$__extra" "$(__tw_off_code_names "$__out")")" || true
     [[ -n "$__extra" ]] || return 0
   fi
+  # Пересечение и оба чтения слоя не отказывают (пояс || true в их телах):
+  # пусто -- «не работает и не падала», расклад веток ниже его разбирает.
   __alive="$(__tw_names_both "$__extra" \
-    "$( { __tw_layer_names "$__out" code '✓'; __tw_layer_names "$__out" code '✗'; } )")"
-  __gone="$(__tw_names_minus "$__extra" "$(__tw_layer_names "$__out" code "$TW_MARKS")")"
-  __swapped="$(__tw_names_minus "$(__tw_names_minus "$__extra" "$__alive")" "$__gone")"
+    "$( { __tw_layer_names "$__out" code '✓'; __tw_layer_names "$__out" code '✗'; } )")" || true
+  # Разность/слой не отказывают (пояс || true в их телах): пусто -- «имя
+  # не измерено ни под одним знаком», что ветка ниже и называет.
+  __gone="$(__tw_names_minus "$__extra" "$(__tw_layer_names "$__out" code "$TW_MARKS")")" || true
+  # Разность не отказывает (пояс || true в __tw_names_minus): пусто --
+  # «остатка нет», проверка -n ниже читает именно его.
+  __swapped="$(__tw_names_minus "$(__tw_names_minus "$__extra" "$__alive")" "$__gone")" || true
   if [[ -n "$__alive" ]]; then
     echo "FATAL: на $__v объявлены правки tweakcc «${__human}», а они снова работают:" >&2
     printf '%s\n' "$__alive" | LC_ALL=C sed -n "1,10s/^/  $__s /p" >&2 || true
@@ -1803,8 +1900,10 @@ __tw_prompt_conflicts() {     # <вывод tweakcc> -> число КОНФЛИ�
 __tw_snapshot_probe() {       # <адрес> -> класс публикации
   local __url="$1" __code
   command -v curl >/dev/null 2>&1 || { printf 'нечем\n'; return 0; }
+  # Пояс || true уже стоит ВНУТРИ подстановки: код сети (включая 000) -- сам
+  # предмет измерения, различитель ниже разбирает его по классам.
   __code="$(curl -s -o /dev/null -w '%{http_code}' \
-              --connect-timeout 10 --max-time 30 "$__url" || true)"
+              --connect-timeout 10 --max-time 30 "$__url" || true)" || true
   __code="${__code//[^0-9]/}"
   case "$__code" in
     200)    printf 'опубликован\n' ;;
@@ -1849,8 +1948,10 @@ __tw_prompt_outage_door() {   # <версия> <вывод tweakcc> <легло>
     echo "FATAL: вывод tweakcc ($__out) исчез до разбора слоя промтов -- мерить нечем." >&2
     return 2
   fi
-  __outage="$(__tw_prompt_outage "$__out")";      __outage="${__outage//[^0-9]/}"
-  __outage_dl="$(__tw_prompt_dl_error "$__out")"; __outage_dl="${__outage_dl//[^0-9]/}"
+  # Оба счётчика обвала не отказывают (grep -c || true в их телах): пусто --
+  # ноль, обнуление ниже и ветка «>0» -- весь разбор обвала.
+  __outage="$(__tw_prompt_outage "$__out")" || true;      __outage="${__outage//[^0-9]/}"
+  __outage_dl="$(__tw_prompt_dl_error "$__out")" || true; __outage_dl="${__outage_dl//[^0-9]/}"
   [[ -n "$__outage" ]] || __outage=0
   [[ -n "$__outage_dl" ]] || __outage_dl=0
   (( __outage > 0 || __outage_dl > 0 )) || return 0
@@ -1865,7 +1966,9 @@ __tw_prompt_outage_door() {   # <версия> <вывод tweakcc> <легло>
     echo "  -- у форка сменилась форма сообщения, иглы двери устарели." >&2
   fi
   __url="https://raw.githubusercontent.com/Piebald-AI/tweakcc/refs/heads/main/data/prompts/prompts-$__ver.json"
-  __snap="$(__tw_snapshot_probe "$__url")"
+  # __tw_snapshot_probe не отказывает по построению (пояс || true на curl и
+  # case, печатающий класс всегда): «нечем» -- сам объявленный класс.
+  __snap="$(__tw_snapshot_probe "$__url")" || true
   # Умолчание стоит ДО разбора: ветка, забывшая назвать свой код, обязана
   # уехать «не мерит», а не нулём -- ноль здесь значил бы «обвала нет».
   __rc=2
@@ -1939,19 +2042,25 @@ __tw_check_applied_level() {
   # секций, считать нечего -- они разъехались бы по слоям молча. Сам ОТКАЗ
   # ниже, в зоне отказов: расклад печатается всегда, а слепая ручка гасит и
   # его, как гасит соседние двери.
-  __unsect="$(__tw_unsectioned_lines "$__out")"
+  # Все счётчики ниже не отказывают (пояс || true в телах хелперов): пусто --
+  # измеренный ноль, обнуление строкой ниже -- часть разбора.
+  __unsect="$(__tw_unsectioned_lines "$__out")" || true
   __unsect_n="$(printf '%s' "$__unsect" | LC_ALL=C grep -a -c . || true)"
   __unsect_n="${__unsect_n//[^0-9]/}"
   [[ -n "$__unsect_n" ]] || __unsect_n=0
-  __code="$(__tw_applied_code_level "$__out")";      __code="${__code//[^0-9]/}"
-  __prompts="$(__tw_applied_prompt_level "$__out")"; __prompts="${__prompts//[^0-9]/}"
-  __nf="$(__tw_prompt_notfound "$__out")";           __nf="${__nf//[^0-9]/}"
+  # Счётчики уровня/промтов/промахов: пусто -- ноль (пояс || true в телах
+  # хелперов), обнуление ниже -- часть разбора.
+  __code="$(__tw_applied_code_level "$__out")" || true;      __code="${__code//[^0-9]/}"
+  __prompts="$(__tw_applied_prompt_level "$__out")" || true; __prompts="${__prompts//[^0-9]/}"
+  __nf="$(__tw_prompt_notfound "$__out")" || true;           __nf="${__nf//[^0-9]/}"
   [[ -n "$__code" ]] || __code=0
   [[ -n "$__prompts" ]] || __prompts=0
   [[ -n "$__nf" ]] || __nf=0
   echo "tweakcc: легло $(( __code + __prompts )) правок (кода $__code, промтов $__prompts)" >&2
   local __tried __off __failed
-  __tried="$(__tw_attempted_code_level "$__out")"; __tried="${__tried//[^0-9]/}"
+  # __tw_attempted_code_level не отказывает (пояс || true в её теле): пусто --
+  # ноль попыток, обнуление ниже и двери «просела/выросла» -- весь разбор.
+  __tried="$(__tw_attempted_code_level "$__out")" || true; __tried="${__tried//[^0-9]/}"
   [[ -n "$__tried" ]] || __tried=0
   echo "tweakcc: попыток по слою кода $__tried, из них легло $__code" >&2
   # Расклад попытки: легло + выключено конфигурацией + пропущено по версии +
@@ -1963,15 +2072,21 @@ __tw_check_applied_level() {
   # Каждый исход считается СВОИМ классом знака. Вычитание («попытки минус
   # легло минус выключено») приписывало бы непроходам любой новый исход, какой
   # заведёт форк, -- и число «не легло» врало бы, не сдвинув ни одной двери.
-  __failed="$(__tw_failed_code_level "$__out")"; __failed="${__failed//[^0-9]/}"
+  # __tw_failed_code_level не отказывает (пояс || true в её теле): пусто --
+  # ноль, обнуление ниже -- часть разбора.
+  __failed="$(__tw_failed_code_level "$__out")" || true; __failed="${__failed//[^0-9]/}"
   [[ -n "$__failed" ]] || __failed=0
-  __pfail="$(__tw_prompt_failed "$__out")"; __pfail="${__pfail//[^0-9]/}"
+  # __tw_prompt_failed не отказывает (пояс || true в её теле): пусто -- ноль,
+  # обнуление ниже и дверь непрошедших -- весь разбор.
+  __pfail="$(__tw_prompt_failed "$__out")" || true; __pfail="${__pfail//[^0-9]/}"
   [[ -n "$__pfail" ]] || __pfail=0
-  __noop="$(__tw_noop_code_names "$__out")"
+  # Перечни имён не отказывают (пояс || true в телах хелперов): пусто --
+  # «имён нет», счёт -c ниже и проверки -n -- весь разбор.
+  __noop="$(__tw_noop_code_names "$__out")" || true
   __noop_n="$(printf '%s' "$__noop" | LC_ALL=C grep -a -c . || true)"
   __noop_n="${__noop_n//[^0-9]/}"
   [[ -n "$__noop_n" ]] || __noop_n=0
-  __vskip="$(__tw_vskip_code_names "$__out")"
+  __vskip="$(__tw_vskip_code_names "$__out")" || true
   __vskip_n="$(printf '%s' "$__vskip" | LC_ALL=C grep -a -c . || true)"
   __vskip_n="${__vskip_n//[^0-9]/}"
   [[ -n "$__vskip_n" ]] || __vskip_n=0
@@ -2003,7 +2118,9 @@ __tw_check_applied_level() {
     # ветку не роняет (проверено прогоном под set -euo pipefail).
     LC_ALL=C grep -a 'Could not find system prompt' "$__out" \
     | while IFS= read -r __ln; do
-        __nm="$(printf '%s' "$__ln" | LC_ALL=C sed -n 's/.*Could not find system prompt "\([^"]*\)".*/\1/p')"
+        # У sed нет кода «не найдено»: без совпадения -- ноль и пусто (ветка
+        # «строка не разобрана» ниже), ненулевое -- отказ прибора.
+        __nm="$(printf '%s' "$__ln" | LC_ALL=C sed -n 's/.*Could not find system prompt "\([^"]*\)".*/\1/p')" || { printf 'ПРИБОР НЕДОСТУПЕН: имя ненайденной накладки не извлечено\n' >&2; return 2; }
         if [[ -n "$__nm" ]]; then
           echo "  не найдена накладка: $__nm"
         else
@@ -2036,7 +2153,9 @@ __tw_check_applied_level() {
   # формы и двери накладок, а они стоят выше объявленного уровня.
   # Слепая ручка проходит ВЫШЕ по тексту и до сюда не доходит: образ без
   # отметки версии она гасит вместе со всеми дверями, как и обещает.
-  __ver="$(__ver_from_bytes "$__bin")"
+  # __ver_from_bytes объявляет «код ВСЕГДА 0»: пусто -- законный ответ, отказ
+  # ниже (regex на версию) называет случай сам.
+  __ver="$(__ver_from_bytes "$__bin")" || true
   if [[ ! "$__ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     echo "FATAL: дверь уровня tweakcc не может назвать версию образа." >&2
     echo "  В байтах $__bin нет отметки версии, а объявленный уровень привязан" >&2
@@ -2094,12 +2213,14 @@ __tw_check_applied_level() {
   # BOM первой строки снимается ПЕРЕД тримом -- тем же приёмом, что у читателей
   # пола: `[[:space:]]` метки порядка байтов не берёт, и файл из редактора давал
   # бы «версия не объявлена» на строке, которая на экране выглядит правильной.
+  # У sed и awk нет кода «не найдено»: ноль даже при пустом выводе (пусто --
+  # ноль строк, awk печатает n+0), ненулевое -- отказ чтения.
   __rows="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_APPLIED" 2>/dev/null \
     | awk -F'\t' -v v="$__ver" '
       /^[[:space:]]*#/ { next } NF==0 { next }
       { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if (k==v) n++ }
       END { print n+0 }
-    ')"
+    ')" || { printf 'ПРИБОР НЕДОСТУПЕН: строки объявленного уровня не прочитаны\n' >&2; return 2; }
   if (( __rows > 1 )); then
     echo "FATAL: в $TWEAKCC_EXPECTED_APPLIED на $__ver приходится строк: $__rows." >&2
     echo "  Читатель берёт первую и выходит -- остальные не действуют." >&2
@@ -2108,12 +2229,14 @@ __tw_check_applied_level() {
   fi
   # Ключ сверяется ТРИМЛЕННЫМ, как и оба числа: иначе строка, вписанная с
   # отступом, читается как чужая версия и дверь отвечает «не объявлен».
+  # Пусто при нулевом коде -- «уровень не объявлен» (отказ ниже разбирает);
+  # ненулевое у sed/awk -- отказ чтения, кода «не найдено» у них нет.
   __want_tried="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_APPLIED" 2>/dev/null \
     | awk -F'\t' -v v="$__ver" '
       /^[[:space:]]*#/ { next } NF==0 { next }
       { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k) }
       k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit }
-    ')"
+    ')" || { printf 'ПРИБОР НЕДОСТУПЕН: объявленный уровень кода не прочитан\n' >&2; return 2; }
   if [[ -z "$__want_tried" ]]; then
     echo "FATAL: для $__ver уровень tweakcc не объявлен, а измерено: попыток $__tried, промтов $__prompts." >&2
     echo "  Уровень к версии не переносится: данные апстрима у каждой свои." >&2
@@ -2204,9 +2327,11 @@ __tw_check_applied_level() {
   #
   # Дубль пары «версия+знак+имя» -- отказ ДО сверки наборов: sort -u в читателе
   # схлопнул бы вторую строку, и правка человека молча не действовала бы.
+  # Пусто при нулевом коде -- законное «дублей нет» (проверка -n ниже);
+  # ненулевое у sed/awk/sort -- отказ чтения, кода «не найдено» нет.
   __inert_dups="$(__tw_inert_rows "$__ver" \
     | LC_ALL=C awk -F'\t' '{ k=$1 "\t" $2; c[k]++ } END { for (k in c) if (c[k] > 1) print k }' \
-    | LC_ALL=C sort)"
+    | LC_ALL=C sort)" || { printf 'ПРИБОР НЕДОСТУПЕН: дубли инертных строк не прочитаны\n' >&2; return 2; }
   if [[ -n "$__inert_dups" ]]; then
     echo "FATAL: в $TWEAKCC_EXPECTED_INERT на $__ver пара «знак + имя» объявлена дважды:" >&2
     printf '%s\n' "$__inert_dups" | LC_ALL=C sed -n '1,10s/^/  /p' >&2 || true
@@ -2218,8 +2343,10 @@ __tw_check_applied_level() {
   # вклеить, не написав, откуда взялось её содержимое. Пустое поле и
   # оставленный дословно текст-заготовка равны по последствиям и отвергаются
   # оба.
+  # Пусто при нулевом коде -- законный «нет строк», отказ ниже его и гейтит;
+  # ненулевое у sed/awk -- отказ чтения, кода «не найдено» нет.
   __inert_nowhy="$(__tw_inert_rows "$__ver" \
-    | LC_ALL=C awk -F'\t' '$3 == "" || $3 == "<причина>" || $3 == "<причина/происхождение>" { print $1 "\t" $2 }')"
+    | LC_ALL=C awk -F'\t' '$3 == "" || $3 == "<причина>" || $3 == "<причина/происхождение>" { print $1 "\t" $2 }')" || { printf 'ПРИБОР НЕДОСТУПЕН: строки без причины не прочитаны\n' >&2; return 2; }
   if [[ -n "$__inert_nowhy" ]]; then
     echo "FATAL: в $TWEAKCC_EXPECTED_INERT на $__ver есть строки без названной причины:" >&2
     printf '%s\n' "$__inert_nowhy" | LC_ALL=C sed -n '1,10s/^/  /p' >&2 || true
@@ -2233,8 +2360,10 @@ __tw_check_applied_level() {
   # наличие СТРОК под версию уводит дверь в ветку сверки, и на пустом измерении
   # она печатала «сошлись с объявлением: 0, 0». Заготовку с незаполненным именем
   # так можно было вклеить и погасить дверь целиком.
+  # Пусто при нулевом коде -- законный «нет строк» (awk печатает пустоту),
+  # отказ ниже его и гейтит; ненулевое у sed/awk -- отказ чтения.
   __inert_noname="$(__tw_inert_rows "$__ver" \
-    | LC_ALL=C awk -F'\t' '$2 == "" { print $1 "\t" $3 }')"
+    | LC_ALL=C awk -F'\t' '$2 == "" { print $1 "\t" $3 }')" || { printf 'ПРИБОР НЕДОСТУПЕН: строки без имени не прочитаны\n' >&2; return 2; }
   if [[ -n "$__inert_noname" ]]; then
     echo "FATAL: в $TWEAKCC_EXPECTED_INERT на $__ver есть строки без ИМЕНИ правки:" >&2
     printf '%s\n' "$__inert_noname" | LC_ALL=C sed -n '1,10s/^/  /p' >&2 || true
@@ -2244,7 +2373,10 @@ __tw_check_applied_level() {
     echo "  Вид строки: <версия><TAB><знак><TAB><имя правки><TAB><причина>." >&2
     return 1
   fi
-  if [[ -z "$(__tw_inert_rows "$__ver")" ]]; then
+  # __tw_inert_rows не отказывает (пояс || true в её теле): пусто -- «строк
+  # объявления нет», обе ветки ниже разбирают именно его.
+  __inert_any="$(__tw_inert_rows "$__ver")" || true
+  if [[ -z "$__inert_any" ]]; then
     if [[ -z "$__vskip" && -z "$__noop" ]]; then
       # Сходимость, а не отказ: пустое объявление и пустое измерение согласны
       # обеими сторонами. Отказ здесь красил бы версию, на которой ничего не
@@ -2305,7 +2437,9 @@ __tw_check_applied_level() {
   # выключенного слоя накладок нет по решению, и объявленный под него ноль был
   # бы ровно тем вакуумным нулём, который эта дверь и заводилась ловить.
   # Причину нуля называет САМ форк строкой объявления -- её и требуем.
-  __loff="$(__tw_prompt_layer_off "$__out")"; __loff="${__loff//[^0-9]/}"
+  # __tw_prompt_layer_off не отказывает (grep -c || true в её теле): пусто --
+  # ноль, обнуление и обе ветки «loff» ниже -- весь разбор.
+  __loff="$(__tw_prompt_layer_off "$__out")" || true; __loff="${__loff//[^0-9]/}"
   [[ -n "$__loff" ]] || __loff=0
   # ЗУБ ПОДСТАНОВКИ (вторая сторона). Кит подставил ручку -- форк ОБЯЗАН
   # объявиться. Пин форка, не знающего ручки, промты вписал бы как раньше, а
@@ -2363,24 +2497,28 @@ __tw_check_applied_level() {
     # не действует. BOM первой строки снимается ПЕРЕД тримом: иначе ключ первой
     # версии читается как чужой, и человеку показывают два одинаковых на вид
     # имени, между которыми нет разницы на экране.
+    # У sed и awk нет кода «не найдено»: ноль даже при пустом выводе (пусто --
+    # ноль строк, awk печатает n+0), ненулевое -- отказ чтения.
     __floor_rows="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_PROMPT_FLOOR" 2>/dev/null \
       | awk -F'\t' -v v="$__ver" '
           /^[[:space:]]*#/ { next } NF==0 { next }
           { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if (k==v) n++ }
           END { print n+0 }
-        ')"
+        ')" || { printf 'ПРИБОР НЕДОСТУПЕН: строки пола промтов не прочитаны\n' >&2; return 2; }
     if (( __floor_rows > 1 )); then
       echo "FATAL: в $TWEAKCC_EXPECTED_PROMPT_FLOOR на $__ver приходится строк: $__floor_rows." >&2
       echo "  Читатель берёт первую и выходит -- остальные не действуют." >&2
       echo "  Оставьте на версию ровно одну строку." >&2
       return 1
     fi
+    # Пусто при нулевом коде -- «пол не объявлен» (отказ ниже разбирает);
+    # ненулевое у sed/awk -- отказ чтения, кода «не найдено» нет.
     __want_prompts="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_PROMPT_FLOOR" 2>/dev/null \
       | awk -F'\t' -v v="$__ver" '
           /^[[:space:]]*#/ { next } NF==0 { next }
           { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k) }
           k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit }
-        ')"
+        ')" || { printf 'ПРИБОР НЕДОСТУПЕН: объявленный пол промтов не прочитан\n' >&2; return 2; }
     if [[ -z "$__want_prompts" ]]; then
       echo "FATAL: для $__ver пол слоя промтов не объявлен, а измерено: легло $__prompts, не найдено $__nf." >&2
       if (( __floor_rows == 0 )); then
@@ -2406,12 +2544,14 @@ __tw_check_applied_level() {
     # вклеить, не заметив, что пол при этом восстановлен на просевшем уровне и
     # следа не осталось. Пустое поле и оставленная дословно заглушка совета --
     # одно и то же: число без названной причины.
+    # Пусто при нулевом коде -- «происхождение не названо» (отказ ниже
+    # разбирает); ненулевое у sed/awk -- отказ чтения.
     __floor_why="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_PROMPT_FLOOR" 2>/dev/null \
       | awk -F'\t' -v v="$__ver" '
           /^[[:space:]]*#/ { next } NF==0 { next }
           { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k) }
           k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3); print $3; exit }
-        ')"
+        ')" || { printf 'ПРИБОР НЕДОСТУПЕН: происхождение пола промтов не прочитано\n' >&2; return 2; }
     if [[ -z "$__floor_why" || "$__floor_why" == "<причина/происхождение числа>" ]]; then
       echo "FATAL: в $TWEAKCC_EXPECTED_PROMPT_FLOOR строка $__ver не называет ПРОИСХОЖДЕНИЕ числа." >&2
       echo "  Третье поле пусто либо в нём оставлена заглушка совета. Дом этого" >&2
@@ -2460,7 +2600,7 @@ __tw_check_applied_level() {
 # объявление стало бы бессрочной индульгенцией. Выключилось без строки --
 # отказ (конфиг подменили, а выключенной правки в образе НЕТ); строка есть, а
 # правка пробуется -- тоже отказ (её включили обратно, запись пережила причину).
-__tw_check_off_set() {        # <вывод tweakcc> <образ> -> 0|1
+__tw_check_off_set() {        # <вывод tweakcc> <образ> -> 0|1|2 (2 = отказ прибора)
   local __out="$1" __bin="$2"
   local __ver __off __measured __declared __undeclared __stale __origin __bad=0
   __off="$(__tw_off_code_names "$__out" | LC_ALL=C grep -a -c . || true)"
@@ -2472,12 +2612,16 @@ __tw_check_off_set() {        # <вывод tweakcc> <образ> -> 0|1
     echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь выключенных правок tweakcc погашена (выключено $__off)" >&2
     return 0
   fi
-  __measured="$(__tw_off_code_names "$__out")"
+  # __tw_off_code_names не отказывает (пояс || true в её теле): пусто --
+  # «выключенных нет», проверки ниже именно это и разбирают.
+  __measured="$(__tw_off_code_names "$__out")" || true
   # Версия -- из БАЙТОВ образа, как у соседок, и отдельной ветки «отметки нет»
   # здесь нет намеренно: дверь уровня стоит ПЕРЕД этой и на таком образе уже
   # отказала, а сам вердикт множества от версии не зависит вовсе -- множество
   # принадлежит дому.
-  __ver="$(__ver_from_bytes "$__bin")"
+  # __ver_from_bytes объявляет «код ВСЕГДА 0»: пусто -- законный ответ, ветки
+  # «отметки нет» у соседних дверей закрывают случай (здесь -- комментарием).
+  __ver="$(__ver_from_bytes "$__bin")" || true
   if [[ ! -f "$TWEAKCC_EXPECTED_OFF" ]]; then
     # Отсутствующий файл = ПУСТОЕ объявленное множество, и пустое измеренное
     # сходится с ним обеими сторонами: comm не даёт ни строки ни туда, ни
@@ -2502,7 +2646,14 @@ __tw_check_off_set() {        # <вывод tweakcc> <образ> -> 0|1
     # утверждает ничего. Объявление, если оно ЕСТЬ, главнее отметки: эта ветка
     # живёт под условием «файла объявления нет».
     if [[ -s "$TWEAKCC_HOME_ORIGIN" ]]; then
-      __origin="$(LC_ALL=C sed -n '1p' "$TWEAKCC_HOME_ORIGIN" 2>/dev/null)"
+      # Файл существует и непуст (проверка -s выше): пусто первой строки при
+      # нулевом коде -- законное «отметка без слов», NOTE ниже печатает её
+      # как есть. Ненулевое у sed -- отказ чтения (кода «не найдено» нет).
+      # Отдаётся КОДОМ 2, а не `exit`: вызывающий разбирает код и убирает за
+      # собой временный вывод tweakcc, чего `exit` отсюда не дал бы сделать.
+      # Stderr самого sed НЕ подавляется: код 2 говорит «не прочиталось», а
+      # почему именно (права, том, обрыв) знает только сообщение прибора.
+      __origin="$(LC_ALL=C sed -n '1p' "$TWEAKCC_HOME_ORIGIN")" || { printf 'ПРИБОР НЕДОСТУПЕН: отметка происхождения дома не прочитана\n' >&2; return 2; }
       echo "NOTE: дом tweakcc $TWEAKCC_HOME создан прогоном, а не оператором ($__origin): объявления выключенных правок у него нет, выключено конфигурацией $__off -- это дефолты форка, дрейфовать в таком доме нечему" >&2
       return 0
     fi
@@ -2526,14 +2677,18 @@ __tw_check_off_set() {        # <вывод tweakcc> <образ> -> 0|1
   # файл, сохранённый редактором с меткой порядка байтов, давал ОБА блока
   # отказа сразу -- имя первой правки числилось и невыполненным объявлением, и
   # необъявленным выключением, а на экране два имени выглядели одинаково.
+  # Пояс || true уже стоит ВНУТРИ подстановки (хвост трубы): пусто -- законное
+  # «объявленное множество пусто», обе разности ниже читают именно его.
   __declared="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_OFF" 2>/dev/null \
                 | LC_ALL=C sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
                 | LC_ALL=C grep -a -v -e '^#' -e '^$' \
-                | LC_ALL=C sort -u || true)"
+                | LC_ALL=C sort -u || true)" || true
+  # Обе разности ниже уже несут пояс || true ВНУТРИ подстановки: отказ
+  # невозможен, пусто -- «множества согласны», проверки -n читают именно его.
   __undeclared="$(LC_ALL=C comm -13 <(printf '%s\n' "$__declared" | LC_ALL=C sed '/^$/d') \
-                                    <(printf '%s\n' "$__measured" | LC_ALL=C sed '/^$/d') || true)"
+                                    <(printf '%s\n' "$__measured" | LC_ALL=C sed '/^$/d') || true)" || true
   __stale="$(LC_ALL=C comm -23 <(printf '%s\n' "$__declared" | LC_ALL=C sed '/^$/d') \
-                               <(printf '%s\n' "$__measured" | LC_ALL=C sed '/^$/d') || true)"
+                               <(printf '%s\n' "$__measured" | LC_ALL=C sed '/^$/d') || true)" || true
   if [[ -n "$__undeclared" ]]; then
     echo "FATAL: выключились правки tweakcc, не объявленные выключенными для дома $TWEAKCC_HOME:" >&2
     printf '%s\n' "$__undeclared" | sed 's/^/  ○ /' >&2
@@ -2599,11 +2754,13 @@ __tw_check_off_set() {        # <вывод tweakcc> <образ> -> 0|1
 # синхронизации не значит ничего. В живом конвейере дверь обвала отказывает
 # раньше и до сюда прогон не доходит; собственная ветка держит вызов из
 # любого другого места честным.
-__tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1
+__tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1|2 (2 = отказ прибора)
   local __out="$1" __bin="$2"
   local __ver __conf __outage __outage_dl __loff
   local __conf_rows __want_conf __conf_why
-  __conf="$(__tw_prompt_conflicts "$__out")"; __conf="${__conf//[^0-9]/}"
+  # __tw_prompt_conflicts не отказывает (пояс || true в её теле): пусто --
+  # ноль, обнуление ниже превращает её в измеренный ноль.
+  __conf="$(__tw_prompt_conflicts "$__out")" || true; __conf="${__conf//[^0-9]/}"
   [[ -n "$__conf" ]] || __conf=0
   if [[ "${CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES:-0}" == "1" ]]; then
     # Гашение ОБЪЯВЛЯЕТСЯ, как у соседних дверей: снятая молча дверь
@@ -2611,8 +2768,10 @@ __tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1
     echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь конфликтов накладок tweakcc погашена (конфликтных $__conf)" >&2
     return 0
   fi
-  __outage="$(__tw_prompt_outage "$__out")";      __outage="${__outage//[^0-9]/}"
-  __outage_dl="$(__tw_prompt_dl_error "$__out")"; __outage_dl="${__outage_dl//[^0-9]/}"
+  # Оба счётчика обвала не отказывают (grep -c || true в их телах): пусто --
+  # ноль, обнуление и ветка «>0» ниже -- весь разбор обвала.
+  __outage="$(__tw_prompt_outage "$__out")" || true;      __outage="${__outage//[^0-9]/}"
+  __outage_dl="$(__tw_prompt_dl_error "$__out")" || true; __outage_dl="${__outage_dl//[^0-9]/}"
   [[ -n "$__outage" ]] || __outage=0
   [[ -n "$__outage_dl" ]] || __outage_dl=0
   if (( __outage > 0 || __outage_dl > 0 )); then
@@ -2627,7 +2786,9 @@ __tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1
   # Зуб подстановки (ручка поднята, а объявления нет) живёт у двери пола: она
   # стоит ВЫШЕ по прогону и до этой двери такой прогон не доходит. Две копии
   # одного отказа разошлись бы молча.
-  __loff="$(__tw_prompt_layer_off "$__out")"; __loff="${__loff//[^0-9]/}"
+  # __tw_prompt_layer_off не отказывает (grep -c || true в её теле): пусто --
+  # ноль, обнуление и ветка «>0» ниже -- весь разбор.
+  __loff="$(__tw_prompt_layer_off "$__out")" || true; __loff="${__loff//[^0-9]/}"
   [[ -n "$__loff" ]] || __loff=0
   if (( __loff > 0 )); then
     echo "NOTE: слой промтов ВЫКЛЮЧЕН ручкой (объявлено форком) -- синхронизация не бежала, конфликтам накладок нечего мерить (измерено конфликтных $__conf)" >&2
@@ -2636,7 +2797,9 @@ __tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1
   # Версия -- из БАЙТОВ образа, как у соседок; отдельной ветки «отметки нет»
   # здесь нет намеренно: дверь уровня стоит ПЕРЕД этой и на таком образе уже
   # отказала.
-  __ver="$(__ver_from_bytes "$__bin")"
+  # __ver_from_bytes объявляет «код ВСЕГДА 0»: пусто -- законный ответ, дверь
+  # уровня выше на таком образе уже отказала (см. комментарий над ней).
+  __ver="$(__ver_from_bytes "$__bin")" || true
   if [[ ! -f "$TWEAKCC_EXPECTED_PROMPT_CONFLICTS" ]]; then
     # Файла объявления нет -- умолчание ноль. Ноль конфликтов сходится с ним
     # обеими сторонами; НЕ ноль -- превышение умолчания, и это отказ.
@@ -2662,24 +2825,30 @@ __tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1
   # выходит, а вторая строка (та, которую правил человек) молча не действует.
   # BOM первой строки снимается ПЕРЕД тримом -- тем же приёмом, что у читателя
   # пола: `[[:space:]]` метки порядка байтов не берёт.
+  # У sed и awk нет кода «не найдено»: ноль даже при пустом выводе (пусто --
+  # ноль строк, awk печатает n+0), ненулевое -- отказ чтения. Отдаётся КОДОМ 2,
+  # а не `exit`: вызывающий разбирает код и убирает за собой временный вывод
+  # tweakcc, чего `exit` отсюда не дал бы сделать.
   __conf_rows="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_PROMPT_CONFLICTS" 2>/dev/null \
     | awk -F'\t' -v v="$__ver" '
         /^[[:space:]]*#/ { next } NF==0 { next }
         { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if (k==v) n++ }
         END { print n+0 }
-      ')"
+      ')" || { printf 'ПРИБОР НЕДОСТУПЕН: строки объявленных конфликтов не прочитаны\n' >&2; return 2; }
   if (( __conf_rows > 1 )); then
     echo "FATAL: в $TWEAKCC_EXPECTED_PROMPT_CONFLICTS на $__ver приходится строк: $__conf_rows." >&2
     echo "  Читатель берёт первую и выходит -- остальные не действуют." >&2
     echo "  Оставьте на версию ровно одну строку." >&2
     return 1
   fi
+  # Пусто при нулевом коде -- «строки на версию нет» (отказ ниже разбирает);
+  # ненулевое у sed/awk -- отказ чтения, кода «не найдено» нет.
   __want_conf="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_PROMPT_CONFLICTS" 2>/dev/null \
     | awk -F'\t' -v v="$__ver" '
         /^[[:space:]]*#/ { next } NF==0 { next }
         { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k) }
         k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit }
-      ')"
+      ')" || { printf 'ПРИБОР НЕДОСТУПЕН: объявленное число конфликтов не прочитано\n' >&2; return 2; }
   if [[ -z "$__want_conf" ]]; then
     if (( __conf_rows == 0 )); then
       echo "FATAL: для $__ver строка конфликтов не объявлена, а измерено: конфликтных $__conf." >&2
@@ -2703,12 +2872,14 @@ __tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1
   # Происхождение ОБЯЗАТЕЛЬНО -- тот же зуб, что у пола: строку нельзя вклеить,
   # не написав, откуда взято её содержимое. Дом файла вне контроля версий, и
   # вклеенная без причины строка пережила бы свою правду бесследно.
+  # Пусто при нулевом коде -- «происхождение не названо» (отказ «не названо
+  # происхождение» ниже); ненулевое у sed/awk -- отказ чтения.
   __conf_why="$(LC_ALL=C sed $'1s/^\xef\xbb\xbf//' "$TWEAKCC_EXPECTED_PROMPT_CONFLICTS" 2>/dev/null \
     | awk -F'\t' -v v="$__ver" '
         /^[[:space:]]*#/ { next } NF==0 { next }
         { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k) }
         k==v { gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3); print $3; exit }
-      ')"
+      ')" || { printf 'ПРИБОР НЕДОСТУПЕН: происхождение конфликтов не прочитано\n' >&2; return 2; }
   if [[ -z "$__conf_why" || "$__conf_why" == "<причина/происхождение числа>" ]]; then
     echo "FATAL: в $TWEAKCC_EXPECTED_PROMPT_CONFLICTS строка $__ver не называет ПРОИСХОЖДЕНИЕ числа." >&2
     echo "  Третье поле пусто либо в нём оставлена заглушка совета. Число без" >&2
@@ -2746,7 +2917,7 @@ __tw_check_prompt_conflicts() {   # <вывод tweakcc> <образ> -> 0|1
   return 0
 }
 
-PRISTINE_SRC="$(__strip_staging "$BIN").orig"
+PRISTINE_SRC="$(__strip_staging "$BIN").orig" || { printf 'ПРИБОР НЕДОСТУПЕН: не снят staging-суффикс с имени цели\n' >&2; exit 2; }
 
 # ГРАНИЦА. Сторожит РОВНО то, что разошлось: форму staging-суффикса в имени,
 # которое эта оболочка получила от установщика. Если `.staging` в имени есть, а
@@ -2861,7 +3032,7 @@ if [[ -n "$__ec_out" ]]; then
 fi
 if (( __rc != 0 )); then
   if (( __rc == 2 )); then
-    __ec_why="$(__emit_check_why "$__ec_out")"
+    __ec_why="$(__emit_check_why "$__ec_out")" || { printf 'ПРИБОР НЕДОСТУПЕН: не собраны поводы отказа разбора\n' >&2; exit 2; }
     if [[ -n "$__ec_why" ]]; then
       echo "FATAL: разбор НЕ ВЫПОЛНЕН: прибор не может мерить (rc=2)." >&2
       echo "  ИЗМЕРЕННАЯ ПРИЧИНА: $__ec_why" >&2
@@ -3624,6 +3795,18 @@ def _walk_line(st, line):
             continue
         if c == '#' and (i == 0 or line[i - 1].isspace()):
             break
+        # CONSTRAINT: here-string съедается ТРЕМЯ символами здесь, а не отказом
+        # в try_parse_heredoc. Отказ там возвращал управление в цикл БЕЗ
+        # сдвига, и со следующего символа парсер видел остаток `<<` -- уже не
+        # похожий на `<<<` -- то есть заводил heredoc с тегом из строки справа
+        # (`done <<< "$ids"` давал тег $ids). Такой терминатор не встречается
+        # никогда, поэтому ВЕСЬ остаток файла уходил в тело heredoc, где
+        # действует ослабленный построчный предикат: пояс на закрывающей
+        # строке многострочной подстановки он не видит. Волна 6 намерила этим
+        # 18 ложных флагов на уже вылеченном коде.
+        if line.startswith('<<<', i):
+            i += 3
+            continue
         parsed = try_parse_heredoc(line, i)
         if parsed is not None:
             tag, strip, j = parsed
@@ -4182,6 +4365,48 @@ if merged_trap("trap 'exit 143' TERM"):
     print("ГЕЙТ ТРАПОВ ЛОЖНО СРАБАТЫВАЕТ: раздельный сигнальный трап для него тоже находка")
     sys.exit(1)
 
+# CONSTRAINT: here-string не открывает heredoc. Зуб держит ОБЕ стороны: ложный
+# флаг на вылеченном коде ниже `<<<` (прежний дефект парсера) и слепоту к
+# непроверенной подстановке там же. Проба даётся ниже here-string намеренно --
+# именно позиция «после <<<» и была зоной, где предикат терял пояс.
+_HS_HEAD = 'done <<' + '< "$ids"\n'
+_HS_GUARDED = _HS_HEAD + 'v="$(cmd \\\n  | filter)" || { echo fail >&2; exit 2; }\n'
+_HS_BARE = _HS_HEAD + 'v="$(cmd \\\n  | filter)"\n'
+if hits_3b(_HS_GUARDED):
+    print("ГЕЙТ ФОРМ ЛОЖНО СРАБАТЫВАЕТ: here-string принят за heredoc, "
+          "пояс на закрывающей строке потерян")
+    sys.exit(1)
+if not hits_3b(_HS_BARE):
+    print("ГЕЙТ ФОРМ СЛЕП: непроверенная подстановка ниже here-string не найдена")
+    sys.exit(1)
+
+# Реестр ОБЪЯВЛЕННЫХ мест 3b. Существует потому, что у правила есть законные
+# исключения двух родов: фикстура, где пояс заменил бы предмет замера, и
+# строка-данные, которая не исполняется вовсе. Чинить их -- подгонять предмет
+# под прибор. Молчать о них -- escape hatch без следа. Поэтому объявление:
+# поимённое, с причиной и с ДВУСТОРОННЕЙ сверкой (образец --
+# tweakcc-known-misses.txt). Якорь -- ТЕКСТ строки: номера едут при правке выше.
+# Отказ чтения реестра -- отказ ПРИБОРА (код 2), а не вердикт формы: пустой
+# реестр молча снял бы защиту со всех объявленных мест сразу.
+_known_path = os.path.join(root, 'tools', 'shvars-known-sites.txt')
+_known = {}
+if os.path.isfile(_known_path):
+    try:
+        _ktext = io.open(_known_path, encoding='utf-8').read()
+    except (OSError, UnicodeDecodeError):
+        print("ПРИБОР НЕДОСТУПЕН: реестр объявленных мест 3b не читается")
+        sys.exit(2)
+    for _kline in _ktext.split('\n'):
+        if not _kline.strip() or _kline.lstrip().startswith('#'):
+            continue
+        _kp = _kline.split('\t')
+        if len(_kp) < 3 or not _kp[0].strip() or not _kp[1].strip() or not _kp[2].strip():
+            print("ПРИБОР НЕДОСТУПЕН: строка реестра 3b неполна "
+                  "(нужны путь, якорь и причина): " + _kline[:80])
+            sys.exit(2)
+        _known[(_kp[0].strip(), _kp[1].strip())] = _kp[2].strip()
+_known_used = set()
+
 bad = []
 scanned = 0
 n3a = n3b = n3c = n_sentinel = n3b_files = 0
@@ -4208,7 +4433,15 @@ for dirpath, dirnames, filenames in os.walk(root):
                 snip = snip[:117] + "..."
             bad.append(f"{rel}:{n}: 3a builtin ИМЯ=$" + "(...) -- статус берёт "
                        f"local/declare/typeset/export/readonly, errexit бессилен -- {snip}")
-        _b3 = hits_3b(text)
+        # Объявленное место снимается с учёта ЗДЕСЬ и отмечается использованным:
+        # по этой отметке ниже ловится запись, пережившая свою причину.
+        _b3 = []
+        for _n3, _l3 in hits_3b(text):
+            _k3 = (rel, _l3.strip())
+            if _k3 in _known:
+                _known_used.add(_k3)
+                continue
+            _b3.append((_n3, _l3))
         if _b3:
             n3b_files += 1
         for n, line in _b3:
@@ -4247,6 +4480,15 @@ for dirpath, dirnames, filenames in os.walk(root):
             if merged_trap(line):
                 bad.append(f"{os.path.relpath(f, root)}:{n}: слитый сигнальный трап "
                            f"(EXIT вместе с INT/TERM) -- TERM отдаёт 0, а не 143")
+# Вторая сторона сверки. Без неё реестр стал бы бессрочной индульгенцией:
+# место вылечили или удалили, а запись осталась бы снимать защиту с будущей
+# строки, которая однажды совпадёт с якорем текстуально.
+for _k3, _why3 in sorted(_known.items()):
+    if _k3 not in _known_used:
+        bad.append(f"{_k3[0]}: объявленное место 3b БОЛЬШЕ НЕ срабатывает -- "
+                   f"запись пережила свою причину, снимите её из "
+                   f"tools/shvars-known-sites.txt -- якорь: {_k3[1][:90]}")
+
 print(f"ПОДФОРМЫ ПРАВИЛА 3: 3a={n3a} строк; 3b={n3b} строк / {n3b_files} файлов; "
       f"3c={n3c} строк; часовой={n_sentinel} "
       f"(единица 3a/3b/3c -- строка-место, не вхождение; "
@@ -4284,7 +4526,7 @@ __kit_bench_ran=0
 if [[ "${CLAUDE_PATCH_SKIP_KIT_BENCH:-0}" == "1" ]]; then
   # CONSTRAINT: склейка через printf, а не через IFS: `${arr[*]}` берёт из IFS
   # ТОЛЬКО ПЕРВЫЙ символ, и перечень напечатался бы без пробела после запятой.
-  __kit_bench_list=$(printf '%s, ' "${KIT_BENCH_NAMES[@]}")
+  __kit_bench_list=$(printf '%s, ' "${KIT_BENCH_NAMES[@]}") || { printf 'ПРИБОР НЕДОСТУПЕН: не собран перечень стендов кита\n' >&2; exit 2; }
   __kit_bench_list=${__kit_bench_list%, }
   echo "Стенды кита: ПРОПУЩЕНЫ -- CLAUDE_PATCH_SKIP_KIT_BENCH=1. НЕ проверены: $__kit_bench_list" >&2
 else
@@ -5852,8 +6094,10 @@ if [[ -f "$TWEAKCC_BACKUP" ]] && grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP"; 
     SRC_OUT="$("$PRISTINE_SRC" --version 2>&1)"; SRC_RC=$?
     BLD_OUT="$("$BIN" --version 2>&1)"; BLD_RC=$?
     set -e
-    SRC_VER="$(__first_word "$SRC_OUT")"
-    BLD_VER="$(__first_word "$BLD_OUT")"
+    # __first_word объявляет «код ВСЕГДА 0» (пояс || true в её теле): пусто --
+    # законный ответ «не назвал», обе ветки -z ниже именно его разбирают.
+    SRC_VER="$(__first_word "$SRC_OUT")" || true
+    BLD_VER="$(__first_word "$BLD_OUT")" || true
     if [[ -z "$SRC_VER" ]]; then
       BACKUP_WHY="близнец не назвал свою версию (код $SRC_RC): ${SRC_OUT%%$'\n'*}"
       BACKUP_NOTE="$PRISTINE_SRC"
@@ -5983,7 +6227,9 @@ if [[ $ONLY_OURS -eq 0 ]]; then
     set +e
     TGT_OUT="$("$BIN" --version 2>&1)"; TGT_RC=$?
     set -e
-    TGT_VER="$(__first_word "$TGT_OUT")"
+    # __first_word объявляет «код ВСЕГДА 0» (пояс || true в её теле): пусто --
+    # законный ответ «не назвал», отказ ниже называет причину и код ребёнка.
+    TGT_VER="$(__first_word "$TGT_OUT")" || true
     if [[ ! "$TGT_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
       echo "FATAL: the target does not name its version, so what tweakcc is about to" >&2
       echo "  do with it cannot be established." >&2
@@ -5998,12 +6244,15 @@ if [[ $ONLY_OURS -eq 0 ]]; then
       echo "  would be shipped may not be the one you named." >&2
       exit 1
     fi
+    # Пояс || true уже стоит ВНУТРИ подстановки: python ловит свои ошибки сам
+    # и печатает пустую строку, пусто -- законное «ccVersion нет», сравнение
+    # ниже читает именно его.
     CFG_VER="$(python3 -c 'import json,sys
 try:
     v = json.load(open(sys.argv[1], encoding="utf-8")).get("ccVersion")
 except Exception:
     v = None
-print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
+print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)" || true
     # --- killed-probe config marker guard --------------------------------------
     if [[ "$CFG_VER" == "$TWEAKCC_PROBE_CFG_MARKER" ]]; then
       if [[ "${CLAUDE_PATCH_PROBE_CFG_LOAN:-0}" == "1" ]]; then
@@ -6045,7 +6294,7 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
         echo "    * the backup is:  cp -p '$TWEAKCC_BACKUP' <a copy> and --target that" >&2
         exit 1
       fi
-      TWEAKCC_RESTORE_PINNED="$(shasum -a 256 "$TWEAKCC_BACKUP" | awk '{print $1}')"
+      TWEAKCC_RESTORE_PINNED="$(shasum -a 256 "$TWEAKCC_BACKUP" | awk '{print $1}')" || { printf 'ПРИБОР НЕДОСТУПЕН: не снята контрольная сумма бэкапа tweakcc\n' >&2; exit 2; }
     fi
   fi
   # A non-zero --list-patches meant "skip the apply", silently and with every
@@ -6055,7 +6304,9 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
   # without saying why leaves a build carrying none of those patches and a
   # perfectly clean `Done.` -- the same silence the rest of this block exists to
   # end, one level up.
-  TWEAKCC_LIST_OUT="$(mktemp)"
+  TWEAKCC_LIST_OUT="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл списка правок tweakcc\n' >&2; exit 2; }
+  # Пустой путь mktemp уходит ниже в перенаправление и в rm -f.
+  [ -n "$TWEAKCC_LIST_OUT" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь списка правок tweakcc пуст\n' >&2; exit 2; }
   if "${TWEAKCC[@]}" --list-patches >"$TWEAKCC_LIST_OUT" 2>&1; then
     rm -f "$TWEAKCC_LIST_OUT"
     echo "==> Applying tweakcc's configured patches"
@@ -6070,7 +6321,9 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
     # Every patch in the config is there because it is wanted, so a ✗ is a
     # failure of the build. The escape hatch is for deliberately running against
     # a version where something is known not to apply yet.
-    TWEAKCC_OUT="$(mktemp)"
+    TWEAKCC_OUT="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл вывода стадии tweakcc\n' >&2; exit 2; }
+    # Пустой путь mktemp уходит ниже в tee, в разборщики и в rm -f.
+    [ -n "$TWEAKCC_OUT" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь вывода стадии tweakcc пуст\n' >&2; exit 2; }
     set +e
     "${TWEAKCC[@]}" --apply -y --show-unchanged 2>&1 | tee "$TWEAKCC_OUT"
     TWEAKCC_RC=${PIPESTATUS[0]}
@@ -6109,7 +6362,7 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
         echo "  на этой машине не нашлось ($PRISTINE_SRC). 'tweakcc --restore' без бэкапа." >&2
       fi
     fi
-    __tw_saved=$(sed -n 's/^Configuration saved at: //p' "$TWEAKCC_OUT" | tail -1)
+    __tw_saved=$(sed -n 's/^Configuration saved at: //p' "$TWEAKCC_OUT" | tail -1) || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан путь сохранённого конфига из вывода стадии\n' >&2; exit 2; }
     if [[ -n "$__tw_saved" && "$__tw_saved" != "$TWEAKCC_HOME/"* ]]; then
       echo "ОТКАЗ: распаковщик сохранил конфиг в $__tw_saved, а кит считает домом" >&2
       echo "  $TWEAKCC_HOME -- лестницы разрешения дома разошлись. Прогон читал и" >&2
@@ -6168,7 +6421,9 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
         # ложится, -- но невидимой быть не должна. Имена берутся у носителя
         # разбора и по ОБОИМ слоям: сырой образец брал бы строки и вне области
         # якоря (предапплайный список плана), и вне известных секций.
-        __tw_failed_rows="$(__tw_failed_any_names "$TWEAKCC_OUT")"
+        # __tw_failed_any_names не отказывает (пояс || true в её теле):
+        # пусто -- «крестиков нет», проверка -n ниже именно это и читает.
+        __tw_failed_rows="$(__tw_failed_any_names "$TWEAKCC_OUT")" || true
         if [[ -n "$__tw_failed_rows" ]] \
            || grep -q -a 'applied with some failures' "$TWEAKCC_OUT"; then
           echo "NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 — these tweakcc patches did NOT apply:" >&2
@@ -6179,7 +6434,22 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
       # печатает, не отказывая (гашение объявляет сама). Прежде вызов стоял
       # только на ветке с выключенной ручкой, и вход «ручка=1, крестиков нет,
       # объявленный непроход не случился» не печатал ничего.
-      if ! __tw_reconcile_misses "$TWEAKCC_OUT" "$BIN"; then
+      # Форма `if !` снята намеренно: у сверки ТРИ исхода, а не два. Код 2 --
+      # отказ её прибора (не создан временный файл), и объявлять по нему
+      # расхождение непроходов нельзя: расхождения никто не измерял. Код
+      # прогона тоже обязан различаться, иначе вызывающая сторона конвейера
+      # прочтёт отказ прибора как вердикт.
+      __rec_rc=0
+      __tw_reconcile_misses "$TWEAKCC_OUT" "$BIN" || __rec_rc=$?
+      if (( __rec_rc == 2 )); then
+        rm -f "$TWEAKCC_OUT"
+        # Конкретную причину печатает МЕСТО отказа внутри функции: код 2 отдают
+        # разные её ветки (временный файл, пустой путь, разность, чтение
+        # объявлений), и названная здесь одна причина была бы ложью на всех
+        # остальных путях. Здесь называется только стадия, где отказ случился.
+        printf 'ПРИБОР НЕДОСТУПЕН: сверка непроходов tweakcc не выполнена -- отказ её прибора (причина выше)\n' >&2
+        exit 2
+      elif (( __rec_rc != 0 )); then
         rm -f "$TWEAKCC_OUT"
         exit 1
       fi
@@ -6203,18 +6473,29 @@ print(v if isinstance(v, str) else "")' "$TWEAKCC_CFG" 2>/dev/null || true)"
       rm -f "$TWEAKCC_OUT"
       exit "$__tw_level_rc"
     fi
-    if ! __tw_check_off_set "$TWEAKCC_OUT" "$BIN"; then
+    # Форма `if !` снята по той же причине, что и у сверки непроходов: у двери
+    # ТРИ исхода. Код 2 -- отказ её прибора (объявление не прочиталось), и
+    # объявлять по нему дрейф множества выключенных правок нельзя: множество
+    # никто не измерял. Код прогона обязан различаться, иначе вызывающая
+    # сторона конвейера прочтёт отказ прибора как вердикт двери.
+    __tw_off_rc=0
+    __tw_check_off_set "$TWEAKCC_OUT" "$BIN" || __tw_off_rc=$?
+    if (( __tw_off_rc != 0 )); then
       rm -f "$TWEAKCC_OUT"
-      exit 1
+      exit "$__tw_off_rc"
     fi
     # Дверь КОНФЛИКТОВ стоит ПОСЛЕДНЕЙ из дверей слоя: её предмет печатается
     # ДО якоря результатов (блок синхронизации), и любая из дверей выше,
     # отказав, оставляет вывод неразобранным раньше, чем конфликтам станет
     # что сравнивать. Слепая ручка и обвал слоя объявляют своё гашение сами --
     # внутри функции.
-    if ! __tw_check_prompt_conflicts "$TWEAKCC_OUT" "$BIN"; then
+    # `if !` снят по причине двери выше: код 2 -- отказ прибора (объявление
+    # конфликтов не прочиталось), и конфликта накладок он не утверждает.
+    __tw_conf_rc=0
+    __tw_check_prompt_conflicts "$TWEAKCC_OUT" "$BIN" || __tw_conf_rc=$?
+    if (( __tw_conf_rc != 0 )); then
       rm -f "$TWEAKCC_OUT"
-      exit 1
+      exit "$__tw_conf_rc"
     fi
     rm -f "$TWEAKCC_OUT"
   else
@@ -6324,13 +6605,19 @@ echo "==> Applying our multi-provider patches"
 # КОНСТРЕЙНТ: версия берётся ИЗ БАЙТОВ — подписи на этой стадии ещё нет, и
 # запускать образ ради `--version` нельзя.
 echo "==> Ценз байткода изменённых модулей"
-__BC_VER="$(__ver_from_bytes "$BIN")"
+# __ver_from_bytes объявляет «код ВСЕГДА 0» (пояс || true в её теле): пусто --
+# законный ответ «в байтах нет отметки», отбор ниже идёт по ${__BC_VER:+}.
+__BC_VER="$(__ver_from_bytes "$BIN")" || true
 __BC_STOCK=""
 if [[ -f "$PRISTINE_SRC" ]]; then
   __BC_STOCK="$PRISTINE_SRC"
+# Присваивание в цепочке ниже -- операнд &&: его код проверяется самим
+# оператором, а хелпер всегда 0 (пояс || true в его теле); пусто отбрасывается
+# сравнением версий. Комментарий внутрь продолжения ставить нельзя.
 elif [[ -f "$TWEAKCC_BACKUP" ]] \
      && ! grep -q -a -F "$OUR_MARKER" "$TWEAKCC_BACKUP" \
-     && [[ -n "$__BC_VER" && "$(__ver_from_bytes "$TWEAKCC_BACKUP")" == "$__BC_VER" ]]; then
+     && __bc_bk="$(__ver_from_bytes "$TWEAKCC_BACKUP")" \
+     && [[ -n "$__BC_VER" && "$__bc_bk" == "$__BC_VER" ]]; then
   __BC_STOCK="$TWEAKCC_BACKUP"
 fi
 python3 "$HERE/tools/bytecode-census.py" --built "$BIN" \
@@ -6348,7 +6635,7 @@ python3 "$HERE/tools/bytecode-census.py" --built "$BIN" \
 # linux/linux, где стороны СОВПАДАЮТ (поймано первым же прогоном конвейера).
 __BIN_OS_ARCH="$(__image_os_arch "$BIN")" || exit 1
 __BIN_OS="${__BIN_OS_ARCH%%-*}"
-__HOST_PAIR="$(__host_os_arch)"
+__HOST_PAIR="$(__host_os_arch)" || { printf 'ПРИБОР НЕДОСТУПЕН: пара платформ хозяина не измерена\n' >&2; exit 2; }
 if [[ "$__BIN_OS" != "${__HOST_PAIR%%-*}" ]]; then
   echo "==> Подпись ПРОПУЩЕНА: образ ${__BIN_OS_ARCH}, машина ${__HOST_PAIR} -- подписать можно только образ своей ОС"
 elif [[ "$__BIN_OS" == "darwin" ]]; then
@@ -9642,7 +9929,9 @@ validated_nonnegative_integer() {
   fi
   printf '%d\n' "$((10#$digits))"
 }
-GATE_BUDGET="$(validated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET "${CLAUDE_PATCH_GATE_BUDGET:-150}")"
+# Код 2 валидатора -- его собственный вердикт о кривой ручке (FATAL напечатан
+# им самим); прогон умирает тем же кодом, что и до правки (раньше -- set -e).
+GATE_BUDGET="$(validated_nonnegative_integer CLAUDE_PATCH_GATE_BUDGET "${CLAUDE_PATCH_GATE_BUDGET:-150}")" || { printf 'ПРИБОР НЕДОСТУПЕН: бюджет гейта интерфейса не прочитан\n' >&2; exit 2; }
 GATE_SCREEN=(120 40)
 # G-5: поднятый или срезанный бюджет меняет СМЫСЛ вердикта этого гейта
 # (срезанный краснит здоровую сборку, поднятый прячет медленную), поэтому
@@ -9665,7 +9954,9 @@ GATE_TARGET="$(__image_os_arch "$BIN")" || exit 1
 # секции, до неё обрыв не доходит. Порядок здесь -- инвариант: между
 # этой проверкой и созданием $GATE_HOME не должно появляться ничего, что
 # создаёт файлы или процессы.
-GATE_HOME="$(mktemp -d)"
+GATE_HOME="$(mktemp -d)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный дом гейта интерфейса\n' >&2; exit 2; }
+# Пустой путь mktemp уходит ниже в mkdir и в rm -rf.
+[ -n "$GATE_HOME" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь дома гейта интерфейса пуст\n' >&2; exit 2; }
 mkdir -p "$GATE_HOME/cfg" "$GATE_HOME/proj"
 GATE_PROMPT="tweakcc interface gate"
 python3 - "$GATE_HOME" <<'PYSEED'
@@ -9790,7 +10081,9 @@ __interface_gate() {
   # Молчаливый пропуск был бы хуже отказа -- «гейт прошёл» и «гейта не было»
   # читались бы одинаково.
   local __host_pair
-  __host_pair="$(__host_os_arch)"
+  # Стадия вызывается голым именем (set -e в теле активен), выход 2 здесь --
+  # честный код прибора для вызывающего.
+  __host_pair="$(__host_os_arch)" || { printf 'ПРИБОР НЕДОСТУПЕН: пара платформ хозяина не измерена\n' >&2; exit 2; }
   if [[ "$GATE_TARGET" != "$__host_pair" ]]; then
     echo "==> Гейт интерфейса ПРОПУЩЕН: образ ${GATE_TARGET}, машина ${__host_pair} -- запустить нечем"
     rm -rf "$GATE_HOME"
@@ -9859,7 +10152,9 @@ __interface_gate() {
   while (( i < GATE_BUDGET )); do
     i=$((i + 1))
     sleep 1
-    GATE_STATE="$(gate_state_checked)"
+    # gate_state_checked не отказывает по построению (захват || rc=$? внутри,
+    # TOOLFAIL -- сам ответ); пусто невозможно, ветвление ниже -- по слову.
+    GATE_STATE="$(gate_state_checked)" || true
     case "$GATE_STATE" in
       ERROR*|TOOLFAIL*) break ;;
     esac
@@ -9868,7 +10163,8 @@ __interface_gate() {
       GATE_EXITED=1
       GATE_RC=0
       wait $GATE_PID 2>/dev/null || GATE_TOOL_RC=$?
-      GATE_STATE="$(gate_state_checked)"
+      # gate_state_checked не отказывает (захват внутри неё); ответ -- слово.
+      GATE_STATE="$(gate_state_checked)" || true
       break
     fi
     if [[ "$GATE_STATE" == RENDERED ]]; then
@@ -9876,7 +10172,8 @@ __interface_gate() {
       # while instead of declaring victory three seconds in.
       for _ in $(seq 1 8); do
         sleep 1
-        GATE_STATE="$(gate_state_checked)"
+        # gate_state_checked не отказывает (захват внутри неё); ответ -- слово.
+        GATE_STATE="$(gate_state_checked)" || true
         [[ "$GATE_STATE" == ERROR* || "$GATE_STATE" == TOOLFAIL* ]] && break
         # The same death the outer loop handles, and it must be handled the same
         # way HERE -- this is the branch the follow-up loop exists for. Breaking
@@ -9889,7 +10186,8 @@ __interface_gate() {
           GATE_EXITED=1
           GATE_RC=0
           wait $GATE_PID 2>/dev/null || GATE_TOOL_RC=$?
-          GATE_STATE="$(gate_state_checked)"
+          # gate_state_checked не отказывает (захват внутри неё); ответ -- слово.
+          GATE_STATE="$(gate_state_checked)" || true
           break
         fi
       done
@@ -10085,7 +10383,7 @@ if [[ "${CLAUDE_PATCH_SKIP_BENCH:-0}" == "1" ]]; then
   # gate which EXECUTES the judge and the watcher never ran.
   echo "Probes: SKIPPED — CLAUDE_PATCH_SKIP_BENCH=1; judge and watcher behaviour is UNVERIFIED" >&2
 else
-  BENCH="$(dirname "$0")/tools/probe-bench.js"
+  BENCH="$(dirname "$0")/tools/probe-bench.js" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен каталог стенда проб\n' >&2; exit 2; }
   if ! command -v bun >/dev/null; then
     # The bench must run under bun: the image is a single-file bun executable
     # and the carved block is executed by its engine. Refusing loudly beats a
@@ -10094,7 +10392,9 @@ else
     echo "  Set CLAUDE_PATCH_SKIP_BENCH=1 to build without this gate." >&2
     exit 1
   fi
-  BENCH_LOG="$(mktemp)"
+  BENCH_LOG="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный журнал стенда проб\n' >&2; exit 2; }
+  # Пустой путь mktemp уходит ниже в перенаправление и в rm -f.
+  [ -n "$BENCH_LOG" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь журнала стенда проб пуст\n' >&2; exit 2; }
   __benchrc=0
   bun "$BENCH" --binary "$BIN" >"$BENCH_LOG" 2>&1 || __benchrc=$?
   if (( __benchrc == 0 )); then
@@ -10113,8 +10413,8 @@ else
     # дальше: сводка, признающая, что ничего не измерила, всё равно проходила
     # как успех.
     BENCH_SUM=$(grep -a -m1 '^probe-bench: ИТОГ ' "$BENCH_LOG" || true)
-    BENCH_N=$(printf '%s' "$BENCH_SUM" | sed -n 's/.*сценариев=\([0-9][0-9]*\).*/\1/p')
-    BENCH_BAD=$(printf '%s' "$BENCH_SUM" | sed -n 's/.*расхождений=\([0-9][0-9]*\).*/\1/p')
+    BENCH_N=$(printf '%s' "$BENCH_SUM" | sed -n 's/.*сценариев=\([0-9][0-9]*\).*/\1/p') || { printf 'ПРИБОР НЕДОСТУПЕН: не извлечено число сценариев из итога стенда\n' >&2; exit 2; }
+    BENCH_BAD=$(printf '%s' "$BENCH_SUM" | sed -n 's/.*расхождений=\([0-9][0-9]*\).*/\1/p') || { printf 'ПРИБОР НЕДОСТУПЕН: не извлечено число расхождений из итога стенда\n' >&2; exit 2; }
     if [[ -z "$BENCH_N" || -z "$BENCH_BAD" ]]; then
       echo "FATAL: стенд проб завершился успехом, но не назвал итог." >&2
       echo "  Ожидалась строка вида: probe-bench: ИТОГ сценариев=N расхождений=M" >&2
@@ -10333,7 +10633,7 @@ if [[ $DO_UPDATE -eq 1 || $STAGED_FROM_LIVE -eq 1 ]]; then
   # reason (see 0b). Swap it in now, with a rename: atomic, and it takes effect
   # on the next launch rather than under a running process.
   if __has_staging "$BIN"; then
-    FINAL="$(__strip_staging "$BIN")"
+    FINAL="$(__strip_staging "$BIN")" || { printf 'ПРИБОР НЕДОСТУПЕН: не снят staging-суффикс с имени цели\n' >&2; exit 2; }
     mv "$BIN" "$FINAL"
     echo "Swapped the verified build over the previous one: $FINAL"
     BIN="$FINAL"
@@ -10348,13 +10648,16 @@ fi
 # backups. Keep only the current version and its .orig (for emergency restore).
 # Config backups: keep only the 3 most recent.
 if [[ $DO_UPDATE -eq 1 ]]; then
-  VERSIONS_DIR="$(dirname "$BIN")"
+  VERSIONS_DIR="$(dirname "$BIN")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен каталог версий из пути цели\n' >&2; exit 2; }
   # The keep-list is built from the REAL version name, not the target name:
   # when building into staging (--target X.staging) basename would give
   # "2.1.237.staging", and the cleanup would wipe the live 2.1.237 along with
   # its pristine .orig — everything except the intermediate file. Only the
   # binary a live session was executing at that moment would survive.
-  CURRENT_VER="$(basename "$(__strip_staging "$BIN")")"
+  # Пара присваиваний: сначала снимается staging-суффикс, затем берётся имя
+  # версии -- каждая подстановка проверена на своей строке.
+  __cur_base="$(__strip_staging "$BIN")" || { printf 'ПРИБОР НЕДОСТУПЕН: не снят staging-суффикс с имени цели\n' >&2; exit 2; }
+  CURRENT_VER="$(basename "$__cur_base")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя текущей версии из пути\n' >&2; exit 2; }
   CURRENT_VER="${CURRENT_VER%.orig}"
   echo
   echo "==> Cleaning up previous versions"
@@ -10384,7 +10687,7 @@ if [[ $DO_UPDATE -eq 1 ]]; then
       echo "  cannot be answered — refusing to delete old versions on a guess." >&2
     else
       for old in "$VERSIONS_DIR"/2.1.*; do
-        base="$(basename "$old")"
+        base="$(basename "$old")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя старой версии из пути\n' >&2; exit 2; }
         [[ "$base" == "$CURRENT_VER" || "$base" == "$CURRENT_VER.orig" ]] && continue
         if grep -qxF "$old" <<<"$IN_USE"; then
           echo "  kept (a running session is executing it): $base"
@@ -10415,7 +10718,9 @@ fi
 # tools/build-path-probe.sh; расхождение ловится сценарием стенда, а не чтением.
 __envon() {  # имя переменной; 0 истина, 1 ложь, 2 неизвестное значение
   local __name="$1" __raw="${!1-}" __value
-  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  # `return 2`, а не `exit 2`: функция стоит в `||`-списке у своего вызова,
+  # и вызывающий уже различает двойку (`(( rc != 2 )) || exit 2`).
+  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]') || { printf 'ПРИБОР НЕДОСТУПЕН: значение ручки не приведено к нижнему регистру\n' >&2; return 2; }
   case "$__value" in
     1|true|yes|on) return 0 ;;
     ''|0|false|no|off) return 1 ;;
@@ -10443,14 +10748,14 @@ __activation_announce() {
     printf '%s\n' "$__act_out" >&2
     return 1
   fi
-  __act_match="$(printf '%s\n' "$__act_out" | sed -n 's/^MATCH=//p')"
+  __act_match="$(printf '%s\n' "$__act_out" | sed -n 's/^MATCH=//p')" || { printf 'ПРИБОР НЕДОСТУПЕН: не извлечен вердикт MATCH из ответа активации\n' >&2; exit 2; }
   if [[ -z "$__act_match" ]]; then
     echo "FATAL: АКТИВАЦИЯ НЕ ИЗМЕРЕНА -- прибор не назвал MATCH" >&2
     printf '%s\n' "$__act_out" >&2
     return 1
   fi
-  __act_active="$(printf '%s\n' "$__act_out" | sed -n 's/^ACTIVE=//p')"
-  __act_built="$(printf '%s\n' "$__act_out" | sed -n 's/^BUILT=//p')"
+  __act_active="$(printf '%s\n' "$__act_out" | sed -n 's/^ACTIVE=//p')" || { printf 'ПРИБОР НЕДОСТУПЕН: не извлечена активная версия из ответа активации\n' >&2; exit 2; }
+  __act_built="$(printf '%s\n' "$__act_out" | sed -n 's/^BUILT=//p')" || { printf 'ПРИБОР НЕДОСТУПЕН: не извлечена собранная версия из ответа активации\n' >&2; exit 2; }
   case "$__act_match" in
     yes)
       echo "==> Активация: собранная версия активна ($__act_active)"
@@ -10516,7 +10821,9 @@ elif [[ ! -f "$COSTS_SYNC" ]]; then
 elif true; then
   echo
   echo "==> Refreshing model prices and context windows"
-  MODELS_LOG="$(mktemp)"
+  MODELS_LOG="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный журнал синхрона цен\n' >&2; exit 2; }
+  # Пустой путь mktemp уходит ниже в перенаправление и в rm -f.
+  [ -n "$MODELS_LOG" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь журнала синхрона цен пуст\n' >&2; exit 2; }
   # No pipe on the command itself: `python3 ... | grep` would report grep's exit
   # code and a failed sync would read as success. -u so that the two streams
   # land in the log in the order they were written.

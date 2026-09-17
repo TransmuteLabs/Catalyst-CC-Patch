@@ -102,14 +102,15 @@ if [[ -z "${_py}" ]]; then
   __DONE=1
   exit 2
 fi
-_py_probe=$("${_py}" -c 'print("ok")')
+_py_probe=$("${_py}" -c 'print("ok")') || { printf 'ПРИБОР НЕДОСТУПЕН: python3 не ответил на положительный контроль\n' >&2; exit 2; }
 if [[ "${_py_probe}" != "ok" ]]; then
   echo "gate-kill-teeth: ОТКАЗ -- python3 не печатает положительный контроль" >&2
   __DONE=1
   exit 2
 fi
 
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-kill-teeth.XXXXXX")
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-kill-teeth.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+[ -n "$WORKDIR" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
 PIDS="${WORKDIR}/pids"
 HELPERS="${WORKDIR}/helpers.sh"
 : > "${PIDS}"
@@ -326,7 +327,8 @@ t3() {
     echo "T3 FAIL: expected undelivered, got ${GATE_TERM_OUTCOME}"
     return 1
   fi
-  msg=$({ __interface_gate_term_still_alive_msg; } 2>&1)
+  # Код функции-сообщения не вердикт: предмет зуба — текст, его сверяют строки ниже.
+  msg=$({ __interface_gate_term_still_alive_msg; } 2>&1) || true
   if printf '%s' "${msg}" | grep -F -q 'ignored TERM'; then
     echo "T3 FAIL: message still claims ignored TERM"
     echo "T3 message: ${msg}"
@@ -361,9 +363,9 @@ t3() {
 
 write_t4() {
   local q_helpers q_py q_wd
-  q_helpers=$(printf '%q' "${HELPERS}")
-  q_py=$(printf '%q' "${_py}")
-  q_wd=$(printf '%q' "${WORKDIR}")
+  q_helpers=$(printf '%q' "${HELPERS}") || { printf 'ПРИБОР НЕДОСТУПЕН: не процитировать путь вырезки помощников\n' >&2; exit 2; }
+  q_py=$(printf '%q' "${_py}") || { printf 'ПРИБОР НЕДОСТУПЕН: не процитировать путь python3\n' >&2; exit 2; }
+  q_wd=$(printf '%q' "${WORKDIR}") || { printf 'ПРИБОР НЕДОСТУПЕН: не процитировать путь рабочего каталога\n' >&2; exit 2; }
   cat > "${WORKDIR}/t4.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -494,7 +496,7 @@ run_mutation() {
   local newf="${WORKDIR}/mut.${mid}.new"
   cp "${HELPERS}" "${WORKDIR}/helpers.snap"
   local snap now
-  snap=$(sha256_of "${WORKDIR}/helpers.snap")
+  snap=$(sha256_of "${WORKDIR}/helpers.snap") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток вырезки помощников до мутации\n' >&2; exit 2; }
   replace_once "${HELPERS}" "${oldf}" "${newf}"
   local rc=0
   local out="${WORKDIR}/mut.${mid}.out"
@@ -503,7 +505,7 @@ run_mutation() {
   rc=$?
   set -e
   cp "${WORKDIR}/helpers.snap" "${HELPERS}"
-  now=$(sha256_of "${HELPERS}")
+  now=$(sha256_of "${HELPERS}") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток вырезки помощников после восстановления\n' >&2; exit 2; }
   if [[ "${now}" != "${snap}" ]]; then
     echo "gate-kill-teeth: ОТКАЗ -- снимок не сошёлся после ${mid}: snap=${snap} now=${now}" >&2
     __DONE=1

@@ -104,7 +104,8 @@ if [[ "${1:-}" == "--stop" ]]; then
     echo "SWEEP --stop: группа $__pgid мертва -- останавливать нечего" >&2
     exit 1
   fi
-  __now="$(LC_ALL=C ps -o lstart= -p "$__pgid" 2>/dev/null)"
+  # Пустой вывод ps допустим: ниже ветки «лидер мёртв» и «номер переиспользован».
+  __now="$(LC_ALL=C ps -o lstart= -p "$__pgid" 2>/dev/null)" || true
   # Два случая, которые прежде склеивал один диагноз «переиспользован»:
   # ps ДАЛ метку и она не совпала -- номер действительно переиспользован; ps
   # пуст -- лидер группы мёртв, а группа жива (осиротевшие дети), и это не
@@ -167,7 +168,7 @@ __drop_kit_when_idle() {  # [путь, по умолчанию $HERE] [бюдж�
   # __wait_left > 0 ))` не исполнялся ни разу, `__users` оставался пустым, и
   # снимок сносился без единого взгляда на жильцов.
   while :; do
-    __snap_users=$(ps -eo pid,args)
+    __snap_users=$(ps -eo pid,args) || { printf 'ПРИБОР НЕДОСТУПЕН: не получен список процессов для проверки жильцов снимка\n' >&2; return 2; }
     __users=$(printf '%s\n' "$__snap_users" | awk -v here="$__path" -v me="$$" '
       $1 != me && index($0, here) { print $1 }' || true)
     [[ -z "$__users" ]] && break
@@ -459,7 +460,9 @@ __stale_future() {   # путь; 0 -- метка в будущем
 for __stale in "$STATE"/kit.?????? "$STATE"/sweep.self.?????? "$STATE"/sweep.pgid; do
   [[ -e "$__stale" ]] || continue
   [[ "$__stale" == "${SWEEP_SELF:-}" ]] && continue
-  if [[ -z "$(find "$__stale" -maxdepth 0 -mtime +0 2>/dev/null)" ]] \
+  # Пустой find: файл моложе суток либо find отказал — в обоих случаях не сносим по возрасту (ниже ещё __stale_future).
+  __find_age="$(find "$__stale" -maxdepth 0 -mtime +0 2>/dev/null)" || true
+  if [[ -z "$__find_age" ]] \
      && ! __stale_future "$__stale"; then continue; fi
   # Каталоги kit.* и sweep.self.* исполняют shell/python/node прямо из
   # себя, поэтому даже протухший по времени обломок удаляется только после
@@ -490,7 +493,8 @@ done
 # бы ВЕСЬ прогон с диагнозом «номер группы переиспользован» -- неверным. Пустая
 # метка -- не повод валить прогон: файл не создаётся, __PGID_OURS остаётся нулём
 # (трап его не убирает -- его и нет), а поток объявляет недоступность двери.
-__lstart="$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null)"
+# Пустой вывод ps допустим: дверь --stop объявляется недоступной, прогон продолжается.
+__lstart="$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null)" || true
 if [[ -n "$__lstart" ]]; then
   if printf '%s\t%s\n' "$$" "$__lstart" > "$STATE/sweep.pgid"; then
     __PGID_OURS=1
@@ -632,7 +636,7 @@ if (( $# )); then
   # docnum:other): тот же обман счёта, из-за которого разбор
   # списка отвергает одну версию под двумя метками.
   SET_NOTE="названы аргументами -- ${SRC[*]%%:*}"
-  __dup=$(printf '%s\n' "${SRC[@]%%:*}" | sort | uniq -d | tr '\n' ' ')
+  __dup=$(printf '%s\n' "${SRC[@]%%:*}" | sort | uniq -d | tr '\n' ' ') || { printf 'ПРИБОР НЕДОСТУПЕН: не проверена уникальность названных версий\n' >&2; exit 2; }
   [[ -z "${__dup// /}" ]] || {
     echo "SWEEP ОТКАЗ: версия названа дважды: $__dup" >&2
     echo "  счёт «все N версий измерены» обещает N РАЗНЫХ версий" >&2
@@ -715,8 +719,9 @@ ver_of() { local rest="${1#*:}"; printf '%s' "${rest%%:*}"; }
 pin_of() { printf '%s' "${1##*:}"; }
 declare -a MISSING=()
 for entry in "${SRC[@]}"; do
-  [[ -f "$(src_of "$(ver_of "$entry")")" ]] \
-    || MISSING+=("${entry%%:*} ($(src_of "$(ver_of "$entry")"))")
+  __src=$(src_of "$(ver_of "$entry")") || { printf 'ПРИБОР НЕДОСТУПЕН: не собран путь образа корпуса\n' >&2; exit 2; }
+  [[ -f "$__src" ]] \
+    || MISSING+=("${entry%%:*} ($__src)")
 done
 if (( ${#MISSING[@]} )); then
   echo "SWEEP ОТКАЗ: нет пристинных образов: ${MISSING[*]}" >&2
@@ -743,13 +748,16 @@ fi
 # неверно, а искать шли не там.
 sha256_of() {
   local out
-  out=$("${HASH[@]}" "$1" 2>/dev/null | awk '{print $1}')
+  # Пустой хеш обрабатывается следующей строкой как «не прочитать»; ненулевой код хеша — тот же исход. Вызов только как got=$(sha256_of ...).
+  out=$("${HASH[@]}" "$1" 2>/dev/null | awk '{print $1}') || true
   [[ -n "$out" ]] || return 1
   printf '%s' "$out"
 }
 declare -a TAINTED=()
 for entry in "${SRC[@]}"; do
-  v="${entry%%:*}"; src=$(src_of "$(ver_of "$entry")"); want=$(pin_of "$entry")
+  v="${entry%%:*}"
+  src=$(src_of "$(ver_of "$entry")") || { printf 'ПРИБОР НЕДОСТУПЕН: не собран путь образа корпуса\n' >&2; exit 2; }
+  want=$(pin_of "$entry") || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан пин версии корпуса\n' >&2; exit 2; }
   if [[ "$want" == "-" ]]; then
     TAINTED+=("$v (пин не записан)"); continue
   fi
@@ -778,12 +786,16 @@ SRC_KIT="$SWEEP_KIT"
 # описывала дерево на момент конца копирования, а не то, что попало в снимок.
 # Расхождение не гадаем -- объявляем.
 kit_state() {
-  local st; st=$(cd "$SRC_KIT" && git rev-parse --short HEAD 2>/dev/null || echo "вне-git")
-  [[ -n "$(cd "$SRC_KIT" && git status --porcelain 2>/dev/null)" ]] && st="$st+dirty"
+  local st __porc
+  st=$(cd "$SRC_KIT" && git rev-parse --short HEAD 2>/dev/null || echo "вне-git")
+  # Пустой porcelain — штатная чистота; отказ git status (нет репозитория) тоже пуст и совпадает с «вне-git» соседней строки.
+  __porc="$(cd "$SRC_KIT" && git status --porcelain 2>/dev/null)" || true
+  [[ -n "$__porc" ]] && st="$st+dirty"
   printf '%s' "$st"
 }
-STATE_BEFORE=$(kit_state)
-HERE=$(mktemp -d "$STATE/kit.XXXXXX")
+STATE_BEFORE=$(kit_state) || { printf 'ПРИБОР НЕДОСТУПЕН: не снята метка состояния дерева кита до копирования\n' >&2; exit 2; }
+HERE=$(mktemp -d "$STATE/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+[ -n "$HERE" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
 __GUARD_KIT=1   # с этого места уборке принадлежит ещё и снимок кита
 trap '__exit_guard' EXIT
 trap 'exit 130' INT
@@ -811,7 +823,11 @@ cp -R "$SRC_KIT"/. "$HERE"/ || {
 # подоболочку, оставив свипу пустое перечисление.
 __tw_const_from_kit() {   # <имя константы> <имя переменной свипа> <что станет нечем делать>
   local __name="$1" __dst="$2" __what="$3" __hits __val
-  __hits=$(grep -a -c "^${__name}=" "$HERE/claude-patch-all.sh")
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  # Имя счётчика НЕ __rc: под этим именем ловушка выхода несёт код возврата прогона.
+  __hits=$(grep -a -c "^${__name}=" "$HERE/claude-patch-all.sh") || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт присваиваний %s в снимке кита отказал (код %s)\n' "$__name" "$__gsub_rc" >&2; return 2; }
+  __gsub_rc=0
   if (( __hits != 1 )); then
     if (( __hits == 0 )); then
       echo "SWEEP ОТКАЗ: в снимке кита не найдено присваивание $__name -- $__what" >&2
@@ -820,7 +836,7 @@ __tw_const_from_kit() {   # <имя константы> <имя переменн
     fi
     return 1
   fi
-  __val=$(sed -n "s/^${__name}='\(.*\)'\$/\1/p" "$HERE/claude-patch-all.sh")
+  __val=$(sed -n "s/^${__name}='\(.*\)'\$/\1/p" "$HERE/claude-patch-all.sh") || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрано присваивание %s в снимке кита\n' "$__name" >&2; return 2; }
   if [[ -z "$__val" ]]; then
     echo "SWEEP ОТКАЗ: присваивание $__name в снимке кита не разобрано -- $__what" >&2
     return 1
@@ -854,7 +870,8 @@ __tw_const_from_kit TWEAKCC_HOME_ORIGIN_NAME TW_HOME_ORIGIN_NAME \
 # в момент их появления были неотслеживаемыми и для прежней формы невидимыми.
 # `status --porcelain` покрывает все три случая.
 SWEPT_STATE="$STATE_BEFORE"
-[[ "$(kit_state)" == "$STATE_BEFORE" ]] || SWEPT_STATE="$SWEPT_STATE+сдвинулось-при-снимке"
+__ks="$(kit_state)" || { printf 'ПРИБОР НЕДОСТУПЕН: не снята метка состояния дерева кита после копирования\n' >&2; exit 2; }
+[[ "$__ks" == "$STATE_BEFORE" ]] || SWEPT_STATE="$SWEPT_STATE+сдвинулось-при-снимке"
 echo "SWEEP снимок кита: $HERE (дерево $SWEPT_STATE)"
 # Заголовок прогона сменяется настоящей сводкой: строки «вердикта ещё нет»
 # принадлежат тем дверям отказа, которые уже позади.
@@ -921,7 +938,8 @@ __tw_form_violators() {   # <лог> -> число строк правок вн�
 # tools/build-path-probe.sh; расхождение ловится сценарием стенда, а не чтением.
 __envon() {  # имя переменной; 0 истина, 1 ложь, 2 неизвестное значение
   local __name="$1" __raw="${!1-}" __value
-  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  # Пустой результат tr допустим: пустая строка — штатная ложь ручки (отсутствие значения); case ниже её принимает.
+  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]') || true
   case "$__value" in
     1|true|yes|on) return 0 ;;
     ''|0|false|no|off) return 1 ;;
@@ -1234,7 +1252,10 @@ declare -a UNMEASURED_UPSTREAM=()
 rm -f "$STATE/.bench-ran"
 RED=0
 for entry in "${SRC[@]}"; do
-  v="${entry%%:*}"; ver=$(ver_of "$entry"); src=$(src_of "$ver"); want=$(pin_of "$entry")
+  v="${entry%%:*}"
+  ver=$(ver_of "$entry") || { printf 'ПРИБОР НЕДОСТУПЕН: не разобран номер версии из записи корпуса\n' >&2; exit 2; }
+  src=$(src_of "$ver") || { printf 'ПРИБОР НЕДОСТУПЕН: не собран путь образа корпуса\n' >&2; exit 2; }
+  want=$(pin_of "$entry") || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан пин версии корпуса\n' >&2; exit 2; }
   # Точки в номере версии экранируются: шаблон идёт в grep как РЕГУЛЯРНОЕ
   # выражение, и «2.1.246» без экранирования сошлось бы и с «2X1Y246».
   ver_rx="${ver//./\\.}"
@@ -1367,8 +1388,16 @@ for entry in "${SRC[@]}"; do
   # первая (раунд 19, В-9).
   __lc_was="${LC_ALL+set}"; __lc_prev="${LC_ALL:-}"
   export LC_ALL=C
-  ok=$(num "$(grep -a -c '\[OK\]' "$log")")
-  fail=$(num "$(grep -a -c '\[FAIL\]' "$log")")
+  # grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+  # Имя счётчика НЕ __rc: под этим именем ловушка выхода несёт код возврата прогона.
+  __gsub="$(grep -a -c '\[OK\]' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт [OK] в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  ok=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
+  __gsub="$(grep -a -c '\[FAIL\]' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт [FAIL] в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  fail=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Крестики принадлежат ДВУМ слоям с разными владельцами (код -- версия
   # апстрима и наш форк, промты -- каталог накладок ПОЛЬЗОВАТЕЛЯ), поэтому
   # сводка несёт расклад, а не только сумму: по одной сумме нельзя отличить
@@ -1385,9 +1414,9 @@ for entry in "${SRC[@]}"; do
   # (в каждом захвате по якорю) и сложил бы свипу две сборки в один счёт при
   # зелёном вердикте -- ровно тот тихий расход двух читателей одного вывода,
   # ради снятия которого носитель разбора и заводился.
-  twanchor=$(num "$(tw_results_anchor_count "$log")")
-  twcode=$(num "$(__tw_layer_ticks "$log" "$TW_CODE_SECTIONS")")
-  twprompt=$(num "$(__tw_layer_ticks "$log" "$TW_PROMPT_SECTIONS")")
+  twanchor=$(num "$(tw_results_anchor_count "$log")") || { printf 'ПРИБОР НЕДОСТУПЕН: получение счёта якоря блока результатов tweakcc отказал\n' >&2; exit 2; }
+  twcode=$(num "$(__tw_layer_ticks "$log" "$TW_CODE_SECTIONS")") || { printf 'ПРИБОР НЕДОСТУПЕН: получение счёта легших правок слоя кода tweakcc отказал\n' >&2; exit 2; }
+  twprompt=$(num "$(__tw_layer_ticks "$log" "$TW_PROMPT_SECTIONS")") || { printf 'ПРИБОР НЕДОСТУПЕН: получение счёта легших правок слоя промтов tweakcc отказал\n' >&2; exit 2; }
   # Сумма ПРОИЗВОДНА от расклада, а не измеряется отдельно. Галочки вне
   # известной секции не бывает: часовой формы в конвейере на такой строке
   # отказывает раньше, чем сводка что-либо считает, -- значит мерить сумму
@@ -1405,27 +1434,54 @@ for entry in "${SRC[@]}"; do
   # пересказывает те же промахи, и на 2.1.259 сводка говорила 48 при 24
   # промахах, противореча NOTE строкой выше. Перечень конвейера с начала
   # строки не начинается ни в одной своей ветке, включая неразобранную.
-  twmiss=$(num "$(grep -a -c '^Could not find system prompt' "$log")")
-  ours=$(num "$(grep -a -c 'Script patch applied' "$log")")
+  __gsub="$(grep -a -c '^Could not find system prompt' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт промахов накладок промтов в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twmiss=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
+  __gsub="$(grep -a -c 'Script patch applied' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт наших применений патча в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  ours=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Прогон tweakcc кончается ОДНИМ из двух баннеров: полным («successfully»)
   # или частичным («with some failures»). Частичный законен только рядом с
   # NOTE конвейера об объявленных непроходах (tools/tweakcc-known-misses.txt):
   # без неё конвейер отказал бы сам. Считать прогоном лишь полный баннер --
   # значит читать законный частичный прогон как «прогонов 0» (257, волна 33).
-  twok=$(num "$(grep -a -c 'Customizations applied successfully' "$log")")
-  twpart=$(num "$(grep -a -c 'Customizations applied with some failures' "$log")")
-  twnote=$(num "$(grep -a -c '^NOTE: объявленные непроходы tweakcc на ' "$log")")
+  __gsub="$(grep -a -c 'Customizations applied successfully' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт полного баннера tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twok=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
+  __gsub="$(grep -a -c 'Customizations applied with some failures' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт частичного баннера tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twpart=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
+  __gsub="$(grep -a -c '^NOTE: объявленные непроходы tweakcc на ' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт NOTE объявленных непроходов tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twnote=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   twruns=$(( twok + twpart ))
-  iface=$(num "$(grep -a -c '^Interface:' "$log")")
+  __gsub="$(grep -a -c '^Interface:' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт строк интерфейса в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  iface=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Поле привязано к НОМЕРУ версии, а не к форме строки. Прежде оно считало
   # строки по шаблону `^Version: .*(Claude Code)`, поэтому сборка, объявившая
   # ЛЮБУЮ другую версию, проходила вердикт зелёной под именем запинованной.
-  smoke=$(num "$(grep -a -c "^Version: $ver_rx (Claude Code)" "$log")")
+  __gsub="$(grep -a -c "^Version: $ver_rx (Claude Code)" "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт дымовой строки версии в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  smoke=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # А это -- ответ конвейера на вопрос о происхождении байт: он печатает
   # дайджест того, из чего собирал. Совпадение с пином связывает вердикт с
   # БАЙТАМИ, а не только с именем файла, который мы ему назвали.
-  digest=$(num "$(grep -a -c "^Source digest: $want " "$log")")
-  bench=$(num "$(grep -a -c '^Probes: .* scenarios behaved as specified' "$log")")
+  __gsub="$(grep -a -c "^Source digest: $want " "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт строк дайджеста источника в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  digest=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
+  __gsub="$(grep -a -c '^Probes: .* scenarios behaved as specified' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт строк стенда зондов в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  bench=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Локаль возвращается сразу после последнего поля: дальше идут сообщения
   # оператору, и вердикт печатается его текстом, а не байтами.
   # Присутствие ВЫЗОВА гейта иначе не пинится ничем: удали из конвейера блок,
@@ -1434,8 +1490,14 @@ for entry in "${SRC[@]}"; do
   # итоговых строк, то есть доказательства, что гейт ИСПОЛНЯЛСЯ на этой сборке.
   # У пола засчитывается и объявленный пропуск: пристинный близнец есть не
   # всегда, а объявление -- это тоже ответ вызова.
-  forms=$(num "$(grep -a -c '^ФОРМЫ ОБОЛОЧКИ ЧИСТЫ' "$log")")
-  floor=$(num "$(grep -a -c -E '^ПОЛ ПРОВЕРОК СОШЁЛСЯ|^==> Пол проверок ПРОПУЩЕН' "$log")")
+  __gsub="$(grep -a -c '^ФОРМЫ ОБОЛОЧКИ ЧИСТЫ' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт итога гейта форм оболочки в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  forms=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
+  __gsub="$(grep -a -c -E '^ПОЛ ПРОВЕРОК СОШЁЛСЯ|^==> Пол проверок ПРОПУЩЕН' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт итога пола проверок в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  floor=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Дверь уровня tweakcc -- того же рода вызов: удали из конвейера блок, её
   # зовущий, и не покраснеет ни один стенд (дверь уедет вместе со своей
   # проверкой). Засчитывается и объявленное гашение слепой ручкой: это тоже
@@ -1444,7 +1506,10 @@ for entry in "${SRC[@]}"; do
   # и соседнюю дверь выключенных правок, и её объявление подошло бы под образец
   # по ручке -- поле стало бы двойкой, а вердикт сравнивает его с единицей и
   # объявил бы «дверь не отработала» ровно там, где отработали ОБЕ.
-  twlevel=$(num "$(grep -a -c -E '^NOTE: уровень tweakcc на .* сошёлся: |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь уровня tweakcc погашена' "$log")")
+  __gsub="$(grep -a -c -E '^NOTE: уровень tweakcc на .* сошёлся: |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь уровня tweakcc погашена' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт ответа двери уровня tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twlevel=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Дверь МНОЖЕСТВА выключенных правок -- вызов того же рода, и свидетеля,
   # кроме этого поля, у неё нет НИГДЕ: оснастка зонда пути сборки берёт из
   # исходника ТЕЛО функции и зовёт его сама, поэтому снятый из конвейера боевой
@@ -1460,7 +1525,10 @@ for entry in "${SRC[@]}"; do
   # Гашение опознаётся по ИМЕНИ ДВЕРИ, а не по имени ручки: слепые NOTE обеих
   # дверей начинаются одинаково («... -- дверь »), и образец по ручке дал бы
   # двойку в ОБОИХ полях, а вердикт сравнивает каждое с единицей.
-  twoff=$(num "$(grep -a -c -E '^NOTE: выключенные конфигурацией правки tweakcc на .* сошлись с объявлением дома: |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь выключенных правок tweakcc погашена|^NOTE: объявления выключенных правок tweakcc для дома .* нет, и выключенных правок не измерено|^NOTE: дом tweakcc .* создан прогоном, а не оператором ' "$log")")
+  __gsub="$(grep -a -c -E '^NOTE: выключенные конфигурацией правки tweakcc на .* сошлись с объявлением дома: |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь выключенных правок tweakcc погашена|^NOTE: объявления выключенных правок tweakcc для дома .* нет, и выключенных правок не измерено|^NOTE: дом tweakcc .* создан прогоном, а не оператором ' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт ответа двери выключенных правок tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twoff=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Дверь ИНЕРТНЫХ правок (⊘ и ≡) -- третий вызов того же рода, и свидетеля у
   # неё не было вовсе: до этой правки на успешной двусторонней сходимости она
   # МОЛЧАЛА, то есть снятие обеих сверок не меняло ни лога прогона, ни строки
@@ -1475,7 +1543,10 @@ for entry in "${SRC[@]}"; do
   # пропустила.
   # Гашение опознаётся по ИМЕНИ ДВЕРИ, как у соседей: слепые NOTE всех дверей
   # начинаются одинаково, и образец по имени ручки дал бы тройку в каждом поле.
-  twinert=$(num "$(grep -a -c -E '^NOTE: инертные правки tweakcc на .* сошлись с объявлением: |^NOTE: инертных правок tweakcc на .* не объявлено и не измерено|^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь инертных правок tweakcc погашена' "$log")")
+  __gsub="$(grep -a -c -E '^NOTE: инертные правки tweakcc на .* сошлись с объявлением: |^NOTE: инертных правок tweakcc на .* не объявлено и не измерено|^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь инертных правок tweakcc погашена' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт ответа двери инертных правок tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twinert=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # Часовой ФОРМЫ и дверь НЕПРОШЕДШИХ НАКЛАДОК -- четвёртый и пятый вызовы того
   # же рода. У конвейера их голос БЕЗУСЛОВЕН (волна 39d): поле, замолкающее на
   # части законных прогонов, от снятой двери не отличить -- урок соседнего
@@ -1484,16 +1555,22 @@ for entry in "${SRC[@]}"; do
   # Гашение опознаётся по ИМЕНИ ДВЕРИ, как у соседей: одна ручка гасит ВСЕ
   # двери слоя разом, и образец по имени РУЧКИ считал бы в каждом поле их все,
   # а вердикт сравнивает каждое поле с единицей.
-  twform=$(num "$(grep -a -c -E '^NOTE: часовой формы строк tweakcc на .*: строк вне известных секций |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- часовой формы вывода tweakcc погашен' "$log")")
-  twpfail=$(num "$(grep -a -c -E '^NOTE: накладки промтов tweakcc на .*: объявленных не легшими |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь непрошедших накладок tweakcc погашена' "$log")")
+  __gsub="$(grep -a -c -E '^NOTE: часовой формы строк tweakcc на .*: строк вне известных секций |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- часовой формы вывода tweakcc погашен' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт ответа часового формы tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twform=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
+  __gsub="$(grep -a -c -E '^NOTE: накладки промтов tweakcc на .*: объявленных не легшими |^NOTE: CLAUDE_PATCH_ALLOW_TWEAKCC_FAILURES=1 -- дверь непрошедших накладок tweakcc погашена' "$log")" || __gsub_rc=$?
+  [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт ответа двери непрошедших накладок tweakcc в логе отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+  __gsub_rc=0
+  twpfail=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
   # СОБСТВЕННОЕ измерение формы, не свидетель чужой двери: предмет тот же, вход
   # другой (весь лог сборки против захвата конвейера), поэтому и поле своё. Одно
   # имя на две величины кит уже проходил: свидетель двери и собственный замер не
   # различались бы ни числом, ни причиной отказа.
-  twunsect=$(num "$(__tw_form_violators "$log")")
+  twunsect=$(num "$(__tw_form_violators "$log")") || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт строк правок вне известных секций отказал\n' >&2; exit 2; }
   # A NUL byte means two writers shared this file: the log is not one run.
-  mixed=$(LC_ALL=C tr -d '\000' < "$log" | wc -c | tr -d ' ')
-  size=$(wc -c < "$log" | tr -d ' ')
+  mixed=$(LC_ALL=C tr -d '\000' < "$log" | wc -c | tr -d ' ') || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен размер лога без нулевых байт\n' >&2; exit 2; }
+  size=$(wc -c < "$log" | tr -d ' ') || { printf 'ПРИБОР НЕДОСТУПЕН: не измерен размер лога\n' >&2; exit 2; }
   if [[ "$__lc_was" == set ]]; then export LC_ALL="$__lc_prev"; else unset LC_ALL; fi
   note=""
   if (( rc == 3 )); then
@@ -1604,7 +1681,10 @@ for entry in "${SRC[@]}"; do
   __teeth_done_before=$TEETH_DONE
   __teeth_ready=0
   if (( TEETH_DONE == 0 )) && (( rc == 0 )) && [[ -f "$STATE/bin/$v.wave.bin" ]]; then
-    __teeth_ours=$(num "$(LC_ALL=C grep -a -c -F "$SWEEP_OUR_MARKER" "$STATE/bin/$v.wave.bin")")
+    __gsub="$(LC_ALL=C grep -a -c -F "$SWEEP_OUR_MARKER" "$STATE/bin/$v.wave.bin")" || __gsub_rc=$?
+    [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт нашей иглы в образе прогона отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+    __gsub_rc=0
+    __teeth_ours=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
     # Конвейер объявил успех, а правки в образе нет -- это НЕ повод молча
     # пропустить зубы: два утверждения об ОДНОМ образе разошлись, и молчание
     # здесь неотличимо от зелёного.
@@ -1671,7 +1751,10 @@ for entry in "${SRC[@]}"; do
     if (( __teeth_done_before == 0 )); then
       __tc_ready=1
     else
-      __tc_ours=$(num "$(LC_ALL=C grep -a -c -F "$SWEEP_OUR_MARKER" "$STATE/bin/$v.wave.bin")")
+      __gsub="$(LC_ALL=C grep -a -c -F "$SWEEP_OUR_MARKER" "$STATE/bin/$v.wave.bin")" || __gsub_rc=$?
+      [ "${__gsub_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт нашей иглы в образе прогона отказал (код %s)\n' "$__gsub_rc" >&2; exit 2; }
+      __gsub_rc=0
+      __tc_ours=$(num "$__gsub") || { printf 'ПРИБОР НЕДОСТУПЕН: нормализация счёта отказала\n' >&2; exit 2; }
       if [[ "$__tc_ours" == "БИТО" || "$__tc_ours" == "0" ]]; then
         echo "SWEEP ОТКАЗ: конвейер вернул 0 на $v, а образ $STATE/bin/$v.wave.bin не несёт нашей правки (вхождений иглы: $__tc_ours) -- корпусные зубы НЕ МЕРИЛИ" >&2
         sum_line "# корпусные зубы: НЕ ИЗМЕРЕНЫ -- образ версии $v без нашей правки при exit=0"

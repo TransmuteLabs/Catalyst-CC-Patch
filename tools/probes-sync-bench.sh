@@ -107,7 +107,8 @@ mk_kit() {
   # раскатка отказала», не найдя канонной стороны новых пар. Прежняя правка
   # разбирала объявления sed'ом -- это знало про TOOL_FILES, но не про
   # PROBE_FILES и не про пару дома словарей: те так и лежали копиями ниже.
-  local __names __list_rc __err="$(dirname "$dst")/list-err"
+  local __names __list_rc __err
+  __err="$(dirname "$dst")/list-err" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен путь журнала опроса набора\n' >&2; exit 2; }
   __names=$(bash "$dst/scripts/probes-sync.sh" --list 2>"$__err"); __list_rc=$?
   # Положительный контроль: молчащий или отказавший опрос означает, что
   # игрушечный канон вышел бы пустым МОЛЧА.
@@ -213,13 +214,15 @@ CP
   fi
   wait "$first_pid"; TW_RC1=$?
   TW_DIFF=$(bash "$script" --diff 2>&1); TW_DIFF_RC=$?
-  TW_SECOND_LOG=$(cat "$second_log")
+  # Пустой журнал второго писателя допустим: вердикт строится по кодам TW_RC*, журнал — улика.
+  TW_SECOND_LOG=$(cat "$second_log") || true
   return 0
 }
 
 scenario_1() {
   local root
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s1.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s1.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   if ! two_writers "$root" signal; then
     LAST_EVID="$TW_REASON"
@@ -238,7 +241,8 @@ scenario_1() {
 
 scenario_2() {
   local root script dead stale live out rc live_holder
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s2.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s2.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   bash "$script" --to-home >/dev/null 2>&1 || {
@@ -277,7 +281,8 @@ scenario_2() {
 
 scenario_3() {
   local root script stub dead_holder dead_start live live_start logA logB logC logD rcA rcB rcC rcD
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s3.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s3.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   # Ноги flock(1)/perl flock(2) гасятся заглушками с кодом «не могу»: тогда
@@ -392,7 +397,8 @@ scenario_4() {
 
 scenario_5() {
   local root script live out rc
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s5.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s5.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   bash "$script" --to-home >/dev/null 2>&1 || {
@@ -419,7 +425,8 @@ scenario_5() {
 # промтов судьи). Сценарий строит именно его.
 scenario_8() {
   local root script out rc has_to has_from
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s8.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s8.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   bash "$script" --to-home >/dev/null 2>&1 || {
@@ -473,7 +480,8 @@ run_scenario() {
 # дверь кричала бы на каждом живом доме и её бы отключили.
 scenario_9() {
   local root script out rc out2 rc2 out3 rc3
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s9.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s9.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   bash "$script" --to-home >/dev/null 2>&1 || {
@@ -513,7 +521,8 @@ scenario_9() {
 # один файл вне -- красное с ИМЕНЕМ; всё под индексом -- зелёное.
 scenario_10() {
   local root script out1 rc1 out2 rc2 out3 rc3 victim
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s10.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s10.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   victim='judge/replay.py'
@@ -559,7 +568,8 @@ scenario_10() {
 # копией перечня.
 scenario_11() {
   local root script out rc rel named home_files missing made err
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s11.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s11.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   err="$root/find-err"
@@ -609,14 +619,17 @@ scenario_11() {
 
 scenario_6() {
   local root script live live_start other_start stage owner out rc stage_left owner_left
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s6.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s6.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   bash "$script" --to-home >/dev/null 2>&1 || {
     LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
     bad '6 стадии: исходная раскатка отказала'; return; }
   sleep 60 & live=$!
-  live_start=$(LC_ALL=C ps -o lstart= -p "$live" 2>/dev/null)
+  live_start=$(LC_ALL=C ps -o lstart= -p "$live" 2>/dev/null) || __live_ps_rc=$?
+  [ "${__live_ps_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитать время старта живого процесса (код %s)\n' "$__live_ps_rc" >&2; exit 2; }
+  __live_ps_rc=0
   other_start='Mon Jan  1 00:00:00 2001'
   [[ "$live_start" != "$other_start" ]] || other_start='Tue Jan  2 00:00:00 2001'
   stage="$CLAUDE_PROBES_DIR/probes.toml.sync-new.$live"
@@ -642,9 +655,10 @@ scenario_6() {
 
 scenario_7() {   # путь отказа обязан КОНЧАТЬСЯ, а не виснуть
   local root start elapsed rc pid wd stub_pid orphan
-  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s7.XXXXXX")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s7.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
-  start=$(date +%s)
+  start=$(date +%s) || { printf 'ПРИБОР НЕДОСТУПЕН: не получено время старта замера пути отказа\n' >&2; exit 2; }
   bash "$KIT/tools/probes-sync-bench.sh" --hang-case "$root" >"$root/hang.log" 2>&1 &
   pid=$!
   ( sleep 90; kill -9 "$pid" 2>/dev/null ) &
@@ -818,7 +832,8 @@ PY
 self_check() {
   local n root before reddened=0
   for ((n = 1; n <= EXPECTED_MUTATIONS; n++)); do
-    root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-mut.XXXXXX")
+    root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-mut.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+    [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
     mk_kit "$root/kit"
     if ! mutate "$root" "$n"; then rm -rf "$root"; return 2; fi
     local saved_kit="$KIT"

@@ -149,7 +149,7 @@ load_corpus_suffix() {
     || die2 "ОТКАЗ: нет дома имени корпуса $HERE/corpus-file-name.sh"
   . "$HERE/corpus-file-name.sh"
   local probe
-  probe=$(corpus_file_name '')
+  probe=$(corpus_file_name '') || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя файла корпуса\n' >&2; exit 2; }
   [[ -n "$probe" ]] \
     || die2 "ОТКАЗ: дом имени корпуса не дал суффикса -- ценз корпуса слеп"
   REAP_CORPUS_SUFFIX=$probe
@@ -1009,7 +1009,14 @@ PY
   HOLDER_PID=$!
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    if command -v lsof >/dev/null && [[ -n "$(lsof -t "$path" || true)" ]]; then
+    # Пустой lsof -t — штатно: держатель ещё не виден; цикл повторяет, затем отказ прибора.
+    local __lsof_t
+    if command -v lsof >/dev/null; then
+      __lsof_t="$(lsof -t "$path" || true)"
+    else
+      __lsof_t=
+    fi
+    if [[ -n "$__lsof_t" ]]; then
       return 0
     fi
     sleep 0.1
@@ -1049,15 +1056,16 @@ tooth_pass() {
 tooth_1() {
   TOOTH_N=1 TOOTH_NAME='перечисление' TOOTH_RC=0
   local fx out err rc before after
-  fx=$(mktemp -d "$WORK/fx1.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx1.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   start_holder "$fx/scratchpad/held-open.bin" || return 2
-  before=$(manifest_of "$fx")
+  before=$(manifest_of "$fx") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят снимок фикстуры до прогона\n' >&2; exit 2; }
   out=$WORK/t1.out; err=$WORK/t1.err
   run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
   rc=$?
   stop_holder
-  after=$(manifest_of "$fx")
+  after=$(manifest_of "$fx") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят снимок фикстуры после прогона\n' >&2; exit 2; }
   if [[ "$rc" -ne 0 ]]; then
     tooth_fail "перечисление отдало rc=$rc stderr=$(cat "$err")"
   elif [[ "$before" != "$after" ]]; then
@@ -1072,7 +1080,8 @@ tooth_1() {
 tooth_2() {
   TOOTH_N=2 TOOTH_NAME='apply-ровно-кандидаты' TOOTH_RC=0
   local fx out err rc p
-  fx=$(mktemp -d "$WORK/fx2.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx2.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   start_holder "$fx/scratchpad/held-open.bin" || return 2
   out=$WORK/t2.out; err=$WORK/t2.err
@@ -1104,7 +1113,8 @@ tooth_2() {
 tooth_3() {
   TOOTH_N=3 TOOTH_NAME='живой-pid' TOOTH_RC=0
   local fx out err rc livef
-  fx=$(mktemp -d "$WORK/fx3.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx3.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   start_holder "$fx/scratchpad/held-open.bin" || return 2
   livef=$fx/tmp/checks-teeth.$LIVEPID.x.bin
@@ -1127,7 +1137,8 @@ tooth_3() {
 tooth_4() {
   TOOTH_N=4 TOOTH_NAME='открытый-файл' TOOTH_RC=0
   local fx out err rc held
-  fx=$(mktemp -d "$WORK/fx4.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx4.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   held=$fx/scratchpad/held-open.bin
   start_holder "$held" || return 2
@@ -1155,7 +1166,8 @@ tooth_4() {
 tooth_5() {
   TOOTH_N=5 TOOTH_NAME='отказ-прибора' TOOTH_RC=0
   local fx out err rc bindir saved_path
-  fx=$(mktemp -d "$WORK/fx5.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx5.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   bindir=$WORK/nopath
   mkdir -p "$bindir"
@@ -1187,7 +1199,8 @@ tooth_6() {
     tooth_fail "домов порога hours=$n_h size=$n_s (нужно по одному)"
     return 0
   fi
-  fx=$(mktemp -d "$WORK/fx6.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx6.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   probe=$fx/tmp/cc-build-path-probe.midage
   mkdir -p "$probe"
@@ -1263,9 +1276,10 @@ PY
 tooth_7() {
   TOOTH_N=7 TOOTH_NAME='аренда-защищает' TOOTH_RC=0
   local fx out err rc now_s
-  fx=$(mktemp -d "$WORK/fx7.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx7.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
-  now_s=$(date +%s)
+  now_s=$(date +%s) || { printf 'ПРИБОР НЕДОСТУПЕН: не получено текущее время для аренды\n' >&2; exit 2; }
   write_lease "$fx/ccpatch" "$((now_s + 7200))" 'зуб7: боевой корень занят'
   write_lease "$fx/tmp/cc-build-path-probe.oldnopid" "$((now_s + 7200))" 'зуб7: занят кандидат'
   backdate "$fx/tmp/cc-build-path-probe.oldnopid" "$((now_s - 7 * 3600))"
@@ -1312,9 +1326,10 @@ tooth_7() {
 tooth_8() {
   TOOTH_N=8 TOOTH_NAME='аренда-истекла' TOOTH_RC=0
   local fx out err rc now_s
-  fx=$(mktemp -d "$WORK/fx8.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx8.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
-  now_s=$(date +%s)
+  now_s=$(date +%s) || { printf 'ПРИБОР НЕДОСТУПЕН: не получено текущее время для аренды\n' >&2; exit 2; }
   write_lease "$fx/ccpatch" "$((now_s - 60))" 'зуб8: срок прошёл до прогона'
   out=$WORK/t8.out; err=$WORK/t8.err
   run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1 --apply
@@ -1340,7 +1355,8 @@ tooth_9() {
   local fx out err rc now_s n
   # 9а: аренд нет -- строка с нулём обязана быть (иначе «пропущено»
   # неотличимо от «не печатаем»).
-  fx=$(mktemp -d "$WORK/fx9a.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx9a.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   out=$WORK/t9a.out; err=$WORK/t9a.err
   run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
@@ -1355,9 +1371,10 @@ tooth_9() {
     return 0
   fi
   # 9б: есть живая аренда на уровень корня -- число 1 и названный путь.
-  fx=$(mktemp -d "$WORK/fx9b.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx9b.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
-  now_s=$(date +%s)
+  now_s=$(date +%s) || { printf 'ПРИБОР НЕДОСТУПЕН: не получено текущее время для аренды\n' >&2; exit 2; }
   write_lease "$fx/corpus" "$((now_s + 3600))" 'ценз мёртвых ветвей читает корпуса'
   out=$WORK/t9b.out; err=$WORK/t9b.err
   run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
@@ -1394,7 +1411,8 @@ tooth_10() {
   TOOTH_N=10 TOOTH_NAME='битый-маркер-отказ' TOOTH_RC=0
   local fx out err rc now_s bad
   for bad in 'мусор вместо аренды' 'reap-lease-v1 не-число' 'reap-lease-v1 123' ''; do
-    fx=$(mktemp -d "$WORK/fx10.XXXXXX")
+    fx=$(mktemp -d "$WORK/fx10.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
     build_fixture "$fx" "$DEADPID" "$LIVEPID"
     mkdir -p "$fx/corpus"
     printf '%s\n' "$bad" > "$fx/corpus/.reap-lease"
@@ -1417,9 +1435,10 @@ tooth_10() {
   done
   # положительный контроль той же формой: ВЯЗКИЙ текст, годный маркер рядом --
   # rc=0 (иначе «падает на всём» выглядело бы падением на битом).
-  fx=$(mktemp -d "$WORK/fx10ok.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx10ok.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
-  now_s=$(date +%s)
+  now_s=$(date +%s) || { printf 'ПРИБОР НЕДОСТУПЕН: не получено текущее время для аренды\n' >&2; exit 2; }
   write_lease "$fx/corpus" "$((now_s + 3600))" 'годный'
   out=$WORK/t10ok.out; err=$WORK/t10ok.err
   run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
@@ -1664,12 +1683,13 @@ run_one_tooth() {
 
 self_check() {
   require_python
-  WORK=$(mktemp -d "${REAP_SELF_WORK:-${TMPDIR:-/tmp}}/reap-heavy-self.XXXXXX")
+  WORK=$(mktemp -d "${REAP_SELF_WORK:-${TMPDIR:-/tmp}}/reap-heavy-self.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог self-check\n' >&2; exit 2; }
+  [ -n "$WORK" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога self-check пуст\n' >&2; exit 2; }
   TOOL=$WORK/reap-heavy.sh
   cp "$HERE/reap-heavy.sh" "$TOOL"
   SNAP=$WORK/reap-heavy.sh.snap
   cp "$TOOL" "$SNAP"
-  SNAP_HASH=$(sha256_of "$SNAP")
+  SNAP_HASH=$(sha256_of "$SNAP") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток снимка прибора\n' >&2; exit 2; }
   # Копия прибора в $WORK ищет дом имени корпуса по своему HERE -- дом едет
   # рядом с копией. Родителю суффикс нужен для фикстуры и списков зубов.
   cp "$HERE/corpus-file-name.sh" "$WORK/corpus-file-name.sh"
@@ -1742,7 +1762,7 @@ bin/claude
     say "ЗУБ $n красный-контроль: мутация покраснела именным красным"
     cp "$SNAP" "$TOOL"
     local nowh
-    nowh=$(sha256_of "$TOOL")
+    nowh=$(sha256_of "$TOOL") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток копии после восстановления\n' >&2; exit 2; }
     if [[ "$nowh" != "$SNAP_HASH" ]]; then
       say "ЗУБ $n красный-контроль: sha256 после восстановления $nowh != $SNAP_HASH"
       return 1

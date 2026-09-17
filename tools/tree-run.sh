@@ -258,7 +258,8 @@ resolve_side() {
   fi
   if [[ -f "$path" ]]; then
     local dest
-    dest=$(mktemp -d "${TMPDIR:-/tmp}/tree-run-$tag.XXXXXX")
+    dest=$(mktemp -d "${TMPDIR:-/tmp}/tree-run-$tag.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог извлечения %s\n' "$tag" >&2; return 2; }
+    [ -n "$dest" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога извлечения пуст\n' >&2; return 2; }
     python3 "$EXTRACT" extract --image "$path" --out "$dest" >&2 || return 2
     printf '%s\n' "$dest"
     return 0
@@ -302,8 +303,10 @@ cmd_run() {
   [[ -d "$TREE" ]] || die2 "ПРИБОР: нет дерева: $TREE"
   print_boundary "$TREE" ""
   local out err rc
-  out=$(mktemp "${TMPDIR:-/tmp}/tree-run-out.XXXXXX")
-  err=$(mktemp "${TMPDIR:-/tmp}/tree-run-err.XXXXXX")
+  out=$(mktemp "${TMPDIR:-/tmp}/tree-run-out.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл вывода\n' >&2; exit 2; }
+  [ -n "$out" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного файла вывода пуст\n' >&2; exit 2; }
+  err=$(mktemp "${TMPDIR:-/tmp}/tree-run-err.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл ошибок\n' >&2; exit 2; }
+  [ -n "$err" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного файла ошибок пуст\n' >&2; exit 2; }
   run_cli "$TREE" "$out" "$err"
   rc=$?
   cat "$out"
@@ -324,10 +327,14 @@ cmd_ab() {
   local ab_right="$right"  # MUT_AB_SHOULDERS
   print_boundary "$left" ""
   local lout lerr rout rerr lrc rrc lkind rkind
-  lout=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-lo.XXXXXX")
-  lerr=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-le.XXXXXX")
-  rout=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-ro.XXXXXX")
-  rerr=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-re.XXXXXX")
+  lout=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-lo.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл вывода pristine\n' >&2; exit 2; }
+  [ -n "$lout" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного файла вывода pristine пуст\n' >&2; exit 2; }
+  lerr=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-le.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл ошибок pristine\n' >&2; exit 2; }
+  [ -n "$lerr" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного файла ошибок pristine пуст\n' >&2; exit 2; }
+  rout=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-ro.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл вывода patched\n' >&2; exit 2; }
+  [ -n "$rout" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного файла вывода patched пуст\n' >&2; exit 2; }
+  rerr=$(mktemp "${TMPDIR:-/tmp}/tree-run-ab-re.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл ошибок patched\n' >&2; exit 2; }
+  [ -n "$rerr" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного файла ошибок patched пуст\n' >&2; exit 2; }
   run_cli "$left" "$lout" "$lerr"
   lrc=$?
   lkind="$RUN_CLI_KIND"
@@ -373,7 +380,8 @@ cmd_patch() {
   rel=$(meta_get "$TREE" cli) || exit 2
   cli="$TREE/$rel"
   [[ -f "$cli" ]] || die2 "ПРИБОР: нет cli в дереве: $cli"
-  work=$(mktemp -d "${TMPDIR:-/tmp}/tree-run-patch.XXXXXX")
+  work=$(mktemp -d "${TMPDIR:-/tmp}/tree-run-patch.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог патча\n' >&2; exit 2; }
+  [ -n "$work" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога патча пуст\n' >&2; exit 2; }
   in="$work/in.js"
   out="$work/out.js"
   helper="$work/run-patch.mjs"
@@ -483,7 +491,8 @@ tooth_pass() {
 tooth_1() {
   TOOTH_N=1 TOOTH_NAME='дерево-версия' TOOTH_RC=0
   local fx img tree out err rc
-  fx=$(mktemp -d "$WORK/fx1.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx1.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t1.out; err=$WORK/t1.err
@@ -524,7 +533,8 @@ tooth_1() {
 tooth_2() {
   TOOTH_N=2 TOOTH_NAME='префикс-bunfs' TOOTH_RC=0
   local fx img tree out err rc prefix
-  fx=$(mktemp -d "$WORK/fx2.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx2.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t2.out; err=$WORK/t2.err
@@ -564,7 +574,8 @@ tooth_2() {
 tooth_3() {
   TOOTH_N=3 TOOTH_NAME='ноль-вхождений' TOOTH_RC=0
   local fx img tree out err rc
-  fx=$(mktemp -d "$WORK/fx3.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx3.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t3.out; err=$WORK/t3.err
@@ -590,7 +601,8 @@ tooth_3() {
 tooth_4() {
   TOOTH_N=4 TOOTH_NAME='ab-различение' TOOTH_RC=0
   local fx img_p img_t tree_p tree_t out err rc
-  fx=$(mktemp -d "$WORK/fx4.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx4.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img_p="$fx/img-p"
   img_t="$fx/img-t"
   tree_p="$fx/tree-p"
@@ -638,7 +650,8 @@ tooth_4() {
 tooth_5() {
   TOOTH_N=5 TOOTH_NAME='неидемпотентность' TOOTH_RC=0
   local fx img tree script out err rc
-  fx=$(mktemp -d "$WORK/fx5.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx5.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   script="$fx/patch.js"
@@ -677,7 +690,8 @@ tooth_5() {
 tooth_6() {
   TOOTH_N=6 TOOTH_NAME='граница' TOOTH_RC=0
   local fx img tree out err rc
-  fx=$(mktemp -d "$WORK/fx6.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx6.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t6.out; err=$WORK/t6.err
@@ -736,7 +750,8 @@ EOF
 tooth_7() {
   TOOTH_N=7 TOOTH_NAME='рантайм-совпал' TOOTH_RC=0
   local fx img tree out err rc ver
-  fx=$(mktemp -d "$WORK/fx7.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx7.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t7.out; err=$WORK/t7.err
@@ -773,7 +788,8 @@ tooth_7() {
 tooth_8() {
   TOOTH_N=8 TOOTH_NAME='рантайм-расходятся' TOOTH_RC=0
   local fx img tree out err rc ver verdict
-  fx=$(mktemp -d "$WORK/fx8.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx8.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t8.out; err=$WORK/t8.err
@@ -812,7 +828,8 @@ tooth_8() {
 tooth_9() {
   TOOTH_N=9 TOOTH_NAME='рантайм-не-измерен' TOOTH_RC=0
   local fx img tree out err rc
-  fx=$(mktemp -d "$WORK/fx9.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx9.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t9.out; err=$WORK/t9.err
@@ -847,7 +864,8 @@ tooth_9() {
 tooth_10() {
   TOOTH_N=10 TOOTH_NAME='сторож-прибора-код4' TOOTH_RC=0
   local fx img tree out err rc
-  fx=$(mktemp -d "$WORK/fx10.XXXXXX")
+  fx=$(mktemp -d "$WORK/fx10.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
   img="$fx/img"
   tree="$fx/tree"
   out=$WORK/t10.out; err=$WORK/t10.err
@@ -1245,7 +1263,8 @@ self_check() {
   require_bun
   local orig_here="$HERE"
   export TREE_CENSUS="$orig_here/bytecode-census.py"
-  WORK=$(mktemp -d "${TREE_SELF_WORK:-${TMPDIR:-/tmp}}/tree-run-self.XXXXXX")
+  WORK=$(mktemp -d "${TREE_SELF_WORK:-${TMPDIR:-/tmp}}/tree-run-self.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог self-check\n' >&2; exit 2; }
+  [ -n "$WORK" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога self-check пуст\n' >&2; exit 2; }
   cp "$orig_here/tree-run.sh" "$WORK/tree-run.sh"
   cp "$orig_here/tree-extract.py" "$WORK/tree-extract.py"
   cp "$orig_here/bun-drift.sh" "$WORK/bun-drift.sh" || return 2
@@ -1255,8 +1274,8 @@ self_check() {
   SNAP_PY=$WORK/tree-extract.py.snap
   cp "$TOOL" "$SNAP_SH"
   cp "$EXTRACT" "$SNAP_PY"
-  SNAP_SH_HASH=$(sha256_of "$SNAP_SH")
-  SNAP_PY_HASH=$(sha256_of "$SNAP_PY")
+  SNAP_SH_HASH=$(sha256_of "$SNAP_SH") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток снимка tree-run.sh\n' >&2; exit 2; }
+  SNAP_PY_HASH=$(sha256_of "$SNAP_PY") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток снимка tree-extract.py\n' >&2; exit 2; }
 
   local n list_len=${#TEETH_LIST[@]} green=0 redctl=0 ran=0
   if [[ "$list_len" -ne "$EXPECTED_TEETH" ]]; then
@@ -1303,8 +1322,8 @@ self_check() {
     cp "$SNAP_SH" "$TOOL"
     cp "$SNAP_PY" "$EXTRACT"
     local now_sh now_py
-    now_sh=$(sha256_of "$TOOL")
-    now_py=$(sha256_of "$EXTRACT")
+    now_sh=$(sha256_of "$TOOL") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток копии tree-run.sh после восстановления\n' >&2; exit 2; }
+    now_py=$(sha256_of "$EXTRACT") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток копии tree-extract.py после восстановления\n' >&2; exit 2; }
     if [[ "$now_sh" != "$SNAP_SH_HASH" || "$now_py" != "$SNAP_PY_HASH" ]]; then
       say "ЗУБ $n красный-контроль: sha256 после восстановления разошёлся"
       say "  sh $now_sh vs $SNAP_SH_HASH"

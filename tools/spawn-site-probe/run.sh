@@ -37,7 +37,8 @@ IMG="${CLAUDE_SPAWNPROBE_IMAGE:-$(command -v claude || true)}"
 [[ -f "$PLUGIN/hooks/register.ts" ]] || die "модуль прибора не найден: $PLUGIN"
 
 TOK="${CLAUDE_CODE_OAUTH_TOKEN:-}"
-if [[ -z "$TOK" && "$(uname -s)" == "Darwin" ]]; then
+__uname_s="$(uname -s)" || { printf 'ПРИБОР НЕДОСТУПЕН: не определена система\n' >&2; exit 2; }
+if [[ -z "$TOK" && "$__uname_s" == "Darwin" ]]; then
   # Ключ привязан к каталогу конфига (`Claude Code-credentials-<хеш>`), поэтому
   # изолированный дом не залогинен: токен подаётся безголовой ручкой.
   TOK="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null \
@@ -107,8 +108,8 @@ __listed=$(printf '%s\n' "${CASES[@]}" | cut -d'|' -f1 | grep -v '^pass$' | sort
 if [[ -z "$__listed" ]]; then
   die "таблица случаев пуста помимо штатного пути -- сверять нечего"
 fi
-__only_home=$(comm -23 <(printf '%s\n' "$__branches") <(printf '%s\n' "$__listed") | tr '\n' ' ')
-__only_here=$(comm -13 <(printf '%s\n' "$__branches") <(printf '%s\n' "$__listed") | tr '\n' ' ')
+__only_home=$(comm -23 <(printf '%s\n' "$__branches") <(printf '%s\n' "$__listed") | tr '\n' ' ') || { printf 'ПРИБОР НЕДОСТУПЕН: не сравнить ветки модуля с таблицей случаев\n' >&2; exit 2; }
+__only_here=$(comm -13 <(printf '%s\n' "$__branches") <(printf '%s\n' "$__listed") | tr '\n' ' ') || { printf 'ПРИБОР НЕДОСТУПЕН: не сравнить таблицу случаев с ветками модуля\n' >&2; exit 2; }
 if [[ -n "${__only_home// /}" || -n "${__only_here// /}" ]]; then
   echo "spawn-site-probe: ОТКАЗ -- таблица случаев разошлась с домом веток:" >&2
   [[ -n "${__only_home// /}" ]] && echo "  в модуле есть, в таблице нет: $__only_home" >&2

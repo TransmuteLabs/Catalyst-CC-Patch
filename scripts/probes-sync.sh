@@ -205,7 +205,7 @@ stage_one() {  # $1 canon, $2 home, $3 display name
   mkdir -p "$(dirname "$dst")"
   tmp="$dst.sync-new.$$"
   owner="$dst.sync-owner.$$"
-  owner_start="$(LC_ALL=C ps -o lstart= -p $$ 2>/dev/null)"
+  owner_start="$(LC_ALL=C ps -o lstart= -p $$ 2>/dev/null)" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено время старта процесса-писателя\n' >&2; exit 2; }
   # Владелец пишется ДО стадии: существующая стадия без владельца тем самым
   # однозначно принадлежит оборванному писателю. Другой инфикс обязателен:
   # sync-owner не попадает в глоб sync-new.* и не становится ложной стадией.
@@ -302,8 +302,11 @@ acquire_sync_lock() {
       [[ "$__ostart" == "$__owner" ]] && __ostart=''
       __stale_dir=1
       if [[ -n "$__opid" ]] && kill -0 "$__opid" 2>/dev/null; then
+        __ps_lstart="$(LC_ALL=C ps -o lstart= -p "$__opid" 2>/dev/null)" || __ps_lstart_rc=$?
+        [ "${__ps_lstart_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитать время старта держателя замка (код %s)\n' "$__ps_lstart_rc" >&2; exit 2; }
+        __ps_lstart_rc=0
         if [[ -z "$__ostart" ]] \
-           || [[ "$(LC_ALL=C ps -o lstart= -p "$__opid" 2>/dev/null)" == "$__ostart" ]]; then
+           || [[ "$__ps_lstart" == "$__ostart" ]]; then
           __stale_dir=0
         fi
       fi
@@ -359,20 +362,24 @@ sync_stage_owner() {  # стадия; печатает путь файла-вл�
 sync_stage_writer_alive() {  # стадия; pid жив И время старта принадлежит писателю
   local __stage="$1" __pid="${1##*.sync-new.}" __owner __line __owner_pid __owner_start __now
   case "$__pid" in ''|*[!0-9]*) return 1 ;; esac
-  __owner=$(sync_stage_owner "$__stage")
+  # Путь владельца — сборка из пути стадии; пустой/отказ проверяет [[ -f ]] ниже штатным «писатель неизвестен».
+  __owner=$(sync_stage_owner "$__stage") || true
   [[ -f "$__owner" ]] || return 1
   __line=$(cat "$__owner" 2>/dev/null) || return 1
   __owner_pid="${__line%%$'\t'*}"
   __owner_start="${__line#*$'\t'}"
   [[ "$__owner_start" != "$__line" && "$__owner_pid" == "$__pid" ]] || return 1
   kill -0 "$__pid" 2>/dev/null || return 1
-  __now="$(LC_ALL=C ps -o lstart= -p "$__pid" 2>/dev/null)"
+  # Пустой lstart — штатно: процесс уже не тот (умер или номер переиспользован);
+  # равенство ниже не сходится, функция сообщает «не жив».
+  __now="$(LC_ALL=C ps -o lstart= -p "$__pid" 2>/dev/null)" || true
   [[ "$__now" == "$__owner_start" ]]
 }
 prune_one_sync_stage() {
   local __stage="$1" __pid="${1##*.sync-new.}" __owner
   case "$__pid" in ''|*[!0-9]*) return 0 ;; esac
-  __owner=$(sync_stage_owner "$__stage")
+  # Путь владельца — сборка из пути стадии; прополка зовёт alive ниже и без файла-владельца считает писателя мёртвым.
+  __owner=$(sync_stage_owner "$__stage") || true
   if ! sync_stage_writer_alive "$__stage"; then
     rm -f "$__stage" "$__owner" && echo "убрана осиротевшая стадия: $__stage"
   fi
@@ -539,10 +546,14 @@ if [[ "$MODE" == "--diff" && -d "$TOOLS_HOME" ]]; then
     if [[ ! -f "$ROOT/judge/$__rel" ]]; then
       echo "не занесён в канон: judge/$__rel (живёт только в доме инструментов)"
       HOME_ONLY=$((HOME_ONLY+1))
-    elif [[ "$TRACK_CENSUS" == 'да' ]] \
-         && [[ -z "$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" ]]; then
-      echo "лежит в каноне, но вне репозитория: judge/$__rel (git его не отслеживает)"
-      UNTRACKED=$((UNTRACKED+1))
+    elif [[ "$TRACK_CENSUS" == 'да' ]]; then
+      __git_ls="$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" || __git_ls_rc=$?
+      [ "${__git_ls_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: не спросить git об отслеживании judge/%s (код %s)\n' "$__rel" "$__git_ls_rc" >&2; exit 2; }
+      __git_ls_rc=0
+      if [[ -z "$__git_ls" ]]; then
+        echo "лежит в каноне, но вне репозитория: judge/$__rel (git его не отслеживает)"
+        UNTRACKED=$((UNTRACKED+1))
+      fi
     fi
   done < <(cd "$TOOLS_HOME" && find . \( -name records -o -name labelled -o -name __pycache__ -o -name fixtures \) -prune -o \
              -type f \( -name '*.py' -o -name '*.md' -o -name '*.sh' \) -print 2>&1 | sed 's|^\./||' | sort)

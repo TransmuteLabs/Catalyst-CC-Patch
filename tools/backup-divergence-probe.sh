@@ -49,7 +49,8 @@ EXPECTED_MUTATIONS=2
 command -v python3 >/dev/null 2>&1 || {
   echo "backup-divergence-probe: нет python3 -- стража не вырезать" >&2; exit 6; }
 
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+[ -n "$WORK" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
 # Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
 # EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
 # `set -u`, `${x:?}`, bad substitution) -- провал невидим вызывающему
@@ -203,8 +204,8 @@ print(f'извлечено: страж {g0+1}..{g1+1}, пост-сверка {p0
 PY
 
 # repr питона даёт одинарные кавычки -- для bash это ровно то, что нужно.
-MARKER="$(cat "$WORK/marker.txt")"
-PROBE_MARKER="$(cat "$WORK/probe-marker.txt")"
+MARKER="$(cat "$WORK/marker.txt")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан маркер стража из вырезки\n' >&2; exit 2; }
+PROBE_MARKER="$(cat "$WORK/probe-marker.txt")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан маркер зонда из вырезки\n' >&2; exit 2; }
 
 mkimg() {   # $1 путь, $2 версия ('-' = не называет версию), $3 начинка
   if [ "$2" = "-" ]; then

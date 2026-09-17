@@ -64,7 +64,7 @@ set -u
 # claude-patch-all.sh; расхождение ловится сценарием стенда, а не чтением.
 __envon() {  # имя переменной; 0 истина, 1 ложь, 2 неизвестное значение
   local __name="$1" __raw="${!1-}" __value
-  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  __value=$(printf '%s' "$__raw" | LC_ALL=C tr '[:upper:]' '[:lower:]') || { echo "lock-probe: ОТКАЗ -- не нормализовать значение $__name" >&2; return 2; }
   case "$__value" in
     1|true|yes|on) return 0 ;;
     ''|0|false|no|off) return 1 ;;
@@ -83,14 +83,17 @@ PIPELINE="$HERE/claude-patch-all.sh"
 
 # Граница преамбулы -- строка установки трапа. Если её нет, преамбула
 # переехала: отказ, а не «проверил как смог».
-TRAP_LINE="$(grep -n "^trap '__release_lock' EXIT\$" "$PIPELINE" | head -1 | cut -d: -f1)"
+TRAP_LINE="$(grep -n "^trap '__release_lock' EXIT\$" "$PIPELINE" | head -1 | cut -d: -f1)" || __trap_ln_rc=$?
+[ "${__trap_ln_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: поиск строки трапа замка отказал (код %s)\n' "$__trap_ln_rc" >&2; exit 2; }
+__trap_ln_rc=0
 [[ -n "$TRAP_LINE" ]] || {
   echo "ОТКАЗ: в $PIPELINE не найдена строка \`trap '__release_lock' EXIT\` --" >&2
   echo "       преамбула замка переехала, и зонд измерял бы не её." >&2
   exit 2
 }
 
-ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cc-lock-probe.XXXXXX")"
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cc-lock-probe.XXXXXX")" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+[ -n "$ROOT" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
 # Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
 # EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
 # `set -u`, `${x:?}`, bad substitution) -- провал невидим вызывающему
@@ -245,7 +248,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   grep -q 'наследник rc=' "$ROOT/holder.log" 2>/dev/null && break
   sleep 0.3
 done
-KID="$(sed -n 's/^держатель: ребёнок //p' "$ROOT/holder.log")"
+KID="$(sed -n 's/^держатель: ребёнок //p' "$ROOT/holder.log")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан pid ребёнка-держателя\n' >&2; exit 2; }
 HOLDER_KIDS="$HOLDER ${KID:-}"
 if [[ -z "$KID" ]]; then
   bad "держатель не поднялся: $(cat "$ROOT/holder.log")"
@@ -261,7 +264,10 @@ else
   # писатели. Ветка отказа обязана СОВПАСТЬ с ответом на этот вопрос -- иначе
   # шапка «Держатели замка сейчас:» печаталась бы пустой, а следом шёл совет
   # завершить «названного», которого не назвали ни одной строкой.
-  if [[ -n "$(lsof -t -- "$LOCK" 2>/dev/null || true)" ]]; then
+  # Пустой lsof -t — штатно: писателей у файла нет; ветка else это и проверяет.
+  # 2>/dev/null на строке не снимать.
+  __lsof_t="$(lsof -t -- "$LOCK" 2>/dev/null || true)"
+  if [[ -n "$__lsof_t" ]]; then
     [[ "$out" == *"Держатели замка сейчас:"* && "$out" == *"Завершить названного"* ]] \
       && ok "держатель назван в самом отказе" \
       || bad "писатели у замка ЕСТЬ, а отказ их не назвал: $out"
@@ -344,7 +350,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   grep -q 'ребёнок-без-замка' "$ROOT/closed.log" 2>/dev/null && break
   sleep 0.3
 done
-CLOSED_KID="$(sed -n 's/^держатель-закрытый: ребёнок-без-замка //p' "$ROOT/closed.log")"
+CLOSED_KID="$(sed -n 's/^держатель-закрытый: ребёнок-без-замка //p' "$ROOT/closed.log")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитан pid ребёнка без замка\n' >&2; exit 2; }
 HOLDER_KIDS="${HOLDER_KIDS:-} $CLOSED_HOLDER ${CLOSED_KID:-}"
 if [[ -z "$CLOSED_KID" ]]; then
   bad "держатель не поднялся: $(cat "$ROOT/closed.log")"
@@ -389,12 +395,17 @@ echo "8. гейт интерфейса конвейера поднимает р�
 # «смотрю не туда», а не молчаливой зеленью, и потому лечится локатор, а не
 # правка. Совпадение обязано быть РОВНО ОДНО: при двух «первое сверху» мерило бы,
 # возможно, чужую строку, и прибор не знал бы, на какую смотрит.
-GATE_SPAWN_N="$(grep -c '"\${__gate_cmd\[@\]}"' "$PIPELINE")"
-GATE_SPAWN="$(grep -n '"\${__gate_cmd\[@\]}"' "$PIPELINE" | head -1 | cut -d: -f1)"
+# grep -c возвращает 1 при нуле совпадений -- это счёт, не отказ прибора.
+GATE_SPAWN_N="$(grep -c '"\${__gate_cmd\[@\]}"' "$PIPELINE")" || __gate_c_rc=$?
+[ "${__gate_c_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: подсчёт строк запуска гейта отказал (код %s)\n' "$__gate_c_rc" >&2; exit 2; }
+__gate_c_rc=0
+GATE_SPAWN="$(grep -n '"\${__gate_cmd\[@\]}"' "$PIPELINE" | head -1 | cut -d: -f1)" || __gate_n_rc=$?
+[ "${__gate_n_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: поиск строки запуска гейта отказал (код %s)\n' "$__gate_n_rc" >&2; exit 2; }
+__gate_n_rc=0
 if [[ "$GATE_SPAWN_N" != "1" ]]; then
   bad "строк с раскрытием массива запуска гейта в конвейере $GATE_SPAWN_N, а не одна -- прибор смотрит не туда"
 else
-  GATE_CLOSE="$(sed -n "$((GATE_SPAWN + 1))p" "$PIPELINE")"
+  GATE_CLOSE="$(sed -n "$((GATE_SPAWN + 1))p" "$PIPELINE")" || { printf 'ПРИБОР НЕДОСТУПЕН: не прочитана строка закрытия дескриптора гейта\n' >&2; exit 2; }
   [[ "${GATE_CLOSE#"${GATE_CLOSE%%[![:space:]]*}"}" == ') 9>&- &' ]] \
     && ok "запуск гейта закрывает дескриптор замка: ${GATE_CLOSE#"${GATE_CLOSE%%[![:space:]]*}"}" \
     || bad "запуск гейта НЕ закрывает дескриптор замка (строка $((GATE_SPAWN + 1)): «${GATE_CLOSE}»)"
@@ -500,7 +511,7 @@ echo "9. перепись замков полна"
 CENSUS_MISSED=""
 while IFS= read -r __line; do
   __f="${__line%%:*}"; __rest="${__line#*:}"
-  __fd="$(printf '%s' "$__rest" | sed -n 's/.*exec \([0-9]\)>.*/\1/p' | head -1)"
+  __fd="$(printf '%s' "$__rest" | sed -n 's/.*exec \([0-9]\)>.*/\1/p' | head -1)" || { printf 'ПРИБОР НЕДОСТУПЕН: не разобрать номер дескриптора открытия замка\n' >&2; exit 2; }
   [[ -n "$__fd" ]] || continue
   __rel="${__f#$HERE/}"
   grep -q "\`$__rel\`.*| $__fd |" "$HERE/README.md" \
