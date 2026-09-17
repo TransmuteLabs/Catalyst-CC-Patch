@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maratkarimov.model-costs-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/YOUR-USER/work/SIB/Transmutation/Nexus/Catalyst/Catalyst-CC-Patch/set-model-costs.py</string>
+    </array>
+    <!-- The trigger is the catalogue CHANGING, not the install. The proxy app
+         rewrites models.json whenever it discovers a provider's models, and a
+         model gained there keeps billing at the $5/$25 fallback and compacts
+         at a 200K default until somebody re-runs the sync by hand (measured
+         #53: the catalogue moved on 16.09 while the last sync ran on 04.09,
+         and 6 of 12 enabled models had drifted). The patch-time run stays as
+         a second, independent path -- this agent only stops the drift from
+         being INVISIBLE between patches. WatchPaths fires launchd when the
+         file's content changes; it says nothing about WHEN the app rewrites
+         the file, and launchd coalesces bursts into one run. -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/YOUR-USER/Library/Application Support/VibeProxy/models.json</string>
+    </array>
+    <!-- RunAtLoad is NOT needed: at login nothing has changed yet, and the
+         patch-time/manual runs already cover the "sync now" case. An extra
+         login-time run would only clutter the log. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR-USER</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR-USER/Library/Logs/model-costs-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR-USER/Library/Logs/model-costs-sync.log</string>
+</dict>
+</plist>

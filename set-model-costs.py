@@ -34,11 +34,16 @@ lexicographically smaller provider id for determinism.
     python3 set-model-costs.py               # sync and write
     python3 set-model-costs.py --dry-run     # show what would be written
     python3 set-model-costs.py --show        # print what is currently stored
+    python3 set-model-costs.py --check-drift # read-only: live proxy list vs stored rows
 
 Exit codes (a subset of the kit-wide table, see the claude-patch-all.sh header):
-  0  sync done (or --dry-run/--show answered)
+  0  sync done (or --dry-run/--show answered, or --check-drift found no red)
   1  a refusal on the merits: the registry is unreachable/unparsable, the
-     stored config is unreadable
+     stored config is unreadable, or --check-drift found a served model
+     without a row the source could have written (stale sync — red)
+  2  --check-drift could not measure: the proxy listing or the price source
+     is unreachable. An unmeasured predicate must not answer green, and a
+     "no drift" over an unreachable source is exactly that.
 The script itself CAN exit non-zero (круг 28, F-11): what makes a failed cost
 sync a WARNING is the CONVEYOR, which swallows this script's non-zero code as
 one (claude-patch-all.sh, the set-model-costs step) -- the image is already
@@ -380,13 +385,26 @@ def load_proxy_catalogue():
     by three). Entries that are switched on describe the route in force, so
     they win; among equals the SMALLEST declared window wins, because
     under-declaring wastes context while over-declaring makes requests fail.
+
+    The parse also counts the file's raw denominators into last_stats
+    (providers / records / enabled), the way fetch_catalogue records its
+    last_source: records counts EVERY model row across providers of both
+    shapes, before the skip filter and the dedup — it is the file's size;
+    unique published names (len of the return value) is what the sync keys
+    on. The two counts answer different questions (#53 measured 682 raw
+    records against 626 published names) and both are named in the output,
+    because a bare "(N models)" let them pass for the same number.
     """
     try:
         with open(PROXY_CATALOGUE_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception:
+        # No catalogue AND no stats: an explicit empty state, so a stale
+        # attribute from an earlier call can never answer for this one.
+        load_proxy_catalogue.last_stats = None
         return {}
     out = {}
+    records = 0
     for provider_id, rows in data.items():
         # The proxy publishes a provider entry in two shapes: a bare list of
         # models and a wrapper {"models": [...], "priority": N}. Iterating the
@@ -398,6 +416,7 @@ def load_proxy_catalogue():
         if isinstance(rows, dict):
             rows = rows.get("models")
         for row in rows or []:
+            records += 1
             if not isinstance(row, dict):
                 continue
             published = row.get("alias") or row.get("name")
@@ -416,6 +435,15 @@ def load_proxy_catalogue():
                 entry["name"] = row.get("name") or entry["name"]
             elif live_route == entry["enabled"] and window:
                 entry["context"] = min(entry["context"] or window, window)
+    load_proxy_catalogue.last_stats = {
+        # providers — ключи файла ОБЕИХ форм, включая пустые; records — все
+        # строки моделей до фильтра и дедупа; enabled — уникальные имена, у
+        # которых хоть один маршрут включён (уровень имени, не строки: замер
+        # 17.09 считал именно так).
+        "providers": len(data),
+        "records": records,
+        "enabled": sum(1 for entry in out.values() if entry["enabled"]),
+    }
     return out
 
 
@@ -481,6 +509,35 @@ def rank(entry, model_id):
     )
 
 
+def lookup_keys(model_id, routed):
+    """Lookup keys for one proxy id: the published id first, then the upstream
+    id behind it, then the deployment-tag-stripped id.
+
+    One home for the key order: the sync and the drift check must ask the
+    source the same question, or their answers are about different models.
+    """
+    keys = [ALIASES.get(model_id, model_id)]
+    for extra in (routed.get("name"), DEPLOYMENT_TAG.sub("", model_id)):
+        if extra and extra.lower() not in (k.lower() for k in keys):
+            keys.append(extra)
+    return keys
+
+
+def price_match(catalogue, keys):
+    """Ranked candidates for the first key that names the model, else [].
+
+    The sync prices a model iff this is non-empty, so the drift check asking
+    the same question of the same source is what makes "the source could
+    have priced it" mean exactly what the sync does — not an approximation
+    that could drift from it.
+    """
+    for key in keys:
+        found = sorted(candidates(catalogue, key), key=lambda e: rank(e, key))
+        if found:
+            return found
+    return []
+
+
 def to_model_costs(cost):
     """models.dev cost record -> Claude Code's ModelCosts (USD per 1M tokens).
 
@@ -507,6 +564,111 @@ def to_model_costs(cost):
     }
 
 
+def proxy_catalog_line(catalogued):
+    """The catalogue denominators line — one home for sync and drift output.
+
+    Every quantity names itself: raw records (every model row the file
+    carries, both provider shapes, before the skip filter and the dedup) is
+    the file's size, unique published names is what the sync keys on, and
+    neither may hide behind a bare "(N models)" again — the two counts
+    measured 682 against 626 on the same file (#53) and looked like one
+    number that disagreed with itself.
+    """
+    stats = getattr(load_proxy_catalogue, "last_stats", None)
+    if catalogued:
+        return (f"Proxy catalog <- {PROXY_CATALOGUE_PATH} "
+                f"(records {stats['records']}, providers {stats['providers']}, "
+                f"enabled {stats['enabled']}, "
+                f"unique published names {len(catalogued)})")
+    return f"Proxy catalog <- absent, skipped ({PROXY_CATALOGUE_PATH})"
+
+
+def check_drift(config):
+    """Read-only drift predicate (#53): the LIVE proxy listing vs stored rows.
+
+    RED is a name the proxy serves right now that lacks a price or a window
+    row the sync COULD have written — the source knows the model, so the
+    stored rows are stale, and every session through that model bills at the
+    $5/$25 fallback and compacts at a 200K default. A name the source cannot
+    price (or window) is YELLOW: counted, never red, because an invented
+    price is worse than a missing one — the sync leaves those rows out on
+    purpose, and a tooth that painted them red would be a tooth on a
+    decision, not on drift. The proxy's catalogue file and its live listing
+    are DIFFERENT sources (measured 17.09: of 10 served names only 3 were
+    enabled catalogue entries), so their disagreement is printed as a fact
+    about the configuration and never colours the verdict. Nothing here
+    writes: not the config, not the seen-roster, not the fetch cache.
+    """
+    try:
+        live_ids = proxy_model_ids()
+    except Exception as error:
+        print(f"ERROR: cannot reach the proxy: {error}", file=sys.stderr)
+        return 2
+    catalogued = load_proxy_catalogue()
+    print(proxy_catalog_line(catalogued))
+    # The source catalogue decides red vs yellow; without it the two are
+    # indistinguishable, and an unmeasured predicate must not answer green.
+    try:
+        catalogue = fetch_catalogue(persist=False)
+    except Exception as error:
+        print(f"ERROR: cannot reach {MODELS_DEV_URL} ({error}); red vs yellow "
+              "is unmeasurable, refusing to answer", file=sys.stderr)
+        return 2
+    if not isinstance(config, dict):
+        print("ERROR: ~/.claude.json does not hold a JSON object; nothing to "
+              "compare the live list against", file=sys.stderr)
+        return 1
+    prices = config.get("customModelCosts") or {}
+    windows = config.get("customModelContextWindows") or {}
+    red_price, red_window = [], []
+    yellow = {}
+    for model_id in live_ids:
+        routed = catalogued.get(model_id) or {}
+        found = price_match(catalogue, lookup_keys(model_id, routed))
+        window = context_window(model_id, found[0][1] if found else None, routed)
+        price_gap = model_id not in prices
+        window_gap = model_id not in windows
+        priceable = bool(found)
+        windowable = window is not None and window > 0
+        if price_gap and priceable:
+            red_price.append(model_id)
+        if price_gap and not priceable:
+            yellow.setdefault(model_id, []).append("price")
+        if window_gap and windowable:
+            red_window.append(model_id)
+        if window_gap and not windowable:
+            yellow.setdefault(model_id, []).append("window")
+    missing_price = [m for m in live_ids if m not in prices]
+    missing_window = [m for m in live_ids if m not in windows]
+    print(f"Live list <- {PROXY_MODELS_URL}: {len(live_ids)} served names, "
+          f"without price row: {len(missing_price)}, "
+          f"without window row: {len(missing_window)}, "
+          f"not in source: {len(yellow)}")
+    for model_id in red_price:
+        print(f"  RED {model_id}: served live, no price row (the source prices it)")
+    for model_id in red_window:
+        print(f"  RED {model_id}: served live, no window row (a window is derivable)")
+    for model_id, kinds in sorted(yellow.items()):
+        print(f"  YELLOW {model_id}: not in source for {' and '.join(sorted(kinds))}; "
+              "left without a row on purpose")
+    enabled_catalogue = {name for name, entry in catalogued.items()
+                         if entry.get("enabled")}
+    only_catalogue = sorted(enabled_catalogue - set(live_ids))
+    only_live = sorted(set(live_ids) - enabled_catalogue)
+    print(f"Catalogue/live discrepancy (a fact about the configuration, not a "
+          f"verdict): enabled in the catalogue but not served: "
+          f"{len(only_catalogue)} ({', '.join(only_catalogue)}); "
+          f"served but not enabled in the catalogue: {len(only_live)} "
+          f"({', '.join(only_live)})")
+    red = sorted(set(red_price) | set(red_window))
+    print(f"Drift verdict: red {len(red)}, not in source {len(yellow)}")
+    if red:
+        print("ERROR: stored rows are stale for models the proxy serves right "
+              "now; re-run the sync", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     path = os.path.expanduser("~/.claude.json")
     if not os.path.exists(path):
@@ -522,6 +684,11 @@ def main() -> int:
             "customModelContextWindows": config.get("customModelContextWindows", {}),
         }, indent=2))
         return 0
+
+    # Read-only predicate, so it goes before every writing step; --show keeps
+    # priority because it is the older, narrower reader.
+    if "--check-drift" in sys.argv:
+        return check_drift(config)
 
     print(f"Proxy models  <- {PROXY_MODELS_URL}")
     try:
@@ -541,10 +708,7 @@ def main() -> int:
     # until someone re-runs this. `--prune` is the explicit way to drop what is
     # really gone.
     catalogued = load_proxy_catalogue()
-    if catalogued:
-        print(f"Proxy catalog <- {PROXY_CATALOGUE_PATH} ({len(catalogued)} models)")
-    else:
-        print(f"Proxy catalog <- absent, skipped ({PROXY_CATALOGUE_PATH})")
+    print(proxy_catalog_line(catalogued))
 
     remembered = load_seen()
     if "--dry-run" not in sys.argv:
@@ -597,19 +761,7 @@ def main() -> int:
     rows = []
     for model_id in roster:
         routed = catalogued.get(model_id) or {}
-        # Published id first, then the upstream id behind it: the proxy renames
-        # freely, and the upstream id is the one models.dev is keyed on.
-        keys = [ALIASES.get(model_id, model_id)]
-        for extra in (routed.get("name"), DEPLOYMENT_TAG.sub("", model_id)):
-            if extra and extra.lower() not in (k.lower() for k in keys):
-                keys.append(extra)
-
-        found, lookup = [], keys[0]
-        for key in keys:
-            found = sorted(candidates(catalogue, key), key=lambda e: rank(e, key))
-            if found:
-                lookup = key
-                break
+        found = price_match(catalogue, lookup_keys(model_id, routed))
 
         # A window is worth writing even with no price: an unpriced model still
         # has to compact at the right point, and that is the defect that breaks

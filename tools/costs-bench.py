@@ -56,8 +56,8 @@ ROUTING = ROOT / "patch_claude_routing.py"
 # the bench itself does -- the copy list carries it as a dependency, for the
 # same one-way-census reason as ROUTING above.
 ANCHOR = ROOT / "tools" / "heredoc-anchor.py"
-EXPECTED_SCENARIOS = 14
-EXPECTED_MUTATIONS = 21
+EXPECTED_SCENARIOS = 16
+EXPECTED_MUTATIONS = 23
 
 # Load form mirrors the pipeline's PYCOMPILE stage: a load failure is a named
 # bench refusal (code 2, "cannot measure"), not a fallback to a local edition
@@ -134,7 +134,22 @@ def import_file(path: Path, stem: str) -> ModuleType:
     return module
 
 
-def run_costs_main(config: dict[str, object], *, catalogue: dict[str, object]) -> tuple[int, bytes, bytes, str, list[Path]]:
+def run_costs_main(config: dict[str, object], *, catalogue: dict[str, object],
+                   live_ids: list[str] | None = None,
+                   proxy_catalogue: dict[str, object] | None = None,
+                   proxy_stats: dict[str, int] | None = None,
+                   proxy_unreachable: bool = False,
+                   argv: list[str] | None = None
+                   ) -> tuple[int, bytes, bytes, str, list[Path]]:
+    """Run set-model-costs.py's main() against a substituted HOME.
+
+    Every network side is a fixture: the live proxy listing (live_ids, or a
+    raised OSError with proxy_unreachable), the proxy's own catalogue file
+    (proxy_catalogue + the raw denominators the parse counts into
+    load_proxy_catalogue.last_stats), the seen-roster (empty, inert) and the
+    models.dev price catalogue. argv extends the plain invocation, so a mode
+    like --check-drift is exercised through the same door a caller uses.
+    """
     with tempfile.TemporaryDirectory() as raw:
         home = Path(raw)
         path = home / ".claude.json"
@@ -145,8 +160,19 @@ def run_costs_main(config: dict[str, object], *, catalogue: dict[str, object]) -
         os.environ["HOME"] = str(home)
         try:
             module = import_file(COSTS, "costs")
-            module.proxy_model_ids = lambda: []
-            module.load_proxy_catalogue = lambda: {}
+
+            def fixture_proxy_ids() -> list[str]:
+                if proxy_unreachable:
+                    raise OSError("fixture: proxy is down")
+                return [] if live_ids is None else list(live_ids)
+
+            module.proxy_model_ids = fixture_proxy_ids
+
+            def fixture_proxy_catalogue() -> dict[str, object]:
+                fixture_proxy_catalogue.last_stats = proxy_stats  # type: ignore[attr-defined]
+                return {} if proxy_catalogue is None else dict(proxy_catalogue)
+
+            module.load_proxy_catalogue = fixture_proxy_catalogue
             module.load_seen = lambda: set()
             module.save_seen = lambda ids: None
 
@@ -155,7 +181,7 @@ def run_costs_main(config: dict[str, object], *, catalogue: dict[str, object]) -
 
             fake_fetch.last_source = "network"  # type: ignore[attr-defined]
             module.fetch_catalogue = fake_fetch
-            sys.argv = [str(COSTS)]
+            sys.argv = [str(COSTS)] if argv is None else [str(COSTS), *argv]
             output = io.StringIO()
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                 rc = module.main()
@@ -224,7 +250,15 @@ def scenario_c3() -> None:
         try:
             guarded = import_file(COSTS, "guard")
             guarded.proxy_model_ids = lambda: ["small"]
-            guarded.load_proxy_catalogue = lambda: {"small": {"context": 32000}}
+
+            def guard_catalogue() -> dict[str, object]:
+                # Каталожная строка вывода теперь требует сырые знаменатели
+                # (last_stats), и стаб обязан нести полный контракт прибора.
+                guard_catalogue.last_stats = {"records": 1, "providers": 1,  # type: ignore[attr-defined]
+                                              "enabled": 0}
+                return {"small": {"context": 32000}}
+
+            guarded.load_proxy_catalogue = guard_catalogue
             guarded.load_seen = lambda: set()
             guarded.save_seen = lambda ids: None
             guarded.candidates = lambda catalogue, model_id: []
@@ -676,12 +710,123 @@ def scenario_c14() -> None:
             f"refusal is not named: {out!r}")
 
 
+def scenario_c15() -> None:
+    # #53, §0.1/§0.4 герметично: предмет дрейфа -- ЖИВОЙ список прокси против
+    # строк конфига. Имя из живого ответа без строки цены ИЛИ окна, которую
+    # источник мог бы написать, -- КРАСНЫЙ (конфиг протух); имя, которого
+    # источник не знает, -- ЖЁЛТЫЙ (счётчик, никогда не красный: выдуманная
+    # цена хуже отсутствующей); недоступный прокси -- отказ мерить (код 2),
+    # не ноль. Каталог и живой список -- РАЗНЫЕ источники (замер 17.09:
+    # пересечение 3 из 10), их расхождение печатается фактом и вердикт не
+    # красит. Проверка чисто читающая: подменённый конфиг обязан вернуться
+    # байт-в-байт и без бэкапа.
+    source = {"vendor": {"models": {
+        "drift-model": {"cost": {"input": 1.25, "output": 5},
+                         "limit": {"input": 120000, "context": 160000}},
+        "synced-model": {"cost": {"input": 2, "output": 8},
+                          "limit": {"context": 200000}},
+    }}}
+    routes = {
+        "drift-model": {"name": None, "context": None,
+                        "providers": ["fixture"], "enabled": False},
+        "ghost-model": {"name": None, "context": 32000,
+                        "providers": ["fixture"], "enabled": True},
+    }
+    stats = {"records": 2, "providers": 1, "enabled": 1}
+
+    rc, before, after, output, backups = run_costs_main(
+        {"customModelCosts": {}, "customModelContextWindows": {}},
+        catalogue=source, live_ids=["drift-model"],
+        proxy_catalogue=routes, proxy_stats=stats, argv=["--check-drift"])
+    require(rc == 1, f"live gap did not redden the drift check: rc={rc}\n{output}")
+    require(after == before, "drift check is not read-only: config changed")
+    require(not backups, f"drift check took a backup: {backups}")
+    require("RED drift-model" in output and "no price row" in output
+            and "no window row" in output,
+            f"red case did not name the model and both missing rows\n{output}")
+    require("records 2" in output and "providers 1" in output
+            and "enabled 1" in output and "unique published names 2" in output,
+            f"catalogue denominators not named in the drift output\n{output}")
+
+    synced = {"customModelCosts": {"synced-model": {"inputTokens": 2}},
+              "customModelContextWindows": {"synced-model": 200000}}
+    rc, before, after, output, backups = run_costs_main(
+        synced, catalogue=source, live_ids=["synced-model"],
+        proxy_catalogue=routes, proxy_stats=stats, argv=["--check-drift"])
+    require(rc == 0,
+            f"green case (every row present) returned rc={rc} -- a discrepancy "
+            f"fact line must not paint the check red\n{output}")
+    require(after == before and not backups,
+            "green drift check wrote to the config")
+    require("enabled in the catalogue but not served: 1" in output
+            and "ghost-model" in output
+            and "served but not enabled in the catalogue: 1" in output,
+            f"catalogue/live discrepancy not named as a fact line\n{output}")
+
+    rc, _, after, output, _ = run_costs_main(
+        {"customModelCosts": {}, "customModelContextWindows": {}},
+        catalogue={"vendor": {"models": {}}}, live_ids=["unknown-model"],
+        argv=["--check-drift"])
+    require(rc == 0,
+            f"a not-in-source gap painted the check red: rc={rc}\n{output}")
+    require("not in source: 1" in output and "YELLOW unknown-model" in output,
+            f"yellow case not named with its counter\n{output}")
+    require("absent, skipped" in output,
+            f"absent catalogue line changed form\n{output}")
+
+    rc, _, _, output, _ = run_costs_main(
+        {"customModelCosts": {}, "customModelContextWindows": {}},
+        catalogue=source, proxy_unreachable=True, argv=["--check-drift"])
+    require(rc == 2,
+            f"unreachable proxy answered instead of refusing to measure: rc={rc}\n{output}")
+    require("cannot reach the proxy" in output,
+            f"refusal did not name the proxy\n{output}")
+
+
+def scenario_c16() -> None:
+    # #53, §0.2 (замер §2): прокси публикует провайдера ДВУМЯ формами --
+    # голый список моделей и обёртка {"models": [...], "priority": N}. Разбор
+    # одной формы занижает МОЛЧА (первый счёт контроллера: 77 вместо 682).
+    # Синтетический каталог несёт ОБЕ формы; уникальные имена и сырые записи
+    # обязаны быть суммой по обеим формам, «включённые» -- считаться с обеих.
+    module = import_file(COSTS, "forms")
+    with tempfile.TemporaryDirectory() as raw:
+        catalogue_path = Path(raw) / "models.json"
+        catalogue_path.write_text(json.dumps({
+            "bare": [
+                {"alias": "bare-one", "name": "bare-one",
+                 "context-length": 111, "enabled": True},
+                {"alias": "bare-two", "name": "bare-two",
+                 "context-length": 222, "enabled": False},
+            ],
+            "wrapped": {
+                "priority": 3,
+                "models": [
+                    {"alias": "wrapped-one", "name": "wrapped-one",
+                     "context-length": 333, "enabled": True},
+                ],
+            },
+        }), encoding="utf-8")
+        module.PROXY_CATALOGUE_PATH = str(catalogue_path)
+        loaded = module.load_proxy_catalogue()
+        require(sorted(loaded) == ["bare-one", "bare-two", "wrapped-one"],
+                f"both provider shapes must yield their names: {sorted(loaded)}")
+        require(loaded["wrapped-one"]["context"] == 333
+                and loaded["wrapped-one"]["providers"] == ["wrapped"]
+                and loaded["wrapped-one"]["enabled"] is True,
+                f"wrapper-form entry lost its route facts: {loaded['wrapped-one']}")
+        stats = module.load_proxy_catalogue.last_stats
+        require(stats == {"providers": 2, "records": 3, "enabled": 2},
+                f"raw denominators must count BOTH provider shapes: {stats!r}")
+
+
 SCENARIOS: list[tuple[str, Callable[[], None]]] = [
     ("C1", scenario_c1), ("C2", scenario_c2), ("C3", scenario_c3),
     ("C4", scenario_c4), ("C5", scenario_c5), ("C6", scenario_c6),
     ("C7", scenario_c7), ("C8", scenario_c8), ("C9", scenario_c9),
     ("C10", scenario_c10), ("C11", scenario_c11), ("C12", scenario_c12),
     ("C13", scenario_c13), ("C14", scenario_c14),
+    ("C15", scenario_c15), ("C16", scenario_c16),
 ]
 
 
@@ -894,6 +1039,24 @@ def m20(root: Path) -> None:
                  "    ANCHOR_TEETH_RAN = True", "M20")
 
 
+def m21(root: Path) -> None:
+    # #53: предикат дрейфа ослеплён в «всегда красный» (равная длина:
+    # and -> or с паддингом) -- зелёный контроль C15 обязан упасть: без
+    # пробела в строках вердикта быть не может.
+    replace_once(root / "set-model-costs.py",
+                 "if price_gap and priceable:",
+                 "if price_gap or  priceable:", "M21")
+
+
+def m22(root: Path) -> None:
+    # #53: разбор каталога теряет объект-форму провайдера -- счёт уникальных
+    # имён и сырых записей занижается МОЛЧА (первый счёт контроллера: 77
+    # вместо 682). Равная длина: models -> modelz.
+    replace_once(root / "set-model-costs.py",
+                 'rows = rows.get("models")',
+                 'rows = rows.get("modelz")', "M22")
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M1", m1, "C1", "empty replacement"),
     ("M2", m2, "C2", "empty replacement"),
@@ -916,6 +1079,8 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M18", m18, "C13", "python missing identity: returned rc=0"),
     ("M19", m19, "C13", "python launch nonzero: returned rc=0"),
     ("M20", m20, "C14", "anchor teeth never ran at startup"),
+    ("M21", m21, "C15", "must not paint the check red"),
+    ("M22", m22, "C16", "both provider shapes must yield"),
 ]
 
 # Circle 25, E-4: a scenario with no mutation of its own proves nothing --

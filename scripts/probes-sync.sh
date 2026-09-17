@@ -426,6 +426,28 @@ else
   PLIST_IN_SET=1
 fi
 
+# Второй образец plist — агент синкрона цен по смене каталога прокси (#53).
+# Механизм ТОТ ЖЕ, что у judge-compact выше: дом образцов один (judge/),
+# установка — осознанным шагом заполненной копией в ~/Library/LaunchAgents.
+# CONSTRAINT: отсутствующий образец исключается из набора НАРЯВНЕ с образцом
+# с плейсхолдерами. Стенд синхронизации строит игрушечный канон по --list ДО
+# того, как положит этот файл, и у judge-compact дыра закрыта заглушкой в
+# самом стенде; здесь закрытие живёт в самом правиле, чтобы отсутствующий
+# файл не вводил пару, чья канонная сторона не существует.
+MODEL_COSTS_PLIST_NAME=com.maratkarimov.model-costs-sync.plist
+MODEL_COSTS_PLIST_IN_SET=0
+if [[ -f "$ROOT/judge/$MODEL_COSTS_PLIST_NAME" ]] \
+   && ! grep -q 'YOUR-USER' "$ROOT/judge/$MODEL_COSTS_PLIST_NAME"; then
+  add_pair "$ROOT/judge/$MODEL_COSTS_PLIST_NAME" \
+           "$LAUNCH_AGENTS_DIR/$MODEL_COSTS_PLIST_NAME" "$MODEL_COSTS_PLIST_NAME"
+  MODEL_COSTS_PLIST_IN_SET=1
+else
+  [[ "$MODE" == "--to-home" ]] && \
+    echo "!! $MODEL_COSTS_PLIST_NAME не раскатан: образец отсутствует или несёт /Users/YOUR-USER — заполните пути под себя"
+  [[ "$MODE" == "--diff" ]] && echo "($MODEL_COSTS_PLIST_NAME в каноне — образец с плейсхолдерами, сравнение с домом не имеет смысла)"
+  true
+fi
+
 __pairs=${#PAIR_A[@]}
 
 # Набор назван ЗДЕСЬ и только здесь: место выбрано после пары plist -- она
@@ -477,6 +499,8 @@ else
   STAGE_TMP=(); STAGE_OWNER=()
   [[ "$PLIST_IN_SET" -eq 1 && "$MODE" == "--to-home" ]] && \
     echo "   (plist обновлён — нужен launchctl bootout+bootstrap)"
+  [[ "$MODEL_COSTS_PLIST_IN_SET" -eq 1 && "$MODE" == "--to-home" ]] && \
+    echo "   ($MODEL_COSTS_PLIST_NAME обновлён — нужен launchctl bootout+bootstrap)"
   true
 fi
 
