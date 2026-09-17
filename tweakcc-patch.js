@@ -27,6 +27,11 @@ const fail = msg => {
 
 const applied = [];
 const failures = [];
+// A step whose SUBJECT was deleted upstream is neither applied nor failed: it
+// lands here, is declared in every summary -- success included -- and never
+// stops the run. A step missing from the output must not be readable as
+// "nothing happened" when the truth is "nothing was there to patch".
+const inapplicable = [];
 
 // A minified name can contain `$`: in 2.1.239 the session matcher is called
 // `$jS`. In a regex SOURCE `$` is the end-of-line anchor, and a name injected
@@ -2693,15 +2698,89 @@ step('22 judge consulted before a subagent dispatch', () => {
   // range: the definition and both homes share one module (374 on 2.1.247, 360
   // on 246, 433 on 242; 233 and 240 have a single module altogether). Asserted
   // rather than assumed, because a future split would be silent.
+  // The guard this block replaces demanded ONE MODULE for the engine and
+  // both homes: a sufficient condition for the name to be in scope. 2.1.274
+  // moved the Agent head into its own chunk and the condition stopped
+  // holding while the property it stood for -- the name resolving at the
+  // home -- still holds through an import. The replacement checks that
+  // property itself: a home in the engine's own module needs nothing; a home
+  // elsewhere receives the name through that module's OWN existing import
+  // edge from the engine's module, by appending the name to the clause. A
+  // new import statement is never created: chunk init order in this bundle
+  // is not ours to choose, and an invented edge is exactly what the
+  // one-module guard existed to prevent.
   const [qLo, qHi] = moduleSliceAround(js, qm.index);
+  // Only a name the engine's module EXPORTS can be imported anywhere:
+  // without this check an appended clause entry would be a load-time link
+  // error, not a binding.
+  const engineExports = new Set();
+  for (const ex of js.slice(qLo, qHi).matchAll(/export\{([^}]*)\}/g)) {
+    for (let entry of ex[1].split(',')) {
+      entry = entry.trim();
+      if (!entry) continue;
+      const asAt = /^(\S+)\s+as\s+(\S+)$/.exec(entry);
+      engineExports.add(asAt ? asAt[2] : entry);
+    }
+  }
+  if (!engineExports.has(QM)) {
+    fail(
+      `the single-shot query engine '${QM}' is not exported by its module -- ` +
+        `an import binding for it cannot be created from anything`,
+    );
+  }
+  const importClauses = [];
   for (const [label, at] of [['watcher', m.index], ['judge', headAt]]) {
-    if (at < qLo || at >= qHi) {
+    if (at >= qLo && at < qHi) continue;
+    const [hLo, hHi] = moduleSliceAround(js, at);
+    const homeText = js.slice(hLo, hHi);
+    // Fail-closed BEFORE any edit: the name occurring as a whole token in
+    // the home module means the import would collide with or shadow a local
+    // binding of the same letters. A substring inside a longer identifier
+    // (`Ioe2`) is a different name and does not collide.
+    if (new RegExp(`(^|[^\\w$])${rxEsc(QM)}([^\\w$]|$)`).test(homeText)) {
       fail(
-        `the single-shot query engine is defined in a different module than the ` +
-          `${label} home — its name would not resolve there and the consultation ` +
-          `would silently fall back to raw HTTP`,
+        `the single-shot query engine name '${QM}' already occurs in the ` +
+          `${label} home's module -- importing it there would collide with ` +
+          `an existing binding`,
       );
     }
+    // The clause to extend is identified by CONTENT, not by a path: the
+    // patch text carries no module-name table, so "the home's import from
+    // the engine's module" is the clause whose EVERY name the engine's
+    // module exports. With measured name sets (88 on 2.1.274) that selects
+    // exactly one specifier; anything else refuses rather than guesses.
+    const bySpec = new Map();
+    for (const im of homeText.matchAll(/import\{([^}]*)\}from(?:"([^"]+)"|'([^']+)')/g)) {
+      const spec = im[2] ?? im[3];
+      if (!bySpec.has(spec)) bySpec.set(spec, { clause: im[0], names: new Set() });
+      for (let name of im[1].split(',')) {
+        name = name.trim();
+        if (!name) continue;
+        const asAt = /^(\S+)\s+as\s+\S+$/.exec(name);
+        bySpec.get(spec).names.add(asAt ? asAt[1] : name);
+      }
+    }
+    // `every` on an EMPTY name set is true, so an `import{}from"..."` clause
+    // would qualify as "from the engine's module" without importing anything
+    // from it. Such a clause is not evidence of the edge this step needs.
+    const fromEngine = [...bySpec]
+      .filter(([, v]) => v.names.size > 0 && [...v.names].every((n) => engineExports.has(n)))
+      .map(([spec]) => spec);
+    if (fromEngine.length === 0) {
+      fail(
+        `the ${label} home's module imports nothing from the engine's module -- ` +
+          `no existing edge can carry the name, and a new import is not ours ` +
+          `to invent`,
+      );
+    }
+    if (fromEngine.length > 1) {
+      fail(
+        `${fromEngine.length} import clauses in the ${label} home's module could ` +
+          `be from the engine's module -- which one carries the name is not ` +
+          `ours to guess`,
+      );
+    }
+    importClauses.push(bySpec.get(fromEngine[0]).clause);
   }
   // Everything the operator tunes lives in files read ON EVERY CALL, not in the
   // binary: a judge whose wording can only change by re-patching cannot be
@@ -4707,6 +4786,40 @@ step('22 judge consulted before a subagent dispatch', () => {
     js = js.slice(0, e.at) + e.text + js.slice(e.at + e.len);
   }
 
+  // The import-clause extension runs AFTER the positional splices above: it
+  // inserts bytes, and the splice indices were taken from the pre-edit
+  // text. Both homes in one foreign module yield the same clause twice; the
+  // dedupe keeps the name from being appended twice -- a duplicate import
+  // binding is a load error, not a no-op.
+  for (const clause of new Set(importClauses)) {
+    const at = js.indexOf(clause);
+    if (at === -1 || js.indexOf(clause, at + 1) !== -1) {
+      fail(
+        `the engine module's import clause is not a unique address in the ` +
+          `bundle (${clause.length} bytes) -- refusing to extend an ambiguous site`,
+      );
+    }
+    const close = at + clause.indexOf('}');
+    js = js.slice(0, close) + ',' + QM + js.slice(close);
+    // The NEW GUARD, in place of the old one-module check: after the edit
+    // the engine's name must actually be imported inside that module -- the
+    // same property the old guard proved by sufficient condition. It runs
+    // AFTER the edit because before it the name is not there yet by design.
+    const [vLo, vHi] = moduleSliceAround(js, at);
+    let bound = false;
+    for (const im of js.slice(vLo, vHi).matchAll(/import\{([^}]*)\}from["'][^"']+["']/g)) {
+      for (let name of im[1].split(',')) {
+        if (name.trim() === QM) bound = true;
+      }
+    }
+    if (!bound) {
+      fail(
+        `the single-shot query engine name '${QM}' did not land in the home ` +
+          `module's import clause`,
+      );
+    }
+  }
+
   applied.push(
     `judge: consulted inside the dispatch tool's own call (context ` +
       `'${CTX}', ${toolShape === 'pattern'
@@ -5495,6 +5608,30 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
 step('29 mod-API session model budget ceiling becomes operator-set', () => {
   const ID = '[A-Za-z_$][\\w$]*';
 
+  // CONSTRAINT: two different zeros. "The mechanism is gone" -- upstream
+  // deleted the mod-session budget WHOLE -- is not a failure: the subject of
+  // this step no longer exists, and refusing for that would drop every later
+  // patch for nothing. "The shape moved" -- the anchor below no longer
+  // matches while the mechanism lives -- IS a failure, exactly as before.
+  // The distinction is made by five witnesses naming the machinery from five
+  // sides; the threshold is ALL FIVE dead. One reworded literal must not
+  // retire the step: the first upstream rephrase of a message string would
+  // silently turn this patch off.
+  const WITNESSES = [
+    "the session's model budget for this plugin is spent",
+    ' session tokens spent',
+    'budget for this plugin',
+    'new Map,n=new Map;return{reserve:',
+    'budgets.model',
+  ];
+  if (WITNESSES.every((w) => !js.includes(w))) {
+    inapplicable.push(
+      '29 mod-API model budget: апстрим удалил механизм бюджета мод-сессии ' +
+        'целиком (пять свидетелей мертвы); предмет правки отсутствует',
+    );
+    return;
+  }
+
   const guard = new RegExp(
     'if\\(\\(' + ID + '\\.get\\((' + ID + ')\\)\\?\\?0\\)\\+' + ID + '>=(' + ID + ')\\)' +
     'throw new ' + ID + '\\(`\\$\\{\\1\\}: \\$\\.model\\.complete: ' +
@@ -5582,7 +5719,10 @@ step('29 mod-API session model budget ceiling becomes operator-set', () => {
 //     shape on linux at 194611162 under a different minified name -- sMt vs
 //     cMt -- which is why nothing here is pinned by name):
 //       var <LIM>=8192;
-//       async function <f>({model:e,prompt:n,system:r,maxTokens:s},{plugin:d,budget:m},S){
+//       270: async function <f>({model:e,prompt:n,system:r,maxTokens:s},{plugin:d,budget:m},S){
+//       274: async function <f>({model:e,prompt:n,system:r,maxTokens:s},g,h){
+//       (the tail drifts -- the budget half of it was deleted upstream in
+//       2.1.274 -- and step 31 deliberately does not pin it)
 //         if(s!==void 0&&(!Number.isInteger(s)||s<1||s><LIM>))
 //           throw new <E>(`${d}: $.model.complete: maxTokens must be an
 //                          integer from 1 to ${<LIM>} (got ${String(s)})`);
@@ -5728,9 +5868,17 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
   // with the call sitting 483 bytes inside the head on every one of them.
   const head = new RegExp(
     'async function (' + ID + ')\\(\\{model:(' + ID + '),prompt:(' + ID + '),system:(' + ID +
-    '),maxTokens:(' + ID + ')\\},\\{plugin:(' + ID + '),budget:(' + ID + ')\\},(' + ID + ')\\)\\{',
+    '),maxTokens:(' + ID + ')\\},([^)]*)\\)\\{',
     'g',
   );
+  // CONSTRAINT: the parameter tail after the destructured object is captured
+  // whole and spliced back VERBATIM -- this step uses none of the tail's
+  // parts. 2.1.270 spelled it `{plugin:<id>,budget:<id>},<id>`; 2.1.274
+  // deleted the budget mechanism upstream and spells it `<id>,<id>`. Pinning
+  // the tail's shape would couple this step to a mechanism it does not touch,
+  // and `[^)]*` is exact for both forms: no parenthesis can occur in that
+  // span. The exactly-once requirement below is NOT relaxed -- a weaker
+  // locator must not become a weaker guarantee.
   const heads = [...js.matchAll(head)];
   if (heads.length !== 1) {
     fail(
@@ -5740,7 +5888,7 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
     return;
   }
   const h = heads[0];
-  const [hWhole, fn, aMdl, aPrm, aSys, aMax, aPlg, aBud, aSig] = h;
+  const [hWhole, fn, aMdl, aPrm, aSys, aMax, aRest] = h;
 
   const call = new RegExp(
     'await (' + ID + ')\\(\\{querySource:"hook_prompt",model:(' + ID + '),max_tokens:(' + ID +
@@ -5829,7 +5977,7 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
         'async function ' + fn + '({model:' + aMdl + ',prompt:' + aPrm + ',system:' + aSys +
         ',maxTokens:' + aMax + ',effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias' +
         ',detail:__mcDetail},' +
-        '{plugin:' + aPlg + ',budget:' + aBud + '},' + aSig + '){' +
+        aRest + '){' +
         // Before the ceiling guard on purpose -- see the header.
         'if(' + aMax + '===void 0&&__mcAlias!==void 0)' + aMax + '=__mcAlias;',
       )
@@ -5880,6 +6028,10 @@ if (failures.length > 0) {
   // boundaries the unpacker inserts are countable -- and not saying it costs an
   // hour of grepping in the wrong direction.
   const boundaries = (js.match(/\/\*__tweakcc_module_boundary_\d+__\*\//g) || []).length;
+  // `inapplicable` is deliberately outside `total`: a step with no subject is
+  // not a failed patch, and counting it here would drop the run for a state
+  // upstream created. It is still DECLARED in the message -- going silent is
+  // the one thing this verdict must never do.
   const total = failures.length + applied.length;
   const shape =
     applied.length === 0
@@ -5894,10 +6046,23 @@ if (failures.length > 0) {
   throw new Error(
     `multi-provider patch: ${failures.length} of ${total} patches ` +
     `could not be applied (nothing written):\n  - ${failures.join('\n  - ')}` +
+    (inapplicable.length > 0
+      ? `\ninapplicable in this build (subject deleted upstream, nothing to patch):` +
+        `\n  - ${inapplicable.join('\n  - ')}`
+      : '') +
     shape,
   );
 }
 
-console.error(`multi-provider patch: applied ${applied.length} edits:\n  - ${applied.join('\n  - ')}`);
+// The inapplicable section rides the SUCCESS line too: a step that went
+// missing must be visible in every outcome, not only in a failure report --
+// silence here is exactly the no-op defect the end-of-file gate exists for.
+console.error(
+  `multi-provider patch: applied ${applied.length} edits:\n  - ${applied.join('\n  - ')}` +
+    (inapplicable.length > 0
+      ? `\ninapplicable in this build (subject deleted upstream, nothing to patch):` +
+        `\n  - ${inapplicable.join('\n  - ')}`
+      : ''),
+);
 
 return js;
