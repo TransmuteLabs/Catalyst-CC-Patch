@@ -233,13 +233,19 @@ console.log('РАМКА ОДИНАКОВА НА ВСЕХ ТРЁХ ПУТЯХ');
 // all. The guard requires the door (CLAUDE_CODE_ENABLE_FUNCTION_HOOKS) open too.
 // This class parses fine when the guard is dropped -- node --check, tsc and
 // splice-parity all stay green -- so its removal is invisible to every other
-// check. Assert it structurally here. Count is pinned: a NEW carrier-gated
-// splice must also carry the door guard, then raise this number.
+// check. Assert it structurally here. The carrier-name class and the __-var
+// names below are GENERALIZED on purpose: a gate with a new CLAUDE_*_CARRIER
+// name or new __-prefixed vars is still counted, so a freshly-written BARE
+// gate of ANY shape fails nBare!==0 -- a name-specific pin (JUDGE|FORM|IDLE
+// and __c/__d) let a sixth gate of another shape pass silently (audit #51 F1).
+// CARRIER_GATES stays a COUNT pin: a new GUARDED gate raises nCarrier past it
+// and must bump this number. Our splice vars are always __-prefixed, so __\w+
+// catches the realistic threat without false-matching minified upstream code.
 const CARRIER_GATES = 5;
-const nCarrier = (src.match(/String\(process\.env\.CLAUDE_(?:JUDGE|FORM|IDLE)_CARRIER\?\?""\)/g) || []).length;
-const nGuard = (src.match(/return __c!=="mod"\|\|\(__d!=="1"&&__d!=="true"\)/g) || []).length;
-const nDoorDecl = (src.match(/__d=String\(process\.env\.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS\?\?""\)/g) || []).length;
-const nBare = (src.match(/return __c!=="mod"\}\)\(\)/g) || []).length;
+const nCarrier = (src.match(/String\(process\.env\.CLAUDE_[A-Z0-9_]*CARRIER\?\?""\)/g) || []).length;
+const nGuard = (src.match(/return __\w+!=="mod"\|\|\(__\w+!=="1"&&__\w+!=="true"\)/g) || []).length;
+const nDoorDecl = (src.match(/__\w+=String\(process\.env\.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS\?\?""\)/g) || []).length;
+const nBare = (src.match(/return __\w+!=="mod"\}\)\(\)/g) || []).length;
 if (nCarrier === 0) {
   console.error('ДВЕРНОЙ СТОРОЖ НЕ ИЗМЕРЕН: ни одного carrier-гейта не найдено — якорь пропал');
   process.exit(2);
