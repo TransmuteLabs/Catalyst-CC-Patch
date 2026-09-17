@@ -30,8 +30,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # по нему, литерального перечня нет. EXPECTED_TEETH — отдельная запись-контракт;
 # сторож (GUARD_TEETH_LIST) сверяет её с фактической длиной перечня и числом
 # прогнанных зубов, рассинхрон = rc=4 с причиной словами.
-TEETH_LIST=(1 2 3 4 5 6 7 8 9)
-EXPECTED_TEETH=9
+TEETH_LIST=(1 2 3 4 5 6 7 8 9 10 11 12 13 14)
+EXPECTED_TEETH=14
 COMPARE_EQUAL_IS_MATCH=1  # MUT_COMPARE
 PRINT_BOTH_VERSIONS=1  # MUT_VERDICT_BOTH
 FAIL_CLOSED_MISSING=1  # MUT_FAIL_CLOSED
@@ -58,6 +58,30 @@ __DONE=0
 WORK=''
 __bun_drift_guard() {
   __rc=$?
+  # Часовой контекста исполнителя ловушки: bash 5.2 исполняет EXIT-трап
+  # В ПОДОБОЛОЧКЕ, когда фоновый потомок умирает от перехватываемого сигнала
+  # (#237) -- без предиката тело сносило бы рабочий каталог среди прогона.
+  # В bash 4.0+ BASHPID в подоболочке отличен от $$ (PID главного процесса).
+  # В bash без BASHPID (3.2) PID исполняющей трап оболочки добывается форком:
+  # PPID ребёнка подстановки -- PID нашей оболочки. Контекст -- ТРИ исхода:
+  # главный / подоболочка / НЕ ОПРЕДЕЛЁН. Упавший или пустой форк обязан
+  # считаться главным процессом (молчаливый невыход главного дороже редкой
+  # уборки в подоболочке: вред требует совпадения двух независимых редкостей)
+  # и объявляться именной строкой в stderr -- отказ инструмента не имеет
+  # права одеваться в вердикт. Выход из ветки подоболочки -- return, не
+  # exit: код выхода подоболочки менять мы права не имеем. Форк исполняется
+  # один раз за выход и только на bash без BASHPID.
+  if [[ -n "${BASHPID:-}" ]]; then
+    [[ "$BASHPID" != "$$" ]] && return
+  else
+    __guard_ctx=$(exec sh -c 'echo $PPID') || __guard_ctx=
+    if [[ -n "$__guard_ctx" && "$__guard_ctx" != "$$" ]]; then
+      return
+    fi
+    [[ -z "$__guard_ctx" ]] && echo "ЧАСОВОЙ КОНТЕКСТА НЕ ОПРЕДЕЛЁН (форк PPID не дал ответа) -- продолжаю уборку как главный процесс" >&2
+  fi
+  # Однократность: повторный вход ловушки уборки не делает.
+  trap - EXIT
   [[ -n "${WORK:-}" ]] && rm -rf "$WORK"
   if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
     echo "ОТКАЗ: bun-drift оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
@@ -394,7 +418,7 @@ measure() {
 }
 
 # ---------------------------------------------------------------------------
-# --self-check: четыре зуба, у каждого свой названный красный.
+# --self-check: зубы по перечню TEETH_LIST, у каждого свой названный красный.
 # Мутации правят КОПИЮ; оригинал не трогается. Снимок + sha256, не git.
 # ---------------------------------------------------------------------------
 
@@ -578,8 +602,8 @@ tooth_5() {
 import sys
 p = sys.argv[1]
 t = open(p, encoding='utf-8').read()
-old = "TEETH_LIST=(1 2 3 4 5 6 7 8 9)\n"
-new = "TEETH_LIST=(1 2 3 4 5 6 7 8 9 99)\n"
+old = "TEETH_LIST=(1 2 3 4 5 6 7 8 9 10 11 12 13 14)\n"
+new = "TEETH_LIST=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 99)\n"
 c = t.count(old)
 if c != 1:
     sys.stderr.write('anchor count=%d\n' % c)
@@ -699,6 +723,216 @@ tooth_8() {
   tooth_pass
 }
 
+# ЗУБ 10: EXIT-ловушка, исполнившаяся в ПОДОБОЛОЧКЕ, НЕ убирает рабочий
+# каталог. bash 5.2 исполняет EXIT-трап преждевременно -- в подоболочке, когда
+# фоновый потомок умирает от перехватываемого сигнала (#237). Вызов двойной:
+# повторный вызов часового не убирает и не ломает прогон. Положительный
+# контроль -- зуб 11 (главный процесс убирает тот же каталог).
+tooth_10() {
+  TOOTH_N=10 TOOTH_NAME='подоболочка-не-убирает' TOOTH_RC=0
+  local probe stand rc
+  probe=$(mktemp -d "$WORK/g10.XXXXXX") || { say "ЗУБ 10: ОТКАЗ прибора -- mktemp не создал зонд подоболочки"; return 2; }
+  stand=$WORK/t10-stand.sh
+  {
+    sed -n '/^__bun_drift_guard()/,/^}/p' "$TOOL"
+    printf 'WORK=%q\n' "$probe"
+    printf '__DONE=1\n'
+    printf '( __bun_drift_guard; __bun_drift_guard )\n'
+  } > "$stand"
+  bash "$stand"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "стенд подоболочки rc=$rc"
+    return 0
+  fi
+  if [[ ! -d "$probe" ]]; then
+    tooth_fail "подоболочка снесла рабочий каталог $probe"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 11: ГЛАВНЫЙ процесс убирает тот же каталог -- положительный контроль
+# зуба 10: без него «подоболочка не убирает» зелено и на предикате,
+# отвергающем вообще всё.
+tooth_11() {
+  TOOTH_N=11 TOOTH_NAME='главный-убирает' TOOTH_RC=0
+  local probe stand rc
+  probe=$(mktemp -d "$WORK/g11.XXXXXX") || { say "ЗУБ 11: ОТКАЗ прибора -- mktemp не создал зонд главного выхода"; return 2; }
+  stand=$WORK/t11-stand.sh
+  {
+    sed -n '/^__bun_drift_guard()/,/^}/p' "$TOOL"
+    printf 'WORK=%q\n' "$probe"
+    printf '__DONE=1\n'
+    printf "trap '__bun_drift_guard' EXIT\nexit 0\n"
+  } > "$stand"
+  bash "$stand"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "стенд главного выхода rc=$rc"
+    return 0
+  fi
+  if [[ -d "$probe" ]]; then
+    tooth_fail "главный процесс не убрал $probe"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 12: смерть фонового потомка от ПЕРЕХВАТЫВАЕМОГО сигнала (kill без -9)
+# безопасна: wait отдаёт статус потомка (143), рабочий каталог жив СРЕДИ
+# прогона, прогон доходит до конца, финальная уборка срабатывает. На bash 3.2
+# ловушка mid-run не исполняется вовсе (измерено #237) -- зуб зелёный там по
+# платформенной причине. Форма выхода часового -- return, не exit -- контракт
+# (код выхода подоболочки менять права не имеем); на bash 5.2 return и exit в
+# этом месте поведенчески неразличимы (измерено #237), поэтому форма
+# проверяется текстом тела.
+tooth_12() {
+  TOOTH_N=12 TOOTH_NAME='потомок-TERM-безопасен' TOOTH_RC=0
+  local probe stand log rc gbody
+  probe=$(mktemp -d "$WORK/g12.XXXXXX") || { say "ЗУБ 12: ОТКАЗ прибора -- mktemp не создал зонд смерти потомка"; return 2; }
+  log=$WORK/t12.log
+  : > "$log"
+  stand=$WORK/t12-stand.sh
+  {
+    sed -n '/^__bun_drift_guard()/,/^}/p' "$TOOL"
+    printf 'WORK=%q\n' "$probe"
+    printf 'LOG=%q\n' "$log"
+    printf '__DONE=0\n'
+    printf "trap '__bun_drift_guard' EXIT\n"
+    printf "trap 'exit 130' INT\ntrap 'exit 143' TERM\n"
+    printf 'sleep 30 & p=$!\nkill "$p"\nwait "$p"; echo "WAIT_RC=$?" >> "$LOG"\n'
+    printf 'if [[ -d "$WORK" ]]; then echo WORK_AFTER_WAIT=yes >> "$LOG"; else echo WORK_AFTER_WAIT=no >> "$LOG"; fi\n'
+    printf '__DONE=1\nexit 0\n'
+  } > "$stand"
+  bash "$stand"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "стенд смерти потомка rc=$rc лог=$(cat "$log" 2>/dev/null)"
+    return 0
+  fi
+  # Статус wait по убитому TERM потомку платформозависим: bash 5.2 отдаёт 143,
+  # bash 3.2 при живой TERM-ловушке -- 0 (измерено, стенды t32/t32b, 3.2.57).
+  # Защитное свойство (каталог жив среди прогона) проверяется ниже и строго.
+  if ! grep -q '^WAIT_RC=143$' "$log" && ! grep -q '^WAIT_RC=0$' "$log"; then
+    tooth_fail "wait не отдал статус потомка: $(cat "$log")"
+    return 0
+  fi
+  if ! grep -q '^WORK_AFTER_WAIT=yes$' "$log"; then
+    tooth_fail "рабочий каталог снесён среди прогона: $(cat "$log")"
+    return 0
+  fi
+  if [[ -d "$probe" ]]; then
+    tooth_fail "финальная уборка не сработала: $probe"
+    return 0
+  fi
+  gbody=$(sed -n '/^__bun_drift_guard()/,/^}/p' "$TOOL") || { say "ЗУБ 12: ОТКАЗ прибора -- тело гварда не извлекается"; return 2; }
+  if [[ -z "${BASHPID:-}" ]]; then
+    say "ЗУБ 12: поведенческая половина недостижима без BASHPID -- mid-run ловушка на этом интерпретаторе не исполняется вовсе; стенд выше доказал свойство платформы, не часового; контракт выхода обеих веток -- текстом тела ниже"
+  fi
+  if [[ "$gbody" != *']] && return'* ]]; then
+    tooth_fail "часовой, ветка BASHPID: выход подоболочки не return (контракт: код выхода подоболочки не меняем)"
+    return 0
+  fi
+  # Голый return в теле неуникален: ветка форка опознаётся только трёхстрочной
+  # формой блока. Паттерн собран \n-эскейпами: реальные переводы строк живут
+  # только в рантайме, иначе файл получил бы вторую копию якорей мутаций
+  # INV/EXIT-форка и проверка единственности в mutate_copy легла бы (count=2).
+  # В [[ ]] переменная паттерна обязана быть закавычена: незакавыченный $'...'
+  # ломается о glob-семантику квадратной скобки (измерено, bash 3.2 и 5.2).
+  local fork_block
+  fork_block=$'    if [[ -n "$__guard_ctx" && "$__guard_ctx" != "$$" ]]; then\n      return\n    fi'
+  if [[ "$gbody" != *"$fork_block"* ]]; then
+    tooth_fail "часовой, ветка форка: выход подоболочки не return (контракт: код выхода подоболочки не меняем)"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 13: ОДНОКРАТНОСТЬ: ловушка снимает себя (trap с минусом по EXIT) между
+# сохранением кода выхода и уборкой. Поведенческая однократность повторных
+# mid-run вызовов измерена зубом 10 (двойной вызов); повторного входа в
+# главном процессе на bash 5.2 не построить (bash сам не ре-триггерит
+# EXIT-handler, измерено #237), поэтому инвариант самосъёма проверяется
+# текстом тела.
+tooth_13() {
+  TOOTH_N=13 TOOTH_NAME='однократность-ловушка-снимает-себя' TOOTH_RC=0
+  local body pyrc
+  body=$(sed -n '/^__bun_drift_guard()/,/^}/p' "$TOOL") || { say "ЗУБ 13: ОТКАЗ прибора -- тело гварда не извлекается"; return 2; }
+  pyrc=0
+  python3 - "$body" <<'PY' || pyrc=$?
+import sys
+body = sys.argv[1]
+i_rc = body.find('__rc=$?')
+i_trap = body.find('trap ' + '- EXIT')
+i_rm = body.find('rm ')
+if i_rc < 0:
+    sys.stderr.write('нет сохранения кода выхода\n')
+    sys.exit(1)
+if i_trap < 0 or i_trap < i_rc:
+    sys.stderr.write('нет снятия ловушки после __rc=$?\n')
+    sys.exit(2)
+if i_rm >= 0 and i_trap > i_rm:
+    sys.stderr.write('снятие ловушки стоит после уборки\n')
+    sys.exit(3)
+PY
+  if [[ "$pyrc" -ne 0 ]]; then
+    tooth_fail "структура тела гварда: pyrc=$pyrc"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 14: контекст НЕ ОПРЕДЕЛЁН -- третий исход часового: упавшая или
+# пустая добывалка PID (ветка bash без BASHPID) обязана продолжить уборку
+# как главный процесс И объявить отказ именной строкой в stderr; молчаливого
+# исхода не бывает. На bash с BASHPID ветка недостижима (переменная readonly
+# и всегда установлена оболочкой), там зуб держит структурную половину и
+# красный контроль мутации добывалки; поведенческая половина гоняется на
+# bash без BASHPID (PATH без sh валит форк-добывалку).
+tooth_14() {
+  TOOTH_N=14 TOOTH_NAME='контекст-не-определён' TOOTH_RC=0
+  local probe stand rc gbody nopath rm_path bash_abs
+  gbody=$(sed -n '/^__bun_drift_guard()/,/^}/p' "$TOOL") || { say "ЗУБ 14: ОТКАЗ прибора -- тело гварда не извлекается"; return 2; }
+  if [[ "$gbody" != *'__guard_ctx=$(exec'* || "$gbody" != *'|| __guard_ctx='* || "$gbody" != *'ЧАСОВОЙ КОНТЕКСТА НЕ ОПРЕДЕЛЁН'* ]]; then
+    tooth_fail "в теле гварда нет добывалки с захватом кода или именной строки отказа"
+    return 0
+  fi
+  if [[ -n "${BASHPID:-}" ]]; then
+    say "ЗУБ 14: структурная половина; поведенческая -- только bash без BASHPID (на этой машине ветка недостижима)"
+    tooth_pass
+    return 0
+  fi
+  probe=$(mktemp -d "$WORK/g14.XXXXXX") || { say "ЗУБ 14: ОТКАЗ прибора -- mktemp не создал зонд"; return 2; }
+  stand=$WORK/t14-stand.sh
+  {
+    sed -n '/^__bun_drift_guard()/,/^}/p' "$TOOL"
+    printf 'WORK=%q\n' "$probe"
+    printf 'HOLDER_PID=\n__DONE=1\n'
+    printf "trap '__bun_drift_guard' EXIT\nexit 0\n"
+  } > "$stand"
+  nopath=$WORK/t14-nopath
+  mkdir -p "$nopath" || { say "ЗУБ 14: ОТКАЗ прибора -- не создать пустой PATH"; return 2; }
+  rm_path=$(command -v rm) || { say "ЗУБ 14: ОТКАЗ прибора -- нет rm"; return 2; }
+  ln -s "$rm_path" "$nopath/rm" || { say "ЗУБ 14: ОТКАЗ прибора -- не положить rm в пустой PATH"; return 2; }
+  # Интерпретатор зовётся АБСОЛЮТНЫМ путём: PATH стенда намеренно пуст
+  # (в нём только rm), и поиск bash по нему даёт отказ прибора вместо
+  # вердикта. Ветка достижима только на bash без BASHPID (3.2).
+  bash_abs=${BASH:-}
+  [[ -n "$bash_abs" && -x "$bash_abs" ]] || bash_abs=$(command -v bash) || { say "ЗУБ 14: ОТКАЗ прибора -- не найден абсолютный путь bash"; return 2; }
+  PATH="$nopath" "$bash_abs" "$stand" >"$WORK/t14.out" 2>"$WORK/t14.err"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "стенд неопределённого контекста rc=$rc stderr=$(cat "$WORK/t14.err")"
+    return 0
+  fi
+  if [[ -d "$probe" ]]; then
+    tooth_fail "контекст не определён, но каталог не убран: $probe"
+    return 0
+  fi
+  if ! grep -q 'ЧАСОВОЙ КОНТЕКСТА НЕ ОПРЕДЕЛЁН' "$WORK/t14.err"; then
+    tooth_fail "неопределённый контекст прошёл молча: $(cat "$WORK/t14.err")"
+    return 0
+  fi
+  tooth_pass
+}
+
 run_one_tooth() {
   case "$1" in
     1) tooth_1 ;;
@@ -710,16 +944,27 @@ run_one_tooth() {
     7) tooth_7 ;;
     8) tooth_8 ;;
     9) tooth_9 ;;
+    10) tooth_10 ;;
+    11) tooth_11 ;;
+    12) tooth_12 ;;
+    13) tooth_13 ;;
+    14) tooth_14 ;;
     *) say "нет зуба $1"; return 2 ;;
   esac
 }
 
 mutate_copy() {
-  local n="$1"
-  python3 - "$n" "$TOOL" <<'PY'
+  local n="$1" branch=FORK
+  # Якорь мутаций часового обязан лежать в ЖИВОЙ ветке интерпретатора
+  # (#237): мутация в мёртвой ветке не меняет поведения. Признак --
+  # свойство интерпретатора (BASHPID), не версии bash и не машины.
+  [[ -n "${BASHPID:-}" ]] && branch=BASHPID
+  MUT_GUARD_BRANCH="$branch" python3 - "$n" "$TOOL" <<'PY'
+import os
 import sys
 n = int(sys.argv[1])
 path = sys.argv[2]
+guard_branch = os.environ.get('MUT_GUARD_BRANCH', '')
 text = open(path, encoding='utf-8').read()
 pairs = []
 if n == 1:
@@ -770,6 +1015,52 @@ elif n == 9:
     pairs = [
         ('USE_IMAGE_KEY=1  # MUT_IMAGE_KEY\n',
          'USE_IMAGE_KEY=0  # MUT_IMAGE_KEY\n'),
+    ]
+elif n == 10:
+    # MUT_SENTINEL_OFF: снять часовой контекста -- подоболочка снова убирает.
+    pairs = [
+        (('  if [[ -n "${BASHPID' + ':-}" ]]; then\n'
+   + '    [[ "$BASHPID"' + ' != "$$" ]] && return\n'
+   + '  else\n'
+   + "    __guard_ctx=$(exec sh -c " + "'echo $PPID'" + ") || __guard_ctx=\n"
+   + '    if [[ -n "$__guard_ctx" && "$__guard_ctx" != "$$" ]]; then\n'
+   + '      return\n'
+   + '    fi\n'
+   + '    [[ -z "$__guard_ctx" ]] && echo "ЧАСОВОЙ КОНТЕКСТА НЕ ОПРЕДЕЛЁН (форк PPID не дал ответа) -- продолжаю уборку как главный процесс" >&2\n'
+   + '  fi\n'), ''),
+    ]
+elif n == 11:
+    # MUT_SENTINEL_INV: инвертировать предикат ЖИВОЙ ветки -- главный
+    # перестаёт убирать, подоболочка снова убирает. Якорь-близнец
+    # выбирается по интерпретатору; проверка единственности действует
+    # на каждом из двух якорей.
+    pairs = [
+        ('    [[ "$BASHPID"' + ' != "$$" ]] && return\n',
+         '    [[ "$BASHPID"' + ' == "$$" ]] && return\n'),
+    ] if guard_branch == 'BASHPID' else [
+        ('    if [[ -n "$__guard_ctx" && "$__guard_ctx" != "$$" ]]; then\n',
+         '    if [[ -n "$__guard_ctx" && "$__guard_ctx" == "$$" ]]; then\n'),
+    ]
+elif n == 12:
+    # MUT_SENTINEL_EXIT: return -> exit: код выхода подоболочки меняется.
+    # В форк-ветке якорь несёт строку if: одиночный return неуникален.
+    pairs = [
+        ('    [[ "$BASHPID"' + ' != "$$" ]] && return\n',
+         '    [[ "$BASHPID"' + ' != "$$" ]] && exit\n'),
+    ] if guard_branch == 'BASHPID' else [
+        ('    if [[ -n "$__guard_ctx" && "$__guard_ctx" != "$$" ]]; then\n      return\n',
+         '    if [[ -n "$__guard_ctx" && "$__guard_ctx" != "$$" ]]; then\n      exit\n'),
+    ]
+elif n == 13:
+    # MUT_TRAP_RESET_OFF: снять самосъём ловушки -- повторный вход не исключён.
+    pairs = [
+        ('  trap ' + '- EXIT\n', ''),
+    ]
+elif n == 14:
+    # MUT_CTX_FALLBACK_OFF: снять фолбэк-добывалку на литеральный $$ --
+    # неопределённый контекст перестаёт объявляться и не отличим от главного.
+    pairs = [
+        ("    __guard_ctx=$(exec sh -c " + "'echo $PPID'" + ") || __guard_ctx=\n", '    __guard_ctx=$$\n'),
     ]
 else:
     sys.stderr.write('unknown mutation %d\n' % n)
@@ -835,9 +1126,11 @@ self_check() {
     TOOTH_RC=0
     run_one_tooth "$n" || return 2
     if [[ "$TOOTH_RC" -eq 0 ]]; then
+      # Молчащий зуб помечается именной строкой и необновлением redctl:
+      # очередь до конца, полный ИТОГ, ненулевой код (красный остаётся красным).
       say "ЗУБ $n красный-контроль: мутация прошла молча (зуб без зубов)"
       cp "$SNAP" "$TOOL"
-      return 1
+      continue
     fi
     say "ЗУБ $n красный-контроль: мутация покраснела именным красным"
     cp "$SNAP" "$TOOL"
