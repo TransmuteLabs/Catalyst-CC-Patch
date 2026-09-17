@@ -3024,16 +3024,413 @@ if NEG.search('if { echo x; } > "$f"; then'):
     print("ГЕЙТ ФОРМ ЛОЖНО СРАБАТЫВАЕТ: форма без отрицания для него тоже находка")
     sys.exit(1)
 
-# Правило 3: EXIT-трап без часового завершения.
+# Правило 3: непроверенная подстановка команды (измеренный класс 3a/3b/3c).
 #
-# bash 3.2 (единственный на этой машине) отдаёт код 0, когда скрипт с
-# EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
-# `set -u`, `${x:?}`, bad substitution): трап исполняется, `$?` внутри него --
-# ноль, и вызывающий видит успех вместо оборванного прогона. Измерено
-# 2026-08-28 на зонде, который так «зеленел» посреди таблицы. Лечится только
-# ЧАСОВЫМ: штатный конец объявляет себя (`__DONE=1`), трап без объявления
-# краснит сам. Правило файловое, а не строчное: трап и часовой стоят в разных
-# местах файла.
+# Посылка «EXIT-трап + фатальная подстановка => rc=0» не воспроизводится
+# (замер 2026-09-16, bash 3.2 и 5.2: оборвавшиеся формы отдают rc=1).
+# Реальная маскировка: фатальная ошибка ВНУТРИ $(...) убивает подоболочку,
+# внешний скрипт идёт дальше с пустой строкой и штатно возвращает 0.
+# Часовой __DONE этот класс не ловит: скрипт дошёл до конца, __DONE=1.
+#
+# 3a (строчное): local|declare|typeset|export|readonly ИМЯ=$(...) --
+# статус берёт builtin (всегда 0), errexit бессилен.
+# 3b (файловое): файл с ИМЯ=$(...) обязан иметь errexit (`set -e` /
+# `set -o errexit` в любой форме), иначе форма без -e даёт rc=0.
+# 3c (строчное): $(...) в if/elif/while/[[/[ /case, чей код отбрасывается.
+#
+# Исключения (иначе ложные): $((...)) подстановкой не является;
+# if [!] ИМЯ=$(...); then -- образцовая, находкой не бывает.
+#
+# Форма B (подстановка в аргументе другой команды) в гейт НЕ вносится:
+# статически echo "версия: $(date)" неотличима от echo "зубов: $(wc -l < f)",
+# а первая безвредна. Названная граница, не недосмотр; замер -- проба B.
+#
+# Часовой __DONE НЕ удаляется: переводит сигналы в коды (INT/TERM) и ловит
+# ветку exit 0, не дошедшую до штатного конца. Это не ответ на подстановки.
+# Наблюдённый вред: __DONE=1; exit $? возвращает код ПРИСВАИВАНИЯ (ноль) --
+# tree-run.sh --self-check однажды вернул 0 при непройденном зубе.
+IDENT = r'[A-Za-z_][A-Za-z0-9_]*'
+ASSIGN_SUB = re.compile(
+    r'(?:^|\s)(' + IDENT + r')=(?:\$\(|"\$\(|\'\$\()(?!\()')
+ASSIGN_AT_START = re.compile(
+    r'^' + IDENT + r'=(?:\$\(|"\$\(|\'\$\()(?!\()')
+BUILTIN_3A = re.compile(
+    r'^(?:local|declare|typeset|export|readonly)(?![A-Za-z0-9_])(.*)$')
+CASE_ARM = re.compile(
+    r'^(?:[A-Za-z0-9_.*?\[\]\\-]+(?:\|[A-Za-z0-9_.*?\[\]\\-]+)*)\)\s+')
+VERIFIED_IF = re.compile(
+    r'^(?:if|elif|while)(?![A-Za-z0-9_])\s+(?:!\s*)?' + IDENT +
+    r'=(?:\$\(|"\$\(|\'\$\()(?!\()')
+IF_WORD = re.compile(r'^(?:if|elif|while)(?![A-Za-z0-9_])\s+(.*)$')
+CASE_WORD = re.compile(r'^case(?![A-Za-z0-9_])\s+(\S+)')
+SET_LINE = re.compile(r'^set(?![A-Za-z0-9_])')
+
+
+def skip_balanced_paren(s, open_at):
+    depth, i, quote, n = 1, open_at + 1, None, len(s)
+    while i < n and depth:
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            quote = "'"
+            i += 1
+            continue
+        if c == '"':
+            quote = '"'
+            i += 1
+            continue
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        i += 1
+    return i
+
+
+def skip_dollar_sub(s, i):
+    if s.startswith('$((', i):
+        j, depth, n = i + 3, 2, len(s)
+        while j < n and depth:
+            if s.startswith('))', j) and depth == 2:
+                return j + 2
+            if s[j] == '(':
+                depth += 1
+            elif s[j] == ')':
+                depth -= 1
+            j += 1
+        return n
+    if s.startswith('$(', i):
+        return skip_balanced_paren(s, i + 1)
+    return i + 1
+
+
+def split_simple_commands(s):
+    # ; && || -- не внутри кавычек, $(...), $((...), [[ ]].
+    parts, cmd_start, i, quote, n, dbl = [], 0, 0, None, len(s), 0
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+                i += 1
+                continue
+            if s.startswith('$(', i):
+                i = skip_dollar_sub(s, i)
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            quote = "'"
+            i += 1
+            continue
+        if c == '"':
+            quote = '"'
+            i += 1
+            continue
+        if s.startswith('$(', i):
+            i = skip_dollar_sub(s, i)
+            continue
+        if s.startswith('[[', i):
+            dbl += 1
+            i += 2
+            continue
+        if dbl and s.startswith(']]', i):
+            dbl -= 1
+            i += 2
+            continue
+        if dbl:
+            i += 1
+            continue
+        if s.startswith('&&', i) or s.startswith('||', i):
+            parts.append(s[cmd_start:i])
+            i += 2
+            cmd_start = i
+            continue
+        if c == ';':
+            parts.append(s[cmd_start:i])
+            i += 1
+            cmd_start = i
+            continue
+        i += 1
+    parts.append(s[cmd_start:])
+    return parts
+
+
+def cmdsubs_in(s):
+    hits, i, quote, n = [], 0, None, len(s)
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+                i += 1
+                continue
+            if s.startswith('$((', i):
+                i = skip_dollar_sub(s, i)
+                continue
+            if s.startswith('$(', i):
+                hits.append(i)
+                i = skip_dollar_sub(s, i)
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            quote = "'"
+            i += 1
+            continue
+        if c == '"':
+            quote = '"'
+            i += 1
+            continue
+        if s.startswith('$((', i):
+            i = skip_dollar_sub(s, i)
+            continue
+        if s.startswith('$(', i):
+            hits.append(i)
+            i = skip_dollar_sub(s, i)
+            continue
+        i += 1
+    return hits
+
+
+def extract_double_brackets(s):
+    out, i, quote, n = [], 0, None, len(s)
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            quote = "'"
+            i += 1
+            continue
+        if c == '"':
+            quote = '"'
+            i += 1
+            continue
+        if s.startswith('$(', i):
+            i = skip_dollar_sub(s, i)
+            continue
+        if s.startswith('[[', i):
+            j, q2 = i + 2, None
+            while j < n:
+                d = s[j]
+                if q2 == "'":
+                    if d == "'":
+                        q2 = None
+                    j += 1
+                    continue
+                if q2 == '"':
+                    if d == '\\':
+                        j += 2
+                        continue
+                    if d == '"':
+                        q2 = None
+                    j += 1
+                    continue
+                if d == "'":
+                    q2 = "'"
+                    j += 1
+                    continue
+                if d == '"':
+                    q2 = '"'
+                    j += 1
+                    continue
+                if s.startswith(']]', j):
+                    out.append(s[i:j + 2])
+                    j += 2
+                    break
+                j += 1
+            else:
+                out.append(s[i:])
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def enables_errexit(line):
+    s = line.strip()
+    if s.startswith('#') or not SET_LINE.match(s):
+        return False
+    if re.search(r'-o\s+errexit\b', s):
+        return True
+    return re.search(r'(^|\s)-[a-zA-Z]*e', s) is not None
+
+
+def file_has_errexit(text):
+    return any(enables_errexit(l) for l in text.split('\n'))
+
+
+def is_3a_command(cmd):
+    m = BUILTIN_3A.match(cmd.strip())
+    return bool(m) and ASSIGN_SUB.search(m.group(1)) is not None
+
+
+def is_verified_if(cmd):
+    return VERIFIED_IF.match(cmd.strip()) is not None
+
+
+def is_3b_command(cmd):
+    s = cmd.strip()
+    if not s or is_3a_command(s) or is_verified_if(s):
+        return False
+    if re.match(r'^(?:if|elif|while|case|then|do|done|fi|esac|else)\b', s):
+        return False
+    if s.startswith('[[') or re.match(r'^\[\s', s):
+        return False
+    if not s.startswith('$('):
+        s = CASE_ARM.sub('', s, count=1)
+    return ASSIGN_AT_START.match(s) is not None
+
+
+def cmd_3c_hits(cmd):
+    s = cmd.strip()
+    if not s or is_verified_if(s):
+        return []
+    body = s
+    m = IF_WORD.match(s)
+    if m:
+        body = re.sub(r'^!\s*', '', m.group(1))
+    hits = []
+    for frag in extract_double_brackets(body):
+        hits.extend(cmdsubs_in(frag))
+    if re.match(r'^\[\s', body) and not body.startswith('[['):
+        hits.extend(cmdsubs_in(body))
+    cm = CASE_WORD.match(s)
+    if cm:
+        hits.extend(cmdsubs_in(cm.group(1)))
+    return hits
+
+
+def _iter_cmds(text):
+    for n, line in enumerate(text.split('\n'), 1):
+        if line.lstrip().startswith('#'):
+            continue
+        for cmd in split_simple_commands(line):
+            yield n, line, cmd
+
+
+def hits_3a(text):
+    seen, out = set(), []
+    for n, line, cmd in _iter_cmds(text):
+        if n not in seen and is_3a_command(cmd):
+            seen.add(n)
+            out.append((n, line))
+    return out
+
+
+def hits_3b(text):
+    if file_has_errexit(text):
+        return []
+    seen, out = set(), []
+    for n, line, cmd in _iter_cmds(text):
+        if n not in seen and is_3b_command(cmd):
+            seen.add(n)
+            out.append((n, line))
+    return out
+
+
+def hits_3c(text):
+    seen, out = set(), []
+    for n, line, cmd in _iter_cmds(text):
+        if n not in seen and cmd_3c_hits(cmd):
+            seen.add(n)
+            out.append((n, line))
+    return out
+
+
+# Контроли СКЛЕИВАЮТСЯ: записанные целиком, они были бы находкой в самом гейте.
+_s3a = 'local x=' + '$(cmd)'
+if not hits_3a(_s3a + '\n'):
+    print("ГЕЙТ 3a СЛЕП: он не видит local x=$(cmd)")
+    sys.exit(1)
+if hits_3a('local x\nx=' + '$(cmd)\n'):
+    print("ГЕЙТ 3a ЛОЖНО СРАБАТЫВАЕТ: local и присваивание разными строками -- тоже находка")
+    sys.exit(1)
+
+_s3b = 'v=' + '$(cmd)\n'
+if not hits_3b(_s3b):
+    print("ГЕЙТ 3b СЛЕП: он не видит v=$(cmd) без errexit")
+    sys.exit(1)
+if hits_3b('set -euo pipefail\nv=' + '$(cmd)\n'):
+    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: файл с errexit для него тоже находка")
+    sys.exit(1)
+
+_s3c_a = 'if [[ "'
+_s3c_b = '$(cmd)" == "" ]]'
+if not hits_3c(_s3c_a + _s3c_b + '\n'):
+    print("ГЕЙТ 3c СЛЕП: он не видит if [[ \"$(cmd)\" == \"\" ]]")
+    sys.exit(1)
+if hits_3c('if cmd; then\n'):
+    print("ГЕЙТ 3c ЛОЖНО СРАБАТЫВАЕТ: if cmd для него тоже находка")
+    sys.exit(1)
+
+_arith_n = 'n=$((n+1))\n'
+_arith_if = 'if (( n )); then\n'
+if hits_3a(_arith_n) or hits_3b(_arith_n) or hits_3c(_arith_n):
+    print("ГЕЙТ АРИФМЕТИКИ ЛОЖНО СРАБАТЫВАЕТ: n=$((n+1)) для него находка")
+    sys.exit(1)
+if hits_3a(_arith_if) or hits_3b(_arith_if) or hits_3c(_arith_if):
+    print("ГЕЙТ АРИФМЕТИКИ ЛОЖНО СРАБАТЫВАЕТ: if (( n )) для него находка")
+    sys.exit(1)
+
+_verified = 'if ! got=' + '$(cmd); then\n'
+if hits_3a(_verified) or hits_3b(_verified) or hits_3c(_verified):
+    print("ГЕЙТ ПРОВЕРЕННОЙ ФОРМЫ ЛОЖНО СРАБАТЫВАЕТ: if ! got=$(cmd) для него находка")
+    sys.exit(1)
+
+# Часовой __DONE остаётся (сигналы и ветки exit 0), основание -- не подстановки.
 TRAP = re.compile(r'^\s*trap\s+[^\n]*\bEXIT\b', re.M)
 
 def sentinel_missing(text):
@@ -3079,6 +3476,7 @@ if merged_trap("trap 'exit 143' TERM"):
 
 bad = []
 scanned = 0
+n3a = n3b = n3c = n_sentinel = n3b_files = 0
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = [d for d in dirnames if d not in ('.git', 'distros', 'node_modules')]
     for name in sorted(filenames):
@@ -3090,9 +3488,35 @@ for dirpath, dirnames, filenames in os.walk(root):
         except (OSError, UnicodeDecodeError):
             continue
         scanned += 1
+        rel = os.path.relpath(f, root)
         if sentinel_missing(text):
-            bad.append(f"{os.path.relpath(f, root)}: EXIT-трап без часового "
-                       f"завершения -- обрыв на ошибке подстановки вернёт 0")
+            n_sentinel += 1
+            bad.append(f"{rel}: EXIT-трап без часового завершения -- "
+                       f"ветка exit 0 до штатного конца не будет поймана")
+        for n, line in hits_3a(text):
+            n3a += 1
+            snip = line.strip()
+            if len(snip) > 120:
+                snip = snip[:117] + "..."
+            bad.append(f"{rel}:{n}: 3a builtin ИМЯ=$" + "(...) -- статус берёт "
+                       f"local/declare/typeset/export/readonly, errexit бессилен -- {snip}")
+        _b3 = hits_3b(text)
+        if _b3:
+            n3b_files += 1
+        for n, line in _b3:
+            n3b += 1
+            snip = line.strip()
+            if len(snip) > 120:
+                snip = snip[:117] + "..."
+            bad.append(f"{rel}:{n}: 3b ИМЯ=$" + "(...) при файле без errexit -- "
+                       f"фатальная подстановка даст пустую строку и rc=0 -- {snip}")
+        for n, line in hits_3c(text):
+            n3c += 1
+            snip = line.strip()
+            if len(snip) > 120:
+                snip = snip[:117] + "..."
+            bad.append(f"{rel}:{n}: 3c подстановка в условном контексте -- "
+                       f"код отбрасывается -- {snip}")
         for n, line in enumerate(text.split('\n'), 1):
             # Строка-комментарий целиком пропускается: она не исполняется, а
             # объяснить дефект без того, чтобы написать его форму, нельзя --
@@ -3114,8 +3538,13 @@ for dirpath, dirnames, filenames in os.walk(root):
             if merged_trap(line):
                 bad.append(f"{os.path.relpath(f, root)}:{n}: слитый сигнальный трап "
                            f"(EXIT вместе с INT/TERM) -- TERM отдаёт 0, а не 143")
+print(f"ПОДФОРМЫ ПРАВИЛА 3: 3a={n3a} строк; 3b={n3b} строк / {n3b_files} файлов; "
+      f"3c={n3c} строк; часовой={n_sentinel} "
+      f"(единица 3a/3b/3c -- строка-место, не вхождение; "
+      f"в одной строке может быть несколько подстановок)")
 if bad:
-    print("ФОРМЫ ОБОЛОЧКИ, КОТОРЫЕ МОЛЧАТ:")
+    print("ФОРМЫ ОБОЛОЧКИ, КОТОРЫЕ МОЛЧАТ "
+          "(список -- строки-места file:line, не вхождения подстановки):")
     for b in bad:
         print("  " + b)
     sys.exit(1)
