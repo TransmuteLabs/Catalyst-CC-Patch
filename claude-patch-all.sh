@@ -3058,19 +3058,19 @@ if NEG.search('if { echo x; } > "$f"; then'):
 #
 # 3a (строчное): local|declare|typeset|export|readonly ИМЯ=$(...) --
 # статус берёт builtin (всегда 0), errexit бессилен.
-# 3b (строчное, волна 3 #219): красна подстановка-присваивание, чей код
-# возврата не проверен НИ ОДНИМ из трёх измеренных способов: (а) `||`/`&&`
-# на той же строке -- после подстановки или внутри её тела; (б) следующая
-# исполняемая команда -- захват `ИМЯ=$?` (той же строкой после `;` или
-# следующей исполняемой строкой); (в) подстановка в условном контексте
-# (`if [!] ИМЯ=$(...); then`). Файл и его строка `set` в критерий НЕ
-# входят: errexit закрывал класс оптом и ломал идиому захвата кода --
-# из 235 мест волны 1 под errexit не сломалось НИ ОДНО, а сломались два
-# CAP-места (tree-run.sh:383, bun-drift.sh:315), где команда + `rc=$?`
-# умерла до захвата; fs-meta.sh источается тремя хозяевами, и строка
-# `set` внутри него переключала бы режим конвейеру вслепую (волна 2 #219,
-# MEASURE-errexit-risk-219w2.md). Проглатывание закрывается явной
-# проверкой кода на месте, а не режимом файла.
+# 3b (волна 4 #219): красна подстановка-присваивание, чей код не проверен
+# НИ ОДНИМ из четырёх способов на ЛОГИЧЕСКОЙ команде (склейка продолжений:
+# неэкранированный `\`, нечёт кавычек, глубина $(/`(`/backtick):
+# (1) `||`/`&&` СВОЕЙ команды -- левый операнд или тело $(); соседний
+# сегмент на той же физической строке не считается;
+# (2) следующая логическая команда -- присваивание `ИМЯ=$?` (префиксы
+# local/declare/typeset/export); границу функции и терминатор heredoc
+# не пересекать;
+# (3) условный контекст: if/elif/while/until / [[ ]] / левый операнд &&/||;
+# (4) явная область `set +e`/`set +o errexit` ... `set -e`/`set -o errexit`
+# (или конец функции/файла), и внутри неё захват `$?` до конца области.
+# Файловый `set -e` в критерий НЕ входит (sourcing). Тела heredoc сканируются
+# как раньше: волна лечит способ судить уже сканируемую строку, не множество.
 # 3c (строчное): $(...) в if/elif/while/[[/[ /case, чей код отбрасывается.
 #
 # Исключения (иначе ложные): $((...)) подстановкой не является;
@@ -3093,9 +3093,6 @@ BUILTIN_3A = re.compile(
     r'^(?:local|declare|typeset|export|readonly)(?![A-Za-z0-9_])(.*)$')
 CASE_ARM = re.compile(
     r'^(?:[A-Za-z0-9_.*?\[\]\\-]+(?:\|[A-Za-z0-9_.*?\[\]\\-]+)*)\)\s+')
-VERIFIED_IF = re.compile(
-    r'^(?:if|elif|while)(?![A-Za-z0-9_])\s+(?:!\s*)?' + IDENT +
-    r'=(?:\$\(|"\$\(|\'\$\()(?!\()')
 IF_WORD = re.compile(r'^(?:if|elif|while)(?![A-Za-z0-9_])\s+(.*)$')
 CASE_WORD = re.compile(r'^case(?![A-Za-z0-9_])\s+(\S+)')
 
@@ -3399,7 +3396,8 @@ def split_commands_marked(s):
     return parts
 
 
-RC_CAPTURE = re.compile(r'^' + IDENT + r'=\$\?$')
+RC_CAPTURE = re.compile(
+    r'^(?:(?:local|declare|typeset|export)\s+)?' + IDENT + r'=\$\?$')
 
 
 def line_has_guard(s):
@@ -3487,15 +3485,11 @@ def is_3a_command(cmd):
     return bool(m) and ASSIGN_SUB.search(m.group(1)) is not None
 
 
-def is_verified_if(cmd):
-    return VERIFIED_IF.match(cmd.strip()) is not None
-
-
 def is_3b_command(cmd):
     s = cmd.strip()
-    if not s or is_3a_command(s) or is_verified_if(s):
+    if not s or is_3a_command(s):
         return False
-    if re.match(r'^(?:if|elif|while|case|then|do|done|fi|esac|else)\b', s):
+    if re.match(r'^(?:if|elif|while|until|case|then|do|done|fi|esac|else)\b', s):
         return False
     if s.startswith('[[') or re.match(r'^\[\s', s):
         return False
@@ -3504,9 +3498,476 @@ def is_3b_command(cmd):
     return ASSIGN_AT_START.match(s) is not None
 
 
+
+def try_parse_heredoc(s, i):
+    # CONSTRAINT: <<< -- here-string, не heredoc; полный разбор bash запрещён.
+    if not s.startswith('<<', i) or s.startswith('<<<', i):
+        return None
+    j = i + 2
+    strip_tabs = False
+    if j < len(s) and s[j] == '-':
+        strip_tabs = True
+        j += 1
+    while j < len(s) and s[j] in ' \t':
+        j += 1
+    if j >= len(s):
+        return None
+    if s[j] in ('"', "'"):
+        q = s[j]
+        j += 1
+        start = j
+        while j < len(s) and s[j] != q:
+            j += 1
+        tag = s[start:j]
+        if j < len(s) and s[j] == q:
+            j += 1
+        if not tag:
+            return None
+        return (tag, strip_tabs, j)
+    if s[j] == '\\':
+        j += 1
+    start = j
+    while j < len(s) and (s[j].isalnum() or s[j] == '_'):
+        j += 1
+    tag = s[start:j]
+    if not tag:
+        return None
+    return (tag, strip_tabs, j)
+
+
+def is_heredoc_term(line, tag, strip_tabs):
+    s = line.lstrip('\t') if strip_tabs else line
+    return s == tag
+
+
+class _Scan:
+    # quote/paren/backtick на каждом уровне $( ); heredocs -- очередь тегов.
+    def __init__(self):
+        self.ctx = [None]
+        self.paren = [0]
+        self.btick = [False]
+        self.heredocs = []
+        self.line_cont = False
+
+    def open_shell(self):
+        return (
+            self.line_cont
+            or any(c is not None for c in self.ctx)
+            or any(p > 0 for p in self.paren)
+            or any(self.btick)
+            or len(self.ctx) > 1
+        )
+
+
+def _walk_line(st, line):
+    st.line_cont = False
+    i, n = 0, len(line)
+    while i < n:
+        q, c = st.ctx[-1], line[i]
+        if q == "'":
+            if c == "'":
+                st.ctx[-1] = None
+            i += 1
+            continue
+        if q == '"':
+            if c == '\\':
+                if i == n - 1:
+                    st.line_cont = True
+                    break
+                i += 2
+                continue
+            if c == '"':
+                st.ctx[-1] = None
+                i += 1
+                continue
+            if line.startswith('$(', i):
+                st.ctx.append(None)
+                st.paren.append(0)
+                st.btick.append(False)
+                i += 2
+                continue
+            i += 1
+            continue
+        if st.btick[-1]:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '`':
+                st.btick[-1] = False
+                i += 1
+                continue
+            if line.startswith('$(', i):
+                st.ctx.append(None)
+                st.paren.append(0)
+                st.btick.append(False)
+                i += 2
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            if i == n - 1:
+                st.line_cont = True
+                break
+            i += 2
+            continue
+        if c == "'":
+            st.ctx[-1] = "'"
+            i += 1
+            continue
+        if c == '"':
+            st.ctx[-1] = '"'
+            i += 1
+            continue
+        if c == '`' :
+            st.btick[-1] = True
+            i += 1
+            continue
+        if c == '#' and (i == 0 or line[i - 1].isspace()):
+            break
+        parsed = try_parse_heredoc(line, i)
+        if parsed is not None:
+            tag, strip, j = parsed
+            st.heredocs.append((tag, strip))
+            i = j
+            continue
+        if line.startswith('$(', i):
+            st.ctx.append(None)
+            st.paren.append(0)
+            st.btick.append(False)
+            i += 2
+            continue
+        if c == '(':
+            st.paren[-1] += 1
+            i += 1
+            continue
+        if c == ')':
+            if st.paren[-1] > 0:
+                st.paren[-1] -= 1
+                i += 1
+                continue
+            if len(st.ctx) > 1:
+                st.ctx.pop()
+                st.paren.pop()
+                st.btick.pop()
+                i += 1
+                continue
+            i += 1
+            continue
+        i += 1
+
+
+class _LCmd:
+    __slots__ = ('start', 'end', 'text', 'spans', 'in_plus_e')
+
+    def __init__(self, start):
+        self.start = start
+        self.end = start
+        self.text = ''
+        self.spans = []
+        self.in_plus_e = False
+
+
+def _analyze_logical(lines):
+    # Склейка физических строк в логические. Тела heredoc в text не входят:
+    # операторы внутри данных не судят команду (инвариант волны: множество
+    # сканируемых строк не меняется -- тела остаются кандидатами построчно).
+    lcmds = []
+    body_set = set()
+    n = len(lines)
+    i = 0
+    st = _Scan()
+    acc = None
+
+    def flush():
+        nonlocal acc, st
+        if acc is not None:
+            lcmds.append(acc)
+        acc = None
+        st = _Scan()
+
+    while i < n:
+        if st.heredocs:
+            tag, strip = st.heredocs[0]
+            if is_heredoc_term(lines[i], tag, strip):
+                st.heredocs.pop(0)
+                i += 1
+                if not st.heredocs and acc is not None and not st.open_shell():
+                    flush()
+                continue
+            body_set.add(i)
+            i += 1
+            continue
+
+        line = lines[i]
+        if acc is None and not st.open_shell():
+            if not line.strip() or line.lstrip().startswith('#'):
+                i += 1
+                continue
+
+        if acc is None:
+            acc = _LCmd(i)
+        prev_cont = st.line_cont
+        if prev_cont:
+            if acc.text.endswith('\\'):
+                acc.text = acc.text[:-1]
+            if acc.text and not acc.text.endswith((' ', '\t')):
+                acc.text += ' '
+            start_off = len(acc.text)
+            acc.text += line
+        else:
+            if acc.text:
+                acc.text += '\n'
+            start_off = len(acc.text)
+            acc.text += line
+        acc.spans.append((i, start_off, len(acc.text)))
+        acc.end = i
+        _walk_line(st, line)
+        i += 1
+        if st.heredocs:
+            continue
+        if not st.open_shell():
+            flush()
+
+    if acc is not None:
+        lcmds.append(acc)
+    return lcmds, body_set
+
+
+def _strip_unquoted_comment(s):
+    i, quote, n = 0, None, len(s)
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            quote = "'"
+            i += 1
+            continue
+        if c == '"':
+            quote = '"'
+            i += 1
+            continue
+        if c == '#' and (i == 0 or s[i - 1].isspace()):
+            return s[:i].rstrip()
+        i += 1
+    return s.rstrip()
+
+
+def split_segments_marked(s):
+    # Как split_commands_marked, плюс незакавыченные `|` и перевод строки.
+    # `||` проверяется раньше `|`. Внутри $(...) / [[ ]] не режем.
+    parts, cmd_start, i, quote, n, dbl = [], 0, 0, None, len(s), 0
+    while i < n:
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+                i += 1
+                continue
+            if s.startswith('$(', i):
+                i = skip_dollar_sub(s, i)
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            quote = "'"
+            i += 1
+            continue
+        if c == '"':
+            quote = '"'
+            i += 1
+            continue
+        if s.startswith('$(', i):
+            i = skip_dollar_sub(s, i)
+            continue
+        if s.startswith('[[', i):
+            dbl += 1
+            i += 2
+            continue
+        if dbl and s.startswith(']]', i):
+            dbl -= 1
+            i += 2
+            continue
+        if dbl:
+            i += 1
+            continue
+        if s.startswith('&&', i) or s.startswith('||', i):
+            parts.append((s[cmd_start:i], s[i:i + 2], cmd_start))
+            i += 2
+            cmd_start = i
+            continue
+        if c == '|':
+            parts.append((s[cmd_start:i], '|', cmd_start))
+            i += 1
+            cmd_start = i
+            continue
+        if c == ';' or c == '\n':
+            parts.append((s[cmd_start:i], ';', cmd_start))
+            i += 1
+            cmd_start = i
+            continue
+        i += 1
+    parts.append((s[cmd_start:], None, cmd_start))
+    return parts
+
+
+def _phys_of(lc, off):
+    for idx, start, end in lc.spans:
+        if start <= off < end or (off == end and start <= off):
+            return idx
+    if lc.spans:
+        if off >= lc.spans[-1][2]:
+            return lc.spans[-1][0]
+        if off < lc.spans[0][1]:
+            return lc.spans[0][0]
+    return lc.start
+
+
+FUNC_HEAD = re.compile(
+    r'^(?:function\s+' + IDENT + r'(?:\s*\(\s*\))?|' + IDENT + r'\s*\(\s*\))\s*\{?\s*$')
+FUNC_CLOSE = re.compile(r'^\}\s*$')
+SET_PLUS_E = re.compile(r'^set\s+(?:\+e|\+o\s+errexit)\s*$')
+SET_MINUS_E = re.compile(r'^set\s+(?:-e|-o\s+errexit)\s*$')
+
+
+def _lc_head(lc):
+    return _strip_unquoted_comment(lc.text).strip()
+
+
+def _mark_plus_e(lcmds):
+    plus = False
+    for lc in lcmds:
+        t = _lc_head(lc)
+        if FUNC_HEAD.match(t):
+            lc.in_plus_e = plus
+            continue
+        if FUNC_CLOSE.match(t):
+            lc.in_plus_e = False
+            plus = False
+            continue
+        if SET_PLUS_E.match(t):
+            lc.in_plus_e = False
+            plus = True
+            continue
+        if SET_MINUS_E.match(t):
+            lc.in_plus_e = False
+            plus = False
+            continue
+        lc.in_plus_e = plus
+
+
+def _is_boundary_cmd(text):
+    t = _strip_unquoted_comment(text).strip()
+    return bool(FUNC_HEAD.match(t) or FUNC_CLOSE.match(t))
+
+
+def _is_capture_cmd(text):
+    t = _strip_unquoted_comment(text).strip()
+    if not t:
+        return False
+    first = split_segments_marked(t)[0][0].strip()
+    return RC_CAPTURE.match(first) is not None
+
+
+def _old_verified(line, marked, site, lines, idx):
+    if line_has_guard(line):
+        return True
+    if marked[site][1] == ';' and site + 1 < len(marked) and RC_CAPTURE.match(
+            marked[site + 1][0].strip()):
+        return True
+    if site == len(marked) - 1 and RC_CAPTURE.match(
+            next_capture_line(lines, idx).split(';')[0].strip()):
+        return True
+    return False
+
+
+def _verified_on_lc(lc, lcmds, lc_i, idx):
+    segs = split_segments_marked(lc.text)
+    site_seg = None
+    for k, (part, sep, off) in enumerate(segs):
+        if not is_3b_command(part):
+            continue
+        if _phys_of(lc, off) != idx:
+            continue
+        site_seg = k
+        break
+    if site_seg is None:
+        # Кандидат на физической строке не совпал с сегментом склейки --
+        # судим сегменты, чьё начало на этой строке; иначе не освобождаем.
+        for k, (part, sep, off) in enumerate(segs):
+            if is_3b_command(part) and _phys_of(lc, off) == idx:
+                site_seg = k
+                break
+    if site_seg is None:
+        return False
+    part, sep, _off = segs[site_seg]
+    # 1: ||/&& своей команды -- внутренний (тело $()) или левый операнд.
+    if line_has_guard(part):
+        return True
+    if sep in ('&&', '||'):
+        return True
+    # 2: захват $? той же логической командой через `;`
+    if sep == ';' and site_seg + 1 < len(segs) and RC_CAPTURE.match(
+            segs[site_seg + 1][0].strip()):
+        return True
+    # CONSTRAINT: следующая логическая команда захватывает $? сайта только
+    # если сайт -- последний непустой сегмент; иначе $? принадлежит
+    # последнему сегменту этой же команды (`v=$(cmd); echo x` / `rc=$?`).
+    last_nonempty = site_seg
+    for k, (p, _s, _o) in enumerate(segs):
+        if p.strip():
+            last_nonempty = k
+    if site_seg == last_nonempty:
+        nxt = lcmds[lc_i + 1] if lc_i + 1 < len(lcmds) else None
+        if nxt is not None and not _is_boundary_cmd(nxt.text) and _is_capture_cmd(nxt.text):
+            return True
+    # 4: явная область set +e ... set -e, захват $? до конца области.
+    # Тот же констрейнт «сайт последний»: иначе $? в области принадлежит
+    # чужому сегменту, как в пункте 2.
+    if lc.in_plus_e:
+        if sep == ';' and site_seg + 1 < len(segs) and RC_CAPTURE.match(
+                segs[site_seg + 1][0].strip()):
+            return True
+        if site_seg == last_nonempty:
+            for later in lcmds[lc_i + 1:]:
+                if not later.in_plus_e and not SET_MINUS_E.match(_lc_head(later)):
+                    break
+                if _is_boundary_cmd(later.text) or SET_MINUS_E.match(_lc_head(later)):
+                    break
+                if _is_capture_cmd(later.text):
+                    return True
+                break
+    return False
+
+
 def cmd_3c_hits(cmd):
     s = cmd.strip()
-    if not s or is_verified_if(s):
+    if not s:
         return []
     body = s
     m = IF_WORD.match(s)
@@ -3541,9 +4002,15 @@ def hits_3a(text):
 
 
 def hits_3b(text):
-    # Волна 3 #219: критерий построчный. Единица -- строка-место (как и в
-    # волне 1); строка красна, когда НИ одна из трёх проверок кода не сошлась.
+    # Единица отчёта -- строка-место. Суждение -- логическая команда (§3a).
+    # Тело heredoc: прежний построчный предикат (множество сканируемых строк).
     lines = text.split('\n')
+    lcmds, body_set = _analyze_logical(lines)
+    _mark_plus_e(lcmds)
+    phys_to_lc = {}
+    for li, lc in enumerate(lcmds):
+        for pidx, _s, _e in lc.spans:
+            phys_to_lc[pidx] = li
     out = []
     for idx, line in enumerate(lines):
         if line.lstrip().startswith('#'):
@@ -3556,19 +4023,13 @@ def hits_3b(text):
                 break
         if site is None:
             continue
-        # (а) `||`/`&&` на той же строке: после подстановки или внутри неё
-        if line_has_guard(line):
+        if idx in body_set or idx not in phys_to_lc:
+            if _old_verified(line, marked, site, lines, idx):
+                continue
+            out.append((idx + 1, line))
             continue
-        # (б) захват кода той же строкой: `;`-соседство, НЕ `&&`/`||`
-        if marked[site][1] == ';' and RC_CAPTURE.match(
-                marked[site + 1][0].strip()):
+        if _verified_on_lc(lcmds[phys_to_lc[idx]], lcmds, phys_to_lc[idx], idx):
             continue
-        # (б) захват кода следующей исполняемой строкой
-        if site == len(marked) - 1 and RC_CAPTURE.match(
-                next_capture_line(lines, idx).split(';')[0].strip()):
-            continue
-        # (в) условный контекст исключён ещё перечислением мест:
-        # is_verified_if и головы if/while/case не доходят сюда
         out.append((idx + 1, line))
     return out
 
@@ -3613,6 +4074,45 @@ if hits_3b('v=' + '$(cmd)\nrc=' + '$?\n'):
     sys.exit(1)
 if not hits_3b('v=' + '$(cmd)\necho x\nrc=' + '$?\n'):
     print("ГЕЙТ 3b СЛЕП: захват через строку кода подстановки уже не ловит")
+    sys.exit(1)
+if hits_3b('v=' + '$(cmd) || die\n'):
+    print("ГЕЙТ 3b R1 ЛОЖНО СРАБАТЫВАЕТ: || своей команды -- код проверен")
+    sys.exit(1)
+if not hits_3b('v=' + '$(cmd); true || false\n'):
+    print("ГЕЙТ 3b R1 СЛЕП: || соседней команды на строке не проверяет подстановку")
+    sys.exit(1)
+if hits_3b('v=' + '$(cmd)\nrc=' + '$?\n'):
+    print("ГЕЙТ 3b R2 ЛОЖНО СРАБАТЫВАЕТ: захват следующей командой -- код проверен")
+    sys.exit(1)
+if not hits_3b('v=' + '$(cmd)\necho x\nrc=' + '$?\n'):
+    print("ГЕЙТ 3b R2 СЛЕП: захват через чужую команду не ловит")
+    sys.exit(1)
+if hits_3b('if v=' + '$(cmd); then\n'):
+    print("ГЕЙТ 3b R3 ЛОЖНО СРАБАТЫВАЕТ: if v=$(cmd) -- условный контекст")
+    sys.exit(1)
+if not hits_3b('v=' + '$(cmd)\n'):
+    print("ГЕЙТ 3b R3 СЛЕП: без условного контекста не ловит")
+    sys.exit(1)
+if hits_3b('until v=' + '$(cmd); do\n'):
+    print("ГЕЙТ 3b R3 ЛОЖНО СРАБАТЫВАЕТ: until v=$(cmd) -- условный контекст")
+    sys.exit(1)
+if hits_3b('set +e\nv=' + '$(cmd)\nrc=' + '$?\nset -e\n'):
+    print("ГЕЙТ 3b R4 ЛОЖНО СРАБАТЫВАЕТ: set +e и захват $? в области -- код проверен")
+    sys.exit(1)
+if not hits_3b('set +e\nv=' + '$(cmd)\nset -e\n'):
+    print("ГЕЙТ 3b R4 СЛЕП: set +e без захвата $? не проверяет код")
+    sys.exit(1)
+if not hits_3b('v=' + '$(cmd); echo x\nrc=' + '$?\n'):
+    print("ГЕЙТ 3b R2 СЛЕП: $? после чужого сегмента той же команды не принадлежит подстановке")
+    sys.exit(1)
+if not hits_3b('set +e\nv=' + '$(cmd); echo x\nrc=' + '$?\nset -e\n'):
+    print("ГЕЙТ 3b R4 СЛЕП: $? после чужого сегмента в области set +e не принадлежит подстановке")
+    sys.exit(1)
+if hits_3b('v="' + '$(cmd \\\n  | x || true)"\n'):
+    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: || на продолжении логической команды -- код проверен")
+    sys.exit(1)
+if hits_3b('set +e\nv="' + '$(cmd \\\n  x)"; rc=' + '$?\nset -e\n'):
+    print("ГЕЙТ 3b ЛОЖНО СРАБАТЫВАЕТ: set +e, продолжение и захват -- код проверен")
     sys.exit(1)
 
 _s3c_a = 'if [[ "'
