@@ -37,6 +37,11 @@ PIN = re.compile(r'^[0-9a-fA-F]{64}$')
 # claude_patch.VERSION, the canonical guard before installer path construction.
 VERSION = re.compile(r'^[0-9][0-9.]*$')
 PLATFORM = re.compile(r'^#\s*platform:\s*(\S+)\s*$')
+# Пол поддержки -- ровно три числа: N.N.N. Слабее (как VERSION списка) нельзя:
+# «2.1» и «2.1.272.0» не являются полом.
+FLOOR_VERSION = re.compile(r'^[0-9]+\.[0-9]+\.[0-9]+$')
+
+_PREFIX = 'СПИСОК КОРПУСА ОТКАЗ'
 
 
 # Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
@@ -45,11 +50,45 @@ PLATFORM = re.compile(r'^#\s*platform:\s*(\S+)\s*$')
 #   2 -- прибор не может мерить: контракт вызова (аргументов не два), названного
 #        файла нет -- разбирать нечего
 def die(message, code=1):
-    sys.stderr.write('СПИСОК КОРПУСА ОТКАЗ: %s\n' % message)
+    sys.stderr.write('%s: %s\n' % (_PREFIX, message))
     raise SystemExit(code)
 
 
+def parse_floor(path):
+    """Одна активная строка дома пола: версия, дата, основание -- через табуляцию."""
+    global _PREFIX
+    _PREFIX = 'ПОЛ ПОДДЕРЖКИ ОТКАЗ'
+    if not os.path.exists(path):
+        die('нет файла %s -- пол поддержки неизвестен' % path, 2)
+    active = []
+    for number, raw in enumerate(io.open(path, encoding='utf-8'), 1):
+        line = raw.replace('\r', '').rstrip('\n')
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) != 3:
+            die('строка %d: полей %d, а формат -- ровно три через табуляцию '
+                '(версия, дата, основание)' % (number, len(parts)))
+        version, date, reason = (parts[0].strip(), parts[1].strip(),
+                                 parts[2].strip())
+        if not FLOOR_VERSION.match(version):
+            die('строка %d: версия «%s» не вида N.N.N' % (number, version))
+        if not date or not reason:
+            die('строка %d: дата или основание пусты' % number)
+        active.append((number, version))
+    if not active:
+        die('в доме пола нет активной строки', 2)
+    if len(active) > 1:  # FLOOR_ONE
+        die('в доме пола %d активных строк (строки %s) -- нужна одна'
+            % (len(active), ', '.join(str(a[0]) for a in active)))
+    return active[0][1]
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--floor':
+        sys.stdout.write('%s\n' % parse_floor(sys.argv[2]))
+        return
     if len(sys.argv) != 3:
         # Класс 2: сломан ВЫЗОВ, а не список, -- код 1 звал бы чинить формат
         # файла, который никто не читал (свип контроллера, волна 22; тот же

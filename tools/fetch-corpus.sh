@@ -47,7 +47,21 @@ KIT=$(cd "$HERE/.." && pwd)
 CORPUS="${CORPUS_DIR:-$HOME/.local/share/claude-patch/corpus}"
 # Имя файла корпуса -- из общего дома (см. комментарий там).
 . "$HERE/corpus-file-name.sh"
-LIST="${CORPUS_LIST:-$HERE/corpus-versions.txt}"
+[[ -f "$HERE/host-platform.sh" ]] \
+  || { echo "ОТКАЗ: нет дома платформы $HERE/host-platform.sh" >&2; exit 2; }
+# shellcheck source=/dev/null
+. "$HERE/host-platform.sh"
+__pair=$(host_os_arch) || { echo "ОТКАЗ: не определить пару хозяина" >&2; exit 2; }
+__map=$(host_corpus_for "$__pair") || { echo "ОТКАЗ: не отобразить пару $__pair на список" >&2; exit 2; }
+__list_name=${__map%%$'\t'*}
+if [[ -z "${CORPUS_LIST:-}" ]]; then
+  case "$__list_name" in
+    corpus-versions.txt|corpus-versions-linux-x64.txt) ;;
+    *) echo "ОТКАЗ: имя списка ${__list_name:-} вне объявленного набора (пара хозяина $__pair)" >&2
+       exit 2 ;;
+  esac
+fi
+LIST="${CORPUS_LIST:-$HERE/$__list_name}"
 [[ -f "$LIST" ]] || { echo "ОТКАЗ: нет списка версий $LIST" >&2; exit 2; }
 mkdir -p "$CORPUS"
 

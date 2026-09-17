@@ -131,7 +131,7 @@ usage: bash tools/reap-heavy.sh [--apply] [--older-than-hours N] [--min-size-mb 
   ~/ccpatch
   /tmp/claude-<uid>    скратчпады сессий (файлы >= --min-size-mb)
 
-Пол поддержки читается из tools/corpus-versions.txt (минимум активной строки).
+Пол поддержки читается из tools/support-floor.txt, не из минимума списка корпуса.
 EOF
 }
 
@@ -223,6 +223,7 @@ resolve_roots() {
     REAP_TWEAKCC=$FIXTURE/tweakcc
     REAP_LAUNCHER=$FIXTURE/bin/claude
     REAP_LIST=$FIXTURE/corpus-versions.txt
+    REAP_FLOOR=$FIXTURE/support-floor.txt
   else
     REAP_TMP=${TMPDIR:-/tmp}
     REAP_MATRIX=/tmp/cc-matrix/bin
@@ -233,8 +234,11 @@ resolve_roots() {
     REAP_TWEAKCC=$HOME/.tweakcc
     REAP_LAUNCHER=$HOME/.local/bin/claude
     REAP_LIST=$HERE/corpus-versions.txt
+    REAP_FLOOR=$HERE/support-floor.txt
   fi
-  [[ -f "$REAP_LIST" ]] || die2 "ОТКАЗ: нет списка версий $REAP_LIST — пол поддержки неизвестен"
+  REAP_FLOOR_PARSER=$HERE/corpus-list.py
+  [[ -f "$REAP_FLOOR" ]] || die2 "ОТКАЗ: нет дома пола $REAP_FLOOR — пол поддержки неизвестен"
+  [[ -f "$REAP_FLOOR_PARSER" ]] || die2 "ОТКАЗ: нет разборщика пола $REAP_FLOOR_PARSER"
 }
 
 # MUT_APPLY_FLAG: перечисление не сносит; только явное --apply.
@@ -242,6 +246,7 @@ run_census() {
   local __reap_apply=$APPLY
   export REAP_TMP REAP_MATRIX REAP_CORPUS REAP_VERSIONS REAP_CCPATCH
   export REAP_SCRATCH REAP_TWEAKCC REAP_LAUNCHER REAP_LIST
+  export REAP_FLOOR REAP_FLOOR_PARSER
   export REAP_HOURS=$OLDER_THAN_HOURS
   export REAP_MINSIZE=$MIN_SIZE_MB
   export REAP_APPLY=$__reap_apply
@@ -277,7 +282,7 @@ def parse_ver(s):
 def ver_lt(a, b):
     return parse_ver(a) < parse_ver(b)
 
-def read_floor(path):
+def read_floor_from_list(path):
     vers = []
     try:
         fh = open(path, 'r')
@@ -296,6 +301,25 @@ def read_floor(path):
     if not vers:
         die2("ОТКАЗ: в списке нет активных версий — пол неизвестен")
     return min(vers, key=parse_ver)
+
+def read_floor(path):
+    parser = os.environ.get('REAP_FLOOR_PARSER') or ''
+    if not parser:
+        die2('ОТКАЗ: разборщик пола не назван — пол поддержки неизвестен')
+    proc = subprocess.Popen(
+        [sys.executable, parser, '--floor', path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if not isinstance(out, str):
+        out = out.decode('utf-8', 'replace')
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode != 0:
+        sys.stderr.write(err)
+        sys.exit(proc.returncode if proc.returncode else 2)
+    ver = out.strip().split('\n')[0].strip()
+    if not ver:
+        die2('ОТКАЗ: разборщик пола вернул пусто — пол поддержки неизвестен')
+    return ver
 
 def realpath(path):
     return os.path.realpath(path)
@@ -553,7 +577,7 @@ def require_root_readable(root, label):
 hours = int(os.environ['REAP_HOURS'])  # ONE_HOME_HOURS
 minsize = int(os.environ['REAP_MINSIZE']) * 1024 * 1024
 do_apply = os.environ.get('REAP_APPLY') == '1'
-floor = read_floor(os.environ['REAP_LIST'])
+floor = read_floor(os.environ['REAP_FLOOR'])
 # Суффикс читает родитель из дома имени корпуса; пустой -- отказ прибора:
 # без него ценз корпуса не опознаёт ни одного образца (ПУСТО НЕ НОЛЬ).
 corpus_suffix = os.environ.get('REAP_CORPUS_SUFFIX') or ''
@@ -851,6 +875,8 @@ with open(os.path.join(fx, 'corpus-versions.txt'), 'w') as fh:
     fh.write('# platform: fixture\n')
     fh.write('272 2.1.272 00\n')
     fh.write('273 2.1.273 00\n')
+with open(os.path.join(fx, 'support-floor.txt'), 'w') as fh:
+    fh.write('2.1.272\t2026-09-15\tfixture floor\n')
 
 # Directory mtime moves when children are created; set age AFTER contents.
 for p, mt in (
@@ -1693,6 +1719,7 @@ self_check() {
   # Копия прибора в $WORK ищет дом имени корпуса по своему HERE -- дом едет
   # рядом с копией. Родителю суффикс нужен для фикстуры и списков зубов.
   cp "$HERE/corpus-file-name.sh" "$WORK/corpus-file-name.sh"
+  cp "$HERE/corpus-list.py" "$WORK/corpus-list.py"
   load_corpus_suffix
   GARBAGE_REL="
 tmp/cc-build-path-probe.oldnopid

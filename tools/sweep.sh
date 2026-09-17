@@ -579,9 +579,25 @@ CORPUS="${CORPUS_DIR:-$HOME/.local/share/claude-patch/corpus}"
 # 2026-08-28). Ноль -- весь корпус; ручка SWEEP_LAST_N перебивает.
 SWEEP_LAST_N_DEFAULT=5
 
-# Список версий -- в tools/corpus-versions.txt, общий с наполнителем корпуса.
+# Список версий -- платформенный файл из tools/host-platform.sh, общий с
+# наполнителем. CORPUS_LIST по-прежнему перекрывает выбор; гейт ниже сверяет
+# имя с объявленным набором и с парой хозяина.
 # Рабочий корень прогона -- $STATE (см. SWEEP_STATE_DIR выше).
-LIST="${CORPUS_LIST:-$SWEEP_KIT/tools/corpus-versions.txt}"
+[[ -f "$SWEEP_KIT/tools/host-platform.sh" ]] \
+  || { echo "SWEEP ОТКАЗ: нет дома платформы $SWEEP_KIT/tools/host-platform.sh" >&2; exit 2; }
+# shellcheck source=/dev/null
+. "$SWEEP_KIT/tools/host-platform.sh"
+__pair=$(host_os_arch) || { echo "SWEEP ОТКАЗ: не определить пару хозяина" >&2; exit 2; }
+__map=$(host_corpus_for "$__pair") || { echo "SWEEP ОТКАЗ: не отобразить пару $__pair на список" >&2; exit 2; }
+__list_name=${__map%%$'\t'*}
+if [[ -z "${CORPUS_LIST:-}" ]]; then
+  case "$__list_name" in
+    corpus-versions.txt|corpus-versions-linux-x64.txt) ;;
+    *) echo "SWEEP ОТКАЗ: имя списка ${__list_name:-} вне объявленного набора (пара хозяина $__pair)" >&2
+       exit 2 ;;
+  esac
+fi
+LIST="${CORPUS_LIST:-$SWEEP_KIT/tools/$__list_name}"
 [[ -f "$LIST" ]] || { echo "SWEEP ОТКАЗ: нет списка версий $LIST" >&2; exit 2; }
 # Формат списка разбирает ОДИН дом на оба инструмента: свой `while read` у
 # каждого читателя разошёлся на строке без пина, на лишнем поле и на дубле
@@ -597,7 +613,11 @@ LIST="${CORPUS_LIST:-$SWEEP_KIT/tools/corpus-versions.txt}"
 SWEEP_PLATFORM=$(cd "$SWEEP_KIT" && python3 -c 'import claude_patch; print(claude_patch.npm_platform_pkg())' 8>&-) || {
   echo "SWEEP ОТКАЗ: не определить платформу этой машины (claude_patch не грузится) -- сломан кит, а не список" >&2
   exit 2; }
-PARSED=$(python3 "$SWEEP_KIT/tools/corpus-list.py" "$LIST" "$SWEEP_PLATFORM" 8>&-) || {
+# Цель разбора -- пакет ХОЗЯИНА, не объявление списка: иначе чужой
+# объявленный список читался бы как свой. Отказ называет обе платформы
+# (corpus-list.py).
+SWEEP_LIST_TARGET="$SWEEP_PLATFORM"
+PARSED=$(python3 "$SWEEP_KIT/tools/corpus-list.py" "$LIST" "$SWEEP_LIST_TARGET" 8>&-) || {
   __lrc=$?
   if (( __lrc == 2 )); then
     echo "SWEEP ОТКАЗ: разборщик списка НЕ МЕРИЛ (rc=2): причина строкой выше -- разбирать нечего либо сломан сам прибор" >&2
@@ -1041,7 +1061,7 @@ sum_line "# набор: $SET_NOTE"
 # CORPUS_LIST заведены для стенда, но наследуются от кого угодно: утёкшая в
 # оболочку игрушечная пара давала настоящему прогону игрушечный корпус, и
 # сводка такого прогона ничем не отличалась от боевой (раунд 19, В-3).
-if [[ "$CORPUS" != "$HOME/.local/share/claude-patch/corpus" || "$LIST" != "$SWEEP_KIT/tools/corpus-versions.txt" ]]; then
+if [[ "$CORPUS" != "$HOME/.local/share/claude-patch/corpus" || "$LIST" != "$SWEEP_KIT/tools/$__list_name" ]]; then
   echo "SWEEP корпус НЕ БОЕВОЙ: образы $CORPUS, список $LIST"
   sum_line "# корпус: НЕ БОЕВОЙ -- образы $CORPUS, список $LIST"
 fi

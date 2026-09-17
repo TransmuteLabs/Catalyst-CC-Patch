@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=241
-EXPECTED_MUTATIONS=322
+EXPECTED_SCENARIOS=248
+EXPECTED_MUTATIONS=329
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -2187,6 +2187,9 @@ run_all() {
   scenario_228; scenario_229; scenario_230; scenario_231; scenario_232
   scenario_233; scenario_234; scenario_235; scenario_236
   scenario_237; scenario_238; scenario_239; scenario_240; scenario_241
+  # Волна 111: дом пола, платформенные списки, сверка копии пары хозяина.
+  scenario_242; scenario_243; scenario_244; scenario_245
+  scenario_246; scenario_247; scenario_248
 }
 
 scenario_46() {   # версия сборки не та, что мерили
@@ -4856,7 +4859,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 322 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 329 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -5368,6 +5371,187 @@ scenario_241() {   # код образа не подменяется кодом 
     fi
   done
   ok "241 PTY: exited 1/127 и signaled 15 доехали; пять негодных статусов -- код 2"
+}
+
+run_floor() {   # kit, path
+  python3 "$1/tools/corpus-list.py" --floor "$2" 2>&1
+}
+
+scenario_242() {   # дома пола нет -- отказ, а не молчаливый дефолт
+  local out rc fx
+  out=$(run_floor "$K" "$C/no-such-floor-home"); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )) || [[ "$out" != *"пол поддержки неизвестен"* ]]; then
+    LAST_EVID="FLOOR_HOME_MISSING :: $LAST_EVID"
+    bad "242 нет дома пола: разборщик не отказал названной причиной"; return
+  fi
+  : > "$C/s242.empty-floor"
+  out=$(run_floor "$K" "$C/s242.empty-floor"); rc=$?
+  LAST_EVID="empty rc=$rc :: $out"
+  if (( rc == 0 )); then
+    LAST_EVID="FLOOR_HOME_MISSING empty-default :: $LAST_EVID"
+    bad "242 пустой дом пола: молчаливый дефолт"; return
+  fi
+  fx="$C/s242.fx"
+  rm -rf "$fx"
+  mkdir -p "$fx/corpus" "$fx/tmp" "$fx/cc-matrix/bin" "$fx/versions" \
+           "$fx/ccpatch" "$fx/scratchpad" "$fx/tweakcc" "$fx/bin"
+  { echo "# platform: fixture"
+    echo "272 2.1.272 00"; } > "$fx/corpus-versions.txt"
+  printf 'v272\n' > "$fx/versions/2.1.272"
+  ln -s "$fx/versions/2.1.272" "$fx/bin/claude"
+  out=$(bash "$K/tools/reap-heavy.sh" --fixture "$fx" --min-size-mb 1 --older-than-hours 100 2>&1); rc=$?
+  LAST_EVID="reap rc=$rc :: $out"
+  if (( rc == 0 )) || [[ "$out" != *"пол поддержки неизвестен"* ]]; then
+    LAST_EVID="FLOOR_HOME_MISSING :: $LAST_EVID"
+    bad "242 нет дома пола: прополка не отказала кодом 2"; return
+  fi
+  LAST_EVID="FLOOR_HOME_MISSING rc=$rc"
+  ok "242 нет дома пола -- отказ, не дефолт"
+}
+
+scenario_243() {   # в доме пола две активные строки -- отказ
+  local out rc
+  printf '2.1.272\t2026-09-15\ta\n2.1.273\t2026-09-15\tb\n' > "$C/s243.floor"
+  out=$(run_floor "$K" "$C/s243.floor"); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )) || [[ "$out" != *"активных строк"* ]]; then
+    LAST_EVID="FLOOR_TWO_ACTIVE :: $LAST_EVID"
+    bad "243 две активные строки пола: отказ не назвал причину"; return
+  fi
+  ok "243 две активные строки пола -- отказ"
+}
+
+scenario_244() {   # пол не вида N.N.N -- отказ
+  local out rc
+  printf '2.1\t2026-09-15\tshort\n' > "$C/s244.floor"
+  out=$(run_floor "$K" "$C/s244.floor"); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc == 0 )) || [[ "$out" != *"не вида N.N.N"* ]]; then
+    LAST_EVID="FLOOR_BAD_VERSION :: $LAST_EVID"
+    bad "244 пол не N.N.N: отказ не назвал форму"; return
+  fi
+  ok "244 пол не вида N.N.N -- отказ"
+}
+
+scenario_245() {   # список чужой платформы на этой машине -- отказ с обеими
+  local out rc foreign foreign_plat host_plat pin
+  host_plat=$(cd "$K" && python3 -c 'import claude_patch; print(claude_patch.npm_platform_pkg())') \
+    || { printf 'ПРИБОР НЕДОСТУПЕН: пакет платформы хозяина не получен\n' >&2; exit 2; }
+  pin=$(awk '/^900 /{print $3; exit}' "$C/versions.txt")
+  [ -n "$pin" ] || { printf 'ПРИБОР НЕДОСТУПЕН: пин игрушечной 900 не прочитан\n' >&2; exit 2; }
+  if [[ "$host_plat" == *linux-x64* ]]; then
+    foreign=corpus-versions.txt
+    foreign_plat=@anthropic-ai/claude-code-darwin-arm64
+  else
+    foreign=corpus-versions-linux-x64.txt
+    foreign_plat=@anthropic-ai/claude-code-linux-x64
+  fi
+  { echo "# platform: $foreign_plat"
+    echo "900 0.0.900 $pin"; } > "$K/tools/$foreign"
+  out=$(run_sweep "$K" "$C/corpus" "$K/tools/$foreign" 900); rc=$?
+  LAST_EVID="rc=$rc host=$host_plat foreign=$foreign_plat :: $out"
+  if (( rc == 0 )) \
+     || [[ "$out" != *"список набран для платформы"* ]] \
+     || [[ "$out" != *darwin-arm64* ]] \
+     || [[ "$out" != *linux-x64* ]]; then
+    LAST_EVID="FOREIGN_DECLARED_LIST :: $LAST_EVID"
+    bad "245 чужой объявленный список: отказ не назвал обе платформы"; return
+  fi
+  ok "245 чужой объявленный список -- отказ с обеими платформами"
+}
+
+scenario_246() {   # имя списка вне объявленного набора -- отказ гейта
+  local out rc pair map name
+  if [[ ! -f "$K/tools/host-platform.sh" ]]; then
+    LAST_EVID="LIST_NAME_UNDECLARED нет tools/host-platform.sh"
+    bad "246 нет дома платформы -- гейт имени не на чем стоять"; return
+  fi
+  # shellcheck source=/dev/null
+  . "$K/tools/host-platform.sh"
+  pair=$(host_os_arch) || { LAST_EVID="LIST_NAME_UNDECLARED pair rc"; bad "246 пара хозяина не печатается"; return; }
+  map=$(host_corpus_for "$pair") || { LAST_EVID="LIST_NAME_UNDECLARED map rc"; bad "246 отображение пары отказало"; return; }
+  name=${map%%$'\t'*}
+  if [[ -z "$name" ]]; then
+    LAST_EVID="LIST_NAME_UNDECLARED pair=$pair empty-name"
+    bad "246 отображение не дало имени списка для пары $pair"; return
+  fi
+  cp "$C/versions.txt" "$K/tools/$name"
+  out=$(run_sweep "$K" "$C/corpus" "" 900); rc=$?
+  LAST_EVID="rc=$rc pair=$pair name=$name :: $out"
+  if [[ "$out" == *"вне объявленного набора"* ]]; then
+    LAST_EVID="LIST_NAME_UNDECLARED :: $LAST_EVID"
+    bad "246 объявленное имя списка отвергнуто гейтом"; return
+  fi
+  ok "246 объявленное имя списка проходит гейт"
+}
+
+scenario_247() {   # прополка берёт пол из дома, не из минимума списка
+  local fx out rc
+  fx="$C/s247.fx"
+  rm -rf "$fx"
+  mkdir -p "$fx/corpus" "$fx/tmp" "$fx/cc-matrix/bin" "$fx/versions" \
+           "$fx/ccpatch" "$fx/scratchpad" "$fx/tweakcc" "$fx/bin"
+  printf '2.1.272\t2026-09-15\tfloor\n' > "$fx/support-floor.txt"
+  { echo "# platform: fixture"
+    echo "273 2.1.273 00"; } > "$fx/corpus-versions.txt"
+  printf 'img272\n' > "$fx/corpus/2.1.272.pristine"
+  printf 'img273\n' > "$fx/corpus/2.1.273.pristine"
+  printf 'v273\n' > "$fx/versions/2.1.273"
+  printf 'v272\n' > "$fx/versions/2.1.272"
+  ln -s "$fx/versions/2.1.273" "$fx/bin/claude"
+  out=$(bash "$K/tools/reap-heavy.sh" --fixture "$fx" --min-size-mb 1 --older-than-hours 100 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    LAST_EVID="ПОЛ_ИЗ_СПИСКА rc=$rc :: $out"
+    bad "247 прополка отказала при живом доме пола"; return
+  fi
+  if [[ "$out" == *"2.1.272"* && "$out" == *"below floor"* ]]; then
+    LAST_EVID="ПОЛ_ИЗ_СПИСКА :: $out"
+    bad "247 2.1.272 стал кандидатом -- пол взят из минимума списка"; return
+  fi
+  ok "247 прополка берёт пол из дома, 2.1.272 не кандидат"
+}
+
+scenario_248() {   # копия __host_os_arch и дом обязаны совпадать, включая unknown
+  local stub carve got_home got_copy rc_home rc_copy s m
+  if [[ ! -f "$K/tools/host-platform.sh" ]]; then
+    LAST_EVID="HOST_OS_ARCH_DIVERGED нет tools/host-platform.sh"
+    bad "248 нет дома пары хозяина"; return
+  fi
+  carve="$C/s248.copy.sh"
+  awk -v h='__host_os_arch() {' 'index($0, h) == 1 {on=1} on {print} on && $0 == "}" {exit}' \
+    "$K/claude-patch-all.real" > "$carve"
+  if [[ ! -s "$carve" ]]; then
+    LAST_EVID="HOST_OS_ARCH_DIVERGED якорь копии потерян"
+    bad "248 __host_os_arch не вырезан из конвейера -- прибор не мерит"; return
+  fi
+  stub="$C/s248.bin"
+  mkdir -p "$stub"
+  cat > "$stub/uname" <<'UNAME248'
+#!/bin/sh
+case "$1" in
+  -s) printf '%s\n' "${STUB_UNAME_S}" ;;
+  -m) printf '%s\n' "${STUB_UNAME_M}" ;;
+  *)  /usr/bin/uname "$@" ;;
+esac
+UNAME248
+  chmod +x "$stub/uname"
+  LAST_EVID="HOST_OS_ARCH_DIVERGED"
+  for pair in Darwin/arm64 Darwin/aarch64 Darwin/x86_64 Linux/x86_64 Linux/amd64 Linux/aarch64 MINGW64/x86_64 FreeBSD/riscv EMPTY/EMPTY; do
+    s=${pair%%/*}; m=${pair#*/}
+    [[ "$pair" == EMPTY/EMPTY ]] && s= && m=
+    got_home=$(PATH="$stub:$PATH" STUB_UNAME_S="$s" STUB_UNAME_M="$m" \
+               bash -c 'set -u; . "$1"; host_os_arch' _ "$K/tools/host-platform.sh" 2>&1); rc_home=$?
+    got_copy=$(PATH="$stub:$PATH" STUB_UNAME_S="$s" STUB_UNAME_M="$m" \
+               bash -c 'set -u; . "$1"; __host_os_arch' _ "$carve" 2>&1); rc_copy=$?
+    LAST_EVID="HOST_OS_ARCH_DIVERGED s=${s:-empty} m=${m:-empty} home=[$got_home]/$rc_home copy=[$got_copy]/$rc_copy"
+    if [[ "$rc_home" != "$rc_copy" || "$got_home" != "$got_copy" ]]; then
+      bad "248 копия __host_os_arch разошлась с домом на $s/$m"; return
+    fi
+  done
+  LAST_EVID="HOST_OS_ARCH_DIVERGED совпали все пары"
+  ok "248 копия __host_os_arch совпадает с домом на всех разобранных парах"
 }
 
 # --- дверь обвала слоя промтов (#101) ---------------------------------------
@@ -9673,6 +9857,48 @@ MUT_CAUSE+=(
   'PTY_REFUSAL_FAIL_OPEN'
   'PTY_CHILD_STATUS_LOST'
   'PTY_STATUS_ABSENCE_ZERO')
+
+# Волна 111: дом пола, имя списка по платформе, сверка копии пары хозяина.
+MUT_FILE+=(
+  'tools/corpus-list.py'
+  'tools/corpus-list.py'
+  'tools/corpus-list.py'
+  'tools/sweep.sh'
+  'tools/host-platform.sh'
+  'tools/reap-heavy.sh'
+  'tools/host-platform.sh')
+MUT_PAT+=(
+  "die\\('нет файла %s -- пол поддержки неизвестен' % path, 2\\)"
+  'if len\(active\) > 1:  # FLOOR_ONE'
+  'if not FLOOR_VERSION.match\(version\):'
+  'SWEEP_LIST_TARGET="\$SWEEP_PLATFORM"'
+  'printf '\''%s\\t%s\\n'\'' "\$name" "\$pkg"  # HOST_LIST_NAME'
+  "floor = read_floor\(os.environ\['REAP_FLOOR'\]\)"
+  'Darwin\)               os=darwin ;;')
+MUT_REP+=(
+  "return '2.1.272'"
+  'if False:  # FLOOR_ONE'
+  'if False and not FLOOR_VERSION.match(version):'
+  'SWEEP_LIST_TARGET=$(sed -n "s/^# platform: //p" "$LIST" | awk "NR==1{print; exit}")'
+  'printf '\''%s\\t%s\\n'\'' "corpus-versions-undeclared.txt" "\$pkg"  # HOST_LIST_NAME'
+  "floor = read_floor_from_list(os.environ['REAP_LIST'])"
+  'Darwin)               os=linux ;;')
+MUT_SCENARIO+=(
+  '242'
+  '243'
+  '244'
+  '245'
+  '246'
+  '247'
+  '248')
+MUT_CAUSE+=(
+  'FLOOR_HOME_MISSING'
+  'FLOOR_TWO_ACTIVE'
+  'FLOOR_BAD_VERSION'
+  'FOREIGN_DECLARED_LIST'
+  'LIST_NAME_UNDECLARED'
+  'ПОЛ_ИЗ_СПИСКА'
+  'HOST_OS_ARCH_DIVERGED')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь
