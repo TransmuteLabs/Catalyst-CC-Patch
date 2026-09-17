@@ -4961,39 +4961,48 @@ step('23 statusline update throttle', () => {
 });
 
 step('24 bypass permissions under sudo', () => {
-  // Two independent guards refuse bypassPermissions when euid is 0: the inline
-  // check on the startup path and the exported refuseBypassUnderRoot(). Both
-  // are neutralised here.
+  // CONSTRAINT: two independent guards refuse bypassPermissions under root euid
+  // and SHARE the same error text. Site A -- exported refuseBypassUnderRoot(),
+  // condition isRootOutsideDeliberateSandbox(). Site B -- startup inline check,
+  // condition process.getuid()===0. A locator on the shared console.error/exit
+  // body resolves BOTH on 2.1.272/273 but MISSES site B on 2.1.274, where
+  // upstream spliced `await <telemetry>(...)` between console.error and
+  // process.exit: the continuous body literal stops matching while the guard
+  // stays fully live. The old body-count form then saw count===1 and reported
+  // "the other already neutralised upstream" -- false; site B was live. So each
+  // guard is neutralised by its OWN structural anchor; site B by its CONDITION
+  // (a false condition makes the guarded exit unreachable whatever the
+  // rewritable body becomes); and a site located NEITHER live nor
+  // already-neutralised is a hard failure, never a silently absorbed count.
   //
-  // tweakcc's own patch for this rewrites only the FIRST -- its regex is not
-  // global and String.match stops there -- which leaves the second live and the
-  // setting half-applied. That patch is condition-gated off in the config
-  // today, and the older form of this step demanded EXACTLY two occurrences,
-  // so the day the knob is switched on the count becomes 1 and this step fails
-  // the whole run. The comment above already named the collision; the step did
-  // not act on it. It does now: whatever the count, every LIVE guard is
-  // neutralised, and zero live guards is a verified postcondition rather than
-  // a failure.
-  const guard =
-    'console.error("--dangerously-skip-permissions cannot be used with root/sudo ' +
-    'privileges for security reasons"),process.exit(1)';
-  const count = js.split(guard).length - 1;
-  if (count === 0) {
-    // Nothing live -- but prove the refusal is actually gone rather than
-    // reworded, or this branch turns a moved guard into a green run.
-    if (js.includes('cannot be used with root/sudo privileges')) {
-      fail('root/sudo refusal survives in an unrecognised form');
+  // Site A anchor includes the isRoot condition to stay site-specific (the bare
+  // body is shared with site B on 272/273). Neutralise the body.
+  const guardA =
+    'isRootOutsideDeliberateSandbox())console.error("--dangerously-skip-permissions ' +
+    'cannot be used with root/sudo privileges for security reasons"),process.exit(1)';
+  const doneA = 'isRootOutsideDeliberateSandbox())void 0';
+  const condB = 'process.getuid()===0&&process.env.IS_SANDBOX!=="1"';
+  const doneB = '!1&&process.env.IS_SANDBOX!=="1"';
+  for (const [label, live, done] of [['A', guardA, doneA], ['B', condB, doneB]]) {
+    const nLive = js.split(live).length - 1;
+    const nDone = js.split(done).length - 1;
+    if (nLive + nDone === 0) {
+      fail(
+        `root/sudo guard site ${label} located neither live nor neutralised — ` +
+          `upstream may have reworded it; re-check before neutralising`,
+      );
     }
-    applied.push('root/sudo refusal (already neutralised upstream; verified)');
-    return;
+    if (nLive + nDone > 1) {
+      fail(`root/sudo guard site ${label} matched ${nLive + nDone} times, expected exactly one`);
+    }
+    if (nLive === 1) js = js.split(live).join(done);
   }
-  if (count > 2) fail(`found ${count} root/sudo refusals, expected at most 2 — re-check before neutralising`);
-  js = js.split(guard).join('void 0');
-  applied.push(
-    count === 2
-      ? 'root/sudo refusal neutralised at 2 sites'
-      : `root/sudo refusal neutralised at 1 site (the other was already neutralised upstream)`,
-  );
+  // Postcondition: no LIVE guard survives. Assert on the STRUCTURES -- the error
+  // text lingers in the bun string pool and in site B's now-dead body, so a bare
+  // text search would false-positive.
+  if (js.split(guardA).length - 1 !== 0) fail('root/sudo guard site A survived neutralisation');
+  if (js.split(condB).length - 1 !== 0) fail('root/sudo guard site B survived neutralisation');
+  applied.push('root/sudo refusal neutralised at both guards (site A body, site B condition)');
 });
 
 step('25 CLAUDE.md alternate filenames', () => {
