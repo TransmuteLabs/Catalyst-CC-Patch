@@ -495,12 +495,18 @@ handle no one anywhere reads is БЕСХОЗНАЯ; either is exit 3. Exit 2 cov
 unreadable image, a `--external` name that turns out to HAVE a reader (the
 owner was named twice and once wrongly), and -- the positive control -- a
 `--control` handle that is not found readable, because an instrument that
-cannot find a known-live reader has no right to a verdict on the rest. Exit 5
-is zero declared handles (ПУСТО ≠ НОЛЬ).
+cannot find a known-live reader has no right to a verdict on the rest, and an
+`--ours` home that yields no file of any scanned extension -- a silent home is
+indistinguishable from a home without readers, which is exactly how a live
+handle once got reported БЕСХОЗНАЯ. Exit 5 is zero declared handles
+(ПУСТО ≠ НОЛЬ).
 
-The image is read with python latin-1 only: it carries NUL bytes, and grep
-returns zero on it where python finds eleven. Teeth:
-`tools/env-handles-live-guard-teeth.sh` (13, count pinned).
+The image is read with python latin-1 only because the subject is a BYTE
+image, not text: grep returns zero on it where python finds eleven. The
+rule does not generalize to anything merely containing NUL -- on UTF-8 text
+a latin-1 decode mangles non-ASCII and yields a false empty result that is
+indistinguishable from a measurement. Teeth:
+`tools/env-handles-live-guard-teeth.sh` (15, count pinned).
 
 Written because `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=99999` sat in the
 settings for an unknown number of versions while 2.1.276 read it nowhere --
