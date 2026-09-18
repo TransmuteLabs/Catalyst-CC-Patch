@@ -5546,21 +5546,52 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
 
   // --- site B: the downgrade and the lineup exclusion become opt-in -------
   // The predicate itself is left STOCK (see the step header): only its two
-  // harmful readings are gated by the handle. The constants and the
-  // predicate are captured by ONE expression so that every name arrives
-  // from its own site; the whole-text match must be exactly one.
-  const bundleRx =
-    `var (${ID})="claude-opus-4-8",(${ID})="claude-opus-5";` +
-    `function (${ID})\\((${ID})\\)\\{return (${ID})\\(\\)&&(${ID})\\(\\4\\)===\\2\\}`;
-  const bundles = js.match(new RegExp(bundleRx, 'g'));
-  if (!bundles || bundles.length !== 1) {
+  // harmful readings are gated by the handle.
+  //
+  // The entry point is the DOWNGRADE READER -- the one function whose entire
+  // body is "predicate holds ? the downgrade constant : the input". That is
+  // this step's subject stated as BEHAVIOUR, so it survives a rewrite of
+  // whatever surrounds it. The earlier form entered through a constants-and-
+  // predicate BUNDLE, which required the two `var`s and the predicate to be
+  // textually adjacent and the predicate's body to be exactly two conjuncts.
+  // 2.1.276 interposed an unrelated function between them and grew the body
+  // to three conjuncts with the model comparison moved inside a `.some()`
+  // callback: the subject never moved, the locator did.
+  //
+  // Whole-text uniqueness is required HERE and not on the constant, because
+  // the constant is not unique: 2.1.276 carries two bindings of
+  // "claude-opus-4-8" and two of "claude-opus-5", so a locator entering
+  // through the string alone can land on the foreign one. The reader is
+  // unique; the constant is then checked THROUGH it -- uniqueness says there
+  // is one such function, the content string says it is the opus downgrade.
+  const readerRx =
+    `function (${ID})\\((${ID})\\)\\{return (${ID})\\(\\2\\)\\?(${ID}):\\2\\}`;
+  const readerAll = js.match(new RegExp(readerRx, 'g'));
+  if (!readerAll || readerAll.length !== 1) {
     fail(
-      `downgrade predicate bundle: expected exactly 1 match over the whole ` +
-        `text, found ${bundles ? bundles.length : 0}`,
+      `mapped-target downgrade reader: expected exactly 1 match over the ` +
+        `whole text, found ${readerAll ? readerAll.length : 0}`,
     );
   }
-  const bundle = js.match(new RegExp(bundleRx));
-  const [, F, M, A, v, U, C] = bundle;
+  const bundle = js.match(new RegExp(readerRx));
+  const [, B, , A, F] = bundle;
+
+  // Shape alone would also fit an unrelated `p(x)?K:x` if upstream ever
+  // leaves only one of those; the content string is what makes the match an
+  // identification rather than a coincidence.
+  if (!new RegExp(`(?<![\\w$.])${rxEsc(F)}="claude-opus-4-8"`).test(js)) {
+    fail(
+      `downgrade constant '${F}' is not bound to "claude-opus-4-8" -- the ` +
+        `reader found is not the opus downgrade`,
+    );
+  }
+  // Cosmetic: it only names the constants in the applied line, and no edit
+  // below mentions it. Its absence must therefore NOT fail the step -- a
+  // locator may not refuse over something the edit does not use.
+  const mHit = js.match(
+    new RegExp(`${rxEsc(F)}="claude-opus-4-8",(${ID})="claude-opus-5"`),
+  );
+  const M = mHit ? mHit[1] : '(not adjacent)';
 
   // Site B is bound to the SEAM'S module before any of its forms is
   // trusted: the opt-in shapes written below name the seam (`<S>()`), and a
@@ -5570,15 +5601,17 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   // 2.1.270 stock the whole image carries them 16 times on darwin and 23
   // on linux, of which ours are the definition and the two call sites
   // alone -- every other binding of those letters is foreign, so a
-  // whole-text match can sit on a foreign module. The constants bundle,
-  // the exclusion form and the ternary are therefore all searched
-  // (modText below) and edited (editModuleAt at the end of this step)
-  // inside this ONE module, exactly like site A.
+  // whole-text match can sit on a foreign module. The downgrade reader, the
+  // exclusion form and the ternary are therefore all searched (modText
+  // below) and edited (editModuleAt at the end of this step) inside this ONE
+  // module, exactly like site A. This check is also what scopes the reader:
+  // it is located over the whole text, so its module membership is proven
+  // here rather than assumed.
   const seamBounds = moduleSliceAround(js, callSites[0].index);
   const bundleBounds = moduleSliceAround(js, bundle.index);
   if (bundleBounds[0] !== seamBounds[0]) {
     fail(
-      `site B forms have split from the seam's module: the constants bundle ` +
+      `site B forms have split from the seam's module: the downgrade reader ` +
         `sits at offset ${bundle.index} while the seam '${seam}' lives in ` +
         `the module of the call site at offset ${callSites[0].index} -- the ` +
         `edit would spawn a reference across a module boundary`,
@@ -5615,24 +5648,13 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   }
   const exclArg = modText.match(new RegExp(exclRx))[1];
 
-  // Reading 2 -- the mapped-target downgrade inside `DJ`. The reader's own
-  // definition (`function <B>(<x>){return <A>(<x>)?<F>:<x>}` on 2.1.270)
-  // names it, and the ternary is then located THROUGH that name:
-  // `<W>()?<B>(<x>.id):<L>(<x>.id)`. The `<L>` branch is deliberately NOT
-  // touched: its semantics (the cloud-provider family default) is not
-  // measured, and a locator may not rest on an unproven scope any more than
-  // an edit may rest on unproven semantics.
-  const readerRx =
-    `function (${ID})\\((${ID})\\)\\{return ${rxEsc(A)}\\(\\2\\)\\?${rxEsc(F)}:\\2\\}`;
-  const readerHits = modText.match(new RegExp(readerRx, 'g')) || [];
-  if (readerHits.length !== 1) {
-    fail(
-      `mapped-target downgrade reader: expected exactly one ` +
-        `function <B>(<x>){return <A>(<x>)?<F>:<x>} in the module, ` +
-        `found ${readerHits.length}`,
-    );
-  }
-  const B = modText.match(new RegExp(readerRx))[1];
+  // Reading 2 -- the mapped-target downgrade. `<B>` is the reader this step
+  // entered through, so it is already known and already proven unique over
+  // the whole text and resident in this module; the ternary is located
+  // THROUGH its name: `<W>()?<B>(<x>.id):<L>(<x>.id)`. The `<L>` branch is
+  // deliberately NOT touched: its semantics (the cloud-provider family
+  // default) is not measured, and a locator may not rest on an unproven
+  // scope any more than an edit may rest on unproven semantics.
   const ternRx = `(${ID})\\(\\)\\?${rxEsc(B)}\\((${ID})\\.id\\):(${ID})\\(\\2\\.id\\)`;
   const ternHits = modText.match(new RegExp(ternRx, 'g')) || [];
   if (ternHits.length !== 1) {
@@ -5825,98 +5847,146 @@ step('29 mod-API session model budget ceiling becomes operator-set', () => {
 //     shape on linux at 194611162 under a different minified name -- sMt vs
 //     cMt -- which is why nothing here is pinned by name):
 //       var <LIM>=8192;
-//       270: async function <f>({model:e,prompt:n,system:r,maxTokens:s},{plugin:d,budget:m},S){
-//       274: async function <f>({model:e,prompt:n,system:r,maxTokens:s},g,h){
-//       (the tail drifts -- the budget half of it was deleted upstream in
-//       2.1.274 -- and step 31 deliberately does not pin it)
 //         if(s!==void 0&&(!Number.isInteger(s)||s<1||s><LIM>))
 //           throw new <E>(`${d}: $.model.complete: maxTokens must be an
 //                          integer from 1 to ${<LIM>} (got ${String(s)})`);
-//         ...let D=(s??<DEF>)+M;...
-//     2 of the 3 conditions in that guard are CORRECTNESS, not policy
-//     (docnum:other -- conditions of an upstream `if`, not a kit counter) --
-//     `Number.isInteger` and `<1` refuse values the API could not use at all
-//     -- and they are left exactly as they are. Only the upper bound moves.
+//
+//     2.1.276 SPLIT that one guard into three parts, and the split is the
+//     reason the old locator found nothing (measured on both platforms,
+//     pristine image, linux offset 198525450):
+//       async function <f>({model:e,prompt:n,system:r,maxTokens:s},g,h){
+//         if(s!==void 0&&(!Number.isInteger(s)||s<1))
+//           throw new <E>(`${g}: $.model.complete: maxTokens must be a
+//                          positive integer (got ${String(s)})`);
+//         let w=<resolve>(e); ...
+//         let <CEIL>=Math.min(<T>(w).upperLimit,<CAP>);
+//         if(s!==void 0&&s><CEIL>)
+//           throw new <E>(`${g}: $.model.complete: maxTokens ${s} is past
+//                          what ${w} can produce in one reply (${<CEIL>})`);
+//         let[L,B]=<th>(w),U=Math.min((s??<DEF>)+B,<CEIL>);
+//     The CORRECTNESS half (`Number.isInteger`, `<1`) now stands on its own
+//     and is not touched -- it refuses values the API could not use at all.
+//     What moved is the ceiling: it is no longer a bare literal but the
+//     smaller of what the model can physically produce and a SHARED cap
+//     (64000 on 2.1.276). Only the shared cap is policy; `.upperLimit` is a
+//     fact about the model.
+//
+//     The edit therefore sits on the ceiling's own BINDING, not on the
+//     shared cap's declaration. That is not a stylistic choice: the cap is
+//     handed to a second consumer in an unrelated request path, so rewriting
+//     it where it is declared would move a ceiling this step never measured.
+//     Sitting on the binding also makes the blast radius exact -- the
+//     binding is a `let` inside the entry function, so every reader of it
+//     (the refusal, the message slot, and the clamp that sets the request's
+//     real max_tokens) is served by one replacement and none can be missed.
 //
 //     `<DEF>` (256 on 2.1.270) is deliberately NOT touched: it is the value a
 //     caller gets by NOT passing maxTokens, and any caller that wants more
 //     passes more. A default a consumer can lift is not a ceiling, and
 //     rewriting it would change replies nobody asked us to change.
 //
-//     With the handle unset the comparison `s > Infinity` is never true, and
-//     the refusal's own text -- which interpolates the SAME name -- then reads
-//     "from 1 to Infinity", so the image never announces a limit it does not
-//     enforce. What the API itself accepts as max_tokens remains the API's
-//     answer to give: this edit stops the IMAGE from refusing first, it does
-//     not promise the model will serve any number.
+//     With the handle unset our term is Infinity, so the ceiling collapses
+//     to `min(<model>.upperLimit, Infinity)` -- the model's own limit and
+//     nothing else. The shared cap is gone; the physical one stays. This is
+//     a DELIBERATE and named difference from the 2.1.270 edition of this
+//     step, which left no bound at all and made the refusal announce "from 1
+//     to Infinity": back then the guard carried no per-model term, so there
+//     was nothing else to fall back to. Now there is, and keeping it is
+//     strictly better -- the refusal names a real number, and the clamp that
+//     builds the request cannot ask for what the model cannot produce.
+//     What the API accepts beyond that remains the API's answer to give.
 //
-//     The limit's minified name is NOT pinned (root #75): it is READ OUT of
-//     the comparison inside the guard, and the guard is found by its own
-//     user-visible message. Scoping the rewrite to the module is not a
-//     formality here -- it is load-bearing, and measured: on the 2.1.270
-//     darwin image the name occurs 15 times, of which exactly 3 belong to
-//     this module (the declaration, the comparison, the message slot). The
-//     other 12 are tslib's `__generator` in another chunk, an `onSelect`
-//     callback in a UI chunk, and bun's own string tables -- a whole-image
-//     rewrite would rename a generator and a menu handler.
+//     The ceiling's minified name is NOT pinned (root #75): it is READ OUT
+//     of the comparison inside the refusal, and the refusal is found by its
+//     own user-visible message. The locator does not pin the shape around
+//     it either -- that is exactly what broke here: the earlier form welded
+//     the three conditions of the old guard together as one closed `if`, so
+//     upstream splitting them left the site in place and the locator behind.
 // --------------------------------------------------------------------------
 step('30 mod-API per-call maxTokens ceiling becomes operator-set', () => {
   const ID = '[A-Za-z_$][\\w$]*';
 
+  // The refusal is found by its own user-visible message; the ceiling's
+  // minified name is READ OUT of the comparison that refusal guards, and is
+  // never pinned (root #75).
   const guard = new RegExp(
-    'if\\((' + ID + ')!==void 0&&\\(!Number\\.isInteger\\(\\1\\)\\|\\|\\1<1\\|\\|\\1>(' + ID + ')\\)\\)' +
-    'throw new ' + ID + '\\(`\\$\\{' + ID + '\\}: \\$\\.model\\.complete: ' +
-    'maxTokens must be an integer from 1 to \\$\\{\\2\\} \\(got \\$\\{String\\(\\1\\)\\}\\)`\\)',
+    'if\\((' + ID + ')!==void 0&&\\1>(' + ID + ')\\)throw new ' + ID + '\\(' +
+    '`\\$\\{' + ID + '\\}: \\$\\.model\\.complete: maxTokens \\$\\{\\1\\} ' +
+    'is past what \\$\\{' + ID + '\\} can produce in one reply ' +
+    '\\(\\$\\{\\2\\}\\)`\\)',
     'g',
   );
   const sites = [...js.matchAll(guard)];
   if (sites.length !== 1) {
     fail(
-      `the mod-API maxTokens refusal must occur exactly once, found ${sites.length} -- ` +
+      `the mod-API maxTokens ceiling refusal must occur exactly once, found ${sites.length} -- ` +
       `more than one site would mean the limit is consulted where this edit does not reach`,
     );
   }
-  const lim = sites[0][2];
+  const ceil = sites[0][2];
   const at = sites[0].index;
 
-  // Uniqueness is required in the module that DEFINES the name, not in the
-  // whole bundle -- see the census in the block above: the same letters name
-  // a tslib generator and a UI callback in other chunks.
-  const declSrc = 'var ' + rxEsc(lim) + '=(\\d+);';
+  // The ceiling is a LOCAL binding of the entry function, so rewriting the
+  // binding alone serves EVERY reader of it. That is also why the shared
+  // constant it is built from is not rewritten where it is declared: that
+  // constant has a second consumer in an unrelated request path (measured on
+  // 2.1.276), and a ceiling somebody else depends on is not this step's
+  // subject. The `.upperLimit` term is likewise left alone -- it is what the
+  // model can physically produce, which is a fact, not a policy.
+  const bindSrc =
+    'let ' + rxEsc(ceil) + '=Math\\.min\\((' + ID + '\\(' + ID +
+    '\\)\\.upperLimit),(' + ID + ')\\);';
   const mod = moduleTextAt(at);
-  const decls = mod.match(new RegExp(declSrc, 'g')) || [];
-  if (decls.length !== 1) {
+  const binds = mod.match(new RegExp(bindSrc, 'g')) || [];
+  if (binds.length !== 1) {
     fail(
-      `the maxTokens limit '${lim}' must be declared exactly once in the refusal's module, ` +
-      `found ${decls.length} -- the locator would rewrite an unrelated constant`,
+      `the ceiling '${ceil}' must be bound exactly once in the refusal's module as ` +
+      `min(<model>.upperLimit, <shared cap>), found ${binds.length}`,
     );
   }
-  const stock = new RegExp(declSrc).exec(mod)[1];
+  const [, modelTerm, cap] = mod.match(new RegExp(bindSrc));
 
-  // Read on EVERY consult, not once at module init -- the same reason step 28
-  // and step 29 carry: the image moves its own environment around while the
+  // The ceiling governs TWO things, not one: this refusal, and the
+  // max_tokens the request actually carries. The clamp is pinned so that a
+  // build which stops clamping -- or starts clamping with something else --
+  // fails here loudly instead of silently changing what an unset handle
+  // means for the bytes that leave the process.
+  const clampSrc =
+    '=Math\\.min\\(\\(' + ID + '\\?\\?' + ID + '\\)\\+' + ID + ',' +
+    rxEsc(ceil) + '\\)';
+  const clamps = mod.match(new RegExp(clampSrc, 'g')) || [];
+  if (clamps.length !== 1) {
+    fail(
+      `the request's max_tokens must be clamped by the ceiling '${ceil}' exactly once, ` +
+      `found ${clamps.length} -- the edit's reach and the request's bound have parted`,
+    );
+  }
+
+  // Read on EVERY consult, not once at module init -- the same reason steps
+  // 28 and 29 carry: the image moves its own environment around while the
   // process runs, so a value read at load time can be the wrong one by the
-  // time the guard consults it. Both in-module uses coerce this object: the
-  // comparison `>` takes the number hint, the message's `${...}` slot takes
-  // the string hint, and the handler ignores the hint and answers with a
-  // number in both.
+  // time the guard consults it. An inline expression replaces the coercing
+  // object of the earlier edition because this binding now feeds arithmetic
+  // AND a message slot from the same place, and a number is right in both
+  // without a hint.
   editModuleAt(at, text =>
-    text.replace(new RegExp(declSrc), () =>
+    text.replace(new RegExp(bindSrc), () =>
       // ZERO IS NO CAP, exactly as in step 29, and so is every other value
       // that is not a usable positive ceiling: unset, empty, non-numeric,
       // negative, NaN. An operator writing 0 means "no per-call ceiling",
       // never "a ceiling of nothing", and a value nobody can read must not
       // quietly reintroduce the limit it was written to remove.
-      'var ' + lim + '={[Symbol.toPrimitive](){' +
-      'let v=process.env.CLAUDE_CODE_MOD_MAX_TOKENS;' +
+      'let ' + ceil + '=Math.min(' + modelTerm + ',' +
+      '(()=>{let v=process.env.CLAUDE_CODE_MOD_MAX_TOKENS;' +
       'if(v===void 0||v==="")return Infinity;' +
       'let n=Number(v);' +
-      'return Number.isFinite(n)&&n>0?n:Infinity}};',
+      'return Number.isFinite(n)&&n>0?n:Infinity})());',
     ),
   );
   applied.push(
-    `30 mod-API per-call maxTokens: limit '${lim}' (stock ${stock}) now reads ` +
-    `CLAUDE_CODE_MOD_MAX_TOKENS; unset or unusable = no cap`,
+    `30 mod-API per-call maxTokens: ceiling '${ceil}' (stock min(${modelTerm}, ${cap})) ` +
+    `now reads CLAUDE_CODE_MOD_MAX_TOKENS; unset or unusable leaves only what the ` +
+    `model itself can produce`,
   );
 });
 

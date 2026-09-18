@@ -55,6 +55,17 @@ def reap(pid, status):
     return value if found else None
 
 
+# CONSTRAINT: предел ожидания жатвы. Ребёнок, застрявший в состоянии выхода,
+# не жнётся НИКОГДА, и ждать его без предела -- значит не иметь предела вовсе.
+#
+# ВЕЛИЧИНА СВЯЗАНА С ОКНОМ ВЫЗЫВАЮЩЕГО и обязана быть СТРОГО МЕНЬШЕ его:
+# гейт интерфейса (claude-patch-all.sh, стадия 5a2) после TERM ждёт прибор
+# 10 x 0.5 с и затем шлёт KILL. Жатва, равная этому окну, не оставляет времени
+# записать строку статуса -- прибор погибал бы ровно на границе, и вызывающий
+# снова читал бы молчание вместо ответа.
+REAP_GRACE_SECONDS = 2.0
+
+
 def stop_group(pid, status):
     # The leader may have exited while descendants still hold the PTY.
     signal_group(pid, signal.SIGTERM)
@@ -67,8 +78,20 @@ def stop_group(pid, status):
             break
         time.sleep(0.02)
     signal_group(pid, signal.SIGKILL)
-    if status is None:
-        _, status = os.waitpid(pid, 0)
+    # CONSTRAINT: жатва ОГРАНИЧЕНА и её неудача -- ответ, а не молчание.
+    # Здесь стоял блокирующий os.waitpid(pid, 0). Ребёнок, застрявший в выходе
+    # (macOS: `ps` STAT `?Es`), не отвечает даже на SIGKILL -- измерено 18.09,
+    # два прогона из двух, один пережил kill -9 и провисел 12 минут. Прибор
+    # молча ждал его вечно: собственный --seconds не соблюдался, строка статуса
+    # не писалась, и ВЫЗЫВАЮЩИЙ читал это молчание как отказ измерения, хотя
+    # предмет замера (отрисовка интерфейса) к тому времени уже состоялся.
+    # Незажинаемость -- свойство машины; ответ о ней обязан БЫТЬ, и он даётся
+    # возвратом None, который вызывающий называет словом.
+    grace = time.monotonic() + REAP_GRACE_SECONDS
+    while status is None and time.monotonic() < grace:
+        status = reap(pid, status)
+        if status is None:
+            time.sleep(0.02)
     return status
 
 
@@ -121,8 +144,15 @@ def run(args):
                 child_status = reap(pid, child_status)
                 if requested:
                     break
-                if child_status is None and time.monotonic() >= deadline:
-                    timed_out = True
+                # CONSTRAINT: предел -- у ВСЕГО цикла, а не у одной его ветки.
+                # Условие `child_status is None` оставляло без предела исход
+                # «ребёнок умер, а поток PTY держат потомки»: данные идут, EOF
+                # нет, выход по `not ready` не наступает -- прибор крутится
+                # бесконечно. timed_out при этом остаётся вердиктом о ПРОДУКТЕ
+                # (не уложился живой ребёнок); оборванное дочитывание хвоста
+                # уже мёртвого ребёнка таймаутом не зовётся.
+                if time.monotonic() >= deadline:
+                    timed_out = child_status is None
                     break
                 ready = [] if eof else select.select([fd], [], [], 0.05)[0]
                 if ready:
@@ -142,7 +172,14 @@ def run(args):
                     time.sleep(0.02)
             child_status = stop_group(pid, child_status)
             pid = None
-            if os.WIFEXITED(child_status):
+            # CONSTRAINT: три исхода, три РАЗНЫХ слова. `unreaped` -- ребёнок
+            # пережил KILL и не пожат за отведённый срок; это состояние машины,
+            # и отличать его от штатного выхода обязан тот, кто читает статус.
+            # Раньше этот исход не имел слова, потому что до него не доходило:
+            # прибор висел в waitpid и не писал ничего.
+            if child_status is None:
+                line = "unreaped"
+            elif os.WIFEXITED(child_status):
                 line = f"exited {os.WEXITSTATUS(child_status)}"
             else:
                 line = f"signaled {os.WTERMSIG(child_status)}"

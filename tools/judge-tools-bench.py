@@ -709,12 +709,32 @@ def scenario_18() -> None:
     require("vanished" not in arm.split("print(")[0], "ветка снова считает «исчезло под руками»")
 
 
-def sync_diff(root: Path, home: Path, tools: Path, agents: Path) -> tuple[int, str]:
-    """Прогон scripts/probes-sync.sh --diff на игрушечных домах."""
+def toy_env(home: Path, tools: Path, agents: Path) -> dict[str, str]:
+    """Окружение игрушечных домов для scripts/probes-sync.sh.
+
+    CONSTRAINT: платформа владельца расписания ПИНИТСЯ здесь, а не берётся у
+    машины. Предмет всех сценариев этого стенда -- нога launchd: они сажают
+    plist в игрушечный LaunchAgents, а сверка выбирает ногу по живому
+    `uname -s`. Без пина те же сценарии зелены на Darwin и красны на Linux,
+    где ветка plist мертва по построению, -- стенд мерил бы машину, а не
+    продукт (#237). Нога crontab у этой сверки измеряется своим стендом,
+    tools/probes-sync-bench.sh.
+
+    CONSTRAINT: дом пина ОДИН на все вызовы стенда. Три копии этого окружения
+    жили порознь, и пин, попавший в две из трёх, вернул бы ту же зависимость
+    от машины через третью.
+    """
     env = dict(os.environ)
     env["CLAUDE_PROBES_DIR"] = str(home)
     env["CLAUDE_JUDGE_TOOLS_DIR"] = str(tools)
     env["CLAUDE_LAUNCH_AGENTS_DIR"] = str(agents)
+    env["CLAUDE_SCHEDULE_PLATFORM"] = "Darwin"
+    return env
+
+
+def sync_diff(root: Path, home: Path, tools: Path, agents: Path) -> tuple[int, str]:
+    """Прогон scripts/probes-sync.sh --diff на игрушечных домах."""
+    env = toy_env(home, tools, agents)
     done = subprocess.run(
         ["bash", str(root / "scripts" / "probes-sync.sh"), "--diff"],
         capture_output=True, text=True, errors="replace", env=env,
@@ -733,9 +753,7 @@ def scenario_19() -> None:
         require(rc == 5, f"пустая машина обязана давать «мерить нечего» (5), а дала {rc}")
         require("не раскатан" in out, "пустая машина не названа классом «не раскатан»")
 
-        env = dict(os.environ)
-        env.update(CLAUDE_PROBES_DIR=str(home), CLAUDE_JUDGE_TOOLS_DIR=str(tools),
-                   CLAUDE_LAUNCH_AGENTS_DIR=str(agents))
+        env = toy_env(home, tools, agents)
         done = subprocess.run(
             ["bash", str(ROOT / "scripts" / "probes-sync.sh"), "--to-home"],
             capture_output=True, text=True, errors="replace", env=env,
@@ -999,9 +1017,7 @@ def toy_kit(base: Path) -> Path:
 def run_sync(kit: Path, mode: str, home: Path, tools: Path, agents: Path,
              fake_home: Path | None = None,
              lock_path: Path | None = None) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env.update(CLAUDE_PROBES_DIR=str(home), CLAUDE_JUDGE_TOOLS_DIR=str(tools),
-               CLAUDE_LAUNCH_AGENTS_DIR=str(agents))
+    env = toy_env(home, tools, agents)
     # Замок называется явно только там, где сценарию нужно СДЕЛАТЬ его
     # занятым: держать боевой замок стенд не вправе.
     if lock_path is not None:
@@ -2926,9 +2942,13 @@ def mutation_m12(root: Path) -> None:
 
 
 def mutation_m13(root: Path) -> None:
+    # CONSTRAINT: якорь несёт ОТСТУП продолжения строки, и отступ -- часть
+    # предмета. Он разошёлся с конвейером (было два пробела, стало пять), и
+    # мутация перестала применяться вовсе: зуб 20 стоял незапиненным, а
+    # самопроверка краснела «без зубов» вместо вердикта о продукте.
     replace_once(
         root / "claude-patch-all.sh",
-        'env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \\\n  bash',
+        'env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \\\n     bash',
         'bash',
         "M13",
     )
@@ -3651,9 +3671,13 @@ def mutation_m71(root: Path) -> None:
     # Ценз покрытия агента снят: агент на умолчании judge снова выглядит
     # зелёным, а журнал лестницы failover не пропалывает никто -- красит
     # ровно зуб 61. Проверка цели агента (строка выше) не тронута.
+    # CONSTRAINT: якорь следует за ПЕРЕМЕННОЙ ЦИКЛА ("$__probe"), а не за
+    # литералом 'failover'. Волна 235 обобщила сверку на НАБОР проб, литерал
+    # из продукта исчез, и мутация перестала применяться вовсе: зуб 61 стоял
+    # незапиненным, пока отказ ступенью раньше прятал самопроверку.
     replace_once(
         root / "scripts" / "probes-sync.sh",
-        "    if grep -q -- '--probe' <<<\"$__args\" && grep -qF 'failover' <<<\"$__args\"; then\n",
+        "    if grep -q -- '--probe' <<<\"$__args\" && grep -qF \"$__probe\" <<<\"$__args\"; then\n",
         "    if true; then\n",
         "M71",
     )

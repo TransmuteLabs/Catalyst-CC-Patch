@@ -5824,12 +5824,12 @@ python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-59fd2d46d04b04e90d0cd1ffedf418d7ee6f9030}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-7e2a07e5b78c0b1607ab109adc2e5d2f7ed61768}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "59fd2d46d04b04e90d0cd1ffedf418d7ee6f9030" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "7e2a07e5b78c0b1607ab109adc2e5d2f7ed61768" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -6699,6 +6699,12 @@ def SWITCH(env, empty_off=True):
     variable is set, the form probe is ON unless it is turned off, so the form
     probe's reader lacks the `__s===""||` disjunct. That absence is what keeps
     the three readers from matching each other, and every caller relies on it.
+
+    Третий гейт `__d` -- дверца CLAUDE_CODE_ENABLE_FUNCTION_HOOKS (моды в
+    2.1.272+ выключены по умолчанию): читатель отдаёт splice-путь, если носитель
+    не mod ЛИБО функция-хуки не включены (`__c!=="mod"||(__d!=="1"&&__d!=="true")`).
+    Прежняя форма кончалась на `return __c!=="mod"` и не имела предмета ни в одном
+    образе 2.1.276.
     """
     empty = rb'__s===""\|\|' if empty_off else rb''
     return (rb'\(\(\)=>\{let __s=String\(process\.env\.' + env + rb'\?\?""\)'
@@ -6706,7 +6712,10 @@ def SWITCH(env, empty_off=True):
             rb'if\(' + empty + rb'__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)'
             rb'return !1;'
             rb'let __c=String\(process\.env\.' + env + rb'_CARRIER\?\?""\)'
-            rb'\.trim\(\)\.toLowerCase\(\);return __c!=="mod"\}\)\(\)')
+            rb'\.trim\(\)\.toLowerCase\(\);'
+            rb'let __d=String\(process\.env\.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS\?\?""\)'
+            rb'\.trim\(\)\.toLowerCase\(\);'
+            rb'return __c!=="mod"\|\|\(__d!=="1"&&__d!=="true"\)\}\)\(\)')
 
 
 # Апстримовый отказ, который несёт ТОЛЬКО форма-фабрика инструмента диспатча:
@@ -7859,7 +7868,7 @@ def _chevron_colour_follows_state(d):
 
 
 def _sudo_refusal_is_neutralised(d):
-    """Both sites, by their consequents.
+    """Both sites, by their neutralised structure.
 
     Absence of the stock phrase looks like the obvious test and is not available:
     the refusal text lives in the image's STRING POOL, not only in the code that
@@ -7867,14 +7876,17 @@ def _sudo_refusal_is_neutralised(d):
     (measured on every version -- `root/sudo privileges` is present in the pool of
     each patched image). Requiring its absence could therefore never pass.
 
-    What the step actually does is turn each consequent into `void 0`, at TWO
-    sites: the bypass-option guard and the setup path. Requiring both is what
-    makes this mean something -- one alone would go green with the other refusal
-    still alive.
+    Каждый сторож гасится по СВОЕЙ структуре, и они разные: site A (guard опции
+    обхода) -- тело в `void 0`; site B (стартовая инлайн-проверка) -- УСЛОВИЕ
+    `process.getuid()===0` в `!1` (ложное условие делает охраняемый выход
+    недостижимым, каким бы ни стало тело). На 2.1.276 site B несёт конъюнкт
+    `&&!<x>.CLAUDE_CODE_BUBBLEWRAP` и тело `console.error`, а не `)void 0`:
+    прежняя проверка ждала `)void 0` -- форму, которой у этого сайта нет.
+    Требуются ОБЕ половины -- одна прошла бы зелено со вторым сторожем живым.
     """
     guarded = re.search(rb'if\(' + ID + rb'\.isRootOutsideDeliberateSandbox\(\)\)void 0', d)
-    setup = re.search(rb'process\.getuid\(\)===0&&process\.env\.IS_SANDBOX!=="1"&&'
-                      rb'!' + ID + rb'\.CLAUDE_CODE_BUBBLEWRAP\)void 0', d)
+    setup = re.search(rb'!1&&process\.env\.IS_SANDBOX!=="1"&&'
+                      rb'!' + ID + rb'\.CLAUDE_CODE_BUBBLEWRAP\)', d)
     return bool(guarded and setup)
 
 def _claude_md_alternates_are_tried(d):
@@ -7922,35 +7934,56 @@ def _refusal_routes_read_the_config(d):
                           rb'CLAUDE_CODE_REFUSAL_FALLBACK_ROUTES', d, re.S))
 
 
+def _find_downgrade_reader(d):
+    """Уникальный читатель-понижатель `function <B>(<x>){return <A>(<x>)?<F>:<x>}`,
+    чей `<F>` привязан к "claude-opus-4-8" -- вход ПО ПОВЕДЕНИЮ, как в шаге.
+
+    2.1.276 сломал прежнюю связку «две `var`-константы + предикат рядом»: между
+    ними вставлена посторонняя функция, а тело предиката выросло до трёх
+    конъюнктов со сравнением модели внутри `.some()`. Предмет не двигался,
+    двигался локатор -- поэтому вход через ЧИТАТЕЛЬ (одно поведение: «предикат
+    держит ? константа понижения : вход»). Уникальность требуется над всем
+    текстом: константа НЕ уникальна на 2.1.276 (по два связывания opus-4-8 и
+    opus-5), читатель уникален; содержимое `<F>` затем опознаёт его как opus.
+    Возвращает (B, x, A, F) либо None.
+    """
+    hits = list(re.finditer(
+        rb'function (' + ID + rb')\((' + ID + rb')\)\{return (' + ID + rb')\(\2\)\?(' + ID + rb'):\2\}',
+        d))
+    if len(hits) != 1:
+        return None
+    m = hits[0]
+    if not re.search(rb'(?<![\w$.])' + re.escape(m.group(4)) + rb'="claude-opus-4-8"', d):
+        return None
+    return m.group(1), m.group(2), m.group(3), m.group(4)
+
+
 def _top_of_lineup_is_reachable(d):
     """Верх линейки достижим -- ПО РУЧКЕ, и пинятся ТРИ формы разом.
 
-    Три -- это и есть гарантия волны: (1) связка констант понижения и верха
-    на месте -- на образе, где площадка исчезла ВОВСЕ, ослабленная форма
-    сматчилась бы на чужой код и проверка зеленела бы, обещая несуществующее
-    свойство (пол чувствительности, а не придирка); (2) исключение верха в
-    find-предикате несёт опт-ин форму `!(<S>()===void 0&&<A>(<x>))` -- без
-    таблицы она равна стоковой, с таблицей исключение снято; (3) тернар
-    понижения цели несёт `(<W>()?(<S>()===void 0?<B>(<x>.id):<x>.id):<L>(...)`.
-    Один и тот же `<S>` обязан стоять в ОБОИХ опт-ин формах: ручка одна, и
-    два разных шва развязали бы половину механизма. Имена НЕ пинятся
-    буквами -- только группами, как в соседних проверках.
+    Три -- это и есть гарантия волны: (1) читатель-понижатель опознан по
+    поведению и содержимому (`<F>="claude-opus-4-8"`) -- на образе, где форма
+    ослабла, зелень обещала бы несуществующее свойство (пол чувствительности);
+    (2) исключение верха в find-предикате несёт опт-ин форму
+    `!(<S>()===void 0&&<A>(<x>))` -- без таблицы равна стоковой `!<A>(<x>)`, с
+    таблицей исключение снято; (3) тернар понижения цели несёт
+    `<W>()?(<S>()===void 0?<B>(<x>.id):<x>.id):<L>(<x>.id)`. Один и тот же `<S>`
+    обязан стоять в ОБОИХ опт-ин формах: ручка одна, два разных шва развязали
+    бы половину механизма. `<A>` и `<B>` берутся из читателя, не по буквам.
     """
-    bundle = re.search(
-        rb'var (' + ID + rb')="claude-opus-4-8",(' + ID + rb')="claude-opus-5";'
-        rb'function (' + ID + rb')\((' + ID + rb')\)\{return (' + ID + rb')\(\)&&(' + ID + rb')\(\4\)===\2\}',
-        d)
-    if not bundle:
+    r = _find_downgrade_reader(d)
+    if not r:
         return False
+    B, _x, A, _F = r
     optin = re.search(
-        rb'!\((' + ID + rb')\(\)===void 0&&' + re.escape(bundle.group(3)) + rb'\((' + ID + rb')\)\)',
+        rb'!\((' + ID + rb')\(\)===void 0&&' + re.escape(A) + rb'\((' + ID + rb')\)\)',
         d)
     if not optin:
         return False
     seam = optin.group(1)
     return bool(re.search(
         rb'(' + ID + rb')\(\)\?\(' + re.escape(seam) + rb'\(\)===void 0\?'
-        rb'(' + ID + rb')\((' + ID + rb')\.id\):\3\.id\):(' + ID + rb')\(\3\.id\)',
+        + re.escape(B) + rb'\((' + ID + rb')\.id\):\2\.id\):(' + ID + rb')\(\2\.id\)',
         d))
 
 
@@ -7964,34 +7997,19 @@ def _armed_model_keeps_its_downgrade(d):
     код с несколькими действиями. Снятие этой защиты не ронило НИ ОДНУ из
     прежних проверок шага -- обе пинят только опт-ин формы.
 
-    Проверяется структурное отношение: внутри функции вооружённой модели
-    читатель-понижатель применён к производителю вооружённой модели. Имена
-    идут группами, не буквами: связка констант даёт константу понижения и
-    предикат, читатель захватывается из СВОЕГО определения (как в соседней
-    проверке -- `function <B>(<x>){return <A>(<x>)?<F>:<x>}`), и затем
-    требуется применение читателя к вызову-производителю без аргументов
-    (`<B>(<P>())`). Вызов без аргументов -- единственный измеримый
-    различитель двух применений читателя: понижение НА ЦЕЛИ в тернаре
-    получает `.id`, а производитель вооружённой модели -- функцию. Маркеров
-    границ модулей в упакованном образе нет (измерено), поэтому отношение
-    ищется по всему образу, но читатель уже привязан к своей связке
-    констант -- чужое одноимённое связывание из другого чанка определением
-    с этими именами не станет.
+    Проверяется структурное отношение: читатель-понижатель `<B>` (опознан по
+    поведению и `<F>="claude-opus-4-8"`) применён к производителю вооружённой
+    модели БЕЗ аргументов -- `<B>(<P>())`. Вызов без аргументов -- единственный
+    измеримый различитель двух применений читателя: понижение НА ЦЕЛИ в тернаре
+    получает `.id`, а производитель вооружённой модели -- функцию. Читатель
+    уникален над всем текстом, поэтому чужое одноимённое связывание из другого
+    чанка его местом не станет.
     """
-    bundle = re.search(
-        rb'var (' + ID + rb')="claude-opus-4-8",(' + ID + rb')="claude-opus-5";'
-        rb'function (' + ID + rb')\((' + ID + rb')\)\{return (' + ID + rb')\(\)&&(' + ID + rb')\(\4\)===\2\}',
-        d)
-    if not bundle:
+    r = _find_downgrade_reader(d)
+    if not r:
         return False
-    downgrade = bundle.group(1)
-    pred = bundle.group(3)
-    reader = re.search(
-        rb'function (' + ID + rb')\((' + ID + rb')\)\{return ' + re.escape(pred)
-        + rb'\(\2\)\?' + re.escape(downgrade) + rb':\2\}', d)
-    if not reader:
-        return False
-    return bool(re.search(rb'(?<![\w$])' + re.escape(reader.group(1))
+    B = r[0]
+    return bool(re.search(rb'(?<![\w$])' + re.escape(B)
                           + rb'\((' + ID + rb')\(\)\)', d))
 
 
@@ -8149,43 +8167,44 @@ def _step29_verdict(d, src):
 
 
 # Отказ мод-API по пределу maxTokens ОДНОГО вызова -- вторая дверь той комнаты
-# и единственный дом имени предела. Имя берётся ИЗ сравнения внутри сторожа:
-# на 2.1.270 оно `sMt` на darwin и `cMt` на linux (измерено), вшитое имя
-# промахнулось бы на второй платформе сегодня. Обе проверки ниже ловят имя
-# одной иглой и потому не могут разъехаться между собой.
+# и единственный дом имени предела. Имя предела берётся ИЗ сравнения внутри
+# сторожа, не вписывается буквами. На 2.1.276 апстрим переписал форму: прежний
+# «maxTokens must be an integer from 1 to N» (в пристине этой сборки 0 вхождений)
+# сменился на «is past what <model> can produce in one reply», а сам предел из
+# module-level `var` стал per-call `let M=Math.min(<model>.upperLimit,...)` в теле
+# $.model.complete. group(1) -- аргумент maxTokens, group(2) -- имя предела.
 _MOD_MAXTOKENS_REFUSAL = (
-    rb'if\((' + ID + rb')!==void 0&&\(!Number\.isInteger\(\1\)\|\|\1<1\|\|\1>(' + ID + rb')\)\)'
+    rb'if\((' + ID + rb')!==void 0&&\1>(' + ID + rb')\)'
     rb'throw new ' + ID + rb'\(`\$\{' + ID + rb'\}: \$\.model\.complete: '
-    rb'maxTokens must be an integer from 1 to \$\{\2\} \(got \$\{String\(\1\)\}\)`\)'
+    rb'maxTokens \$\{\1\} is past what \$\{' + ID + rb'\} '
+    rb'can produce in one reply \(\$\{\2\}\)`\)'
 )
 
 
 def _mod_maxtokens_ceiling_is_operator_set(d):
     """Предел maxTokens на ОДИН вызов объявлен НАШЕЙ формой.
 
-    Предмет тот же, что у потолка сессии, и по тем же причинам: имя предела
-    захватывается из САМОГО сравнения, которое бросает отказ, а объявление
-    требуется у ЗАХВАЧЕННОГО имени -- «в образе есть имя переменной окружения»
-    не говорит о пределе ничего.
+    Имя предела захватывается из САМОГО сравнения, которое бросает отказ, --
+    «в образе есть имя переменной окружения» о пределе не говорит ничего.
 
-    Пинится тело вставки целиком, включая обе ветки умолчания и ЛЕНИВУЮ форму:
-    `Symbol.toPrimitive` значит, что окружение читается на КАЖДОМ обращении.
-    Здесь у ленивости есть и вторая работа, которой не было у потолка сессии:
-    имя коэрцится ДВАЖДЫ за один отказ -- числом в сравнении и строкой в тексте
-    «from 1 to ...». Нетерпеливая форма заморозила бы оба на значении момента
-    загрузки, и текст отказа начал бы называть не то число, по которому
-    отказывают.
+    На 2.1.276 предел -- per-call `let M=Math.min(<model>.upperLimit,IIFE)` в теле
+    $.model.complete: `<model>` -- аргумент вызова, поэтому строка исполняется на
+    КАЖДЫЙ вызов и IIFE перечитывает окружение каждый раз. Свежесть, ради которой
+    на 2.1.270 нужна была ленивая `Symbol.toPrimitive`-форма (там предел был
+    module-level `var`, замороженный на загрузке), здесь даётся самим per-call
+    `let` нативно: и число в `s>M`, и строка в `(${M})` берут одно текущее
+    значение. Пинится тело IIFE целиком, включая обе ветки умолчания на Infinity.
     """
     site = re.search(_MOD_MAXTOKENS_REFUSAL, d)
     if not site:
         return False
     lim = site.group(2)
     return bool(re.search(
-        rb'var ' + re.escape(lim) + rb'=\{\[Symbol\.toPrimitive\]\(\)\{let (' + ID + rb')='
-        rb'process\.env\.CLAUDE_CODE_MOD_MAX_TOKENS;'
+        rb'let ' + re.escape(lim) + rb'=Math\.min\(' + ID + rb'\(' + ID + rb'\)\.upperLimit,'
+        rb'\(\(\)=>\{let (' + ID + rb')=process\.env\.CLAUDE_CODE_MOD_MAX_TOKENS;'
         rb'if\(\1===void 0\|\|\1===""\)return Infinity;'
         rb'let (' + ID + rb')=Number\(\1\);'
-        rb'return Number\.isFinite\(\2\)&&\2>0\?\2:Infinity\}\};', d))
+        rb'return Number\.isFinite\(\2\)&&\2>0\?\2:Infinity\}\)\(\)\)', d))
 
 
 def _mod_maxtokens_default_is_not_the_ceiling(d):
@@ -8231,11 +8250,14 @@ def _mod_maxtokens_default_is_not_the_ceiling(d):
 # больше нет» здесь ВСЕГДА красна и не значит ничего -- измерено 2026-09-15 на
 # собственном стенде шага. Все 3 проверки шага (docnum:subset -- счёт
 # подмножества реестра, а не его размер) пинят НАЛИЧИЕ новой структуры.
+# На 2.1.276 второй аргумент входа `{plugin,budget}` ушёл вместе с механизмом
+# бюджета мод-API (тот же снос, что сделал шаг 29 неприменимым): сигнатура стала
+# `({...,detail:__mcDetail},g,h)` c простыми параметрами. group(5) -- аргумент
+# maxTokens -- сохраняет свой номер, на него опирается alias-проверка ниже.
 _MOD_ENTRY_PATCHED = (
     rb'async function (' + ID + rb')\(\{model:(' + ID + rb'),prompt:(' + ID + rb'),system:(' + ID +
     rb'),maxTokens:(' + ID + rb'),effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias'
-    rb',detail:__mcDetail\},'
-    rb'\{plugin:(' + ID + rb'),budget:(' + ID + rb')\},(' + ID + rb')\)\{'
+    rb',detail:__mcDetail\},' + ID + rb',' + ID + rb'\)\{'
 )
 
 # Вызов провайдера ПОСЛЕ правки, вместе с обоими пробросами. Окно от головы, а
@@ -8359,13 +8381,10 @@ def _cancellation_rule_is_whole(d):
     # (инлайн-форма канонического __envon из ядра). 2026-09-12: тот же сайт
     # несёт CLAUDE_JUDGE_CARRIER=mod (splice stands down). Пин проходит по
     # читателю ЦЕЛИКОМ включая stand-down -- иначе ручка выпадёт, а правило
-    # в промте останется, и два носителя снова судят вместе.
-    if not re.search(rb'\.\.\.\(\(\(\)=>\{let __s=String\(process\.env\.CLAUDE_JUDGE\?\?""\)'
-                     rb'\.trim\(\)\.toLowerCase\(\);'
-                     rb'if\(__s===""\|\|__s==="0"\|\|__s==="false"\|\|__s==="off"\|\|__s==="no"\)return !1;'
-                     rb'let __c=String\(process\.env\.CLAUDE_JUDGE_CARRIER\?\?""\)'
-                     rb'\.trim\(\)\.toLowerCase\(\);return __c!=="mod"\}'
-                     rb'\)\(\)&&' + ID
+    # в промте останется, и два носителя снова судят вместе. Читатель берётся
+    # из SWITCH() -- эта проверка держала СВОЮ копию и отстала от гейта
+    # function-hooks (__d), из-за чего краснела на всём 2.1.276; теперь дом один.
+    if not re.search(rb'\.\.\.\(' + SWITCH(b'CLAUDE_JUDGE') + rb'&&' + ID
                      + rb'\?\.agentContext\?\.agentType==="main"\?\['
                      rb'"A subagent dispatch may be reviewed before it runs\.', d):
         return False
@@ -10226,6 +10245,10 @@ __interface_gate() {
   fi
   local GATE_STATUS="$GATE_HOME/status" GATE_TOOL_RC=0
   local __status_line="" __status_extra=""
+  # Признак «ребёнок не пожат» инициализируется здесь: непроинициализированный
+  # флаг под `set -u` уронил бы стадию, а его протечка между вызовами объявила
+  # бы чужое состояние машины свойством этой сборки.
+  local GATE_UNREAPED=0
 
   # $! адресует группу драйвера; тот пересылает TERM группе своей PTY-сессии.
   # Убийство одного процесса оставило бы дерево образа живым.
@@ -10398,6 +10421,23 @@ __interface_gate() {
     GATE_RC=$((10#${BASH_REMATCH[1]}))
   elif [[ "$__status_line" =~ ^signaled\ ([0-9]{1,3})$ ]] && (( 10#${BASH_REMATCH[1]} > 0 && 10#${BASH_REMATCH[1]} < 128 )); then
     GATE_RC=$((128 + 10#${BASH_REMATCH[1]}))
+  elif [[ "$__status_line" == unreaped ]]; then
+    # CONSTRAINT: ребёнок пережил KILL и не пожат -- состояние МАШИНЫ, а не код
+    # образа. Измерено 18.09 на 2.1.276/darwin: сессия, снятая после отрисовки,
+    # застревает в состоянии выхода (`ps` STAT `?Es`) и не жнётся даже SIGKILL.
+    # Кода выхода у образа в этом исходе НЕТ -- и выдумывать его нельзя.
+    #
+    # ЭТО НЕ ДВЕРЬ FAIL-OPEN: строка принимается ТОЛЬКО когда образ не выходил
+    # сам (снимали мы), а вердикт всё равно выносит GATE_STATE ниже -- без
+    # отрисовки ветка `*)` объявит отказ, как и прежде. Обратный случай
+    # (образ вышел сам, но прибор его не пожал) -- противоречие двух каналов,
+    # и оно объявляется, а не толкуется.
+    if [[ $GATE_EXITED -eq 1 ]]; then
+      echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- образ вышел сам, но прибор его не пожал (каналы противоречат)" >&2
+      return 2
+    fi
+    GATE_UNREAPED=1
+    GATE_RC=0
   else
     echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- отказ прибора или неверный статус: $__status_line" >&2
     [[ ! -f "$GATE_HOME/instrument.log" ]] || while IFS= read -r __status_extra; do
@@ -10421,6 +10461,13 @@ __interface_gate() {
         return 1
       fi
       echo "Interface: came up in a throwaway home and drew its message, no name or type errors"
+      # Незажинаемый ребёнок ОБЪЯВЛЯЕТСЯ, а не проглатывается: отрисовка
+      # доказана до снятия, но машина осталась с процессом, которого не берёт
+      # даже KILL, и следующий прогон встретит его живым.
+      if [[ $GATE_UNREAPED -eq 1 ]]; then
+        echo "  примечание: ребёнка не удалось пожать (машина держит его в состоянии выхода);"
+        echo "  отрисовка доказана до снятия, код выхода образа в этом исходе не существует"
+      fi
       rm -rf "$GATE_HOME"
       ;;
     TOOLFAIL*)
@@ -10491,7 +10538,7 @@ __interface_gate
 # The checks above are text checks on the image and the interface gate only
 # proves the product starts. Neither runs the judge or the watcher. The bench
 # does: it carves both probe blocks out of the finished binary, compiles them,
-# and drives probe-bench's 129 scenarios through a throwaway probes home —
+# and drives probe-bench's 132 scenarios through a throwaway probes home —
 # verdicts, degraded
 # configs, trimming, nudges, the fleet filters.
 #

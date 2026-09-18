@@ -133,7 +133,10 @@ const ENV_KEYS = [
   //
   // Снимать их обязан САМ стенд, а не вызывающий: `env -u` на одной стадии
   // конвейера не спасает того, кто запустит стенд рукой.
+  // Дверца того же класса: ручка, меняющая СМЫСЛ молчания (молчит только
+  // носитель=mod при открытой дверце; закрытая дверца обязана дать сплайс).
   ...Object.values(CARRIER_KEY),
+  'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS',
   'ANTHROPIC_BASE_URL',
 ];
 
@@ -571,18 +574,32 @@ const scenarios = [
   // ENV_KEYS. Стоя в голове, эта тройка делает утечку наблюдаемой: убери три
   // имени из ENV_KEYS -- и весь хвост прогона уйдёт в молчание. Перенос их в
   // конец массива обезоружит зуб carrier-isolation, не уронив ни одного теста.
-  { name: 'judge-carrier-mod', carrierValue: 'mod',
+  { name: 'judge-carrier-mod', carrierValue: 'mod', doorValue: '1',
     response: 'OK: не должно дойти -- носитель мод',
     expected: { passed: true, outcome: null, poolCalls: 0, journalLines: 0,
                 recordCount: 0 } },
   { name: 'watch-carrier-mod', probe: 'watch', toolName: 'Read', watchState: OLD,
-    carrierValue: 'mod',
+    carrierValue: 'mod', doorValue: '1',
     response: 'NUDGE: не должно дойти -- носитель мод',
     expected: { passed: true, outcome: null, poolCalls: 0, nudges: 0 } },
-  { name: 'form-carrier-mod', probe: 'form', carrierValue: 'mod',
+  { name: 'form-carrier-mod', probe: 'form', carrierValue: 'mod', doorValue: '1',
     dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
     files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
     expected: { passed: true, journalLines: 0, poolCalls: 0 } },
+  // Полюс закрытой дверцы: носитель=mod, дверца не задана (остаётся стёртой).
+  // Сплайс обязан работать — иначе при закрытой дверце судьи нет вообще.
+  { name: 'judge-carrier-mod-door-shut', carrierValue: 'mod',
+    response: 'OK: не должно дойти -- носитель мод',
+    expected: { passed: true, outcome: 'ok', poolCalls: 1, recordCount: 1,
+                journalLines: 1 } },
+  { name: 'watch-carrier-mod-door-shut', probe: 'watch', toolName: 'Read', watchState: OLD,
+    carrierValue: 'mod',
+    response: 'NUDGE: не должно дойти -- носитель мод',
+    expected: { passed: true, outcome: 'nudge', poolCalls: 1, nudges: 1 } },
+  { name: 'form-carrier-mod-door-shut', probe: 'form', carrierValue: 'mod',
+    dispatchPrompt: 'бриф: {{DIR}}/.briefs/1-brief.md',
+    files: { '.briefs/1-brief.md': '# Бриф 1\n\nтело\n' },
+    expected: { passed: true, journalLines: 1, poolCalls: 0 } },
   {
     // The model is named in the call — source is call; definitions are not
     // consulted.
@@ -1543,7 +1560,7 @@ const scenarios = [
 // trusting that nobody ever edits an array badly. Duplicate names are guarded
 // with it because two entries under one name report as one line: the second
 // silently stands in for the first.
-const EXPECTED_SCENARIOS = 129;
+const EXPECTED_SCENARIOS = 132;
 if (scenarios.length !== EXPECTED_SCENARIOS) {
   console.error(`probe-bench: сценариев ${scenarios.length}, ожидалось `
     + `${EXPECTED_SCENARIOS} — добавлены или потеряны без обновления числа`);
@@ -1551,7 +1568,7 @@ if (scenarios.length !== EXPECTED_SCENARIOS) {
 }
 // Режим --self-check сверяет длину таблицы мутаций с этим числом на каждом
 // своём запуске: правка таблицы без числа молча урезала бы перечень.
-const EXPECTED_MUTATIONS = 12;
+const EXPECTED_MUTATIONS = 13;
 // A scenario without `expected` used to run and be counted as conforming --
 // the comparator treated a missing specification as agreement (mismatchDetails
 // now returns one). The count above catches a hole in the ARRAY; this catches a
@@ -1636,6 +1653,12 @@ function setScenarioEnvironment(tempDir, scenario) {
   // carrier-isolation в таблице самопроверки.
   if (scenario.carrierValue !== undefined) {
     process.env[CARRIER_KEY[scenario.probe ?? 'judge']] = scenario.carrierValue;
+  }
+  // Дверца — свойство сценария, как и значение носителя: ставится ПОСЛЕ
+  // стирания ENV_KEYS и живёт один сценарий. Не задана — переменная остаётся
+  // стёртой (дверца закрыта), и сплайс при carrier=mod обязан работать.
+  if (scenario.doorValue !== undefined) {
+    process.env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS = scenario.doorValue;
   }
 }
 
@@ -2693,7 +2716,7 @@ const SELF_CHECK_MUTATIONS = [
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
-    poison: { from: 'EXPECTED_SCENARIOS = 129;', to: 'EXPECTED_SCENARIOS = 128;' },
+    poison: { from: 'EXPECTED_SCENARIOS = 132;', to: 'EXPECTED_SCENARIOS = 131;' },
     controlRc: 4,
     controlCause: 'добавлены или потеряны',
     mutation: { from: 'if (scenarios.length !== EXPECTED_SCENARIOS) {', to: 'if (false) {' },
@@ -2799,7 +2822,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'carrier-isolation',
-    // ЕДИНСТВЕННАЯ запись ПРЯМОГО хода (`breaks`), и полярность тут не прихоть.
+    // Прямой ход (`breaks`) — изоляция, и полярность тут не прихоть.
     // Соседи выше стерегут ДВЕРЬ: дверь доказывается ослеплением, потому что
     // сломанная дверь молчит. Здесь предмет -- ИЗОЛЯЦИЯ окружения, и сломанная
     // изоляция не молчит, а красит: сценарии носителя стоят в ГОЛОВЕ массива
@@ -2812,11 +2835,26 @@ const SELF_CHECK_MUTATIONS = [
     // чего заражение как раз не делает.
     //
     // Почему красноты хватает как доказательства: единственная правка -- снятие
-    // трёх имён из списка стирания, и покраснеть от неё может только то, что
-    // эти имена КТО-ТО ставит. Ставят их ровно сценарии носителя, и больше
-    // никто. Значит краснота => протечка носителя, другой дороги нет.
+    // трёх имён носителя и дверцы из списка стирания, и покраснеть от неё может
+    // только то, что эти имена КТО-ТО ставит. Ставят их ровно сценарии носителя,
+    // и больше никто. Значит краснота => протечка носителя, другой дороги нет.
+    // Дверцу снимать обязан тот же зуб: молчание = носитель=mod И дверца открыта;
+    // без дверцы хвост едет при закрытой дверце, где сплайс законно работает.
     breaks: {
-      from: '  ...Object.values(CARRIER_KEY),\n',
+      from: "  ...Object.values(CARRIER_KEY),\n  'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS',\n",
+      to: '',
+    },
+    expectRc: 1,
+    expectCause: 'MISMATCH ',
+  },
+  {
+    name: 'door-isolation',
+    // Сестра carrier-isolation: дверца в том же списке стирания. Сломанная
+    // изоляция красит, а не молчит — сценарии *-carrier-mod ставят дверцу в
+    // process.env, и без имени в ENV_KEYS *-door-shut (и хвост) едут в мире
+    // открытой дверцы, где carrier=mod законно молчит.
+    breaks: {
+      from: "  'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS',\n",
       to: '',
     },
     expectRc: 1,
