@@ -10432,7 +10432,13 @@ __interface_gate() {
     echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- статус отсутствует, пуст или неполон (отказ прибора)" >&2
     return 2
   fi
-  __status_kind="$(__interface_gate_classify_status "$__status_line")"
+  # CONSTRAINT: отказ самого классификатора -- НЕ ИЗМЕРЕНО, а не исход образа.
+  # Подстановка без проверки кода вернула бы пустую строку, и разбор ниже отнёс
+  # бы её в ветку «bad», обвинив образ в том, что сломался прибор.
+  if ! __status_kind="$(__interface_gate_classify_status "$__status_line")"; then
+    echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- классификатор статуса отказал (отказ прибора)" >&2
+    return 2
+  fi
   if [[ "$__status_kind" =~ ^exited\ ([0-9]{1,3})$ ]]; then
     GATE_RC=$((10#${BASH_REMATCH[1]}))
   elif [[ "$__status_kind" =~ ^signaled\ ([0-9]{1,3})$ ]]; then

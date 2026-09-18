@@ -490,8 +490,16 @@ t5() {
   load_helpers
   local fail=0
   t5_case() {
-    local input="$1" expected="$2" got
-    got="$(__interface_gate_classify_status "${input}")"
+    local input="$1" expected="$2" got rc=0
+    # CONSTRAINT: код подстановки захватывается -- отказ прибора обязан краснеть
+    # отдельно от несовпадения ответа, иначе пустой got читался бы как «ответил
+    # не то», и зуб обвинил бы классификатор в чужой поломке.
+    got="$(__interface_gate_classify_status "${input}")" || rc=$?
+    if (( rc != 0 )); then
+      echo "T5 FAIL: «${input}» классификатор ОТКАЗАЛ кодом ${rc}"
+      fail=1
+      return 0
+    fi
     if [[ "${got}" != "${expected}" ]]; then
       echo "T5 FAIL: «${input}» expected ${expected}, got ${got}"
       fail=1
