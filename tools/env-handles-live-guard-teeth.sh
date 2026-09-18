@@ -13,7 +13,7 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GUARD="${GUARD:-$KIT/tools/env-handles-live-guard.sh}"
-EXPECTED_TEETH=13
+EXPECTED_TEETH=15
 
 PASSED=0; FAILED=0; RAN=0; WORKDIR=''
 cleanup() { if [[ -n "${WORKDIR:-}" ]]; then rm -rf "${WORKDIR}"; fi; }
@@ -28,6 +28,10 @@ bad() { FAILED=$((FAILED + 1)); printf '  ПРОВАЛ %s\n' "$1"; }
 
 CTRL=CTRL_HANDLE
 mkdir -p "$WORKDIR/ours"
+# CONSTRAINT: дом --ours обязан быть НЕпустым во всех зубах, кроме зуба 14:
+# гвард роняет прибор на молчащем доме. Файл нейтрален -- ни одного имени
+# ручки в нём нет, иначе он зеленил бы чужие зубы.
+printf '// нейтральный файл фикстуры\n' > "$WORKDIR/ours/placeholder.ts"
 
 # Фикстура образа: контрольная ручка ЧИТАЕТСЯ (e.CTRL_HANDLE), NUL внутри.
 mk_image() {   # $1 -- добавочный текст
@@ -207,8 +211,40 @@ tooth_13() {
   else bad "13 ждали rc=5, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
+# 14. дом --ours без единого сканируемого файла -> 2 (молчащий дом неотличим
+#     от дома без читателей: именно так живая ручка получила «бесхозная»)
+tooth_14() {
+  RAN=$((RAN + 1))
+  mk_image 'let q=cfg.LIVE_FOURTEEN;'
+  mk_settings '{"LIVE_FOURTEEN":"x"}'
+  mkdir -p "$WORKDIR/empty-home"
+  rm -f "$WORKDIR/empty-home"/*
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --ours "$WORKDIR/empty-home" --label t14 2>&1) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"ПРИБОР НЕДОСТУПЕН"* && "$GUARD_OUT" != *"ВЕРДИКТ"* ]]; then
+    ok '14 молчащий дом --ours -> 2 без вердикта'
+  else bad "14 ждали rc=2 ПРИБОР НЕДОСТУПЕН без ВЕРДИКТ, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 15. читатель на Rust засчитывается: std::env::var в .rs -- живой читатель,
+#     потому что claude-hooks запускаются потомками Claude Code
+tooth_15() {
+  RAN=$((RAN + 1))
+  mk_image 'let q=cfg.UNRELATED_FIFTEEN;'
+  mk_settings '{"RUST_FIFTEEN":"x"}'
+  printf 'let d = std::env::var("RUST_FIFTEEN").ok();\n' > "$WORKDIR/ours/hook.rs"
+  run_guard --label t15
+  local rc=$GUARD_RC out=$GUARD_OUT
+  rm -f "$WORKDIR/ours/hook.rs"
+  if [[ $rc -eq 0 && "$out" == *"читает наш код 1"* ]]; then
+    ok '15 читатель на Rust засчитан'
+  else bad "15 ждали rc=0 и «читает наш код 1», получили rc=$rc :: $out"; fi
+}
+
 tooth_1; tooth_2; tooth_3; tooth_4; tooth_5; tooth_6; tooth_7
 tooth_8; tooth_9; tooth_10; tooth_11; tooth_12; tooth_13
+tooth_14; tooth_15
 
 printf '%s прошло, %s провалов, ожидалось %s\n' "$PASSED" "$FAILED" "$EXPECTED_TEETH"
 if [[ $RAN -ne $EXPECTED_TEETH ]]; then

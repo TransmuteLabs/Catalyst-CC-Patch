@@ -32,9 +32,19 @@ set -u
 exec python3 - "$@" <<'PY'
 import json, os, re, sys
 
-CODE_EXT = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".sh", ".zsh", ".bash")
+# CONSTRAINT: .rs входит не для полноты списка, а по замеру: живой читатель
+# CLAUDE_OPC_DIR -- std::env::var в 10 файлах claude-hooks, а это ПОТОМКИ
+# Claude Code, наследующие наш env. Без .rs гвард объявлял живую ручку
+# бесхозной -- ложная тревога того самого класса, который он ловит.
+# CONSTRAINT: .md / .toml / .json сюда НЕ входят: упоминание имени в доке
+# или в конфиге легализовало бы мёртвую ручку, читателя у неё нет.
+CODE_EXT = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".sh", ".zsh",
+            ".bash", ".rs")
+# CONSTRAINT: target -- продукт сборки Rust. Он попал сюда вместе с .rs: без
+# него гвард читал бы сгенерированный код как наш и мог объявить читателем то,
+# чего в исходниках нет (а заодно обходил бы дерево в тысячи раз дольше).
 SKIP_DIR = {".git", "node_modules", "dist", "distros", "versions", "__pycache__",
-            ".venv", "cache", "tool-results"}
+            ".venv", "cache", "tool-results", "target"}
 DEFAULT_IMAGE = os.path.expanduser("~/.tweakcc/native-claudejs-orig.js")
 DEFAULT_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 # Ручка контроля: замерена 19.09 на 2.1.276 -- ровно одно место чтения.
@@ -108,11 +118,15 @@ def present_in_image(img, name):
 
 
 def collect_our_code(dirs):
+    # CONSTRAINT: дом, объявленный --ours и не давший НИ ОДНОГО файла, роняет
+    # ПРИБОР (код 2), а не зеленит предмет: молчащий дом неотличим от дома без
+    # читателей, и именно так живая ручка получает вердикт «бесхозная».
     out = []
     for d in dirs:
         if not os.path.isdir(d):
             sys.stderr.write("env-handles-live-guard: --ours не каталог: %s\n" % d)
             sys.exit(2)
+        before = len(out)
         for dp, dn, fn in os.walk(d):
             dn[:] = [x for x in dn if x not in SKIP_DIR]
             for f in fn:
@@ -124,6 +138,11 @@ def collect_our_code(dirs):
                         out.append(open(p, "r", encoding="utf-8", errors="replace").read())
                     except OSError:
                         continue
+        if len(out) == before:
+            sys.stderr.write(
+                "env-handles-live-guard: ПРИБОР НЕДОСТУПЕН -- дом --ours не дал ни "
+                "одного файла расширений %s: %s\n" % (" ".join(CODE_EXT), d))
+            sys.exit(2)
     return out
 
 
