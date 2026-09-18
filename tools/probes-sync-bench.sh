@@ -113,6 +113,8 @@ mk_kit() {
   # PROBE_FILES и не про пару дома словарей: те так и лежали копиями ниже.
   local __names __list_rc __err
   __err="$(dirname "$dst")/list-err" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен путь журнала опроса набора\n' >&2; exit 2; }
+  # --list читает предмет: make_env до опроса, иначе ручки машины входят в канон.
+  make_env "$(dirname "$dst")"
   __names=$(bash "$dst/scripts/probes-sync.sh" --list 2>"$__err"); __list_rc=$?
   # Положительный контроль: молчащий или отказавший опрос означает, что
   # игрушечный канон вышел бы пустым МОЛЧА.
@@ -141,6 +143,10 @@ make_env() {
   # подмена прибора только через CLAUDE_CRONTAB_CMD и только в сценариях
   # 15-18, где заглушка лежит во временном каталоге стенда.
   export CLAUDE_SCHEDULE_PLATFORM=Darwin
+  # CONSTRAINT: предмет читает HOME (probes-sync.sh:54, :61) как запас к
+  # CLAUDE_CONFIG_DIR / CLAUDE_LAUNCH_AGENTS_DIR; без пина замер едет от
+  # дома машины.
+  export HOME="$root/home"
   # CONSTRAINT: ГЕРМЕТИЧНОСТЬ -- ЭТО ПОЛНЫЙ НАБОР РУЧЕК, А НЕ ТЕ, ЧТО ВСПОМНИЛИ.
   # Ручки, которые инструмент читает, а стенд НЕ пинит, приезжают из окружения
   # МАШИНЫ и меняют предмет замера: прогон из снимка экспортирует
@@ -151,8 +157,8 @@ make_env() {
   # ставит её СВОИМ вызовом (`ИМЯ=... bash "$script"`), а не наследованием.
   # Остальное окружение инструмента запинено выше: CLAUDE_CONFIG_DIR,
   # CLAUDE_PROBES_DIR, CLAUDE_JUDGE_TOOLS_DIR, CLAUDE_LAUNCH_AGENTS_DIR,
-  # PROBES_SYNC_LOCK, CLAUDE_SCHEDULE_PLATFORM; CLAUDE_HOME_DIR инструмент
-  # выводит сам (probes-sync.sh:54) и из окружения не читает.
+  # PROBES_SYNC_LOCK, CLAUDE_SCHEDULE_PLATFORM, HOME; CLAUDE_HOME_DIR
+  # инструмент выводит сам (probes-sync.sh:54) и из окружения не читает.
   local __leaked=""
   [[ -n "${CATALYST_TRACKED_WITNESS:-}" ]] && __leaked="$__leaked CATALYST_TRACKED_WITNESS"
   [[ -n "${CLAUDE_CRONTAB_CMD:-}" ]] && __leaked="$__leaked CLAUDE_CRONTAB_CMD"
@@ -161,6 +167,22 @@ make_env() {
     say "  (стенд снял ручки окружения машины:$__leaked -- замер герметичен)"
   fi
   mkdir -p "$CLAUDE_CONFIG_DIR" "$CLAUDE_LAUNCH_AGENTS_DIR"
+  local __grc=0 __gout
+  __gout=$(bash "$REAL_KIT/tools/stand-env-guard.sh" \
+    --subject "$KIT/scripts/probes-sync.sh" \
+    --pinned CLAUDE_CONFIG_DIR \
+    --pinned CLAUDE_PROBES_DIR \
+    --pinned CLAUDE_JUDGE_TOOLS_DIR \
+    --pinned CLAUDE_LAUNCH_AGENTS_DIR \
+    --pinned PROBES_SYNC_LOCK \
+    --pinned CLAUDE_SCHEDULE_PLATFORM \
+    --pinned HOME \
+    --label probes-sync) || __grc=$?
+  printf '%s\n' "$__gout"
+  if (( __grc != 0 )); then
+    say "probes-sync-bench: ОТКАЗ -- окружение не герметично (guard rc=$__grc)"
+    exit 2
+  fi
 }
 
 wait_file() {   # <путь> [шагов по 0.05 с]

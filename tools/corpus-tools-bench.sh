@@ -936,7 +936,45 @@ unset SWEEP_LEADER SWEEP_KIT SWEEP_SELF SWEEP_LAST_N
 TW_FIXTURE="$ROOT/tweakcc-fixture"
 mkdir -p "$TW_FIXTURE"
 printf '{}\n' > "$TW_FIXTURE/config.json"
+# CONSTRAINT: TWEAKCC_CONFIG_DIR -- первичный той же конструкции, что читает
+# XDG_CONFIG_HOME (sweep.sh:1205-1209). Стенд пинит первичный; запас машины
+# снимается, иначе замер едет от XDG машины.
+export TWEAKCC_CONFIG_DIR="${BENCH_TW_HOME:-$TW_FIXTURE}"
+unset XDG_CONFIG_HOME
+# CONSTRAINT: TMPDIR читает sweep.sh:1184 как запас к CLAUDE_PATCH_LOCK.
+# Пустой -- стенд задаёт свой; иначе ПРОПУСКАЕТСЯ значение машины (форма
+# mktemp под ${TMPDIR:-/tmp} не меняется). Стенд значением не владеет,
+# поэтому гварду объявляется --declared-machine, а не --pinned.
+if [[ -z "${TMPDIR:-}" ]]; then
+  export TMPDIR="$ROOT/tmp"
+  mkdir -p "$TMPDIR"
+fi
+# CONSTRAINT: HOME читают sweep.sh и fetch-corpus.sh как запас к CORPUS_DIR /
+# TWEAKCC_CONFIG_DIR. Значение НЕ подменяется -- иначе git/mktemp сценариев
+# едут в игрушечный дом; стенд им не владеет и объявляет его гварду
+# --declared-machine. --pinned здесь утверждал бы ложное владение.
+if [[ -z "${HOME:-}" ]]; then
+  export HOME="$ROOT/home"
+  mkdir -p "$HOME"
+fi
 
+run_stand_env_guard() {
+  local __s1=$1 __s2=$2 __grc=0 __gout
+  __gout=$(bash "$KIT/tools/stand-env-guard.sh" \
+    --subject "$__s1" --subject "$__s2" \
+    --pinned TWEAKCC_CONFIG_DIR \
+    --declared-machine HOME \
+    --declared-machine TMPDIR \
+    --label corpus-tools) || __grc=$?
+  printf '%s\n' "$__gout"
+  if (( __grc != 0 )); then
+    say "corpus-tools-bench: ОТКАЗ -- окружение не герметично (guard rc=$__grc)"
+    exit 2
+  fi
+}
+# Гвард зовут там, где есть предмет: после mk_kit в прогоне сценариев
+# и в начале self_check. --table-check/--lock-probe копий стенда
+# запускаются не из кита (сценарий 43), $KIT там не дом гварда.
 run_sweep() {   # kit, corpus-dir, list, аргументы...
   local kit=$1 cdir=$2 list=$3; shift 3
   # Стенд всегда называет значение: 5 имитирует боевое умолчание, а явно
@@ -10188,6 +10226,7 @@ self_check() {
 
 if [[ "${1:-}" == "--self-check" ]]; then
   check_mut_tables || exit 4
+  run_stand_env_guard "$KIT/tools/sweep.sh" "$KIT/tools/fetch-corpus.sh"
   __rc=0; self_check || __rc=$?
   if (( __rc != 0 )); then __DONE=1; exit "$__rc"; fi
   __DONE=1; exit 0
@@ -10198,6 +10237,7 @@ K=$(mktemp -d "$ROOT/kit.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН
 [ -n "$K" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь копии кита пуст\n' >&2; exit 2; }
 use_corpus "$(mktemp -d "$ROOT/corp.XXXXXX")"
 mk_kit "$K"; mk_corpus "$C"
+run_stand_env_guard "$K/tools/sweep.sh" "$K/tools/fetch-corpus.sh"
 # Версия оболочки -- часть условий прогона: текст фатальной ошибки подстановки
 # и поведение пустого массива под `set -u` у bash 3.2 и bash 4+ разные, и
 # причина отказа, запиненная на одну из них, недоказуема на другой машине.

@@ -450,6 +450,62 @@ the CONVEYOR swallows its non-zero code as a WARNING, because the image is
 already built and correct by then; the claim «never exits fatally» belongs to
 the caller, not to the script (round 28, F-11).
 
+## Stand environment guard
+
+`tools/stand-env-guard.sh` derives the set of environment handles a subject
+reads (shell `${NAME:-` / `${NAME}` / `$NAME`, python `os.environ.get` /
+`os.environ[]` / `os.getenv`, js `process.env.NAME` / `process.env["NAME"]`)
+and classifies each name into one of four baskets: pinned (`--pinned`: the
+stand declared it OWNS the value, and the name is non-empty in the caller),
+declared-machine (`--declared-machine`: the subject reads the name and the
+stand deliberately lets the MACHINE's value through -- `--pinned` there would
+claim an ownership the stand does not have, so the two are distinct and a
+name in both is a contradiction, exit 2), inherited (declared nowhere and
+present -- the measurement would ride the machine; refuse), clean (unset --
+acceptable). Exit codes: 0 hermetic; 3 inherited names; 4 a `--pinned` name
+that the subject reads is empty or unset (a `--declared-machine` name that is
+unset is NOT a refusal -- it is disclosed as `NAME(не выставлена)`); 2 an
+unreadable `--subject` or a contradictory declaration; 5 zero reads unless
+`--allow-zero`.
+
+On a green run the guard prints exactly ONE line -- the counts, with the
+declared-machine names inline, because a limit nobody names is
+indistinguishable from a limit that was never there. The per-name basket
+listing appears ONLY on a refusal: the guard is called 110 times in one
+`probes-sync-bench` run, and per-name printing on green buried the evidence
+of a real refusal under 770 lines (7 pinned names x 110 calls).
+
+Teeth: `tools/stand-env-guard-teeth.sh` (16, count pinned). This wave wires
+the guard into two of nine stands (`tools/probes-sync-bench.sh`,
+`tools/corpus-tools-bench.sh`); the rest are a later wave.
+
+## Environment handle liveness guard
+
+`tools/env-handles-live-guard.sh` answers the question no other instrument
+asks: does anything READ the handles we declare? Every key of `env` in a
+settings file must have a reader in one of four places -- the host image (a
+structural access: any identifier dot NAME, or a bracket access preceded by
+something indexable), our own CODE (documentation does not count: a mention
+in a doc would legalize a dead handle), a `${NAME}` substitution elsewhere in
+the same settings file (how an MCP server entry takes a key from `env`), or
+an explicitly `--external` declared consumer outside every inspected home.
+
+A handle whose name the image knows but never reads is reported as МЁРТВАЯ; a
+handle no one anywhere reads is БЕСХОЗНАЯ; either is exit 3. Exit 2 covers an
+unreadable image, a `--external` name that turns out to HAVE a reader (the
+owner was named twice and once wrongly), and -- the positive control -- a
+`--control` handle that is not found readable, because an instrument that
+cannot find a known-live reader has no right to a verdict on the rest. Exit 5
+is zero declared handles (ПУСТО ≠ НОЛЬ).
+
+The image is read with python latin-1 only: it carries NUL bytes, and grep
+returns zero on it where python finds eleven. Teeth:
+`tools/env-handles-live-guard-teeth.sh` (13, count pinned).
+
+Written because `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=99999` sat in the
+settings for an unknown number of versions while 2.1.276 read it nowhere --
+its name lived only in two of upstream's own name lists.
+
 ## Environment knobs
 
 The kit reads these; everything else it uses is derived. A knob that removes
