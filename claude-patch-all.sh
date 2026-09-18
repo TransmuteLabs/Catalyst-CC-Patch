@@ -4639,8 +4639,13 @@ fi
 # только аудит (круг 20, D-1). Тест-ручки домов снимаются: гейт меряет
 # НАСТОЯЩИЙ дом, а не тот, что назвало окружение оператора.
 echo "==> Раскатка инструментов судьи"
-env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \
-  bash "$(dirname "$0")/scripts/probes-sync.sh" --diff 9>&- || {
+if env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \
+     bash "$(dirname "$0")/scripts/probes-sync.sh" --diff 9>&-; then
+  # #63: сверка --diff на УСПЕХЕ молчит (probes-sync.sh выходит 0 без echo).
+  # Стадия обязана позитивно подтвердить исход в логе, иначе свип-присутствие
+  # не отличит успех от молчаливого пропуска. log_re стадии требует эту строку.
+  echo "Раскатка инструментов судьи: расхождений нет — раскатка полная"
+else
   __rc=$?
   case $__rc in
     5) echo "РАСКАТКИ НЕТ: на этой машине не заведено ни одного файла — пропуск (rc=5)" ;;
@@ -4666,7 +4671,7 @@ env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \
     *) echo "СВЕРКА РАСКАТКИ ОТВЕТИЛА НЕОЖИДАННЫМ КОДОМ (rc=$__rc): вердикта нет" >&2
        exit 1 ;;
   esac
-}
+fi
 
 # --- 0d. the numbers stated in the docs must be the numbers that are declared --
 # A count written in prose has no reader, so it goes stale by default. This is
@@ -5768,6 +5773,31 @@ python3 "$(dirname "$0")/tools/orphan-stand-gate.py" 9>&- || {
     2) echo "ПЕРЕПИСЬ ИСПОЛНИТЕЛЕЙ: прибор не может мерить (причины выше)" >&2
        exit 2 ;;
     *) echo "ПЕРЕПИСЬ ИСПОЛНИТЕЛЕЙ: неизвестный ответ гейта ($__rc)" >&2
+       exit 1 ;;
+  esac
+}
+
+# --- перепись стадий конвейера: каждая стадия объявлена с пином (#63) ---------
+# Корень #63: стадия `echo "==> ..."` пиняема по умолчанию НЕ была — новую можно
+# было добавить, не объявив, чем ловится её провал, и она текла молчаливо-зелёной.
+# Дом объявлений — tools/pipeline-stages.tsv; гейт census роняет прогон, если
+# стадия источника не заявлена строкой канона, если строка канона мертва, если
+# pin sweep:<field> висит на несуществующем поле sweep.sh, либо счёт стадий
+# разошёлся с EXPECTED_STAGES. Так "стадия пиняема по умолчанию".
+EXPECTED_STAGES=31
+echo "==> Перепись стадий конвейера"
+python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
+    --source "$0" \
+    --table "$(dirname "$0")/tools/pipeline-stages.tsv" \
+    --sweep "$(dirname "$0")/tools/sweep.sh" \
+    --expected "$EXPECTED_STAGES" 9>&- || {
+  __rc=$?
+  case $__rc in
+    2) echo "ПЕРЕПИСЬ СТАДИЙ: стадия конвейера не пиняется каноном (ОТКАЗы выше)" >&2
+       exit 2 ;;
+    3) echo "ПЕРЕПИСЬ СТАДИЙ: прибор не может мерить (нет/нечитаем файл, битый канон)" >&2
+       exit 3 ;;
+    *) echo "ПЕРЕПИСЬ СТАДИЙ: неизвестный ответ гейта ($__rc)" >&2
        exit 1 ;;
   esac
 }

@@ -1,0 +1,39 @@
+# Канон стадий конвейера claude-patch-all.sh (#63). Дом; перечень = проекция (--list).
+# Колонки (РОВНО 5, разделитель TAB): id  src_re  log_re  pin  condition
+#   src_re    — регэксп по ТЕКСТУ source-echo '==> ...' (покрытие+живучесть гейта census).
+#   log_re    — регэксп по строке ЛОГА прогона (подтверждение стадии для sweep-check).
+#   pin       — ловля провала: exit | sweep:<field> | EXEMPT:<основание> (обяз.).
+#   condition — участие в логе: always | cond-skip | cond-silent.
+# Логические строки покрывают ВСЕ source-echo '==>' конвейера (подпись=2 echo, пол=2,
+# активация=3). Счёт строк сверяется census --expected с EXPECTED_STAGES (дом — claude-patch-all.sh).
+config-backup-prune	Cleaning old config backups	Cleaning old config backups	exit	cond-silent
+unpacker-prune	Cleaning old unpacker builds	Cleaning old unpacker builds	exit	cond-silent
+install-pristine	Installing a pristine Claude Code	Installing a pristine Claude Code	exit	cond-silent
+parse-patch-code	Разбор вклеиваемого кода	Разбор вклеиваемого кода	exit	always
+heredoc-anchor-teeth	Зубы якоря heredoc	Зубы якоря heredoc	exit	always
+parse-checks-block	Разбор блока проверок	Разбор блока проверок	exit	always
+shell-forms	Формы оболочки	Формы оболочки	sweep:forms	always
+bench-judge-tools	\$\{KIT_BENCH_NAMES\[0\]\}	Стенд инструментов судьи	exit	cond-silent
+bench-costs	\$\{KIT_BENCH_NAMES\[1\]\}	Стенд моделей и цен	exit	cond-silent
+bench-probes-sync	\$\{KIT_BENCH_NAMES\[2\]\}	Стенд синхронизации проб	exit	cond-silent
+probes-rollout	Раскатка инструментов судьи	Раскатка инструментов судьи: расхождений нет|РАСКАТКИ НЕТ	exit	cond-skip
+docnum-sync-check	Сверка чисел в доках	Сверка чисел в доках	exit	always
+lock-inheritance-gate	Гейт наследования замка	Гейт наследования замка	exit	always
+docnum-anchor-census	Перепись якорей таблицы гейта чисел	Перепись якорей таблицы гейта чисел	exit	always
+docnum-teeth	Зубы гейта чисел	Зубы гейта чисел	exit	cond-silent
+executors-census	Перепись исполнителей инструментов	Перепись исполнителей инструментов	exit	always
+stage-census	Перепись стадий конвейера	Перепись стадий конвейера	exit	always
+unpacker-fetch	Fetching the unpacker	Fetching the unpacker	exit	cond-silent
+tweakcc-ui	Opening tweakcc	Opening tweakcc	EXEMPT:интерактивный TUI, rc намеренно проглочен || true	cond-silent
+tweakcc-apply	Applying tweakcc	Applying tweakcc	sweep:twok	always
+our-patches	Applying our multi-provider patches	Applying our multi-provider patches	sweep:ours	always
+bytecode-census	Ценз байткода изменённых модулей	Ценз байткода изменённых модулей	exit	always
+signing	Подпис	Re-signed with|Подпись ПРОПУЩЕНА|Подписи у образа	exit	cond-skip
+verifying	Verifying	Verifying	sweep:ok	always
+checks-floor	Пол проверок	ПОЛ ПРОВЕРОК СОШЁЛСЯ|Пол проверок ПРОПУЩЕН	sweep:floor	cond-skip
+interface-gate	Гейт интерфейса ПРОПУЩЕН	Interface:|Гейт интерфейса ПРОПУЩЕН	sweep:iface	cond-skip
+interface-term-teeth	Зубы доставки TERM	Зубы доставки TERM	exit	always
+judge-serves	СУДЬЯ СЛУЖИТ	СУДЬЯ СЛУЖИТ	exit	cond-silent
+cleanup-old-versions	Cleaning up previous versions	Cleaning up previous versions	exit	cond-silent
+activation	Активация|РАСХОЖДЕНИЕ ОБЪЯВЛЕНО	Активация: собранная версия активна	exit	cond-silent
+refresh-model-prices	Refreshing model prices	Refreshing model prices	EXEMPT:refresh цен объявлен never-fatal, SKIP_MODELS на каждой сборке	cond-silent
