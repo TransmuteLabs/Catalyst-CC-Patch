@@ -65,6 +65,9 @@ ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
 # отличает сужение по окну от поиска по всему образу.
 DECOY_BACK = 2_000_000
+# Потолок числа вхождений литерального якоря: больше -- якорь мутировал бы чужие
+# сайты, и такому зубу место в derived (см. edits_literal, #149).
+CEILING = 8
 
 
 class Refusal(Exception):
@@ -100,9 +103,9 @@ def read_table() -> list[dict[str, str]]:
         if line.startswith("#") or not line.strip():
             continue
         parts = line.rstrip("\n").split("\t")
-        if len(parts) != 7:
-            raise Refusal(f"строка таблицы не из семи полей: {parts[:2]}")
-        rows.append(dict(zip(("id", "check", "kind", "anchor", "repl", "also", "note"),
+        if len(parts) != 8:
+            raise Refusal(f"строка таблицы не из восьми полей: {parts[:2]}")
+        rows.append(dict(zip(("id", "check", "kind", "anchor", "repl", "also", "expect", "note"),
                              parts)))
     return rows
 
@@ -113,11 +116,35 @@ def edits_literal(base: bytes, row: dict[str, str]) -> list[tuple[int, bytes]]:
     if len(repl) > len(anchor):
         raise Refusal(f"{row['id']}: замена длиннее якоря ({len(repl)} > {len(anchor)})")
     repl = repl.ljust(len(anchor))
+    # Ожидаемое число вхождений -- ОБЯЗАТЕЛЬНОЕ поле: пустое/нецелое = отказ, а не
+    # молчаливый пропуск (молчащее поле вернуло бы отказ, открывающийся молчанием).
+    raw = row.get("expect", "")
+    try:
+        expect = int(raw)
+    except (TypeError, ValueError):
+        raise Refusal(f"{row['id']}: ожидаемое число вхождений не целое: {raw!r}")
+    if expect < 1:
+        raise Refusal(f"{row['id']}: ожидаемое число вхождений < 1: {expect}")
+    if expect > CEILING:
+        # Прежний отказ «якорь слишком широк», теперь по ОБЪЯВЛЕННОМУ числу:
+        # литеральный зуб, ждущий больше потолка вхождений, мутировал бы чужие
+        # сайты -- его место в derived (как V4 с 12 при потолке 8).
+        raise Refusal(f"{row['id']}: якорь слишком широк -- ждёт {expect} вхождений "
+                      f"при потолке {CEILING}; такому зубу место в derived")
     spots = [m.start() for m in re.finditer(re.escape(anchor), base)]
+    n = len(spots)
     if not spots:
         raise Refusal(f"{row['id']}: якорь не найден в образе")
-    if len(spots) > 8:
-        raise Refusal(f"{row['id']}: якорь слишком широк -- {len(spots)} вхождений")
+    if n != expect:
+        # #149: два состояния больше не смешиваются в один текст. Живое число
+        # разошлось с ожидаемым -- сдвинулась ПЛОЩАДКА (апстрим завёл или убрал
+        # вхождения того же идиома), зуб цел; направление названо. Это НЕ «якорь
+        # слишком широк» -- та ветка выше и судит по ОБЪЯВЛЕННОМУ числу.
+        direction = "выросло" if n > expect else "убыло"
+        raise Refusal(f"{row['id']}: число вхождений {direction} -- ждали {expect}, "
+                      f"нашли {n}; сдвинулась площадка (апстрим завёл/убрал "
+                      f"вхождения идиома), зуб цел -- перемерить и обновить "
+                      f"ожидаемое поле")
     return [(s, repl) for s in spots]
 
 
@@ -756,12 +783,71 @@ def _tooth_real_patch_src() -> str | None:
     return None
 
 
+def self_check() -> int:
+    """Герметичная самопроверка ветвей edits_literal (#149): без образа и замка.
+
+    Каждый сценарий обязан провалиться при удалении СВОЕЙ ветви -- иначе разводка
+    двух отказов зелена вакуумно (в норме n==expect, ветвь дрейфа не срабатывает,
+    и её удаление обычный прогон не заметит). База b"x MARK y MARK z" несёт ровно
+    два вхождения MARK.
+    """
+    B = b"x MARK y MARK z"
+
+    def r(anchor: str, repl: str, expect) -> dict[str, str]:
+        return {"id": "T", "anchor": anchor, "repl": repl, "expect": expect}
+
+    # (имя, база, строка, ожидание): ("edits", N) -- вернуть N правок;
+    # ("refuse", [подстроки]) -- отказ, несущий все подстроки.
+    cases = [
+        ("совпало",        B, r("MARK", "MARX", 2),           ("edits", 2)),
+        ("дрейф-вверх",    B, r("MARK", "MARX", 1),           ("refuse", ["выросло", "ждали 1", "нашли 2", "площадка"])),
+        ("дрейф-вниз",     B, r("MARK", "MARX", 3),           ("refuse", ["убыло", "ждали 3", "нашли 2", "площадка"])),
+        ("выше-потолка",   B, r("MARK", "MARX", CEILING + 1), ("refuse", ["слишком широк", "derived"])),
+        ("нецелое",        B, r("MARK", "MARX", "-"),         ("refuse", ["не целое"])),
+        ("меньше-1",       B, r("MARK", "MARX", "0"),         ("refuse", ["< 1"])),
+        ("якорь-пропал",   B, r("ZZZZ", "ZZZ", 1),            ("refuse", ["не найден"])),
+        ("замена-длиннее", B, r("MARK", "MARKX", 2),          ("refuse", ["замена длиннее якоря"])),
+    ]
+    bad = 0
+    for name, base, row, exp in cases:
+        kind = exp[0]
+        try:
+            res = edits_literal(base, row)
+        except Refusal as exc:
+            if kind != "refuse":
+                bad += 1
+                print(f"checks-teeth self-check: {name}: ЖДАЛИ РЕЗУЛЬТАТ, отказ «{exc}»", flush=True)
+                continue
+            miss = [s for s in exp[1] if s not in str(exc)]
+            if miss:
+                bad += 1
+                print(f"checks-teeth self-check: {name}: отказ без слов {miss}: «{exc}»", flush=True)
+            else:
+                print(f"checks-teeth self-check: {name}: OK", flush=True)
+            continue
+        if kind == "refuse":
+            bad += 1
+            print(f"checks-teeth self-check: {name}: ЖДАЛИ ОТКАЗ, получили {len(res)} правок", flush=True)
+        elif len(res) != exp[1]:
+            bad += 1
+            print(f"checks-teeth self-check: {name}: ждали {exp[1]} правок, получили {len(res)}", flush=True)
+        else:
+            print(f"checks-teeth self-check: {name}: OK", flush=True)
+    print(f"checks-teeth self-check: ИТОГ сценариев={len(cases)} провалов={bad}", flush=True)
+    return 0 if bad == 0 else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="зубы реестра проверок")
     ap.add_argument("--image", help="собранный образ (по умолчанию -- цель ~/.local/bin/claude)")
     ap.add_argument("--jobs", type=int, default=3, help="сколько мутаций мерить разом")
     ap.add_argument("--id", help="прогнать только названные строки таблицы (через запятую)")
+    ap.add_argument("--self-check", action="store_true",
+                    help="герметичная самопроверка ветвей edits_literal (#149), без образа и замка")
     opts = ap.parse_args()
+
+    if opts.self_check:
+        return self_check()
 
     # Код 2 «контракт вызова» -- тот же, которым соседи validate/adjudicate
     # отвергают --jobs < 1 (круг 28, F-10). Прежний молчаливый подъём
