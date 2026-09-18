@@ -141,6 +141,25 @@ make_env() {
   # подмена прибора только через CLAUDE_CRONTAB_CMD и только в сценариях
   # 15-18, где заглушка лежит во временном каталоге стенда.
   export CLAUDE_SCHEDULE_PLATFORM=Darwin
+  # CONSTRAINT: ГЕРМЕТИЧНОСТЬ -- ЭТО ПОЛНЫЙ НАБОР РУЧЕК, А НЕ ТЕ, ЧТО ВСПОМНИЛИ.
+  # Ручки, которые инструмент читает, а стенд НЕ пинит, приезжают из окружения
+  # МАШИНЫ и меняют предмет замера: прогон из снимка экспортирует
+  # CATALYST_TRACKED_WITNESS для боевого конвейера, и игрушечный кит (он вне
+  # git) начинал судить ценз по НАСТОЯЩЕМУ свидетелю -- мутация 10 краснела
+  # чужой причиной на обеих площадках при зелёном прогоне с чистого шелла.
+  # Поэтому непинимые ручки здесь СНИМАЮТСЯ; сценарий, которому ручка нужна,
+  # ставит её СВОИМ вызовом (`ИМЯ=... bash "$script"`), а не наследованием.
+  # Остальное окружение инструмента запинено выше: CLAUDE_CONFIG_DIR,
+  # CLAUDE_PROBES_DIR, CLAUDE_JUDGE_TOOLS_DIR, CLAUDE_LAUNCH_AGENTS_DIR,
+  # PROBES_SYNC_LOCK, CLAUDE_SCHEDULE_PLATFORM; CLAUDE_HOME_DIR инструмент
+  # выводит сам (probes-sync.sh:54) и из окружения не читает.
+  local __leaked=""
+  [[ -n "${CATALYST_TRACKED_WITNESS:-}" ]] && __leaked="$__leaked CATALYST_TRACKED_WITNESS"
+  [[ -n "${CLAUDE_CRONTAB_CMD:-}" ]] && __leaked="$__leaked CLAUDE_CRONTAB_CMD"
+  unset CATALYST_TRACKED_WITNESS CLAUDE_CRONTAB_CMD
+  if [[ -n "$__leaked" ]]; then
+    say "  (стенд снял ручки окружения машины:$__leaked -- замер герметичен)"
+  fi
   mkdir -p "$CLAUDE_CONFIG_DIR" "$CLAUDE_LAUNCH_AGENTS_DIR"
 }
 
@@ -539,7 +558,6 @@ scenario_10() {
   script="$root/kit/scripts/probes-sync.sh"
   victim='judge/replay.py'
   wit="$root/TRACKED.txt"
-  unset CATALYST_TRACKED_WITNESS || true
   bash "$script" --to-home >/dev/null 2>&1 || {
     LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
     bad '10 ценз репозитория: исходная раскатка отказала'; return; }
