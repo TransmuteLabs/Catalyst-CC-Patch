@@ -9,7 +9,10 @@
 #   2  прибор не смог измерить: корень недоступен, нет python3/lsof, lsof
 #      не прошёл положительный контроль, или битый/нечитаемый маркер аренды
 #   3  НЕ ИЗМЕРЕНО: имя попало под правило, а размер/возраст снять не удалось
-#      — частичная таблица не выдаётся и --apply не исполняется
+#      по правам/вводу-выводу — частичная таблица не выдаётся и --apply не
+#      исполняется. Исчезновение кандидата между обходом и stat СЮДА НЕ ВХОДИТ:
+#      это штатная гонка многовладельческого корня (живые дорожки удаляют
+#      параллельно) — свой счётчик, громкая строка «гонка: …», код 0.
 #
 # ОБЪЯВЛЕННАЯ АРЕНДА корня (после incident 16.09: возраст+размер — НЕ основание
 # сносить то, что читает живой замер; прополка 09:21 снесла корпуса 267-270
@@ -115,7 +118,7 @@ usage: bash tools/reap-heavy.sh [--apply] [--older-than-hours N] [--min-size-mb 
 
   без --apply     таблица кандидатов (path, mb, age_h, reason), ничего не сносит
   --apply         снести ровно кандидатов таблицы
-  --self-check    десять зубов на своей фикстуре; боевые корни не участвуют
+  --self-check    зубы на своей фикстуре; боевые корни не участвуют
 
 Занятые каталоги защищаются ОБЪЯВЛЕННОЙ АРЕНДОЙ: одна строка
   <каталог>/.reap-lease -> "reap-lease-v1 <unix-секунды-истечения> [причина]"
@@ -269,6 +272,18 @@ def die3(msg):
     sys.stderr.write(msg + '\n')
     sys.exit(3)
 
+# Исчезновение кандидата МЕЖДУ обходом и stat -- ШТАТНАЯ ГОНКА, не отказ.
+# Контраст с judge/compact.py (ОДНОВЛАДЕЛЬЧЕСКИЙ каталог: там исчезновение под
+# обходом считается сбоем -- владелец один, и никто не вправе удалять под замером).
+# Здесь корни МНОГОВЛАДЕЛЬЧЕСКИЕ (живые дорожки пишут и удаляют параллельно),
+# поэтому FileNotFoundError на stat -- нормальная гонка: считается своим
+# счётчиком, печатается громкой строкой и НЕ роняет прогон. Прочие отказы stat
+# (права, ввод-вывод) остаются die3 с причиной словами.
+race_vanished = []  # (путь, текст ошибки); только реально исчезнувшее под обходом
+
+def note_vanished(path, exc):
+    race_vanished.append((path, str(exc)))
+
 def parse_ver(s):
     parts = []
     for p in s.split('.'):
@@ -340,13 +355,20 @@ def under(root, path):
     return p == r or p.startswith(r + sep)
 
 def lstat_or_unmeasured(path):
+    # None -- кандидат исчез между обходом и stat (штатная гонка): вызывающий
+    # пропускает его. Прочие OSError (права, ввод-вывод) -- die3.
     try:
         return os.lstat(path)
+    except FileNotFoundError as exc:
+        note_vanished(path, exc)
+        return None
     except OSError as exc:
         die3("НЕ ИЗМЕРЕНО: не stat %s: %s" % (path, exc))
 
 def tree_bytes(path):
     st = lstat_or_unmeasured(path)
+    if st is None:
+        return None  # исчез между обходом и stat -- штатная гонка
     if stat.S_ISLNK(st.st_mode) or stat.S_ISREG(st.st_mode):
         return st.st_size, st.st_mtime
     if not stat.S_ISDIR(st.st_mode):
@@ -358,6 +380,9 @@ def tree_bytes(path):
                 fp = os.path.join(root, name)
                 try:
                     total += os.lstat(fp).st_size
+                except FileNotFoundError as exc:
+                    note_vanished(fp, exc)
+                    continue
                 except OSError as exc:
                     die3("НЕ ИЗМЕРЕНО: не размер %s: %s" % (fp, exc))
     except OSError as exc:
@@ -617,7 +642,10 @@ def add(path, reason, root):
         return
     if path_is_open(path):
         return
-    nbytes, mtime = tree_bytes(path)
+    measured = tree_bytes(path)
+    if measured is None:
+        return  # кандидат исчез между обходом и stat -- штатная гонка
+    nbytes, mtime = measured
     cands.append((path, nbytes, mtime, reason, root))
 
 # 1. временный каталог: cc-build-path-probe.* и копии зубов
@@ -632,6 +660,8 @@ if require_root_readable(tmp, 'tmp') and not reaped_root(tmp):
             add(path, 'tmp: pid %d dead' % pid, tmp)
         else:
             st = lstat_or_unmeasured(path)
+            if st is None:
+                continue  # исчез между обходом и stat -- штатная гонка
             if now - st.st_mtime >= age_limit:
                 add(path, 'tmp: no pid in name, older than %sh' % hours, tmp)
     for path in glob.glob(os.path.join(tmp, 'checks-teeth.*.bin')):
@@ -644,6 +674,8 @@ if require_root_readable(tmp, 'tmp') and not reaped_root(tmp):
             add(path, 'tmp: teeth copy, pid %d dead' % pid, tmp)
         else:
             st = lstat_or_unmeasured(path)
+            if st is None:
+                continue  # исчез между обходом и stat -- штатная гонка
             if now - st.st_mtime >= age_limit:
                 add(path, 'tmp: teeth copy, no pid, older than %sh' % hours, tmp)
 
@@ -658,6 +690,8 @@ if require_root_readable(matrix, 'cc-matrix/bin') and not reaped_root(matrix):
         if os.path.isdir(path) and not os.path.islink(path):
             continue
         st = lstat_or_unmeasured(path)
+        if st is None:
+            continue  # исчез между обходом и stat -- штатная гонка
         if now - st.st_mtime >= age_limit:
             add(path, 'matrix: older than %sh' % hours, matrix)
 
@@ -722,6 +756,8 @@ if require_root_readable(ccpatch, 'ccpatch') and not reaped_root(ccpatch):
         if not os.path.isdir(path) or os.path.islink(path):
             continue
         st = lstat_or_unmeasured(path)
+        if st is None:
+            continue  # исчез между обходом и stat -- штатная гонка
         if now - st.st_mtime >= age_limit:
             add(path, 'ccpatch: run dir older than %sh' % hours, ccpatch)
 
@@ -733,8 +769,11 @@ if require_root_readable(scratch, 'scratch') and not reaped_root(scratch):
                 path = os.path.join(root, name)
                 try:
                     st = os.lstat(path)
+                except FileNotFoundError as exc:
+                    note_vanished(path, exc)
+                    continue
                 except OSError as exc:
-                    die3("НЕ ИЗМЕРЕНО: не stat %s: %s" % (path, exc))
+                    die3("НЕ ИЗМЕРЕНО (скратч): не stat %s: %s" % (path, exc))
                 if not stat.S_ISREG(st.st_mode):
                     continue
                 if st.st_size < minsize:
@@ -779,11 +818,18 @@ for _d in sorted(lease_hits):
     _exp, _rsn = lease_hits[_d]
     print('аренда: пропущен %s до %s%s'
           % (_d, fmt_utc(_exp), (' причина: %s' % _rsn) if _rsn else ''))
+
+# ГРОМКАЯ СТРОКА ГОНКИ: кандидат, исчезнувший между обходом и stat -- штатная
+# гонка многовладельческого корня, не отказ. Печатается число (ноль тоже) и
+# путь каждого исчезнувшего, в обоих режимах.
+print('гонка: кандидатов исчезло под обходом: %d' % len(race_vanished))
+for _p, _e in race_vanished:
+    print('гонка: исчез %s (%s)' % (_p, _e))
 PY
 }
 
 # ---------------------------------------------------------------------------
-# --self-check: десять зубов, у каждого свой названный красный.
+# --self-check: зубы прибора, у каждого свой названный красный.
 # Мутации правят КОПИЮ; оригинал не трогается. Снимок + sha256, не git.
 # ---------------------------------------------------------------------------
 
@@ -1007,6 +1053,20 @@ elif n == 15:
     # неопределённый контекст перестаёт объявляться и не отличим от главного.
     old = "    __guard_ctx=$(exec sh -c " + "'echo $PPID'" + ") || __guard_ctx=\n"
     new = '    __guard_ctx=$$\n'
+elif n == 16:
+    # MUT_VANISH_DIE3: снять ветку штатной гонки в lstat_or_unmeasured --
+    # исчезнувший кандидат снова роняет прогон кодом 3 (до-#214 поведение).
+    old = ('    except FileNotFoundError as exc:\n'
+           '        note_vanished(path, exc)\n'
+           '        return None\n')
+    new = ''
+elif n == 17:
+    # MUT_PERM_SWALLOW: отказ stat по правам в обходе скратча перестаёт ронять
+    # прогон -- права-ошибка глотается как гонка (нечитаемое молча пропадает).
+    old = ('                except OSError as exc:\n'
+           '                    die3("НЕ ИЗМЕРЕНО (скратч): не stat %s: %s" % (path, exc))\n')
+    new = ('                except OSError as exc:\n'
+           '                    continue\n')
 c = text.count(old)
 if c != 1:
     sys.stderr.write('mutation %d anchor count=%d\n' % (n, c))
@@ -1686,6 +1746,85 @@ tooth_15() {
   tooth_pass
 }
 
+# ЗУБ 16: кандидат, исчезнувший МЕЖДУ обходом и stat -- штатная гонка
+# многовладельческого корня: rc 0, попадает в счётчик гонки, назван громкой
+# строкой. Триггер детерминирован швом REAP_LSOF: обёртка lsof на проверке
+# открытых файлов (-t) сносит кандидата и объявляет «не открыт» (rc 1) --
+# следующий stat в tree_bytes встречает исчезнувший путь. Обёртка кладётся
+# первой в PATH: require_lsof берёт её же (command -v lsof), а положительный
+# контроль (-p ... -Fn) обёртка проходит непустым ответом.
+tooth_16() {
+  TOOTH_N=16 TOOTH_NAME='исчез-под-обходом-гонка' TOOTH_RC=0
+  local fx out err rc bindir cand
+  fx=$(mktemp -d "$WORK/fx16.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  bindir=$WORK/lsofwrap16
+  mkdir -p "$bindir"
+  cat > "$bindir/lsof" <<'WRAP'
+#!/usr/bin/env bash
+# ЗУБ 16: -p <pid> -Fn -- положительный контроль require_lsof, дать непустой
+# ответ. -t <пути> -- проверка открытых: снести переданных кандидатов и
+# объявить «не открыт» (rc 1), чтобы следующий stat встретил исчезнувший путь.
+for a in "$@"; do
+  if [[ "$a" == "-p" ]]; then printf 'n/dev/null\n'; exit 0; fi
+done
+shift   # снять -t
+rm -rf "$@"
+exit 1
+WRAP
+  chmod +x "$bindir/lsof"
+  cand=$fx/cc-matrix/bin/242.wave.bin
+  out=$WORK/t16.out; err=$WORK/t16.err
+  PATH="$bindir:$PATH" bash "$TOOL" --fixture "$fx" --min-size-mb 1 >"$out" 2>"$err"
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "исчезновение кандидата уронило прогон rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  if ! grep -Eq 'гонка: кандидатов исчезло под обходом: [1-9][0-9]*' "$out"; then
+    tooth_fail "нет громкой строки гонки с ненулевым счётчиком: $(cat "$out")"
+    return 0
+  fi
+  if ! grep -Fq "гонка: исчез $cand" "$out"; then
+    tooth_fail "исчезнувший кандидат $cand не назван в счётчике гонки: $(cat "$out")"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 17: файл, нечитаемый по правам (родитель без x), в обходе скратча по-
+# прежнему роняет прогон кодом 3 с причиной словами -- это НЕ штатная гонка.
+# Триггер детерминирован: каталог с r без x -- обход видит имя (readdir), а
+# lstat ребёнка даёт EACCES независимо от d_type файловой системы.
+tooth_17() {
+  TOOTH_N=17 TOOTH_NAME='нечитаем-по-правам-отказ' TOOTH_RC=0
+  local fx out err rc locked
+  fx=$(mktemp -d "$WORK/fx17.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  locked=$fx/scratchpad/locked
+  mkdir -p "$locked"
+  python3 - "$locked/big" <<'PY'
+import sys
+open(sys.argv[1], 'wb').write(b'\0' * (2 * 1024 * 1024))
+PY
+  chmod 0400 "$locked"
+  out=$WORK/t17.out; err=$WORK/t17.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
+  rc=$?
+  chmod 0700 "$locked"   # вернуть x, иначе rm -rf "$WORK" не уберёт содержимое
+  if [[ "$rc" -ne 3 ]]; then
+    tooth_fail "нечитаемый по правам файл не дал rc=3 (дано rc=$rc) stderr=$(cat "$err")"
+    return 0
+  fi
+  if ! grep -Fq 'НЕ ИЗМЕРЕНО' "$err"; then
+    tooth_fail "код 3 без причины словами: $(cat "$err")"
+    return 0
+  fi
+  tooth_pass
+}
+
 run_one_tooth() {
   case "$1" in
     1) tooth_1 ;;
@@ -1703,6 +1842,8 @@ run_one_tooth() {
     13) tooth_13 ;;
     14) tooth_14 ;;
     15) tooth_15 ;;
+    16) tooth_16 ;;
+    17) tooth_17 ;;
     *) say "нет зуба $1"; return 2 ;;
   esac
 }
@@ -1757,21 +1898,21 @@ bin/claude
   HOLDER_PID=
 
   local n green=0 redctl=0
-  say "reap-heavy --self-check: зубы=15 (зелёная сторона на исходном тексте)"
-  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  say "reap-heavy --self-check: зубы=17 (зелёная сторона на исходном тексте)"
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     TOOTH_RC=0
     run_one_tooth "$n" || return 2
     if [[ "$TOOTH_RC" -eq 0 ]]; then
       green=$((green + 1))
     fi
   done
-  if [[ "$green" -ne 15 ]]; then
-    say "reap-heavy --self-check: ОТКАЗ — зелёных $green из 15"
+  if [[ "$green" -ne 17 ]]; then
+    say "reap-heavy --self-check: ОТКАЗ — зелёных $green из 17"
     return 1
   fi
 
   say "reap-heavy --self-check: красный контроль (мутация → именной красный → снимок)"
-  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     cp "$SNAP" "$TOOL"
     if ! mutate_copy "$TOOL" "$n"; then
       say "ЗУБ $n красный-контроль: ОТКАЗ прибора — якорь мутации не единственный"
@@ -1796,8 +1937,8 @@ bin/claude
     fi
     redctl=$((redctl + 1))
   done
-  say "reap-heavy --self-check: ИТОГ зубов=15 зелёных=$green красный-контроль=$redctl"
-  [[ "$green" -eq 15 && "$redctl" -eq 15 ]]
+  say "reap-heavy --self-check: ИТОГ зубов=17 зелёных=$green красный-контроль=$redctl"
+  [[ "$green" -eq 17 && "$redctl" -eq 17 ]]
 }
 
 parse_args "$@"
