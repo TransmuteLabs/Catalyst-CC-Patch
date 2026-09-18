@@ -15,19 +15,40 @@ FAILED=0
 RAN=0
 WORKDIR=''
 
+# CONSTRAINT: конец объявляет себя САМ (__DONE=1). Голый EXIT-трап съедает
+# обрыв с кодом 0 -- ошибка оболочки или ранний exit до итога выглядели бы
+# зелёным прогоном. Часовой краснит ровно этот случай (правило часового,
+# claude-patch-all.sh:4327-4332; образец -- tools/gate-kill-teeth.sh).
+__DONE=0
+
 cleanup() {
   if [[ -n "${WORKDIR:-}" ]]; then
     rm -rf "${WORKDIR}"
   fi
 }
-trap cleanup EXIT
+
+__stand_env_guard_teeth_guard() {
+  local __rc=$?
+  trap - EXIT
+  cleanup
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "ОТКАЗ: stand-env-guard-teeth оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 2
+  fi
+  exit "$__rc"
+}
+trap '__stand_env_guard_teeth_guard' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/stand-env-guard-teeth.XXXXXX") || {
   printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2
+  __DONE=1
   exit 2
 }
 [ -n "$WORKDIR" ] || {
   printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2
+  __DONE=1
   exit 2
 }
 
@@ -232,8 +253,16 @@ tooth_15() {
   printf 'echo "${QUIET_A:-}${QUIET_B:-}"\n' > "$WORKDIR/s15.sh"
   QUIET_A=1 QUIET_B=2 run_guard --subject "$WORKDIR/s15.sh" \
     --pinned QUIET_A --pinned QUIET_B --label t15
-  local lines
-  lines=$(printf '%s\n' "$GUARD_OUT" | grep -c .)
+  # CONSTRAINT: код подстановки берётся ЯВНО. `grep -c` отдаёт 1 при НУЛЕ
+  # совпадений -- это счёт, а не отказ; отказом прибора считается 2 и выше.
+  # Без разбора кода пустой вывод и сломанный grep дали бы одинаковый «0».
+  local lines __lrc=0
+  lines=$(printf '%s\n' "$GUARD_OUT" | grep -c .) || __lrc=$?
+  if (( __lrc > 1 )); then
+    printf 'ПРИБОР НЕДОСТУПЕН: счёт строк вывода отказал кодом %s\n' "$__lrc" >&2
+    __DONE=1
+    exit 2
+  fi
   if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" != *"запинено: "* && "$lines" -eq 1 ]]; then
     ok '15 зелёный вывод -- одна строка, без поимённых корзин'
   else
@@ -277,16 +306,20 @@ printf '%s прошло, %s провалов, ожидалось %s\n' "$PASSED"
 if [[ $RAN -ne $EXPECTED_TEETH ]]; then
   printf 'TEETH_RC=4\n'
   printf 'stand-env-guard-teeth: ОТКАЗ -- прогнано %s, пин EXPECTED_TEETH=%s\n' "$RAN" "$EXPECTED_TEETH" >&2
+  __DONE=1
   exit 4
 fi
 if [[ $FAILED -ne 0 ]]; then
   printf 'TEETH_RC=1\n'
+  __DONE=1
   exit 1
 fi
 if [[ $PASSED -ne $EXPECTED_TEETH ]]; then
   printf 'TEETH_RC=4\n'
   printf 'stand-env-guard-teeth: ОТКАЗ -- прошло %s, пин EXPECTED_TEETH=%s\n' "$PASSED" "$EXPECTED_TEETH" >&2
+  __DONE=1
   exit 4
 fi
 printf 'TEETH_RC=0\n'
+__DONE=1
 exit 0

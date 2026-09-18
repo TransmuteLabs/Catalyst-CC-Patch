@@ -16,12 +16,33 @@ GUARD="${GUARD:-$KIT/tools/env-handles-live-guard.sh}"
 EXPECTED_TEETH=15
 
 PASSED=0; FAILED=0; RAN=0; WORKDIR=''
-cleanup() { if [[ -n "${WORKDIR:-}" ]]; then rm -rf "${WORKDIR}"; fi; }
-trap cleanup EXIT
+# CONSTRAINT: конец объявляет себя САМ (__DONE=1). Голый EXIT-трап съедает
+# обрыв с кодом 0 -- ошибка оболочки или ранний exit до итога выглядели бы
+# зелёным прогоном. Часовой краснит ровно этот случай (правило часового,
+# claude-patch-all.sh:4327-4332; образец -- tools/gate-kill-teeth.sh).
+__DONE=0
+
+cleanup() {
+  if [[ -n "${WORKDIR:-}" ]]; then rm -rf "${WORKDIR}"; fi
+}
+
+__env_handles_teeth_guard() {
+  local __rc=$?
+  trap - EXIT
+  cleanup
+  if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
+    echo "ОТКАЗ: env-handles-live-guard-teeth оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
+    exit 2
+  fi
+  exit "$__rc"
+}
+trap '__env_handles_teeth_guard' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/env-handles-teeth.XXXXXX") || {
-  printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
-[ -n "$WORKDIR" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; __DONE=1; exit 2; }
+[ -n "$WORKDIR" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; __DONE=1; exit 2; }
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok     %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  ПРОВАЛ %s\n' "$1"; }
@@ -184,7 +205,15 @@ tooth_11() {
   mk_image 'let a=cfg.Q_A; let b=cfg.Q_B;'
   mk_settings '{"Q_A":"1","Q_B":"2"}'
   run_guard --label t11
-  local lines; lines=$(printf '%s\n' "$GUARD_OUT" | grep -c .)
+  # CONSTRAINT: код подстановки берётся ЯВНО. `grep -c` отдаёт 1 при НУЛЕ
+  # совпадений -- это счёт, а не отказ; отказом прибора считается 2 и выше.
+  local lines __lrc=0
+  lines=$(printf '%s\n' "$GUARD_OUT" | grep -c .) || __lrc=$?
+  if (( __lrc > 1 )); then
+    printf 'ПРИБОР НЕДОСТУПЕН: счёт строк вывода отказал кодом %s\n' "$__lrc" >&2
+    __DONE=1
+    exit 2
+  fi
   if [[ $GUARD_RC -eq 0 && "$lines" -eq 1 ]]; then
     ok '11 зелёный вывод -- ровно одна строка'
   else bad "11 ждали rc=0 и одну строку, получили rc=$GUARD_RC строк=$lines :: $GUARD_OUT"; fi
@@ -250,13 +279,16 @@ printf '%s прошло, %s провалов, ожидалось %s\n' "$PASSED"
 if [[ $RAN -ne $EXPECTED_TEETH ]]; then
   printf 'TEETH_RC=4\n'
   printf 'env-handles-live-guard-teeth: ОТКАЗ -- прогнано %s, пин EXPECTED_TEETH=%s\n' "$RAN" "$EXPECTED_TEETH" >&2
+  __DONE=1
   exit 4
 fi
-if [[ $FAILED -ne 0 ]]; then printf 'TEETH_RC=1\n'; exit 1; fi
+if [[ $FAILED -ne 0 ]]; then printf 'TEETH_RC=1\n'; __DONE=1; exit 1; fi
 if [[ $PASSED -ne $EXPECTED_TEETH ]]; then
   printf 'TEETH_RC=4\n'
   printf 'env-handles-live-guard-teeth: ОТКАЗ -- прошло %s, пин EXPECTED_TEETH=%s\n' "$PASSED" "$EXPECTED_TEETH" >&2
+  __DONE=1
   exit 4
 fi
 printf 'TEETH_RC=0\n'
+__DONE=1
 exit 0
