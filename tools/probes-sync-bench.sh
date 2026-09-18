@@ -21,7 +21,7 @@ KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REAL_KIT=$KIT
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
 EXPECTED_SCENARIOS=19
-EXPECTED_MUTATIONS=20
+EXPECTED_MUTATIONS=24
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -33,7 +33,7 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19 10 10 10 10)
 # Улика, по которой признаётся СВОЯ причина покраснения: подстрока LAST_EVID
 # сценария. Дом перечня мутаций ОДИН -- EXPECTED_MUTATIONS; и обход
 # self_check, и эта таблица, и MUT_SCENARIO обязаны сойтись с ним длиной.
@@ -45,7 +45,8 @@ MUT_EVID=(x 'второй=0' 'diff_rc=0' 'B=3' 'НЕ_НАЗВАНА' 'rc=1' 'rc=
           'вне_истории=0' 'СЛОВО_РАЗОШЛОСЬ_С_ДЕЛОМ' 'запускает НЕ' \
           'ПРИЧИНА_НЕ_НАЗВАНА' 'РАСХОЖДЕНИЕ_НЕ_НАЗВАНО' 'ПРЕДМЕТ_НЕ_НАЗВАН' \
           'ВЛАДЕЛЕЦ_НЕ_УЗНАН' 'НЕПОКРЫТИЕ_НЕ_НАЗВАНО' 'НЕДОСТУПЕН_НЕ_НАЗВАН' \
-          'ПЛАТФОРМА_НЕ_НАЗВАНА')
+          'ПЛАТФОРМА_НЕ_НАЗВАНА' 'нечитаем_назван=0' 'битый_назван=0' 'ПУСТОЙ_НЕ_НЕИЗМЕРЕНО' \
+          'свидетель=0')
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -525,16 +526,20 @@ scenario_9() {
 # одно и то же, и ценз по первому даёт ложное зелёное в том самом случае,
 # ради которого написан: строка `judge/bench/` в .gitignore (её целью были
 # записи прогонов) прятала от git положенные рядом зубы, и find их видел, а
-# клон репозитория -- нет. Сценарий держит ТРИ состояния: канона вне git
-# нет вовсе -- НЕ ИЗМЕРЕНО и молчания быть не должно; часть под индексом, а
-# один файл вне -- красное с ИМЕНЕМ; всё под индексом -- зелёное.
+# клон репозитория -- нет. Сценарий держит ШЕСТЬ состояний: git есть --
+# источник git; вне git без свидетеля -- НЕ ИЗМЕРЕНО; свидетель заказан и
+# не найден или битый -- ПРИБОР НЕДОСТУПЕН (exit 2); свидетель цел без
+# путей под judge/ -- НЕ ИЗМЕРЕНО (слепота ≠ чистота); свидетель цел с
+# путями под judge/ -- ценз по множеству свидетеля, вердикт называет источник.
 scenario_10() {
-  local root script out1 rc1 out2 rc2 out3 rc3 victim
+  local root script out1 rc1 out2 rc2 out3 rc3 out4 rc4 out5 rc5 out6 rc6 out7 rc7 victim wit
   root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s10.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
   [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   victim='judge/replay.py'
+  wit="$root/TRACKED.txt"
+  unset CATALYST_TRACKED_WITNESS || true
   bash "$script" --to-home >/dev/null 2>&1 || {
     LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
     bad '10 ценз репозитория: исходная раскатка отказала'; return; }
@@ -551,7 +556,40 @@ scenario_10() {
   (cd "$root/kit" && git add judge) >/dev/null 2>&1
   out3=$(bash "$script" --diff 2>&1); rc3=$?
 
-  LAST_EVID="без_git=$rc1 вне_истории=$rc2 всё_в_индексе=$rc3 :: назван=$(printf '%s' "$out2" | grep -c "вне репозитория: $victim")"
+  # Дальше -- не git: свидетель подменяет индекс только вне рабочего дерева.
+  rm -rf "$root/kit/.git"
+
+  out4=$(CATALYST_TRACKED_WITNESS="$root/NO-SUCH-WITNESS" bash "$script" --diff 2>&1); rc4=$?
+
+  printf '%s\n' \
+    '# Свидетель индекса дерева Catalyst-CC-Patch, снят с ОРИГИНАЛА при снятии снимка.' \
+    'TREE=Catalyst-CC-Patch' \
+    'HEAD=deadbeef' \
+    'COUNT=99' \
+    'judge/compact.py' > "$wit"
+  out5=$(CATALYST_TRACKED_WITNESS="$wit" bash "$script" --diff 2>&1); rc5=$?
+
+  printf '%s\n' \
+    '# Свидетель индекса дерева Catalyst-CC-Patch, снят с ОРИГИНАЛА при снятии снимка.' \
+    'TREE=Catalyst-CC-Patch' \
+    'HEAD=deadbeef' \
+    'COUNT=1' \
+    'scripts/probes-sync.sh' > "$wit"
+  out6=$(CATALYST_TRACKED_WITNESS="$wit" bash "$script" --diff 2>&1); rc6=$?
+
+  printf '%s\n' \
+    '# Свидетель индекса дерева Catalyst-CC-Patch, снят с ОРИГИНАЛА при снятии снимка.' \
+    'TREE=Catalyst-CC-Patch' \
+    'HEAD=cafebabe' \
+    'COUNT=1' \
+    'judge/compact.py' > "$wit"
+  out7=$(CATALYST_TRACKED_WITNESS="$wit" bash "$script" --diff 2>&1); rc7=$?
+
+  # CONSTRAINT: у обоих отказов свидетеля ОДИН код (2) и одна общая строка
+  # «ПРИБОР НЕДОСТУПЕН» -- по ним мутация, снявшая первый отказ, неотличима от
+  # здорового кода: поток доходит до второго отказа и отдаёт тот же код с той
+  # же строкой. Поэтому улика несёт ИМЯ каждого отказа отдельно.
+  LAST_EVID="без_git=$rc1 вне_истории=$rc2 всё_в_индексе=$rc3 нет_файла=$rc4 битый=$rc5 пустой=$rc6 свидетель=$rc7 :: назван=$(printf '%s' "$out7" | grep -c "вне репозитория: $victim") источник=$(printf '%s' "$out7" | grep -c 'по свидетелю снимка') нечитаем_назван=$(printf '%s' "$out4" | grep -c 'свидетель индекса нечитаем') битый_назван=$(printf '%s' "$out5" | grep -c 'свидетель индекса битый (COUNT=')"
   rm -rf "$root"
   if [[ $rc1 -ne 0 ]]; then
     bad "10 ценз репозитория: канон вне git обязан быть НЕ ИЗМЕРЕНО, а не расхождением (rc=$rc1)"
@@ -563,8 +601,31 @@ scenario_10() {
     bad '10 ценз репозитория: покраснело, но имя файла вне истории не названо'
   elif [[ $rc3 -ne 0 ]]; then
     bad "10 ценз репозитория: всё под индексом, а сверка всё равно красная (rc=$rc3)"
+  elif [[ $rc4 -ne 2 ]]; then
+    bad "10 свидетель отсутствует: заказанный и не найденный обязан быть ПРИБОР НЕДОСТУПЕН (rc=2), получили $rc4"
+  elif ! printf '%s' "$out4" | grep -q 'ПРИБОР НЕДОСТУПЕН: свидетель индекса нечитаем'; then
+    bad '10 свидетель отсутствует: код 2 без ИМЕННОГО отказа «свидетель индекса нечитаем»'
+  elif [[ $rc5 -ne 2 ]]; then
+    bad "10 свидетель битый: COUNT≠путей обязан быть ПРИБОР НЕДОСТУПЕН (rc=2), получили $rc5"
+  elif ! printf '%s' "$out5" | grep -q 'ПРИБОР НЕДОСТУПЕН: свидетель индекса битый (COUNT='; then
+    bad '10 свидетель битый: код 2 без ИМЕННОГО отказа «свидетель индекса битый (COUNT=…)»'
+  elif [[ $rc6 -ne 0 ]]; then
+    LAST_EVID="ПУСТОЙ_НЕ_НЕИЗМЕРЕНО $LAST_EVID"
+    bad "10 свидетель без judge/: обязан быть НЕ ИЗМЕРЕНО, а не расхождением (rc=$rc6)"
+  elif ! printf '%s' "$out6" | grep -q 'ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО'; then
+    LAST_EVID="ПУСТОЙ_НЕ_НЕИЗМЕРЕНО $LAST_EVID"
+    bad '10 свидетель без judge/: промолчал вместо НЕ ИЗМЕРЕНО'
+  elif printf '%s' "$out6" | grep -q 'вне репозитория:'; then
+    LAST_EVID="ПУСТОЙ_НЕ_НЕИЗМЕРЕНО $LAST_EVID"
+    bad '10 свидетель без judge/: пустое множество прочитано как всё вне истории'
+  elif [[ $rc7 -eq 0 ]]; then
+    bad '10 свидетель цел: файл вне свидетеля НЕ покрасил сверку'
+  elif ! printf '%s' "$out7" | grep -q "вне репозитория: $victim"; then
+    bad '10 свидетель цел: покраснело, но имя файла вне свидетеля не названо'
+  elif ! printf '%s' "$out7" | grep -q 'по свидетелю снимка (HEAD=cafebabe)'; then
+    bad '10 свидетель цел: вердикт не назвал источник (свидетель снимка)'
   else
-    ok '10 ценз репозитория: вне истории назван и красит, вне git -- НЕ ИЗМЕРЕНО, под индексом -- зелено'
+    ok '10 ценз репозитория: шесть состояний -- git, вне git, нет свидетеля, битый, без judge/, по свидетелю'
   fi
 }
 
@@ -1095,6 +1156,24 @@ elif number == 20:
     # но вердикт не называет причину -- читатель видит счёт без имени беды.
     old, new = ('      echo "расходится: прибор не знает владельца расписания для платформы $SCHEDULE_PLATFORM"\n',
                 '      :  # mutation: unknown platform silent\n')
+elif number == 21:
+    old = ('        printf \'ПРИБОР НЕДОСТУПЕН: свидетель индекса нечитаем: %s\\n\' "$__wit" >&2\n'
+           '        exit 2\n')
+    new = ('        TRACK_CENSUS=\'нет\'\n'
+           '        echo "ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО -- канон не в рабочем дереве git ($__git_probe)"\n'
+           '        __wit_ready=0\n')
+elif number == 22:
+    old = ('        printf \'ПРИБОР НЕДОСТУПЕН: свидетель индекса битый (COUNT=%s, путей=%s): %s\\n\' "$__wit_count" "$__wit_npaths" "$__wit" >&2\n'
+           '        exit 2\n')
+    new = ('        TRACK_CENSUS=\'нет\'\n'
+           '        echo "ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО -- канон не в рабочем дереве git ($__git_probe)"\n'
+           '        __wit_broken=1\n')
+elif number == 23:
+    old, new = ('      if [[ "$__wit_judge" -eq 0 ]]; then\n',
+                '      if false; then  # mutation: empty witness treated as tracked census\n')
+elif number == 24:
+    old, new = ('        __git_ls=$(printf \'%s\\n\' "$__wit_paths" | grep -Fx "judge/$__rel") || true\n',
+                '        __git_ls="judge/$__rel"  # mutation: witness membership always tracked\n')
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)

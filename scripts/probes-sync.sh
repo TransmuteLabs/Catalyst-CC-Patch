@@ -626,6 +626,7 @@ fi
 # репозитория) -- это НЕ ИЗМЕРЕНО и говорится вслух, а не молчаливое зелёное.
 HOME_ONLY=0
 UNTRACKED=0
+CHECKED=0
 if [[ "$MODE" == "--diff" && -d "$TOOLS_HOME" ]]; then
   # `|| true` ОБЯЗАТЕЛЕН обеим пробам: под `set -e` код командной подстановки
   # становится кодом присваивания, и «канон не в репозитории» (git отдаёт 128)
@@ -634,9 +635,63 @@ if [[ "$MODE" == "--diff" && -d "$TOOLS_HOME" ]]; then
   __git_probe=$( (cd "$ROOT" && git rev-parse --is-inside-work-tree) 2>&1 ) || true
   __tracked_seen=$( (cd "$ROOT" && git ls-files -- judge) 2>&1 | grep -c . ) || true
   TRACK_CENSUS='да'
+  __track_src='git'
+  __wit_head=''
+  __wit_paths=''
   if [[ "$__git_probe" != "true" ]]; then
-    TRACK_CENSUS='нет'
-    echo "ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО -- канон не в рабочем дереве git ($__git_probe)"
+    if [[ -z "${CATALYST_TRACKED_WITNESS:-}" ]]; then
+      TRACK_CENSUS='нет'
+      echo "ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО -- канон не в рабочем дереве git ($__git_probe)"
+    else
+      # Заказанный свидетель -- прибор, не опция: нет/нечитаем/бит → отказ, не
+      # откат к НЕ ИЗМЕРЕНО. Пустой набор путей под judge/ -- слепота, не чистота.
+      __wit="$CATALYST_TRACKED_WITNESS"
+      if [[ ! -r "$__wit" ]]; then
+        printf 'ПРИБОР НЕДОСТУПЕН: свидетель индекса нечитаем: %s\n' "$__wit" >&2
+        exit 2
+      fi
+      __have_tree=0
+      __have_head=0
+      __have_count=0
+      __wit_count=''
+      __wit_npaths=0
+      while IFS= read -r __wline || [[ -n "$__wline" ]]; do
+        case "$__wline" in
+          ''|'#'*) continue ;;
+          TREE=*) __have_tree=1 ;;
+          HEAD=*) __have_head=1; __wit_head="${__wline#HEAD=}" ;;
+          COUNT=*) __have_count=1; __wit_count="${__wline#COUNT=}" ;;
+          *)
+            __wit_npaths=$((__wit_npaths + 1))
+            if [[ -n "$__wit_paths" ]]; then
+              __wit_paths="${__wit_paths}
+${__wline}"
+            else
+              __wit_paths="$__wline"
+            fi
+            ;;
+        esac
+      done < "$__wit"
+      if [[ "$__have_tree" -ne 1 || "$__have_head" -ne 1 || "$__have_count" -ne 1 ]]; then
+        printf 'ПРИБОР НЕДОСТУПЕН: свидетель индекса битый (нет TREE=/HEAD=/COUNT=): %s\n' "$__wit" >&2
+        exit 2
+      fi
+      if [[ "$__wit_count" != "$__wit_npaths" ]]; then
+        printf 'ПРИБОР НЕДОСТУПЕН: свидетель индекса битый (COUNT=%s, путей=%s): %s\n' "$__wit_count" "$__wit_npaths" "$__wit" >&2
+        exit 2
+      fi
+      __wit_judge=0
+      if [[ -n "$__wit_paths" ]]; then
+        __wit_judge=$(printf '%s\n' "$__wit_paths" | grep -c '^judge/') || true
+      fi
+      if [[ "$__wit_judge" -eq 0 ]]; then
+        TRACK_CENSUS='нет'
+        echo "ЦЕНЗ РЕПОЗИТОРИЯ: НЕ ИЗМЕРЕНО -- свидетель снимка не назвал ни одного отслеживаемого файла под judge/ (по свидетелю снимка (HEAD=$__wit_head))"
+      else
+        TRACK_CENSUS='да'
+        __track_src='witness'
+      fi
+    fi
   elif [[ "$__tracked_seen" -eq 0 ]]; then
     # ПУСТО != НОЛЬ: ценз, которому git не назвал НИ ОДНОГО отслеживаемого
     # файла под judge/, ничего не доказывает -- он слеп, а не чист.
@@ -649,12 +704,21 @@ if [[ "$MODE" == "--diff" && -d "$TOOLS_HOME" ]]; then
       echo "не занесён в канон: judge/$__rel (живёт только в доме инструментов)"
       HOME_ONLY=$((HOME_ONLY+1))
     elif [[ "$TRACK_CENSUS" == 'да' ]]; then
-      __git_ls="$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" || __git_ls_rc=$?
-      [ "${__git_ls_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: не спросить git об отслеживании judge/%s (код %s)\n' "$__rel" "$__git_ls_rc" >&2; exit 2; }
-      __git_ls_rc=0
-      if [[ -z "$__git_ls" ]]; then
-        echo "лежит в каноне, но вне репозитория: judge/$__rel (git его не отслеживает)"
-        UNTRACKED=$((UNTRACKED+1))
+      CHECKED=$((CHECKED+1))
+      if [[ "$__track_src" == 'witness' ]]; then
+        __git_ls=$(printf '%s\n' "$__wit_paths" | grep -Fx "judge/$__rel") || true
+        if [[ -z "$__git_ls" ]]; then
+          echo "лежит в каноне, но вне репозитория: judge/$__rel (по свидетелю снимка (HEAD=$__wit_head))"
+          UNTRACKED=$((UNTRACKED+1))
+        fi
+      else
+        __git_ls="$( (cd "$ROOT" && git ls-files -- "judge/$__rel") 2>&1 )" || __git_ls_rc=$?
+        [ "${__git_ls_rc:-0}" -le 1 ] || { printf 'ПРИБОР НЕДОСТУПЕН: не спросить git об отслеживании judge/%s (код %s)\n' "$__rel" "$__git_ls_rc" >&2; exit 2; }
+        __git_ls_rc=0
+        if [[ -z "$__git_ls" ]]; then
+          echo "лежит в каноне, но вне репозитория: judge/$__rel (git его не отслеживает)"
+          UNTRACKED=$((UNTRACKED+1))
+        fi
       fi
     fi
   done < <(cd "$TOOLS_HOME" && find . \( -name records -o -name labelled -o -name __pycache__ -o -name fixtures \) -prune -o \
@@ -664,8 +728,23 @@ if [[ "$MODE" == "--diff" && -d "$TOOLS_HOME" ]]; then
     echo "  (иначе следующая раскатка --to-home снесёт их, а другая машина их не получит)"
     DIFFERS=$((DIFFERS+HOME_ONLY))
   fi
+  # CONSTRAINT: измеренное и чистое ОБЯЗАНО отличаться от неизмеренного. Молчание
+  # при нуле нарушений читается как «ценз прошёл» и как «ценз не запускался»
+  # одинаково -- поэтому источник и знаменатель называются ВСЕГДА, а не только
+  # когда есть о чём ругаться.
+  if [[ "$TRACK_CENSUS" == 'да' ]]; then
+    if [[ "$__track_src" == 'witness' ]]; then
+      echo "ЦЕНЗ РЕПОЗИТОРИЯ: ИЗМЕРЕН по свидетелю снимка (HEAD=$__wit_head): проверено файлов $CHECKED, вне истории $UNTRACKED"
+    else
+      echo "ЦЕНЗ РЕПОЗИТОРИЯ: ИЗМЕРЕН по git: проверено файлов $CHECKED, вне истории $UNTRACKED"
+    fi
+  fi
   if [[ "$UNTRACKED" -ne 0 ]]; then
-    echo "ЦЕНЗ РЕПОЗИТОРИЯ: исходников вне истории: $UNTRACKED -- добавить их в git"
+    if [[ "$__track_src" == 'witness' ]]; then
+      echo "ЦЕНЗ РЕПОЗИТОРИЯ: исходников вне истории: $UNTRACKED -- добавить их в git (по свидетелю снимка (HEAD=$__wit_head))"
+    else
+      echo "ЦЕНЗ РЕПОЗИТОРИЯ: исходников вне истории: $UNTRACKED -- добавить их в git"
+    fi
     echo "  (файл на диске канона, но не в коммитах: клон репозитория его не несёт)"
     DIFFERS=$((DIFFERS+UNTRACKED))
   fi
