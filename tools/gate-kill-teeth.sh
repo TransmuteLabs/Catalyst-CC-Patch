@@ -7,7 +7,7 @@
 # не зелёный прогон. Пустая вырезка -- тоже отказ: пусто не ноль.
 #
 # Коды (подмножество таблицы кита, шапка claude-patch-all.sh):
-#   0  4 зуба зелёные, 4 мутации покраснили названный зуб (docnum:other --
+#   0  объявленные зубы зелёные, объявленные мутации покраснили названный зуб (docnum:other --
 #      смысл кода возврата, а не объявление счёта стенда: сам счёт живёт
 #      ниже в EXPECTED_TEETH / EXPECTED_MUTATIONS, второго дома у него нет)
 #   1  зуб не держится, либо мутация прошла молча / покраснела не своей причиной
@@ -20,8 +20,8 @@ set -euo pipefail
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PIPE="${KIT}/claude-patch-all.sh"
-EXPECTED_TEETH=4
-EXPECTED_MUTATIONS=4
+EXPECTED_TEETH=6
+EXPECTED_MUTATIONS=6
 BEGIN='# GATE_TERM_HELPERS_BEGIN'
 END='# GATE_TERM_HELPERS_END'
 
@@ -113,7 +113,15 @@ WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-kill-teeth.XXXXXX") || { printf 'ПР�
 [ -n "$WORKDIR" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
 PIDS="${WORKDIR}/pids"
 HELPERS="${WORKDIR}/helpers.sh"
+PTY_RUN_SRC="${KIT}/tools/pty-run.py"
+PTY_RUN="${WORKDIR}/pty-run.py"
 : > "${PIDS}"
+if [[ ! -f "${PTY_RUN_SRC}" ]]; then
+  echo "gate-kill-teeth: ОТКАЗ -- нет ${PTY_RUN_SRC}" >&2
+  __DONE=1
+  exit 2
+fi
+cp "${PTY_RUN_SRC}" "${PTY_RUN}"
 
 note_pid() {
   echo "$1" >> "${PIDS}"
@@ -152,6 +160,11 @@ if "__interface_gate_deliver_term" not in body:
 if "__interface_gate_term_still_alive_msg" not in body:
     sys.stderr.write(
         "gate-kill-teeth: ОТКАЗ -- вырезка не содержит __interface_gate_term_still_alive_msg\n"
+    )
+    sys.exit(2)
+if "__interface_gate_classify_status" not in body:
+    sys.stderr.write(
+        "gate-kill-teeth: ОТКАЗ -- вырезка не содержит __interface_gate_classify_status\n"
     )
     sys.exit(2)
 open(dest, "w").write(body)
@@ -473,6 +486,125 @@ t4() {
   return 0
 }
 
+t5() {
+  load_helpers
+  local fail=0
+  t5_case() {
+    local input="$1" expected="$2" got
+    got="$(__interface_gate_classify_status "${input}")"
+    if [[ "${got}" != "${expected}" ]]; then
+      echo "T5 FAIL: «${input}» expected ${expected}, got ${got}"
+      fail=1
+    fi
+  }
+  t5_case 'exited 0' 'exited 0'
+  t5_case 'exited 255' 'exited 255'
+  t5_case 'exited 256' 'bad'
+  t5_case 'signaled 9' 'signaled 9'
+  t5_case 'signaled 0' 'bad'
+  t5_case 'signaled 128' 'bad'
+  t5_case 'unreaped' 'unreaped'
+  t5_case '' 'bad'
+  t5_case 'unreaped x' 'bad'
+  t5_case 'exited 1 2' 'bad'
+  if [[ "${fail}" -ne 0 ]]; then
+    return 1
+  fi
+  echo "T5 green: classifier table held"
+  return 0
+}
+
+write_t6() {
+  cat > "${WORKDIR}/t6.py" <<'PY'
+import importlib.util
+import os
+import sys
+import time
+import types
+
+pty_path, out_path = sys.argv[1], sys.argv[2]
+limit = os.environ.get("T6_LIMIT", "?")
+spec = importlib.util.spec_from_file_location("pty_run_under_test", pty_path)
+if spec is None or spec.loader is None:
+    print("T6 FAIL: cannot load pty-run from %s" % pty_path)
+    sys.exit(2)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+# CONSTRAINT: настоящее ?Es по заказу не воспроизводится. Предмет зуба —
+# поведение прибора при незажинаемом ребёнке: reap никогда не даёт статус,
+# а блокирующий waitpid(pid, 0) не возвращается.
+mod.reap = lambda pid, status: None
+_orig_waitpid = os.waitpid
+
+def _waitpid_unreapable(pid, flags=0):
+    if flags == 0:
+        while True:
+            time.sleep(60)
+    return _orig_waitpid(pid, flags)
+
+os.waitpid = _waitpid_unreapable
+# CONSTRAINT: ребёнок обязан пережить SIGTERM. sleep/echo после TERM — зомби,
+# и Darwin даёт EPERM на killpg(pid, 0) в цикле stop_group — прибор падает
+# исключением, а не словом. --seconds остаётся коротким.
+args = types.SimpleNamespace(
+    cols=80,
+    rows=24,
+    seconds=0.3,
+    out=out_path,
+    command=[
+        sys.executable,
+        "-c",
+        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+    ],
+)
+t0 = time.monotonic()
+rc, line = mod.run(args)
+elapsed = time.monotonic() - t0
+grace = getattr(mod, "REAP_GRACE_SECONDS", "?")
+print(
+    "T6 LIMIT=%ss elapsed=%.3fs REAP_GRACE=%ss word=%s"
+    % (limit, elapsed, grace, line)
+)
+if line != "unreaped":
+    print("T6 FAIL: expected unreaped, got %s" % line)
+    sys.exit(1)
+print("T6 green: instrument answered unreaped within LIMIT")
+sys.exit(0)
+PY
+}
+
+t6() {
+  write_t6
+  local limit=10 rc=0
+  T6_LIMIT="${limit}"
+  export T6_LIMIT
+  echo "T6 LIMIT=${limit}s"
+  set +e
+  perl -e 'alarm shift; exec @ARGV' "${limit}" "${_py}" "${WORKDIR}/t6.py" "${PTY_RUN}" "${WORKDIR}/t6.capture" > "${WORKDIR}/t6.out" 2> "${WORKDIR}/t6.err"
+  rc=$?
+  set -e
+  if [[ "${rc}" -eq 0 ]]; then
+    if grep -F -q 'T6 green: instrument answered unreaped within LIMIT' "${WORKDIR}/t6.out"; then
+      cat "${WORKDIR}/t6.out"
+      echo "T6 green: instrument answered unreaped within LIMIT=${limit}s"
+      return 0
+    fi
+    echo "T6 FAIL: rc=0 but green line missing"
+    echo "T6 stdout: $(cat "${WORKDIR}/t6.out")"
+    echo "T6 stderr: $(cat "${WORKDIR}/t6.err")"
+    return 1
+  fi
+  if grep -F -q 'T6 FAIL:' "${WORKDIR}/t6.out"; then
+    cat "${WORKDIR}/t6.out"
+    echo "T6 stderr: $(cat "${WORKDIR}/t6.err")"
+    return 1
+  fi
+  echo "T6 FAIL: did not finish within LIMIT=${limit}s (rc=${rc})"
+  echo "T6 stdout: $(cat "${WORKDIR}/t6.out")"
+  echo "T6 stderr: $(cat "${WORKDIR}/t6.err")"
+  return 1
+}
+
 replace_once() {
   local file="$1" oldf="$2" newf="$3"
   "${_py}" - "${file}" "${oldf}" "${newf}" <<'PY'
@@ -492,26 +624,30 @@ PY
 
 run_mutation() {
   local mid="$1" tooth="$2" needle="$3"
+  local target="${4:-${HELPERS}}"
   local oldf="${WORKDIR}/mut.${mid}.old"
   local newf="${WORKDIR}/mut.${mid}.new"
-  cp "${HELPERS}" "${WORKDIR}/helpers.snap"
+  local snapf="${WORKDIR}/mut.${mid}.snap"
+  cp "${target}" "${snapf}"
   local snap now
-  snap=$(sha256_of "${WORKDIR}/helpers.snap") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток вырезки помощников до мутации\n' >&2; exit 2; }
-  replace_once "${HELPERS}" "${oldf}" "${newf}"
+  snap=$(sha256_of "${snapf}") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток предмета мутации до правки\n' >&2; exit 2; }
+  replace_once "${target}" "${oldf}" "${newf}"
   local rc=0
   local out="${WORKDIR}/mut.${mid}.out"
   set +e
   "${tooth}" > "${out}" 2>&1
   rc=$?
   set -e
-  cp "${WORKDIR}/helpers.snap" "${HELPERS}"
-  now=$(sha256_of "${HELPERS}") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток вырезки помощников после восстановления\n' >&2; exit 2; }
+  cp "${snapf}" "${target}"
+  now=$(sha256_of "${target}") || { printf 'ПРИБОР НЕДОСТУПЕН: не снят отпечаток предмета мутации после восстановления\n' >&2; exit 2; }
   if [[ "${now}" != "${snap}" ]]; then
     echo "gate-kill-teeth: ОТКАЗ -- снимок не сошёлся после ${mid}: snap=${snap} now=${now}" >&2
     __DONE=1
     exit 2
   fi
-  load_helpers
+  if [[ "${target}" == "${HELPERS}" ]]; then
+    load_helpers
+  fi
   echo "  ${mid} snapshot ${snap}"
   echo "  ${mid} restored ${now}"
   if [[ "${rc}" -eq 0 ]]; then
@@ -556,6 +692,10 @@ n_teeth=$((n_teeth + 1))
 if t3; then n_green=$((n_green + 1)); else fail=1; fi
 n_teeth=$((n_teeth + 1))
 if t4; then n_green=$((n_green + 1)); else fail=1; fi
+n_teeth=$((n_teeth + 1))
+if t5; then n_green=$((n_green + 1)); else fail=1; fi
+n_teeth=$((n_teeth + 1))
+if t6; then n_green=$((n_green + 1)); else fail=1; fi
 
 if [[ "${n_teeth}" -ne "${EXPECTED_TEETH}" ]]; then
   echo "gate-kill-teeth: объявлено ${EXPECTED_TEETH} зубов, фактически ${n_teeth}" >&2
@@ -592,6 +732,28 @@ cat > "${WORKDIR}/mut.3.new" <<'NEW3'
 NEW3
 printf '%s' 'group_err="$(kill -TERM -"${pid}" 2>&1)" || group_rc=$?' > "${WORKDIR}/mut.4.old"
 printf '%s' 'group_err="$(kill -TERM -"${pid}" 2>&1)"' > "${WORKDIR}/mut.4.new"
+cat > "${WORKDIR}/mut.5.old" <<'OLD5'
+    elif [[ "$line" == unreaped ]]; then
+      echo unreaped
+    else
+      echo bad
+OLD5
+cat > "${WORKDIR}/mut.5.new" <<'NEW5'
+    else
+      echo bad
+NEW5
+cat > "${WORKDIR}/mut.6.old" <<'OLD6'
+    grace = time.monotonic() + REAP_GRACE_SECONDS
+    while status is None and time.monotonic() < grace:
+        status = reap(pid, status)
+        if status is None:
+            time.sleep(0.02)
+    return status
+OLD6
+cat > "${WORKDIR}/mut.6.new" <<'NEW6'
+    _found, status = os.waitpid(pid, 0)
+    return status
+NEW6
 
 echo "gate-kill-teeth: running ${EXPECTED_MUTATIONS} mutation controls"
 
@@ -603,6 +765,10 @@ n_mut=$((n_mut + 1))
 if run_mutation 3 t3 'T3 FAIL: message still claims ignored TERM'; then n_mut_held=$((n_mut_held + 1)); else fail=1; fi
 n_mut=$((n_mut + 1))
 if run_mutation 4 t4 'T4 FAIL: aborted under set -e'; then n_mut_held=$((n_mut_held + 1)); else fail=1; fi
+n_mut=$((n_mut + 1))
+if run_mutation 5 t5 'T5 FAIL: «unreaped» expected unreaped'; then n_mut_held=$((n_mut_held + 1)); else fail=1; fi
+n_mut=$((n_mut + 1))
+if run_mutation 6 t6 'T6 FAIL: did not finish within LIMIT' "${PTY_RUN}"; then n_mut_held=$((n_mut_held + 1)); else fail=1; fi
 
 if [[ "${n_mut}" -ne "${EXPECTED_MUTATIONS}" ]]; then
   echo "gate-kill-teeth: объявлено ${EXPECTED_MUTATIONS} мутаций, фактически ${n_mut}" >&2

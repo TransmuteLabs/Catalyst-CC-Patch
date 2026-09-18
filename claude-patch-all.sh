@@ -10244,7 +10244,7 @@ __interface_gate() {
     return 2
   fi
   local GATE_STATUS="$GATE_HOME/status" GATE_TOOL_RC=0
-  local __status_line="" __status_extra=""
+  local __status_line="" __status_extra="" __status_kind=""
   # Признак «ребёнок не пожат» инициализируется здесь: непроинициализированный
   # флаг под `set -u` уронил бы стадию, а его протечка между вызовами объявила
   # бы чужое состояние машины свойством этой сборки.
@@ -10390,6 +10390,21 @@ __interface_gate() {
     esac
     return 0
   }
+  __interface_gate_classify_status() {
+    local line="$1"
+    # CONSTRAINT: одна строка — ровно одно из exited N | signaled N | unreaped | bad.
+    # exited 0..255; signaled 1..127; unreaped — точное совпадение всей строки.
+    if [[ "$line" =~ ^exited\ ([0-9]{1,3})$ ]] && (( 10#${BASH_REMATCH[1]} <= 255 )); then
+      echo "exited ${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^signaled\ ([0-9]{1,3})$ ]] && (( 10#${BASH_REMATCH[1]} > 0 && 10#${BASH_REMATCH[1]} < 128 )); then
+      echo "signaled ${BASH_REMATCH[1]}"
+    elif [[ "$line" == unreaped ]]; then
+      echo unreaped
+    else
+      echo bad
+    fi
+    return 0
+  }
   # GATE_TERM_HELPERS_END
   if [[ $GATE_EXITED -eq 0 ]]; then
     __interface_gate_deliver_term "$GATE_PID"
@@ -10417,11 +10432,12 @@ __interface_gate() {
     echo "FATAL: гейт интерфейса НЕ ИЗМЕРЕН -- статус отсутствует, пуст или неполон (отказ прибора)" >&2
     return 2
   fi
-  if [[ "$__status_line" =~ ^exited\ ([0-9]{1,3})$ ]] && (( 10#${BASH_REMATCH[1]} <= 255 )); then
+  __status_kind="$(__interface_gate_classify_status "$__status_line")"
+  if [[ "$__status_kind" =~ ^exited\ ([0-9]{1,3})$ ]]; then
     GATE_RC=$((10#${BASH_REMATCH[1]}))
-  elif [[ "$__status_line" =~ ^signaled\ ([0-9]{1,3})$ ]] && (( 10#${BASH_REMATCH[1]} > 0 && 10#${BASH_REMATCH[1]} < 128 )); then
+  elif [[ "$__status_kind" =~ ^signaled\ ([0-9]{1,3})$ ]]; then
     GATE_RC=$((128 + 10#${BASH_REMATCH[1]}))
-  elif [[ "$__status_line" == unreaped ]]; then
+  elif [[ "$__status_kind" == unreaped ]]; then
     # CONSTRAINT: ребёнок пережил KILL и не пожат -- состояние МАШИНЫ, а не код
     # образа. Измерено 18.09 на 2.1.276/darwin: сессия, снятая после отрисовки,
     # застревает в состоянии выхода (`ps` STAT `?Es`) и не жнётся даже SIGKILL.
