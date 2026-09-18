@@ -49,6 +49,10 @@ KIT=$(cd "$HERE/.." && pwd)
 # --- ОДИН дом порогов. Второго присваивания этих имён в файле нет. ---
 DEFAULT_OLDER_THAN_HOURS=6
 DEFAULT_MIN_SIZE_MB=100
+# Потолок накопления корней зонда с ЗАВЕРШЁННЫМ возвратом (#57): суммарный
+# размер таких корней выше этого = снести старшие (снимки протухли). Держимые
+# корни (возврат не завершён) потолок НЕ трогает.
+DEFAULT_PROBE_CAP_MB=4096
 
 die2() { printf '%s\n' "$*" >&2; exit 2; }
 die3() { printf '%s\n' "$*" >&2; exit 3; }
@@ -114,11 +118,18 @@ trap 'exit 143' TERM
 usage() {
   cat <<EOF
 usage: bash tools/reap-heavy.sh [--apply] [--older-than-hours N] [--min-size-mb N]
-                               [--fixture DIR] [--self-check]
+                               [--probe-cap-mb N] [--fixture DIR] [--self-check]
 
   без --apply     таблица кандидатов (path, mb, age_h, reason), ничего не сносит
   --apply         снести ровно кандидатов таблицы
+  --probe-cap-mb  потолок накопления ЗАВЕРШЁННЫХ корней зонда (умолч. 4096); 0 = без потолка
   --self-check    зубы на своей фикстуре; боевые корни не участвуют
+
+Корень зонда cc-build-path-probe.* несёт след return.done, только когда возврат
+живого состояния завершён. БЕЗ следа корень ДЕРЖИТСЯ и называется (громкая
+строка «держим:»), никогда не сносится по возрасту -- config.json.snapshot в нём
+может быть единственным путём возврата. СО следом корень -- предмет обычной
+прополки (возраст/мёртвый pid) и потолка накопления (--probe-cap-mb).
 
 Занятые каталоги защищаются ОБЪЯВЛЕННОЙ АРЕНДОЙ: одна строка
   <каталог>/.reap-lease -> "reap-lease-v1 <unix-секунды-истечения> [причина]"
@@ -183,6 +194,7 @@ parse_args() {
   FIXTURE=
   OLDER_THAN_HOURS=$DEFAULT_OLDER_THAN_HOURS
   MIN_SIZE_MB=$DEFAULT_MIN_SIZE_MB
+  PROBE_CAP_MB=$DEFAULT_PROBE_CAP_MB
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --apply) APPLY=1; shift ;;
@@ -202,6 +214,11 @@ parse_args() {
         MIN_SIZE_MB=$2
         shift 2
         ;;
+      --probe-cap-mb)
+        [[ $# -ge 2 ]] || die2 "ОТКАЗ: --probe-cap-mb нужно число"
+        PROBE_CAP_MB=$2
+        shift 2
+        ;;
       -h|--help) usage; __DONE=1; exit 0 ;;
       *) die2 "ОТКАЗ: неизвестный аргумент $1" ;;
     esac
@@ -211,6 +228,9 @@ parse_args() {
   esac
   case "$MIN_SIZE_MB" in
     ''|*[!0-9]*) die2 "ОТКАЗ: --min-size-mb должно быть целым неотрицательным, дано '$MIN_SIZE_MB'" ;;
+  esac
+  case "$PROBE_CAP_MB" in
+    ''|*[!0-9]*) die2 "ОТКАЗ: --probe-cap-mb должно быть целым неотрицательным, дано '$PROBE_CAP_MB'" ;;
   esac
 }
 
@@ -252,6 +272,7 @@ run_census() {
   export REAP_FLOOR REAP_FLOOR_PARSER
   export REAP_HOURS=$OLDER_THAN_HOURS
   export REAP_MINSIZE=$MIN_SIZE_MB
+  export REAP_PROBE_CAP=$PROBE_CAP_MB
   export REAP_APPLY=$__reap_apply
   export REAP_LSOF="${LSOF:-}"
   python3 - <<'PY'
@@ -601,6 +622,7 @@ def require_root_readable(root, label):
 
 hours = int(os.environ['REAP_HOURS'])  # ONE_HOME_HOURS
 minsize = int(os.environ['REAP_MINSIZE']) * 1024 * 1024
+probe_cap = int(os.environ['REAP_PROBE_CAP']) * 1024 * 1024  # потолок завершённых корней зонда (#57)
 do_apply = os.environ.get('REAP_APPLY') == '1'
 floor = read_floor(os.environ['REAP_FLOOR'])
 # Суффикс читает родитель из дома имени корпуса; пустой -- отказ прибора:
@@ -630,6 +652,8 @@ if exists(launcher):
     active_ver = versions_version(base)
 
 cands = []  # (path, nbytes, mtime, reason, root)
+held_probe_roots = []      # корни зонда БЕЗ return.done -- держим и называем (#57)
+probe_roots_complete = []  # корни зонда С return.done, не в кандидатах по возрасту -- предмет потолка
 
 def add(path, reason, root):
     if not exists(path):
@@ -649,14 +673,26 @@ def add(path, reason, root):
     cands.append((path, nbytes, mtime, reason, root))
 
 # 1. временный каталог: cc-build-path-probe.* и копии зубов
+# Корень зонда с ЗАВЕРШЁННЫМ возвратом несёт след return.done (пишет
+# build-path-probe.sh на чистом возврате): снимки протухли -- сносить свободно
+# по обычным признакам (мёртвый pid / возраст) и по потолку накопления.
+# Корень БЕЗ следа -- возврат НЕ завершён (провал / SIGKILL / обрыв):
+# config.json.snapshot может быть ЕДИНСТВЕННЫМ путём возврата (адресат первой
+# двери стража) ⇒ ДЕРЖИМ и НАЗЫВАЕМ, никогда не сносим по возрасту (инцидент
+# 2026-08-31: глоб снёс путь возврата). Различие -- ПО СЛЕДУ В КОРНЕ, не по
+# времени и не по размеру.
 if require_root_readable(tmp, 'tmp') and not reaped_root(tmp):
     for path in glob.glob(os.path.join(tmp, 'cc-build-path-probe.*')):
         if not os.path.isdir(path):
             continue
+        if not os.path.exists(os.path.join(path, 'return.done')):
+            held_probe_roots.append(path)
+            continue
         pid = name_pid_probe(os.path.basename(path))
+        if pid is not None and pid_is_alive(pid):
+            continue  # живой прогон -- не трогаем даже с завершённым следом
+        probe_roots_complete.append(path)
         if pid is not None:
-            if pid_is_alive(pid):
-                continue
             add(path, 'tmp: pid %d dead' % pid, tmp)
         else:
             st = lstat_or_unmeasured(path)
@@ -783,6 +819,34 @@ if require_root_readable(scratch, 'scratch') and not reaped_root(scratch):
     except OSError as exc:
         die2("ОТКАЗ: не обойти скратчпад %s: %s" % (scratch, exc))
 
+# ПОТОЛОК НАКОПЛЕНИЯ ЗАВЕРШЁННЫХ КОРНЕЙ ЗОНДА (#57): корни со следом
+# return.done возврат уже завершили -- снимки протухли, держать их незачем;
+# без потолка они копятся вечно (дефекта-потолка до #57 не было вовсе).
+# Держим до probe_cap; при переполнении сносим СТАРШИЕ первыми, пока удержанное
+# не уйдёт под потолок. Корни БЕЗ следа (held_probe_roots) потолок НЕ трогает --
+# они несут незавершённый путь возврата.
+if probe_cap > 0 and probe_roots_complete:
+    already = set(c[0] for c in cands)
+    ceil_c = []  # (path, nbytes, mtime) завершённых, ещё не в кандидатах
+    for path in probe_roots_complete:
+        if path in already:
+            continue
+        measured = tree_bytes(path)
+        if measured is None:
+            continue  # исчез под обходом -- штатная гонка
+        ceil_c.append((path, measured[0], measured[1]))
+    retained = sum(r[1] for r in ceil_c)
+    if retained > probe_cap:
+        ceil_c.sort(key=lambda r: r[2])  # старший mtime (меньшее число) первым
+        for path, nbytes, mtime in ceil_c:
+            if retained <= probe_cap:
+                break
+            before = len(cands)
+            add(path, 'tmp: probe root over cap (удержано %d MB > %d MB)'
+                % (retained // 1048576, probe_cap // 1048576), tmp)
+            if len(cands) > before:
+                retained -= nbytes
+
 cands.sort(key=lambda r: r[0])
 print('path\tmb\tage_h\treason')
 for path, nbytes, mtime, reason, root in cands:
@@ -825,6 +889,15 @@ for _d in sorted(lease_hits):
 print('гонка: кандидатов исчезло под обходом: %d' % len(race_vanished))
 for _p, _e in race_vanished:
     print('гонка: исчез %s (%s)' % (_p, _e))
+
+# ГРОМКАЯ СТРОКА ДЕРЖАНИЯ (#57): корень зонда БЕЗ следа return.done -- возврат
+# НЕ завершён; config.json.snapshot может быть единственным путём возврата
+# (адресат первой двери стража). Держим и НАЗЫВАЕМ, никогда не сносим по
+# возрасту (инцидент 2026-08-31: глоб снёс путь возврата). Число (ноль тоже) и
+# путь каждого держимого, в обоих режимах.
+print('держим: корней зонда без следа возврата: %d' % len(held_probe_roots))
+for _h in sorted(held_probe_roots):
+    print('держим: %s (нет return.done -- возврат не завершён)' % _h)
 PY
 }
 
@@ -873,13 +946,16 @@ def touchdir(path, mtime):
 two = b'\0' * (2 * 1024 * 1024)
 tiny = b'protected-tiny\n'
 
-# garbage / protected in tmp
+# garbage / protected in tmp. След return.done (#57): оба корня ЗАВЕРШИЛИ
+# возврат -- они предмет обычной прополки (по возрасту), а не держания.
 p_old = os.path.join(fx, 'tmp', 'cc-build-path-probe.oldnopid')
 touchdir(p_old, old)
 write(os.path.join(p_old, 'blob'), b'old-probe\n', old)
+write(os.path.join(p_old, 'return.done'), b'return complete rc=0\n', old)
 p_young = os.path.join(fx, 'tmp', 'cc-build-path-probe.youngnopid')
 touchdir(p_young, young)
 write(os.path.join(p_young, 'blob'), b'young-probe\n', young)
+write(os.path.join(p_young, 'return.done'), b'return complete rc=0\n', young)
 write(os.path.join(fx, 'tmp', 'checks-teeth.%s.x.bin' % dead), b'dead-teeth\n', young)
 write(os.path.join(fx, 'tmp', 'checks-teeth.%s.x.bin' % live), b'live-teeth\n', old)
 
@@ -1067,6 +1143,22 @@ elif n == 17:
            '                    die3("НЕ ИЗМЕРЕНО (скратч): не stat %s: %s" % (path, exc))\n')
     new = ('                except OSError as exc:\n'
            '                    continue\n')
+elif n == 18:
+    # MUT_HELD_OFF: снять держание корня без следа возврата -- корень без
+    # return.done снова сносится по возрасту (инцидент 2026-08-31: путь
+    # возврата уходит под глоб).
+    old = "        if not os.path.exists(os.path.join(path, 'return.done')):\n"
+    new = "        if False:\n"
+elif n == 19:
+    # MUT_HELD_ALWAYS: держать КАЖДЫЙ корень -- завершённый возврат (return.done)
+    # больше не прибирается, снимки копятся вечно.
+    old = "        if not os.path.exists(os.path.join(path, 'return.done')):\n"
+    new = "        if True:\n"
+elif n == 20:
+    # MUT_CAP_OFF: снять потолок накопления -- завершённые корни зонда сверх
+    # probe_cap перестают сноситься, tmp растёт без предела.
+    old = 'if probe_cap > 0 and probe_roots_complete:\n'
+    new = 'if False and probe_cap > 0 and probe_roots_complete:\n'
 c = text.count(old)
 if c != 1:
     sys.stderr.write('mutation %d anchor count=%d\n' % (n, c))
@@ -1290,6 +1382,9 @@ tooth_6() {
   build_fixture "$fx" "$DEADPID" "$LIVEPID"
   probe=$fx/tmp/cc-build-path-probe.midage
   mkdir -p "$probe"
+  # След завершённого возврата (#57): без него корень держится, и порог возраста
+  # не проверить -- зуб 6 мерит именно порог, поэтому возврат должен быть завершён.
+  printf 'return complete rc=0\n' > "$probe/return.done"
   python3 - "$probe" <<'PY'
 import os, sys, time
 p = sys.argv[1]
@@ -1825,6 +1920,126 @@ PY
   tooth_pass
 }
 
+# ЗУБ 18: корень зонда БЕЗ следа return.done -- возврат не завершён; НЕ сносить
+# даже если старше порога (config.json.snapshot внутри может быть единственным
+# путём возврата -- инцидент 2026-08-31). Корень держится и называется громкой
+# строкой. Красный контроль n=18 (if False) снимает держание -- старый корень
+# без следа снова уезжает в кандидаты и под --apply исчезает.
+tooth_18() {
+  TOOTH_N=18 TOOTH_NAME='держим-без-следа-возврата' TOOTH_RC=0
+  local fx out err rc held
+  fx=$(mktemp -d "$WORK/fx18.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  held=$fx/tmp/cc-build-path-probe.heldnofile
+  mkdir -p "$held"
+  printf 'live-state\n' > "$held/config.json.snapshot"
+  python3 - "$held" <<'PY'
+import os, sys, time
+p = sys.argv[1]
+old = time.time() - 7 * 3600
+os.utime(p, (old, old))
+PY
+  out=$WORK/t18.out; err=$WORK/t18.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1 --apply
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "прогон rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  if [[ ! -d "$held" ]]; then
+    tooth_fail "корень без следа возврата снесён под --apply: $held"
+    return 0
+  fi
+  if grep -F "$held"$'\t' "$out" >/dev/null; then
+    tooth_fail "корень без следа возврата в таблице сноса: $held"
+    return 0
+  fi
+  if ! grep -Fq "держим: $held" "$out"; then
+    tooth_fail "корень без следа возврата не назван в держим: $(cat "$out")"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 19: корень зонда СО следом return.done возврат завершил -- прибирается по
+# обычным признакам (возраст), НЕ держится. Красный контроль n=19 (if True)
+# держит КАЖДЫЙ корень -- завершённый больше не прибирается, снимки копятся.
+tooth_19() {
+  TOOTH_N=19 TOOTH_NAME='завершённый-прибирается' TOOTH_RC=0
+  local fx out err rc comp
+  fx=$(mktemp -d "$WORK/fx19.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  comp=$fx/tmp/cc-build-path-probe.compold
+  mkdir -p "$comp"
+  printf 'blob\n' > "$comp/blob"
+  printf 'return complete rc=0\n' > "$comp/return.done"
+  python3 - "$comp" <<'PY'
+import os, sys, time
+p = sys.argv[1]
+old = time.time() - 7 * 3600
+os.utime(p, (old, old))
+PY
+  out=$WORK/t19.out; err=$WORK/t19.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "прогон rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  if ! grep -F "$comp"$'\t' "$out" >/dev/null; then
+    tooth_fail "завершённый старый корень не попал в кандидаты: $(cat "$out")"
+    return 0
+  fi
+  if grep -Fq "держим: $comp" "$out"; then
+    tooth_fail "завершённый корень ошибочно в держим: $comp"
+    return 0
+  fi
+  tooth_pass
+}
+
+# ЗУБ 20: потолок накопления завершённых корней. Два молодых корня со следом
+# возврата (~2 МБ каждый) сверх --probe-cap-mb 3: возраст их не берёт, берёт
+# потолок -- сносится СТАРШИЙ, младший остаётся под потолком. Красный контроль
+# n=20 (if False and ...) снимает потолок -- старший корень остаётся.
+tooth_20() {
+  TOOTH_N=20 TOOTH_NAME='потолок-накопления' TOOTH_RC=0
+  local fx out err rc r_old r_new
+  fx=$(mktemp -d "$WORK/fx20.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог фикстуры\n' >&2; exit 2; }
+  [ -n "$fx" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога фикстуры пуст\n' >&2; exit 2; }
+  build_fixture "$fx" "$DEADPID" "$LIVEPID"
+  r_old=$fx/tmp/cc-build-path-probe.capold
+  r_new=$fx/tmp/cc-build-path-probe.capnew
+  python3 - "$r_old" "$r_new" <<'PY'
+import os, sys, time
+r_old, r_new = sys.argv[1], sys.argv[2]
+two = b'\0' * (2 * 1024 * 1024)
+now = time.time()
+for p, mt in ((r_old, now - 3000), (r_new, now - 60)):
+    os.makedirs(p, exist_ok=True)
+    open(os.path.join(p, 'blob'), 'wb').write(two)
+    open(os.path.join(p, 'return.done'), 'w').write('return complete rc=0\n')
+    os.utime(p, (mt, mt))
+PY
+  out=$WORK/t20.out; err=$WORK/t20.err
+  run_tool "$out" "$err" --fixture "$fx" --min-size-mb 1 --probe-cap-mb 3
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    tooth_fail "прогон rc=$rc stderr=$(cat "$err")"
+    return 0
+  fi
+  if ! grep -F "$r_old" "$out" | grep -Fq 'over cap'; then
+    tooth_fail "старший сверхлимитный корень не снесён потолком: $(cat "$out")"
+    return 0
+  fi
+  if grep -F "$r_new"$'\t' "$out" >/dev/null; then
+    tooth_fail "младший корень снесён при достаточном потолке: $r_new"
+    return 0
+  fi
+  tooth_pass
+}
+
 run_one_tooth() {
   case "$1" in
     1) tooth_1 ;;
@@ -1844,6 +2059,9 @@ run_one_tooth() {
     15) tooth_15 ;;
     16) tooth_16 ;;
     17) tooth_17 ;;
+    18) tooth_18 ;;
+    19) tooth_19 ;;
+    20) tooth_20 ;;
     *) say "нет зуба $1"; return 2 ;;
   esac
 }
@@ -1898,21 +2116,21 @@ bin/claude
   HOLDER_PID=
 
   local n green=0 redctl=0
-  say "reap-heavy --self-check: зубы=17 (зелёная сторона на исходном тексте)"
-  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+  say "reap-heavy --self-check: зубы=20 (зелёная сторона на исходном тексте)"
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     TOOTH_RC=0
     run_one_tooth "$n" || return 2
     if [[ "$TOOTH_RC" -eq 0 ]]; then
       green=$((green + 1))
     fi
   done
-  if [[ "$green" -ne 17 ]]; then
-    say "reap-heavy --self-check: ОТКАЗ — зелёных $green из 17"
+  if [[ "$green" -ne 20 ]]; then
+    say "reap-heavy --self-check: ОТКАЗ — зелёных $green из 20"
     return 1
   fi
 
   say "reap-heavy --self-check: красный контроль (мутация → именной красный → снимок)"
-  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     cp "$SNAP" "$TOOL"
     if ! mutate_copy "$TOOL" "$n"; then
       say "ЗУБ $n красный-контроль: ОТКАЗ прибора — якорь мутации не единственный"
@@ -1937,8 +2155,8 @@ bin/claude
     fi
     redctl=$((redctl + 1))
   done
-  say "reap-heavy --self-check: ИТОГ зубов=17 зелёных=$green красный-контроль=$redctl"
-  [[ "$green" -eq 17 && "$redctl" -eq 17 ]]
+  say "reap-heavy --self-check: ИТОГ зубов=20 зелёных=$green красный-контроль=$redctl"
+  [[ "$green" -eq 20 && "$redctl" -eq 20 ]]
 }
 
 parse_args "$@"
