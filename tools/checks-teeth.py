@@ -53,7 +53,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 31
+EXPECTED_MUTATIONS = 32
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
 EXPECTED_ENTRY_TEETH = 2
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
@@ -270,7 +270,48 @@ def edits_m2(base: bytes) -> list[tuple[int, bytes]]:
     return [(tail_at + use.start(1), lim)]
 
 
-DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2, "M2": edits_m2}
+def edits_s1(base: bytes) -> list[tuple[int, bytes]]:
+    """Гвард предиката session memory вернулся в СОСТАВНОЙ форме (#341).
+
+    Литеральный зуб невозможен: составная форма длиннее простой, а замена
+    длиннее якоря -- отказ прибора. Мутация derived идёт той же иглой, что
+    проверка: keep-хвост предиката, от него назад до головы функции, и всё
+    между головой и хвостом (ранний возврат апстрима + нейтрализованный
+    tweakcc-гвард `if(!!0)return!1;`) переписывается в живой составной гвард
+    `if(<вызов из раннего возврата>||!<читатель keep>("tengu_m1",!1))return!1;`
+    с дополнением пробелами до прежней длины. Первый терм берётся из самого
+    образа, читатель флага -- из keep-хвоста, имя флага синтетическое:
+    предмет зуба -- ФОРМА условия, а не имя. Старое постусловие знало гвард
+    одним написанием `if(!ID("tengu_...",!1))return!1;` и составную форму
+    пропускало молча -- проверка читала «уже снято» при живом гварде.
+    """
+    keep = re.search(rb'return!' + ID + rb'\(\)\|\|' + ID
+                     + rb'\("tengu_[a-z0-9_]+",!1\)\}', base)
+    if not keep:
+        raise Refusal("S1: keep-хвост предиката session memory не найден")
+    reader = re.search(rb'\|\|(' + ID + rb')\("tengu_', keep.group(0))
+    if not reader:
+        raise Refusal("S1: читатель флага в keep-хвосте не найден")
+    at_keep = keep.start()
+    back = base[max(0, at_keep - 400):at_keep]
+    heads = list(re.finditer(rb'function ' + ID + rb'\(\)\{', back))
+    if not heads:
+        raise Refusal("S1: голова функции предиката не найдена")
+    span_at = at_keep - len(back) + heads[-1].end()
+    span = base[span_at:at_keep]
+    term = re.search(rb'if\((' + ID + rb')\(\)', span)
+    if not term:
+        raise Refusal("S1: в теле предиката нет раннего возврата с вызовом -- "
+                      "первый терм составного гварда не из чего взять")
+    guard = (b'if(' + term.group(1) + b'()||!' + reader.group(1)
+             + b'("tengu_m1",!1))return!1;')
+    if len(guard) > len(span):
+        raise Refusal(f"S1: составной гвард ({len(guard)} байт) не влезает "
+                      f"в тело до keep-хвоста ({len(span)} байт)")
+    return [(span_at, guard.ljust(len(span)))]
+
+
+DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2, "M2": edits_m2, "S1": edits_s1}
 
 
 STEP29_CEILING = "the mod-API model budget ceiling is operator-set"

@@ -6778,6 +6778,12 @@ import os, re, sys
 d = open(sys.argv[1], 'rb').read()
 src = open(sys.argv[2], encoding='utf-8').read()
 ID = rb'[A-Za-z_$][\w$]*'
+# Широкий детектор чтения фича-флага -- глаза постусловия session memory (#341):
+# голый идентификатор, возможно с `this.` или точечной цепочкой (`K.read(…)`,
+# `this.getFeatureValueWithSource(…)`), литерал умолчания !0 ИЛИ !1. Постусловие
+# обязано быть ШИРЕ локатора по построению: локатор режет только понятную ему
+# форму, и зеркало локатора не различает «снято» и «переформовано».
+FLAG_READ = re.compile(rb'(?:this\.)?' + ID + rb'(?:\.' + ID + rb')*\("tengu_[a-z0-9_]+",(?:!0|!1)\)')
 
 
 def SWITCH(env, empty_off=True):
@@ -7078,32 +7084,75 @@ def _session_memory_ungated(d):
     The extract-mode predicate shape is unique bundle wide, so it needs no
     scope.
 
-    The predicate half is checked POSITIVELY. Absence of the gated shape alone
-    cannot tell "forced" from "reshaped upstream", and the second reads as
-    success while session memory stays off -- the same one-sided weakness this
-    docstring warns about for flag names. The end state is exactly one function
-    of the forced shape `function X(){return!Y()||Z("tengu_...",!1)}`: the flag
-    guard gone, the product's own interactivity condition kept. Measured on
-    pristine 2.1.233 / 240 / 242 / 246: gated shape 1, forced shape 0.
+    The postcondition is WIDER than the locator BY CONSTRUCTION (#341): a
+    postcondition that merely mirrors the locator's one spelling cannot tell
+    "removed" from "reshaped upstream" -- the locator finds nothing, the mirror
+    finds nothing, and the run reads green while session memory stays off.
+    Measured on the 2.1.276 census: of 110 flag guards inside `if(` the narrow
+    spelling covers 17; the compound condition is upstream's DOMINANT idiom,
+    not an exotic one. So both halves see the flag read through FLAG_READ
+    (bare, dotted, or `this.`-prefixed reader; !0 or !1 default), and the
+    window half walks every `if(` structurally instead of matching one shape.
+
+    The predicate half is checked POSITIVELY: exactly one keep-tail function
+    survives, and between its head and the tail there is no flag read AT ALL
+    (the tail's own escape-hatch read is outside that slice by construction).
+    Measured on pristine 2.1.272 / 273 / 2.1.277.orig: keep-tail functions 1,
+    flag reads in the body 2 (guard + escape hatch); on the assembled 2.1.276:
+    body reads 0, window guards 0.
     """
     anchor = b'querySource:"extract_memories",forkLabel:"extract_memories"'
     at = d.find(anchor)
     if at == -1:
         return False
     window = d[at:at + 8000]
-    if re.search(rb'if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)\s*return[^;]*;', window):
-        return False
+    # Первая половина -- окно точки входа, структурный проход (#341): каждое
+    # `if(` в окне получает условие по БАЛАНСУ скобок (не по [^)] -- условия
+    # вложенные: стоковый входной гвард на 2.1.272+ сам составной,
+    # `if(!Me&&!H("tengu_passport_quail",!1))`). Условие с чтением флага перед
+    # return -- живой гвард ЛЮБОЙ формы. Непарное `if(` -- красная проверка,
+    # а не «чисто»: молчащее «ничего не нашёл» здесь и был дефект. Баланс
+    # считается по символам внутри `if(…)`: комментариев в минифицированном
+    # условии нет, а единственный строковый литерал -- имя флага -- скобок
+    # не содержит.
+    p = window.find(b'if(')
+    while p != -1:
+        depth = 1
+        k = p + 3
+        cond_end = -1
+        while k < len(window):
+            c = window[k:k + 1]
+            if c == b'(':
+                depth += 1
+            elif c == b')':
+                depth -= 1
+                if depth == 0:
+                    cond_end = k
+                    break
+            k += 1
+        if cond_end == -1:
+            return False
+        cond = window[p + 3:cond_end]
+        if FLAG_READ.search(cond):
+            s = cond_end + 1
+            while s < len(window) and window[s:s + 1] in b' \t\n\r':
+                s += 1
+            if window[s:s + 6] == b'return':
+                return False
+        p = window.find(b'if(', p + 1)
     # Вторая половина -- предикат режима. Прежняя редакция требовала тело из
     # ОДНОГО return («forced») и отдельно искала гейтованную форму тем же
     # однострочным написанием. С 2.1.269 апстрим держит в этом теле ещё и
     # ранний возврат (`function X(){if(Y()!==null)return!0;return!Z()||…}`),
     # поэтому «forced» не совпадал НИКОГДА, а «gated» -- тем более: одна
     # половина не могла подняться, вторая не могла упасть, и обе печатались как
-    # работающие. Утверждается ГАРАНТИЯ: хвост-«keep» на месте и единственный, и
-    # между головой его функции и им НЕТ флагового гарда. Ранние возвраты
-    # апстрима допускаются -- они не про наш флаг, и правка 7 их не трогает.
-    # Измерено на 2.1.267/268/269/270: форма «keep» -- ровно 1 вхождение на
-    # каждом, от головы до неё 15 (267) и 24 (270) байта.
+    # работающие. Утверждается ГАРАНТИЯ: хвост-«keep» на месте и единственный,
+    # и между головой его функции и им НЕТ чтения флага ВООБЩЕ -- ни одной
+    # формы из измеренного класса (составное условие, литерал !0, читатель
+    # через точку). Ранние возвраты апстрима допускаются -- они не про наш
+    # флаг, и правка 7 их не трогает. Чтение-лазейка самого хвоста лежит ВНЕ
+    # среза по построению. Измерено на 2.1.267/268/269/270: форма «keep» --
+    # ровно 1 вхождение на каждом, от головы до неё 15 (267) и 24 (270) байта.
     keeps = list(re.finditer(rb'return!' + ID + rb'\(\)\|\|' + ID
                              + rb'\("tengu_[a-z0-9_]+",!1\)\}', d))
     if len(keeps) != 1:
@@ -7114,7 +7163,7 @@ def _session_memory_ungated(d):
     if not heads:
         return False
     body = back[heads[-1].end():]
-    return not re.search(rb'if\(!' + ID + rb'\("tengu_[a-z0-9_]+",!1\)\)return!1;', body)
+    return not FLAG_READ.search(body)
 
 
 def _stream_finalize_ok(d):

@@ -477,8 +477,51 @@ step('7 session memory', () => {
   // shrank by whatever was cut, and re-reading 8000 characters would pull in
   // trailing code that was never part of this entry point.
   const after = js.slice(anchorIdx, anchorIdx + WIN - (gateDone ? gates[0].length : 0));
-  if (new RegExp(`if\\(!${ID}\\("tengu_[a-z0-9_]+",!1\\)\\)\\s*return[^;]*;`).test(after)) {
-    fail('session-memory extraction is still gated on a feature flag');
+  // The wide flag-read detector: the postcondition's eyes. The locator above
+  // stays narrow on purpose -- it cuts only the shape it understands -- so the
+  // postcondition must NOT mirror it. A guard reshaped into a compound
+  // condition, given a !0 default, or read through a member call
+  // (`K.read("tengu_…")`, `this.getX("tengu_…")`) is invisible to the narrow
+  // form, and "locator found nothing" then reads as "already removed" while
+  // the gate is alive. Constraint: bare identifier, optionally `this.`-prefixed
+  // or dotted (`ID.ID(`), because that covers every reader shape measured in
+  // the 2.1.276 census -- anything wider (arbitrary receivers) would match
+  // non-flag call sites.
+  const wideReadRx = new RegExp(`(?:this\\.)?${ID}(?:\\.${ID})*\\("tengu_[a-z0-9_]+",(?:!0|!1)\\)`);
+  // Structural walk over the window, not the locator's regex: each `if(` gets
+  // its condition taken by BRACKET BALANCE (depth 1 back to 0), not by [^)] --
+  // conditions nest (the stock entry gate is itself compound on 2.1.272+:
+  // `if(!Me&&!H("tengu_passport_quail",!1))`). A condition that still reads a
+  // feature flag in front of a return is a stop, whatever the condition's
+  // shape; the refusal quotes the condition so the failure is tellable apart
+  // from its neighbours. Balance is computed per `if(` over plain characters:
+  // a minified condition carries no comments, and its only string literal --
+  // the flag name -- cannot contain parens. An `if(` whose parens never close
+  // inside the window is an instrument refusal, not a clean pass.
+  for (let p = after.indexOf('if('); p !== -1; p = after.indexOf('if(', p + 1)) {
+    let depth = 1;
+    let condEnd = -1;
+    for (let k = p + 3; k < after.length; k++) {
+      const c = after[k];
+      if (c === '(') depth++;
+      else if (c === ')') {
+        depth--;
+        if (depth === 0) {
+          condEnd = k;
+          break;
+        }
+      }
+    }
+    if (condEnd === -1) {
+      fail('session-memory extraction window holds an unbalanced if( -- cannot verify the gate is gone');
+    }
+    const cond = after.slice(p + 3, condEnd);
+    if (!wideReadRx.test(cond)) continue;
+    let s = condEnd + 1;
+    while (s < after.length && /\s/.test(after[s])) s++;
+    if (after.startsWith('return', s)) {
+      fail(`session-memory extraction is still gated on a feature flag: if(${cond})`);
+    }
   }
 
   // (b) the extract-mode predicate: `flagA && (!something || flagB)`.
@@ -572,11 +615,23 @@ step('7 session memory', () => {
         `(${finals.length} functions carry the interactivity return; expected exactly 1)`
     );
   }
-  if (guardRx.test(finals[0].body)) {
-    fail(
-      'session-memory extract-mode predicate still performs a live feature-flag ' +
-        'read that returns !1 -- extraction may still be off'
-    );
+  // Same widening as the window half: the ONE allowed flag read is the escape
+  // hatch the keepRx match itself carries; any OTHER read in the body -- a
+  // compound condition, a !0 default, a member-call reader -- is a live gate
+  // the narrow locator cannot see, and the refusal must quote it verbatim: an
+  // unquoted failure is indistinguishable from its neighbours and gets fixed
+  // blind.
+  {
+    const bStart = finals[0].open;
+    const allowFrom = finals[0].hitAt - bStart;
+    const allowTo = allowFrom + finals[0].hit.length;
+    for (const r of finals[0].body.matchAll(new RegExp(wideReadRx.source, 'g'))) {
+      if (r.index >= allowFrom && r.index < allowTo) continue;
+      fail(
+        `session-memory extract-mode predicate still performs a live feature-flag ` +
+          `read -- ${r[0]} -- extraction may still be off`
+      );
+    }
   }
 
   const did = [gateDone ? 'extraction gate' : null, modeDone ? 'extract-mode predicate' : null].filter(Boolean);
