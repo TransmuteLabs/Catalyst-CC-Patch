@@ -1,13 +1,12 @@
 # Мутации гейта чисел (0d): id, файл, что заменить, на что, чем гейт обязан
 # ответить. Поля разделены табуляцией.
 #
-# СТРОКИ, НЕСУЩИЕ ЖИВОЙ СЧЁТ (D1, D2, D4, D6, D7, D36, D37, D42, D43, D44, D45),
-# устаревают вместе с ним:
-# мутация обязана создать РАСХОЖДЕНИЕ, а для этого держит в себе одно из двух
-# сверяемых чисел. Устаревают они ГРОМКО -- стенд отвечает «вход не найден
-# дословно» и падает, -- поэтому счёт правится в двух местах: у владельца и
-# здесь. Тихого варианта у этой связки нет: мутация без числа не создаёт
-# расхождения, которое гейт обязан увидеть.
+# СЧЁТ ВЛАДЕЛЬЦА в полях 3-5 (вход, мутация, ждём-след) пишется ТОКЕНОМ
+# {OWNER:<id>:<величина>} и живёт в одном доме -- у владельца: значение
+# подставляет стенд из реестра OWNERS гейта чисел, поэтому таблица едет
+# вместе с владельцем без правки здесь. Литерал допустим ровно там, где
+# мутация обязана держать ЗАВЕДОМО ДРУГОЕ число, и защищён проверкой
+# «после подстановки поле 3 не равно полю 4».
 #
 # Почему таблица лежит ОТДЕЛЬНО от кода стенда: вход каждой мутации -- это
 # нарочно неверное утверждение о счёте, а гейт сканирует прозу в .md и .txt
@@ -22,18 +21,18 @@
 # Каждое правило грамматики имеет здесь СВОЙ вход: украшения разметки (D5),
 # ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
 # явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
-D1	README.md	249 scenarios on a toy corpus	120 scenarios on a toy corpus	объявлено «{OWNER_SCENARIOS} scenarios» (владелец corpus-tools-bench)
-D2	README.md	corpus-tools-bench's 330 recorded mutations	corpus-tools-bench's 136 recorded mutations	объявлено «{OWNER_MUTATIONS} mutations» (владелец corpus-tools-bench)
+D1	README.md	{OWNER:corpus-tools-bench:scenarios} scenarios on a toy corpus	120 scenarios on a toy corpus	объявлено «{OWNER:corpus-tools-bench:scenarios} scenarios» (владелец corpus-tools-bench)
+D2	README.md	corpus-tools-bench's {OWNER:corpus-tools-bench:mutations} recorded mutations	corpus-tools-bench's 136 recorded mutations	объявлено «{OWNER:corpus-tools-bench:mutations} mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
-D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = 132;	const EXPECTED_SCENARIOS = 133;	владелец probe-bench
+D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = {OWNER:probe-bench:scenarios};	const EXPECTED_SCENARIOS = 133;	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
-D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = 45	EXPECTED_MUTATION_COUNT = 45	не объявляет свою величину
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS=330	EXPECTED_MUTATION_COUNT=258	не объявляет свою величину
+D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = {OWNER:docnum-bench:mutations}	EXPECTED_MUTATION_COUNT = {OWNER:docnum-bench:mutations}	не объявляет свою величину
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS={OWNER:corpus-tools-bench:mutations}	EXPECTED_MUTATION_COUNT=258	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение
 D11	claude-patch-all.sh	REACH = 8	REACH = 1	четыре слова между
-D12	scripts/kit-build.sh	 — docnum:historical)	)	объявлено «130 checks» (владелец pipeline)
+D12	scripts/kit-build.sh	 — docnum:historical)	)	объявлено «{OWNER:pipeline:checks} checks» (владелец pipeline)
 D13	claude-patch-all.sh	    if ext in ('.md', '.txt', ''):	    if True:	строковое значение в коде
 D14	claude-patch-all.sh	        lo, hi = sentence_span(at)	        lo, hi = max(0, at - 120), min(len(stream), at + 120)	пометка из соседнего предложения
 D15	claude-patch-all.sh	'стало', 'теперь', 'составляет', 'равно')	'теперь', 'составляет', 'равно')	связка «стало»
@@ -47,7 +46,7 @@ D22	claude-patch-all.sh	MASK = re.compile(r'\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)+|\[\^
 D23	claude-patch-all.sh	        if len(found) > 1:	        if False:	два владельца в предложении -- отказ
 D24	claude-patch-all.sh	    if ext == '.py':	    if ext == '.py-нет':	докстринг питона -- проза
 D25	claude-patch-all.sh	            elif re.match(r'(echo|say|printf)\b', stripped):	            elif False:	печатаемая строка -- проза
-D26	claude-patch-all.sh	    ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',	    ('pipeline', ('нетакогоимени', 'конвейера', 'конвейере',	## What the patches do (130 pipeline checks)
+D26	claude-patch-all.sh	    ('pipeline', ('pipeline', 'конвейер', 'конвейера', 'конвейере',	    ('pipeline', ('нетакогоимени', 'конвейера', 'конвейере',	## What the patches do ({OWNER:pipeline:checks} pipeline checks)
 D27	claude-patch-all.sh	        (('checks', 'проверок', 'проверки', 'проверкам', 'проверками',	        (('checks', 'проверок', 'проверки', 'проверками',	дательный падеж
 D28	claude-patch-all.sh	                if nxt_ch == '-' or prv_ch in ('~', '±'):	                if False:	составное число принадлежит своему слову
 D29	claude-patch-all.sh	            if not prev[:1].isalnum():	            if prev.casefold() not in WORDNUM:	числительное чужого предмета не женится
@@ -62,13 +61,13 @@ D32	claude-patch-all.sh	        return blocks(FENCE_LINE.sub(BREAK, text), BLOCK
 D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABLE_SEP.match(line):	        if False:	ячейка таблицы ловит расхождение по шапке
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
-D36	README.md	probe-bench's 13 recorded mutations	probe-bench's 12 recorded mutations	объявлено «13 mutations» (владелец probe-bench)
-D37	README.md	checks-teeth's 31 recorded mutations	checks-teeth's 32 recorded mutations	объявлено «31 mutations» (владелец checks-teeth)
+D36	README.md	probe-bench's {OWNER:probe-bench:mutations} recorded mutations	probe-bench's 12 recorded mutations	объявлено «{OWNER:probe-bench:mutations} mutations» (владелец probe-bench)
+D37	README.md	checks-teeth's {OWNER:checks-teeth:mutations} recorded mutations	checks-teeth's 32 recorded mutations	объявлено «{OWNER:checks-teeth:mutations} mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
-D40	claude-patch-all.sh	все 130 проверок конвейера сошлись	все 130 сошлись	опущенным существительным
+D40	claude-patch-all.sh	все {OWNER:pipeline:checks} проверок конвейера сошлись	все {OWNER:pipeline:checks} сошлись	опущенным существительным
 D41	claude-patch-all.sh	# docnum:synthetic-block -- этот блок ЕСТЬ сам гейт	# этот блок ЕСТЬ сам гейт	the pipeline runs 999 checks
-D42	claude-patch-all.sh	    """Все питоновские heredoc'и одного файла	    """corpus-tools-bench has 12 scenarios. Питоновские heredoc'и одного файла	объявлено «{OWNER_SCENARIOS} scenarios» (владелец corpus-tools-bench)
-D43	README.md	build-path-probe has 104 scenarios	build-path-probe has 92 scenarios	объявлено «104 scenarios» (владелец build-path-probe)
-D44	README.md	104 scenarios and 107 mutations	104 scenarios and 108 mutations	объявлено «107 mutations» (владелец build-path-probe)
-D45	tools/corpus-tools-bench.sh	EXPECTED_SCENARIOS=249	EXPECTED_SCENARIO_COUNT=200	не объявляет свою величину
+D42	claude-patch-all.sh	    """Все питоновские heredoc'и одного файла	    """corpus-tools-bench has 12 scenarios. Питоновские heredoc'и одного файла	объявлено «{OWNER:corpus-tools-bench:scenarios} scenarios» (владелец corpus-tools-bench)
+D43	README.md	build-path-probe has {OWNER:build-path-probe:scenarios} scenarios	build-path-probe has 92 scenarios	объявлено «{OWNER:build-path-probe:scenarios} scenarios» (владелец build-path-probe)
+D44	README.md	{OWNER:build-path-probe:scenarios} scenarios and {OWNER:build-path-probe:mutations} mutations	{OWNER:build-path-probe:scenarios} scenarios and 108 mutations	объявлено «{OWNER:build-path-probe:mutations} mutations» (владелец build-path-probe)
+D45	tools/corpus-tools-bench.sh	EXPECTED_SCENARIOS={OWNER:corpus-tools-bench:scenarios}	EXPECTED_SCENARIO_COUNT=200	не объявляет свою величину

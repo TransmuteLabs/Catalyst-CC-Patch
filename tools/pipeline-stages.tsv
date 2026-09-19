@@ -23,6 +23,8 @@ docnum-anchor-census	Перепись якорей таблицы гейта ч�
 docnum-teeth	Зубы гейта чисел	Зубы гейта чисел	exit	cond-silent
 stand-env-guard-teeth	Зубы гварда герметичности стендов	Зубы гварда герметичности стендов	exit	always
 env-handles-live-teeth	Зубы гварда живости ручек	Зубы гварда живости ручек	exit	always
+builtin-option-pin-guard	Пины опций встроенных модов	Пины опций встроенных модов	exit	always
+builtin-option-pin-guard-teeth	Зубы гварда пинов опций	Зубы гварда пинов опций	exit	always
 executors-census	Перепись исполнителей инструментов	Перепись исполнителей инструментов	exit	always
 stage-census	Перепись стадий конвейера	Перепись стадий конвейера	exit	always
 unpacker-fetch	Fetching the unpacker	Fetching the unpacker	exit	cond-silent

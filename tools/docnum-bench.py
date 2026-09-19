@@ -18,8 +18,12 @@
 Коды выхода (подмножество общей таблицы кита -- см. шапку claude-patch-all.sh):
   0  каждая записанная мутация покраснела своей причиной
   1  зубы не держатся: мутация прошла молча или покраснела ЧУЖОЙ причиной
-  2  прибор не может мерить: нет таблицы, строка не о пяти полях, владелец
-     чисел не прочитался, якорь гейта пропал или встречается не один раз,
+  2  прибор не может мерить: нет таблицы, строка не о пяти полях, реестр
+     владельцев OWNERS не разобрался из вырезанного гейта, токен
+     {OWNER:...} таблицы не разрешился (неизвестный владелец или величина,
+     якорь владельца найден не один раз), счёт зубов подстановки не равен
+     пину EXPECTED_OWNER_TEETH, якорь гейта пропал или встречается не один
+     раз,
      ВЫРЕЗАННЫЙ ГЕЙТ НЕ РАЗБИРАЕТСЯ
      (py_compile перед прогоном; круг 25, E-2), ПРИСТИННЫЙ кит уже красный
      (контроль провален, и мутация ничего не докажет), либо выведенный из
@@ -44,6 +48,8 @@
 Код разбора ДОМИНИРУЕТ над счётом покраснений: пока гейт не разбирается,
 ни одному числу этого прогона веры нет.
 """
+import ast
+import contextlib
 import io
 import os
 import py_compile
@@ -122,25 +128,22 @@ ANCHOR = 'python3 - "$0" <<\'PYDOCS\'\n'
 END = '\nPYDOCS\n'
 # Круг 28, F-12(б): +1 -- мутация D40 на элидированную форму «все N».
 EXPECTED_MUTATIONS = 45
+# ПУСТО НЕ НОЛЬ и для самих зубов: «ноль провалов» без счётчика проверок
+# неотличим от «зубы не измеряли ничего». Ровно столько проверок обязана
+# прогнать teeth(); расхождение -- код 2 (прибор измерил не то, что объявил),
+# а не тихая зелень. Этот пин -- сверка самИх зубов, в ran не входит.
+EXPECTED_OWNER_TEETH = 15
 
-# Гейт в строке расхождения печатает ЗНАЧЕНИЕ владельца, и ожидаемый след
-# мутаций вокруг чисел корпусного стенда цитирует это значение. Литерал в
-# цитате -- вторая копия знания: владелец переезжает, цитата отстаёт, вход
-# при этом найден, и зуб краснеет не по своей причине. Числа читаются из
-# владельца якорем ТОЙ ЖЕ ФОРМЫ, что и у гейта (присваивание в начале
-# строки, без отступа -- заглушки пишут присваивание с отступом и якорем
-# не считаются; см. комментарий у заглушки в corpus-tools-bench.sh).
-OWNER_BENCH = ('tools', 'corpus-tools-bench.sh')
-OWNER_ANCHORS = (
-    ('scenarios', re.compile(r'^EXPECTED_SCENARIOS=(\d+)$', re.M)),
-    ('mutations', re.compile(r'^EXPECTED_MUTATIONS=(\d+)$', re.M)),
-)
-# Цитата числа владельца в пятом поле таблицы пишется ПЛЕЙСХОЛДЕРОМ, не
-# цифрой: цифра -- второй дом числа (владелец переезжает, цитата отстаёт,
-# вход при этом найден, и зуб краснеет не по своей причине). Плейсхолдер
-# подставляется значением живого владельца; число, написанное цифрой,
-# подстановки не получает и зуб честно не сойдётся.
-WANT_OWNER_TOKEN = ('{OWNER_SCENARIOS}', '{OWNER_MUTATIONS}')
+# Счёт владельца в полях 3-5 таблицы пишется ТОКЕНОМ {OWNER:<id>:<величина>}
+# и живёт в одном доме -- у владельца: цифра -- второй дом числа (владелец
+# переезжает, цитата отстаёт, вход при этом найден, и зуб краснеет не по
+# своей причине). Значения берутся из реестра OWNERS гейта чисел -- вторая
+# копия перечня владельцев здесь расходилась бы с гейтом молча.
+# CONSTRAINT: форма токена -- ровно {OWNER:<id>:<величина>}; фигурные скобки
+# в якорях таблицы живут и в другом смысле (D18 `#{1,6}`, D22
+# `\d{4}-\d{2}-\d{2}`), и сканер обязан видеть только свою форму.
+OWNER_TOKEN = re.compile(r'\{OWNER:([A-Za-z0-9._-]+):([A-Za-z]+)\}')
+OWNER_RESIDUE = '{OWNER:'
 
 
 def read(path):
@@ -167,39 +170,8 @@ def load():
     return rows
 
 
-def owner_counts():
-    """Числа владельца из его файла; не прочитался -- отказ, а не зелёный зуб.
-
-    ПУСТО НЕ НОЛЬ: якорь, найденный ноль или два раза, значит «не знаю, какое
-    число цитировать», и прибор обязан сказать это кодом разбора (2), а не
-    мерить со случайно-сходящимся ожиданием.
-    """
-    path = os.path.join(KIT, *OWNER_BENCH)
-    try:
-        text = read(path)
-    except OSError as error:
-        say('ОТКАЗ -- владелец чисел не читается: %s: %s' % (path, error))
-        sys.exit(2)
-    counts = {}
-    for key, anchor in OWNER_ANCHORS:
-        found = anchor.findall(text)
-        if len(found) != 1:
-            say('ОТКАЗ -- у владельца чисел якорь «%s» найден %d раз, нужно '
-                'ровно один: %s' % (anchor.pattern, len(found), path))
-            sys.exit(2)
-        counts[key] = found[0]
-    return counts
-
-
-def refresh_want(want, counts):
-    """Плейсхолдеры числа владельца в ожидаемом следе -- живым значением."""
-    return (want.replace(WANT_OWNER_TOKEN[0], counts['scenarios'])
-                .replace(WANT_OWNER_TOKEN[1], counts['mutations']))
-
-
-def carve(kit):
-    """Гейт как отдельный исполняемый файл, вырезанный из конвейера."""
-    source = read(os.path.join(kit, PIPELINE))
+def gate_body(source):
+    """Тело гейта чисел из текста конвейера -- без записи и без исполнения."""
     if ANCHOR not in source:
         say('ОТКАЗ -- якорь гейта чисел пропал из %s' % PIPELINE)
         sys.exit(2)
@@ -211,7 +183,129 @@ def carve(kit):
     if END not in source[start:]:
         say('ОТКАЗ -- конец гейта чисел не найден в %s' % PIPELINE)
         sys.exit(2)
-    body = source[start:source.index(END, start)]
+    return source[start:source.index(END, start)]
+
+
+def owners_registry(source):
+    """Реестр владельцев из вырезанного гейта: разбор ast, НЕ исполнение.
+
+    CONSTRAINT: импорт гейта запустил бы сам гейт; собственная копия перечня
+    владельцев здесь расходилась бы с гейтом молча. Любой отказ чтения --
+    код 2: прибор без реестра не может мерить, а молчаливо пустой реестр
+    легализовал бы таблицу, чьи токены больше никто не проверяет.
+    """
+    try:
+        tree = ast.parse(gate_body(source))
+    except SyntaxError as error:
+        say('ОТКАЗ -- гейт чисел не разбирается для чтения OWNERS: %s' % error)
+        sys.exit(2)
+    assigns = [node for node in tree.body if isinstance(node, ast.Assign)
+               and any(isinstance(target, ast.Name) and target.id == 'OWNERS'
+                       for target in node.targets)]
+    if not assigns:
+        say('ОТКАЗ -- в вырезанном гейте нет присваивания OWNERS')
+        sys.exit(2)
+    if len(assigns) > 1:
+        say('ОТКАЗ -- присваиваний OWNERS больше одного: %d' % len(assigns))
+        sys.exit(2)
+    try:
+        owners = ast.literal_eval(assigns[0].value)
+    except (ValueError, SyntaxError) as error:
+        say('ОТКАЗ -- значение OWNERS не разбирается literal_eval: %s' % error)
+        sys.exit(2)
+    registry = {}
+    for item in owners:
+        if not isinstance(item, tuple) or len(item) != 4:
+            say('ОТКАЗ -- элемент реестра OWNERS не кортеж из четырёх: %r'
+                % (item,))
+            sys.exit(2)
+        oid, _names, parts, counts = item
+        if not isinstance(oid, str) or not isinstance(counts, dict) or \
+                (parts is not None and not isinstance(parts, tuple)):
+            say('ОТКАЗ -- элемент реестра OWNERS не той формы: %r' % (item,))
+            sys.exit(2)
+        try:
+            # re.M: якоря владельцев вида ^...$ обязаны матчиться построчно,
+            # не только в начале и конце файла.
+            compiled = {quantity: re.compile(rx, re.M)
+                        for quantity, rx in counts.items()}
+        except (re.error, TypeError) as error:
+            say('ОТКАЗ -- регекспы величин владельца «%s» не компилируются: %s'
+                % (oid, error))
+            sys.exit(2)
+        registry[oid] = (parts, compiled)
+    return registry
+
+
+def owner_value(registry, root, oid, quantity, row):
+    """Живое значение величины владельца; ПУСТО НЕ НОЛЬ.
+
+    Якорь, найденный ноль или два раза, значит «не знаю, какое число
+    цитировать», и прибор обязан сказать это кодом разбора (2), а не мерить
+    со случайно-сходящимся ожиданием. Кэша нет: значение обязано следовать
+    за владельцем в каждом прогоне подстановки.
+    """
+    if oid not in registry:
+        say('ОТКАЗ -- ряд %s: неизвестный владелец «%s»' % (row, oid))
+        sys.exit(2)
+    parts, counts = registry[oid]
+    if quantity not in counts:
+        say('ОТКАЗ -- ряд %s: у владельца «%s» нет величины «%s»'
+            % (row, oid, quantity))
+        sys.exit(2)
+    path = os.path.join(root, PIPELINE if parts is None else os.path.join(*parts))
+    try:
+        text = read(path)
+    except OSError as error:
+        say('ОТКАЗ -- файл владельца чисел не читается: %s: %s' % (path, error))
+        sys.exit(2)
+    found = counts[quantity].findall(text)
+    if len(found) != 1:
+        say('ОТКАЗ -- у владельца «%s» якорь величины «%s» найден %d раз, '
+            'нужно ровно один (%s): %s'
+            % (oid, quantity, len(found), counts[quantity].pattern, path))
+        sys.exit(2)
+    return found[0]
+
+
+def substitute(rows, registry, root):
+    """Токены {OWNER:...} в полях 3-5 -- живыми значениями владельцев.
+
+    Единственная точка подстановки: перепись и полный прогон получают ряды
+    только отсюда -- две точки разошлись бы третьей копией знания.
+    CONSTRAINT: нераспознанный остаток и совпавшие поля 3/4 -- код 2, не
+    молча: тихий пропуск читался бы как «якорь уехал» и уводил бы следующую
+    волну в ложный ремонт, а совпадение дало бы вакуумную зелень.
+    """
+    out = []
+    for name, rel, old, new, want in rows:
+        fields = [old, new, want]
+        for index, text in enumerate(fields):
+            fields[index] = OWNER_TOKEN.sub(
+                lambda match: owner_value(registry, root, match.group(1),
+                                          match.group(2), name),
+                text)
+            if OWNER_RESIDUE in fields[index]:
+                say('ОТКАЗ -- ряд %s, поле %d: после подстановки остался '
+                    'неразрешённый текст вида {OWNER:...' % (name, index + 3))
+                sys.exit(2)
+        if fields[0] == fields[1]:
+            say('ОТКАЗ -- ряд %s: после подстановки вход равен мутации -- '
+                'мутация ничего не меняет, зелень была бы вакуумной' % name)
+            sys.exit(2)
+        out.append((name, rel, fields[0], fields[1], fields[2]))
+    return out
+
+
+def resolved_rows():
+    """Ряды с подставленными значениями -- раздача ОБОИМ проходам."""
+    return substitute(load(),
+                      owners_registry(read(os.path.join(KIT, PIPELINE))), KIT)
+
+
+def carve(kit):
+    """Гейт как отдельный исполняемый файл, вырезанный из конвейера."""
+    body = gate_body(read(os.path.join(kit, PIPELINE)))
     path = os.path.join(kit, '.docnum-gate.py')
     io.open(path, 'w', encoding='utf-8').write(body)
     # Круг 25, E-2: след ищется подстрокой в ВЫВОДЕ гейта, а питоновский
@@ -276,8 +370,182 @@ def census_control():
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _refusal(caption, run, *needles):
+    """Ожидание отказа кодом 2 с названными иглами; None -- сошлось."""
+    buffer = io.StringIO()
+    code = 'вызов вернулся без отказа'
+    try:
+        with contextlib.redirect_stdout(buffer):
+            run()
+    except SystemExit as error:
+        code = error.code
+    text = buffer.getvalue()
+    if code != 2:
+        return '%s: ожидался код 2, вышло %r (печать: %s)' % (
+            caption, code, text.strip() or 'пусто')
+    missing = [needle for needle in needles if needle not in text]
+    if missing:
+        return '%s: в отказе нет %r (печать: %s)' % (
+            caption, missing, text.strip())
+    return None
+
+
+def teeth():
+    """Зубы подстановки {OWNER:...} на синтетике (бриф #312, T1-T8).
+
+    Дисциплина census_control: синтетическое дерево, известные ответы,
+    расхождение -- код «прибор не может мерить» (2), а не тихая зелень.
+    Возвращает (список провалов, число прогнанных проверок); счёт
+    растёт В ТОЧКЕ проверки, чтобы потерянный целиком блок занизил его.
+    """
+    failures = []
+    ran = [0]
+
+    def count(ok, message):
+        ran[0] += 1
+        if not ok:
+            failures.append(message)
+
+    work = tempfile.mkdtemp(prefix='docnum-owner-teeth.')
+    try:
+        gate = ('head\n' + ANCHOR + "OWNERS = (\n"
+                "    ('toy', ('toy',), ('toy.txt',),\n"
+                "     {'items': r'^ITEMS=(\\d+)'}),\n"
+                "    ('toy2', ('toy2',), ('toy2.txt',),\n"
+                "     {'items': r'^ITEMS=(\\d+)'}),\n"
+                "    ('toy3', ('toy3',), ('toy3.txt',),\n"
+                "     {'items': r'^ITEMS=(\\d+)'}),\n"
+                ")\n" + END + 'tail\n')
+        io.open(os.path.join(work, PIPELINE), 'w', encoding='utf-8').write(gate)
+        io.open(os.path.join(work, 'toy.txt'), 'w',
+                encoding='utf-8').write('ITEMS=7\n')
+        io.open(os.path.join(work, 'toy2.txt'), 'w',
+                encoding='utf-8').write('ITEMS=1\nITEMS=2\n')
+        io.open(os.path.join(work, 'toy3.txt'), 'w',
+                encoding='utf-8').write('нет якоря\n')
+        registry = owners_registry(read(os.path.join(work, PIPELINE)))
+
+        # T1: значение живое -- ряд находит вход и ПОСЛЕ сдвига владельца.
+        row = ('K1', 'toy.txt', 'держит {OWNER:toy:items} предметов',
+               'иначе', 'след')
+        got = substitute([row], registry, work)
+        count(got[0][2] == 'держит 7 предметов',
+              'T1: токен не разрешился значением владельца: %r' % (got[0][2],))
+        io.open(os.path.join(work, 'toy.txt'), 'w',
+                encoding='utf-8').write('ITEMS=9\n')
+        got = substitute([row], registry, work)
+        count(got[0][2] == 'держит 9 предметов',
+              'T1: значение владельца заморожено, сдвиг 7->9 не виден: %r'
+              % (got[0][2],))
+
+        # T2, T3: неизвестный владелец и неизвестная величина названы с рядом.
+        for caption, run, needles in [
+                ('T2', lambda: substitute(
+                    [('K2', 'toy.txt', 'v {OWNER:nosuch:items}', 'иначе',
+                      'след')], registry, work),
+                 ('K2', 'nosuch')),
+                ('T3', lambda: substitute(
+                    [('K3', 'toy.txt', 'v {OWNER:toy:nosuch}', 'иначе',
+                      'след')], registry, work),
+                 ('K3', 'toy', 'nosuch'))]:
+            failure = _refusal(caption, run, *needles)
+            count(failure is None, failure)
+
+        # T4: нераспознанный остаток {OWNER: обязан назвать ряд и поле.
+        for caption, run, needles in [
+                ('T4-поле-3', lambda: substitute(
+                    [('K4', 'toy.txt', 'X {OWNER:toy:items', 'иначе',
+                      'след')], registry, work),
+                 ('K4', 'поле 3')),
+                ('T4-поле-5', lambda: substitute(
+                    [('K4', 'toy.txt', 'вход', 'иначе', 'след {OWNER:toy:}')],
+                    registry, work),
+                 ('K4', 'поле 5'))]:
+            failure = _refusal(caption, run, *needles)
+            count(failure is None, failure)
+
+        # T5: подстановка, не меняющая текста, -- вакуумная зелень.
+        failure = _refusal('T5', lambda: substitute(
+            [('K5', 'toy.txt', 'A {OWNER:toy:items}', 'A {OWNER:toy:items}',
+              'след')], registry, work), 'K5')
+        count(failure is None, failure)
+
+        # T6: якорь владельца обязан найтись ровно один раз.
+        for caption, run, needles in [
+                ('T6-дважды', lambda: substitute(
+                    [('K6', 'toy2.txt', 'v {OWNER:toy2:items}', 'иначе',
+                      'след')], registry, work),
+                 ('toy2', 'items', '2', 'toy2.txt')),
+                ('T6-ноль', lambda: substitute(
+                    [('K6', 'toy3.txt', 'v {OWNER:toy3:items}', 'иначе',
+                      'след')], registry, work),
+                 ('toy3', 'items', '0', 'toy3.txt'))]:
+            failure = _refusal(caption, run, *needles)
+            count(failure is None, failure)
+
+        # T7: фигурные скобки чужого смысла сканер не трогает.
+        row7 = ('K7', 'd18.txt',
+                "BLOCK_MD = re.compile(r'^\\s*(?:#{1,6}\\s)')",
+                "MASK = re.compile(r'\\d{4}-\\d{2}-\\d{2}')",
+                'след')
+        got7 = substitute([row7], registry, work)
+        count((got7[0][2], got7[0][3], got7[0][4]) == (row7[2], row7[3],
+                                                       row7[4]),
+              'T7: сканер съел чужие фигурные скобки: %r' % (got7[0],))
+
+        # T8: реестр OWNERS обязан читаться из гейта или отказать с причиной.
+        broken = [
+            ('T8-нет-присваивания',
+             'head\n' + ANCHOR + "X = 1\n" + END + 'tail\n',
+             ('нет присваивания OWNERS',)),
+            ('T8-больше-одного',
+             'head\n' + ANCHOR + "OWNERS = ()\nOWNERS = ()\n" + END + 'tail\n',
+             ('больше одного',)),
+            ('T8-не-literal',
+             'head\n' + ANCHOR + "OWNERS = () or ()\n" + END + 'tail\n',
+             ('literal_eval',)),
+            ('T8-не-кортеж-из-четырёх',
+             'head\n' + ANCHOR + "OWNERS = (('toy', ('toy',), None),)\n"
+             + END + 'tail\n',
+             ('не кортеж из четырёх',)),
+            ('T8-четвёртый-не-словарь',
+             'head\n' + ANCHOR + "OWNERS = (('toy', ('toy',), None, 'x'),)\n"
+             + END + 'tail\n',
+             ('не той формы',)),
+        ]
+        for caption, text, needles in broken:
+            failure = _refusal(caption,
+                               lambda t=text: owners_registry(t), *needles)
+            count(failure is None, failure)
+
+        return failures, ran[0]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def owner_teeth():
+    """teeth() со сверкой пина: потерянный зуб виден ЧИСЛОМ, а не тишиной.
+
+    Зуб на сам механизм счёта: живёт здесь, вне teeth(), и потому в ran не
+    входит. Расхождение -- код 2: прибор измерил не то, что объявил.
+    """
+    failures, ran = teeth()
+    if ran != EXPECTED_OWNER_TEETH:
+        say('ОТКАЗ -- зубы подстановки прогнали %d проверок, пин %d: '
+            'потерянный зуб -- прибор измерил не то, что объявил'
+            % (ran, EXPECTED_OWNER_TEETH))
+        sys.exit(2)
+    return failures, ran
+
+
 def main_anchors():
-    rows = load()
+    failures, ran = owner_teeth()
+    for failure in failures:
+        say('ПОДСТАНОВКА НЕ ДЕРЖИТ -- %s' % failure)
+    if failures:
+        return 2
+    say('ЗУБЫ ПОДСТАНОВКИ: %d/%d' % (ran, EXPECTED_OWNER_TEETH))
+    rows = resolved_rows()
     if not census_control():
         say('ПЕРЕПИСЬ НЕ ИЗМЕРЯЛА -- контроль на синтетике не сошёлся')
         return 2
@@ -309,8 +577,13 @@ def run_gate(kit, gate):
 
 
 def main():
-    rows = load()
-    counts = owner_counts()
+    failures, ran = owner_teeth()
+    for failure in failures:
+        say('ПОДСТАНОВКА НЕ ДЕРЖИТ -- %s' % failure)
+    if failures:
+        return 2
+    say('ЗУБЫ ПОДСТАНОВКИ: %d/%d' % (ran, EXPECTED_OWNER_TEETH))
+    rows = resolved_rows()
     work = tempfile.mkdtemp(prefix='docnum-bench.')
     try:
         kit = os.path.join(work, 'kit')
@@ -332,7 +605,6 @@ def main():
 
         reddened = 0
         for name, rel, old, new, want in rows:
-            want = refresh_want(want, counts)
             target = os.path.join(kit, rel)
             if not os.path.exists(target):
                 say('МУТАЦИЯ %s: FAIL -- нет файла %s' % (name, rel))
