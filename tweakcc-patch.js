@@ -2425,10 +2425,67 @@ step('22 judge consulted before a subagent dispatch', () => {
     }
     return null;
   };
-  const headRx = new RegExp(
-    `(${ID})=await (?:(${ID})\\.(?:call|execute)|${ID}\\((${ID})\\)\\.(?:call|execute))$`,
+  // THE BOUNDARY IS THE CALL'S OWN ENCLOSING STATEMENT -- the statement the
+  // call lies in syntactically, found by bracket structure, not by head
+  // shape. The watcher blocks are statements and need a statement edge, and
+  // the enclosing statement dominates every path the call can later take,
+  // however many runners upstream folds around it: 2.1.233…2.1.276 made the
+  // call itself the statement head (`mr=await e.call(…)`), 2.1.277 folded
+  // it into a runner closure bound in a `let` declarator, and the boundary
+  // moved up to that `let` (measured on 2.1.277: the 229 bytes between the
+  // boundary and the call declare only _r, the runner, and hr; nothing
+  // there assigns e/Ye/s/n, and upstream's own statements just above the
+  // boundary read all four).
+  // The receiver tail binds $2 only; the runner head below decides only
+  // where $4 comes from. Neither is a boundary rule.
+  const recvRx = new RegExp(
+    `(?:(${ID})|${ID}\\((${ID})\\))\\.(?:call|execute)$`,
   );
+  const runnerRx = new RegExp(
+    `(${ID})=(?:\\((${ID}(?:,${ID})*)\\)|(${ID}))=>$`,
+  );
+  // Statement boundary above a position, by bracket structure: `;` at depth
+  // zero ends a statement, and `{` at depth zero begins a block one unless
+  // it is an object literal or a pattern -- told by the token to its left.
+  // Both ways of being wrong are loud, never a splice at a wrong place: a
+  // `{` misread as an object puts the boundary too late, inside an
+  // expression, and the statement-position guard below refuses it; one
+  // misread as a block puts it one statement too far up, which still
+  // dominates the call and loses nothing the watcher needed.
+  const stmtStartAbove = (pos, floor) => {
+    let depth = 0;
+    for (let i = pos - 1; i >= floor; i--) {
+      const c = js[i];
+      if (c === ')' || c === ']' || c === '}') depth++;
+      else if (c === '(' || c === '[') {
+        if (depth > 0) depth--;
+      } else if (c === ';' && depth === 0) return i + 1;
+      else if (c === '{') {
+        if (depth > 0) {
+          depth--;
+          continue;
+        }
+        const w = js.slice(Math.max(floor, i - 12), i);
+        if (
+          i === floor ||
+          w.endsWith('=>') ||
+          w.endsWith(')') ||
+          w.endsWith(';') ||
+          w.endsWith('}') ||
+          /(?:^|[^A-Za-z0-9_$])(?:try|else|finally|do)$/.test(w)
+        ) {
+          return i + 1;
+        }
+        const kw = /(?:^|[^A-Za-z0-9_$])(let|var|const)$/.exec(w);
+        if (kw) return i - kw[1].length;
+        // Otherwise the `{` opens an object literal or a class body -- an
+        // expression, not a statement: the statement continues to its left.
+      }
+    }
+    return -1;
+  };
   const sites = [];
+  let callFound = 0;
   for (const mm of js.matchAll(/\.(?:call|execute)\(/g)) {
     const open = mm.index + mm[0].length - 1;
     const list = argsAt(js, open);
@@ -2436,24 +2493,74 @@ step('22 judge consulted before a subagent dispatch', () => {
     if (!list[1].includes('toolUseId:')) continue;
     if (!list.some((a) => a.includes('userModified:'))) continue;
     if (list.some((a) => a.includes('fileReadingLimits:'))) continue;
-    // The result has to be BOUND for the watcher to have a statement boundary
-    // to be spliced in front of; an awaited call in expression position is a
-    // different site and is passed over rather than mangled.
+    callFound++;
     const from = Math.max(0, mm.index - 160);
-    const head = headRx.exec(js.slice(from, open));
-    if (!head) continue;
+    const head = js.slice(from, open);
+    const recvM = recvRx.exec(head);
+    if (!recvM) continue;
     const spread = /^\s*\{\.\.\.([$\w]+)\s*,/.exec(list[1]);
     const tuid = /[,{]\s*toolUseId:([$\w]+)\s*[,}]/.exec(list[1]);
     if (!spread || !tuid) continue;
+    const [modLo, modHi] = moduleSliceAround(js, mm.index);
+    const at = stmtStartAbove(mm.index, modLo);
+    if (at === -1) {
+      fail(
+        `the tool dispatch call is present, but no statement edge above it ` +
+          `was found inside its own module -- the watcher blocks have no ` +
+          `statement to splice in front of`,
+      );
+    }
+    let ctx = spread[1];
+    const runnerM = runnerRx.exec(head.slice(0, head.length - recvM[0].length));
+    if (runnerM) {
+      const params = runnerM[2] ? runnerM[2].split(',') : [runnerM[3]];
+      if (params.includes(spread[1])) {
+        // CONSTRAINT: the spread source is the runner arrow's OWN parameter.
+        // The context the tool finally receives is built where the runner is
+        // APPLIED, so $4 is the first application's first argument. A bare
+        // reference handed along (`run:NAME`) is a pass, not an application:
+        // only `NAME(` counts, and the first match forward from the boundary
+        // is the first one statement by statement too. The application is
+        // needed only to NAME the context -- the boundary already dominates
+        // every application, wherever upstream puts them.
+        const appName = runnerM[1];
+        const appRx = new RegExp(`(?<![\\w$])${rxEsc(appName)}\\(`, 'g');
+        const app = appRx.exec(js.slice(at, modHi));
+        if (!app) {
+          fail(
+            `the dispatch call is the body of the runner '${appName}', which ` +
+              `is never applied after its declaration -- the context slot ` +
+              `has no argument to be bound from`,
+          );
+        }
+        const appArgs = argsAt(js, at + app.index + appName.length);
+        if (!appArgs || appArgs.length < 1) {
+          fail(
+            `the first application of the runner '${appName}' carries no ` +
+              `first argument to bind the context slot from`,
+          );
+        }
+        ctx = appArgs[0].trim();
+      }
+    }
     sites.push({
-      at: from + head.index,
-      recv: head[2] ?? head[3],
+      at,
+      recv: recvM[1] ?? recvM[2],
       input: list[0].trim(),
-      ctx: spread[1],
+      ctx,
       toolUseId: tuid[1],
     });
   }
-  if (sites.length === 0) fail('tool dispatch call site not found');
+  // The refusals name what actually changed: "not found" is true only when
+  // the ARGUMENT identity found nothing.
+  if (callFound === 0) fail('tool dispatch call site not found');
+  if (sites.length === 0) {
+    fail(
+      `the tool dispatch call is present (${callFound} candidate(s) by its ` +
+        `arguments) but its receiver is not a name this step can bind $2 ` +
+        `from -- neither a direct <recv>.call|execute nor the adapter form`,
+    );
+  }
   if (sites.length !== 1) {
     fail(`tool dispatch call site is not unique (${sites.length} candidates)`);
   }
