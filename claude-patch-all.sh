@@ -44,6 +44,15 @@
 #      material half only, NOT "nothing was measured" and not a refusal
 #      (the pipeline never returns it; split out of 5 in task #112, see
 #      tools/build-path-probe.sh)
+#   9  a pass DID run and measured its rows, but some of the rows could not
+#      be built: a finding OF that pass, not "nothing was measured" and not
+#      a refusal to measure. The consumer MUST paint it red and hunt the
+#      defect in the instrument or in the corpus -- never in the subject,
+#      whose rows were measured and are named in the log. Declared for
+#      tools/checks-teeth.py (row-refusal class): 7 was the first candidate
+#      and is taken -- it names the OPPOSITE action ("do not paint red,
+#      wait for upstream"), and an action cannot be chosen from a code
+#      that names two.
 #
 # Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
 # traps) and is NOT a kit verdict: POSIX reports the signal, the table above

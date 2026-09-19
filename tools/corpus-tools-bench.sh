@@ -60,8 +60,8 @@
 # Поэтому у каждой мутации записан след, который она обязана оставить в выводе.
 set -u
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED_SCENARIOS=249
-EXPECTED_MUTATIONS=330
+EXPECTED_SCENARIOS=252
+EXPECTED_MUTATIONS=333
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -568,26 +568,30 @@ sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}') || { printf 'за�
 # #63: следы стадий конвейера, которые sweep-check переписи стадий ищет в логе
 # завершённого прогона (tools/pipeline-stages.tsv). Настоящий конвейер печатает
 # эти '==>'-заголовки и исходы в тот же stdout, что становится логом свипа
-# (claude-patch-all.sh > "$log" 2>&1); заглушка повторяет always/cond-skip строки
-# канона, иначе sweep-check покраснел бы КАЖДЫЙ чистый прогон. Печатаются ДО
-# якоря блока результатов tweakcc: читатели слоя, часовой формы и счёт якорей
-# ограничены областью ПОСЛЕ якоря, а поля свипа (ours/twok/ok/forms/floor/iface)
-# заякорены на '^'-исход, не на эти '==>'. cond-silent канона освобождены
-# объявлением и здесь не нужны; interface-gate и checks-floor уже покрыты
-# исходами 'Interface:' и 'ПОЛ ПРОВЕРОК СОШЁЛСЯ' ниже.
-printf '%s\n' '==> Разбор вклеиваемого кода'
-printf '%s\n' "==> Зубы якоря heredoc'ов"
-printf '%s\n' '==> Разбор блока проверок'
-printf '%s\n' '==> Формы оболочки'
-printf '%s\n' '==> Сверка чисел в доках'
-printf '%s\n' '==> Гейт наследования замка'
-printf '%s\n' '==> Перепись якорей таблицы гейта чисел'
-printf '%s\n' '==> Перепись исполнителей инструментов'
-printf '%s\n' "==> Applying tweakcc's configured patches"
-printf '%s\n' '==> Applying our multi-provider patches'
-printf '%s\n' '==> Ценз байткода изменённых модулей'
-printf '%s\n' '==> Verifying'
-printf '%s\n' '==> Зубы доставки TERM гейта интерфейса'
+# (claude-patch-all.sh > "$log" 2>&1); заглушка СТРОИТ метки из канона ТОЙ ЖЕ
+# копии кита, иначе sweep-check покраснел бы КАЖДЫЙ чистый прогон, а второй
+# вшитый список отставал бы от канона молча (#350: отставание краснело почти
+# весь стенд). Печатаются ДО якоря блока результатов tweakcc: читатели слоя,
+# часовой формы и счёт якорей ограничены областью ПОСЛЕ якоря, а поля свипа
+# (ours/twok/ok/forms/floor/iface) заякорены на '^'-исход, не на эти '==>'.
+# cond-silent канона освобождены объявлением и здесь не нужны; interface-gate
+# и checks-floor уже покрыты исходами 'Interface:' и 'ПОЛ ПРОВЕРОК СОШЁЛСЯ'
+# ниже.
+# Метка always-стадии -- её колонка log_re: sweep-check ищет в логе этот
+# регэксп. Стадии, чей след живёт НЕ в производной печати, названы ИМЕНЕМ:
+#   stage-census   -- условная строка НИЖЕ под unless nostagecensus: на её
+#                     условности держится сценарий 249;
+#   interface-gate -- УСЛОВНЫЙ исход «Interface:» блока исходов ниже:
+#                     безусловный заголовок отвязал бы след от исхода;
+#   checks-floor   -- УСЛОВНЫЙ исход «ПОЛ ПРОВЕРОК СОШЁЛСЯ» оттуда же.
+__stg_except=' stage-census interface-gate checks-floor '
+__stg_tbl="$(dirname "$0")/tools/pipeline-stages.tsv"
+[[ -r "$__stg_tbl" ]] || { printf 'заглушка конвейера: канон стадий %s не читается -- метки стадий не построить\n' "$__stg_tbl" >&2; exit 2; }
+while IFS=$'\t' read -r __stg_id __stg_src __stg_log __stg_pin __stg_cond; do
+  [[ "$__stg_cond" == always ]] || continue
+  [[ "$__stg_except" != *" $__stg_id "* ]] || continue
+  printf '==> %s\n' "$__stg_log"
+done < "$__stg_tbl"
 # cond-skip: исход (отличает «отработала» от «пропущена»), а не '==>'-заголовок.
 printf '%s\n' 'Раскатка инструментов судьи: расхождений нет — раскатка полная'
 printf '%s\n' 'Подпись ПРОПУЩЕНА: подпись не восстанавливают на этой ОС'
@@ -834,6 +838,12 @@ if os.environ.get('STUB_TEETH_CONTROL_FAIL', ''):
     print('checks-teeth: КОНТРОЛЬ ПРОВАЛЕН -- образ красен ещё до мутаций:',
           file=sys.stderr)
     sys.exit(2)
+# Строка отказов -- как у настоящего прибора при классе 9: свип берёт её из
+# лога grep'ом, и выдумывать текст в руке он не имеет права.
+if os.environ.get('STUB_TEETH_REFUSALS', ''):
+    print('checks-teeth: ИТОГ отказов прибора=%s id: %s' % (
+        os.environ['STUB_TEETH_REFUSALS'],
+        os.environ.get('STUB_TEETH_REFUSED_IDS', '')))
 rc = int(os.environ.get('STUB_TEETH_RC', '0') or 0)
 print('stub checks-teeth rc=%d' % rc)
 sys.exit(rc)
@@ -1001,6 +1011,8 @@ run_sweep() {   # kit, corpus-dir, list, аргументы...
     SWEEP_LAST_N="$__bench_last_n" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
+    STUB_TEETH_REFUSALS="${STUB_TEETH_REFUSALS:-}" \
+    STUB_TEETH_REFUSED_IDS="${STUB_TEETH_REFUSED_IDS:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     STUB_TEETH_CORPUS_RC="${STUB_TEETH_CORPUS_RC:-0}" \
     STUB_TEETH_CORPUS_MARK="${STUB_TEETH_CORPUS_MARK:-}" \
@@ -2141,6 +2153,81 @@ scenario_78() {   # «мерить нечем» у прибора зубов -- 
   ok "78 «мерить нечем» у прибора зубов -- свой класс, а не красный прогон"
 }
 
+scenario_250() {   # класс 9 у зубов: проход ИЗМЕРИЛ строки, часть не построена
+  # Не находка «прошла молча» и не отказ прибора: свип обязан объявить этап
+  # ИЗМЕРЕННЫМ со счётчиком отказов строк, взятым из лога прибора, и завершиться
+  # находкой (код 1), а не «не мерили» (код 2): иначе одна сместившаяся строка
+  # снова прятала бы все измеренные.
+  local out rc
+  out=$(STUB_TEETH_RC=9 STUB_TEETH_REFUSALS=2 STUB_TEETH_REFUSED_IDS="B1, B2" \
+        run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 1 )); then
+    LAST_EVID="КЛАСС_НЕ_ТОТ :: rc=$rc :: $out"
+    bad "250 класс 9 зубов: код возврата $rc, ждали 1 (находка, а не отказ прибора)"; return
+  fi
+  if [[ "$out" != *"зубы реестра проверок: ИЗМЕРЕНЫ"* ]]; then
+    LAST_EVID="ЭТАП_ОБЪЯВЛЕН_НЕ_ИЗМЕРЕННЫМ :: $out"
+    bad "250 класс 9 зубов: этап не объявлен ИЗМЕРЕННЫМ"; return
+  fi
+  if [[ "$out" != *"ИТОГ отказов прибора=2"* || "$out" != *"B1"* ]]; then
+    LAST_EVID="СЧЁТЧИК_ОТКАЗОВ_НЕ_ДОНЕСЁН :: $out"
+    bad "250 класс 9 зубов: счётчик и id отказов не названы из лога прибора"; return
+  fi
+  if [[ "$out" == *"НЕ ИЗМЕРЕНЫ"* ]]; then
+    LAST_EVID="ЧУЖОЙ_КЛАСС :: $out"
+    bad "250 класс 9 зубов: этап объявлен неизмеренным -- чужой класс, чужой текст"; return
+  fi
+  ok "250 класс 9 зубов: измерено с отказами строк, класс -- находка"
+}
+
+scenario_251() {   # #350: метки always-стадий строятся из канона, не вторым списком
+  # Зуб ДРЕЙФА: строка always добавляется в копию канона, и заглушка обязана
+  # напечатать её метку БЕЗ правки своего кода -- вшитый список этот зуб
+  # проходит молча, производная печать обязана следовать канону. Канон
+  # возвращается на место и после прогона: главный проход делит копию кита
+  # между сценариями, и добавленная строка не имеет права утекать в соседние.
+  local out rc
+  cp "$K/tools/pipeline-stages.tsv" "$C/stages.canon.save" || { bad "251 дрейф меток: канон копии кита не прочитан для сохранения"; return; }
+  printf '%s\n' $'stub-drift-marker\tDrift Marker Stage\tDrift Marker Stage\texit\talways' >> "$K/tools/pipeline-stages.tsv"
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  cp "$C/stages.canon.save" "$K/tools/pipeline-stages.tsv"
+  LAST_EVID="rc=$rc :: $out"
+  if (( rc != 0 )); then
+    if [[ "$out" == *'stub-drift-marker'* ]]; then
+      bad "251 дрейф меток: метка добавленной always-стадии не построена -- список меток отстал от канона"; return
+    fi
+    bad "251 дрейф меток: прогон отказал по чужой причине -- дрейф не измерен"; return
+  fi
+  ok "251 метки always-стадий строятся из канона (добавленная стадия напечатана)"
+}
+
+scenario_252() {   # #350: стадии-исключения производной печати метку НЕ получают
+  # Граница лечения дрейфа: обобщение производной печати «все строки канона --
+  # в заголовки» напечатало бы stage-census ПОВЕРХ условной строки и дало бы
+  # interface-gate/checks-floor безусловный заголовок рядом с УСЛОВНЫМ
+  # исходом -- след стадий отвязался бы от исхода, и noiface/nofloor
+  # перестали бы ронять перепись. Мерится по логу завершённого зелёного
+  # прогона: у красного лог частичен по построению.
+  local out rc log n
+  out=$(run_sweep "$K" "$C/corpus" "$C/versions.txt" 900); rc=$?
+  log="$S/log/sweep-900.log"
+  n=$(grep -a -c '^==> Перепись стадий конвейера$' "$log" 2>/dev/null) || n=0
+  LAST_EVID="rc=$rc :: меток stage-census в логе $n"
+  if (( rc != 0 )); then
+    bad "252 исключения меток: прогон не зелёный -- граница не измерена"; return
+  fi
+  if (( n != 1 )); then
+    LAST_EVID="МЕТКА_СТАДИИ_ПЕРЕСЧЁТА=$n :: $LAST_EVID"
+    bad "252 исключения меток: stage-census напечатана $n раз вместо одной (её строка условна, живёт ниже производной печати)"; return
+  fi
+  if grep -aq -E '^==>.*(Гейт интерфейса|Пол проверок|Interface:)' "$log"; then
+    LAST_EVID="ИСКЛЮЧЕНИЕ_ПОЛУЧИЛО_ЗАГОЛОВОК :: $(grep -a -E '^==>.*(Гейт интерфейса|Пол проверок|Interface:)' "$log" | tr '\n' '|')"
+    bad "252 исключения меток: стадии-исключение получила безусловный заголовок"; return
+  fi
+  ok "252 стадии-исключения канона меток производной печати не получают"
+}
+
 run_all() {
   scenario_1; scenario_2; scenario_3; scenario_4; scenario_5; scenario_6
   scenario_7; scenario_8; scenario_9; scenario_10; scenario_11; scenario_12
@@ -2157,6 +2244,8 @@ run_all() {
   scenario_67; scenario_68; scenario_69; scenario_70; scenario_71; scenario_72
   scenario_73; scenario_74
   scenario_75; scenario_76; scenario_77; scenario_78
+  scenario_250
+  scenario_251; scenario_252
   scenario_79; scenario_80
   scenario_81; scenario_82; scenario_83; scenario_84
   scenario_85; scenario_86; scenario_87
@@ -2813,6 +2902,8 @@ launch_sweep() {   # логфайл, аргументы свипа...
     SWEEP_LAST_N="${BENCH_LAST_N:-}" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
+    STUB_TEETH_REFUSALS="${STUB_TEETH_REFUSALS:-}" \
+    STUB_TEETH_REFUSED_IDS="${STUB_TEETH_REFUSED_IDS:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     STUB_TEETH_CORPUS_RC="${STUB_TEETH_CORPUS_RC:-0}" \
     STUB_TEETH_CORPUS_MARK="${STUB_TEETH_CORPUS_MARK:-}" \
@@ -3406,6 +3497,8 @@ scenario_98() {   # волна 26, D-2: ребёнок форк-запаски, 
     SWEEP_SKIP_TOOLS_BENCH="${BENCH_SKIP_TOOLS:-}" SWEEP_SKIP_BUILD_PROBE="${BENCH_SKIP_PROBE:-}" \
     STUB_TEETH_RC="${STUB_TEETH_RC:-0}" STUB_TEETH_MARK="${STUB_TEETH_MARK:-}" \
     STUB_TEETH_CONTROL_FAIL="${STUB_TEETH_CONTROL_FAIL:-}" \
+    STUB_TEETH_REFUSALS="${STUB_TEETH_REFUSALS:-}" \
+    STUB_TEETH_REFUSED_IDS="${STUB_TEETH_REFUSED_IDS:-}" \
     SWEEP_SKIP_CHECKS_TEETH="${BENCH_SKIP_TEETH:-}" \
     STUB_TEETH_CORPUS_RC="${STUB_TEETH_CORPUS_RC:-0}" \
     STUB_TEETH_CORPUS_MARK="${STUB_TEETH_CORPUS_MARK:-}" \
@@ -4951,7 +5044,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 330 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все 333 мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -10010,6 +10103,52 @@ MUT_SCENARIO+=(
   '249')
 MUT_CAUSE+=(
   'SWEEP DONE')
+
+# #350: рука 9 свипа обязана существовать и объявлять этап ИЗМЕРЕННЫМ.
+# Мутация уводит метку ветки -- код 9 падает в `*)` с чужим текстом
+# «прошла мутацию молча», и сценарий 250 краснеет своим следом.
+MUT_FILE+=(
+  'tools/sweep.sh')
+MUT_PAT+=(
+  '    9\) # Класс 9')
+MUT_REP+=(
+  '    99) # Класс 9')
+MUT_SCENARIO+=(
+  '250')
+MUT_CAUSE+=(
+  'ЭТАП_ОБЪЯВЛЕН_НЕ_ИЗМЕРЕННЫМ')
+
+# #350 (волна 2): производная печать меток always-стадий обязана СЛЕДОВАТЬ
+# канону. Мутация глушит условие always в заглушке -- метки не строятся, и
+# добавленная сценарием 251 стадия остаётся без следа: sweep-check роняет
+# прогон. Зуб доказывает, что сценарий краснеет на ДРЕЙФЕ списка: вшитый
+# список полной длины проходил бы его молча.
+MUT_FILE+=(
+  'claude-patch-all.sh')
+MUT_PAT+=(
+  '\[\[ "\$__stg_cond" == always \]\] \|\| continue')
+MUT_REP+=(
+  '[[ "$__stg_cond" == never ]] || continue')
+MUT_SCENARIO+=(
+  '251')
+MUT_CAUSE+=(
+  'stub-drift-marker')
+
+# #350 (волна 2): граница производной печати. Мутация вынимает stage-census
+# из списка исключений -- заглушка печатает метку ПОВЕРХ условной строки, и
+# сценарий 252 видит дубль. Безусловный заголовок у stage-census отвязал бы
+# след от исхода и разоружил бы сценарий 249: nostagecensus перестал бы
+# ронять перепись стадий.
+MUT_FILE+=(
+  'claude-patch-all.sh')
+MUT_PAT+=(
+  '__stg_except='\'' stage-census interface-gate checks-floor ')
+MUT_REP+=(
+  '__stg_except='\'' interface-gate checks-floor ')
+MUT_SCENARIO+=(
+  '252')
+MUT_CAUSE+=(
+  'МЕТКА_СТАДИИ_ПЕРЕСЧЁТА=2')
 
 # Сценарий, у которого нет своей мутации, не доказывает ничего: его можно
 # сломать, и стенд останется зелёным. Исключение ровно одно и объявлено здесь

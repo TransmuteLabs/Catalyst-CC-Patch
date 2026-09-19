@@ -31,6 +31,12 @@ tweakcc восстанавливает свой бэкап поверх назв
   6  сломано окружение либо машинерия замка: нет bash, нет
      tools/checks-on-image.sh, замок не открыть или flock не работает --
      повтор НЕ поможет
+  9  проход СОСТОЯЛСЯ и измерил строки, но часть строк не построена (отказ
+     строителя/зуба -- третий исход строки). Это НЕ 2: код 2 свип читает как
+     «этап не измеряли», и проход, измеривший строки, не имеет права
+     читаться как «не мерили»; выставляется ПОСЛЕ измерения всех строк.
+     НЕ 7: 7 занят апстрим-смыслом «не краснить, ждать» с противоположным
+     действием -- канон таблицы в шапке claude-patch-all.sh
 """
 
 from __future__ import annotations
@@ -172,6 +178,31 @@ def edits_c10(base: bytes) -> list[tuple[int, bytes]]:
     ]
 
 
+def _find_downgrade_reader(base: bytes) -> tuple[bytes, bytes, bytes, bytes]:
+    """Единственный читатель-понижатель `function <B>(<x>){return <A>(<x>)?<F>:<x>}`,
+    чей <F> связан с "claude-opus-4-8".
+
+    Совпадает по поведению с _find_downgrade_reader из claude-patch-all.sh:
+    вход по ПОВЕДЕНИЮ читателя, а не по связке констант -- 2.1.276 разорвала
+    прежнюю связку «две var-константы + предикат рядом» (между ними вставлена
+    посторонняя функция, тело предиката выросло до .some()), предмет при этом
+    не двигался. Уникальность требуется над всем текстом: константа
+    неуникальна (десятки вхождений), читатель уникален; содержимое <F> затем
+    опознаёт его как opus. Возвращает (B, x, A, F).
+    """
+    hits = list(re.finditer(
+        rb'function (' + ID + rb')\((' + ID + rb')\)\{return (' + ID + rb')\(\2\)\?(' + ID + rb'):\2\}',
+        base))
+    if not hits:
+        raise Refusal("V4: читатель-понижатель не найден")
+    if len(hits) > 1:
+        raise Refusal(f"V4: читатель-понижатель не уникален -- {len(hits)} вхождений")
+    m = hits[0]
+    if not re.search(rb'(?<![\w$.])' + re.escape(m.group(4)) + rb'="claude-opus-4-8"', base):
+        raise Refusal("V4: читатель-понижатель не опознан как opus")
+    return m.group(1), m.group(2), m.group(3), m.group(4)
+
+
 def edits_v4(base: bytes) -> list[tuple[int, bytes]]:
     """Опт-ин исключения верха линейки сломан в НАШЕЙ форме -- и только в ней.
 
@@ -179,19 +210,15 @@ def edits_v4(base: bytes) -> list[tuple[int, bytes]]:
     образе 12 раз при потолке прибора 8, и байтовая мутация выбила бы 11
     чужих сайтов вместе с нашим -- покраснело бы лишнее, а причина покраснения
     стала бы неназываемой. Поэтому мутация идёт ТОЙ ЖЕ цепочкой, что и сама
-    проверка (связка констант -> опт-ин форма исключения), и правит один
-    байт внутри найденной формы. Сравнение `===void 0` становится
-    всегда-ложным: исключение верха перестаёт зависеть от таблицы и живёт
-    всегда, то есть ровно та потеря, которую проверка обязана видеть.
+    проверка в claude-patch-all.sh (читатель-понижатель по поведению ->
+    опт-ин форма исключения с <A> из читателя), и правит один байт внутри
+    найденной формы. Сравнение `===void 0` становится всегда-ложным:
+    исключение верха перестаёт зависеть от таблицы и живёт всегда, то есть
+    ровно та потеря, которую проверка обязана видеть.
     """
-    bundle = re.search(
-        rb'var (' + ID + rb')="claude-opus-4-8",(' + ID + rb')="claude-opus-5";'
-        rb'function (' + ID + rb')\((' + ID + rb')\)\{return (' + ID + rb')\(\)&&(' + ID + rb')\(\4\)===\2\}',
-        base)
-    if not bundle:
-        raise Refusal("V4: связка констант понижения и верха не найдена")
+    _B, _x, A, _F = _find_downgrade_reader(base)
     optin = re.search(
-        rb'!\((' + ID + rb')\(\)===void 0&&' + re.escape(bundle.group(3)) + rb'\((' + ID + rb')\)\)',
+        rb'!\((' + ID + rb')\(\)===void 0&&' + re.escape(A) + rb'\((' + ID + rb')\)\)',
         base)
     if not optin:
         raise Refusal("V4: опт-ин форма исключения верха не найдена")
@@ -767,6 +794,63 @@ def reds(image: Path) -> tuple[list[str], str]:
     return red, out
 
 
+def build_jobs(rows: list[dict[str, str]], picked: set[str] | None, image: Path,
+               base: bytes) -> tuple[list[tuple], list[dict[str, str]], list[tuple[str, str]]]:
+    """Построение заданий; отказ строителя -- исход СТРОКИ, не прохода (#350).
+
+    Прежний Refusal строителя завершал проход кодом 2 ДО построения остальных
+    заданий: одна сместившаяся строка ослепляла прибор по всему реестру, а
+    свип читал код 2 как «не измеряли». Отказ ловится на границе ЭТОЙ строки;
+    остальные строки строятся и измеряются. Возвращает (jobs, inapp_rows,
+    refused), где refused -- пары (id, сырой текст отказа).
+    """
+    jobs: list[tuple] = []
+    inapp_rows: list[dict[str, str]] = []
+    refused: list[tuple[str, str]] = []
+    for row in rows:
+        if picked is not None and row["id"] not in picked:
+            continue
+        if row["kind"] == "inapplicable":
+            inapp_rows.append(row)
+            continue
+        try:
+            if row["kind"] == "derived":
+                edits = DERIVED[row["id"]](base)
+            elif row["kind"] == "literal":
+                edits = edits_literal(base, row)
+            else:
+                raise Refusal(f"{row['id']}: неизвестный вид мутации {row['kind']}")
+        except Refusal as exc:
+            refused.append((row["id"], str(exc)))
+            continue
+        want = {row["check"]}
+        want |= {x.strip() for x in row["also"].split(";") if x.strip()}
+        jobs.append((row["id"], row["check"], str(image), edits, sorted(want)))
+    return jobs, inapp_rows, refused
+
+
+def summary_line(measured: int, bad: int) -> str:
+    """Итог измеренных: отказавшие строки сюда НЕ входят -- им свой счётчик."""
+    return f"checks-teeth: ИТОГ мутаций={measured} прошло молча/чужой дверью={bad}"
+
+
+def refusal_line(refused: list[tuple[str, str]]) -> str:
+    ids = ", ".join(rid for rid, _ in refused)
+    return f"checks-teeth: ИТОГ отказов прибора={len(refused)} id: {ids}"
+
+
+def exit_code(bad: int, refused: int) -> int:
+    """Код прохода при отказах строк. Оба класса выставляются ПОСЛЕ измерения
+    всех строк; найденный дефект зубов (1) приоритетнее отказа строк (9).
+    Отказ строк -- НЕ 2: свип читает 2 как «не измеряли», а проход, измеривший
+    строки, не имеет права читаться как «не мерили»."""
+    if bad:
+        return 1
+    if refused:
+        return 9
+    return 0
+
+
 def run_one(args) -> tuple[str, str, list[str], list[str]]:
     mid, check, image, edits, want = args
     # pid в имени -- единственный признак, по которому обломок убитого воркера
@@ -824,13 +908,106 @@ def _tooth_real_patch_src() -> str | None:
     return None
 
 
-def self_check() -> int:
-    """Герметичная самопроверка ветвей edits_literal (#149): без образа и замка.
+def _tooth_builder_refusal_is_row_scoped() -> str | None:
+    """Отказ строителя одной строки не ослепляет остальные (#350).
 
-    Каждый сценарий обязан провалиться при удалении СВОЕЙ ветви -- иначе разводка
-    двух отказов зелена вакуумно (в норме n==expect, ветвь дрейфа не срабатывает,
-    и её удаление обычный прогон не заметит). База b"x MARK y MARK z" несёт ровно
-    два вхождения MARK.
+    Фикстура -- две literal-строки на базе из самопроверки: R1 не находит свой
+    якорь (Refusal строителя), O1 валидна. Ожидание: O1 построена в задания,
+    R1 -- в перечне отказов с сырым текстом, итоговый код прохода ненулевой.
+    Зуб краснеет, если отказ снова станет глобальным (код 2 до измерения).
+    """
+    B = b"x MARK y MARK z"
+    rows = [
+        {"id": "R1", "check": "c", "kind": "literal", "anchor": "ZZZZ",
+         "repl": "ZZZ", "also": "", "expect": "1"},
+        {"id": "O1", "check": "c", "kind": "literal", "anchor": "MARK",
+         "repl": "MARX", "also": "", "expect": "2"},
+    ]
+    jobs, _inapp, refused = build_jobs(rows, None, Path("/fixture-image"), B)
+    if [j[0] for j in jobs] != ["O1"]:
+        return f"валидная строка не построена: jobs={[j[0] for j in jobs]}"
+    if [r[0] for r in refused] != ["R1"]:
+        return f"отказ не привязан к строке: refused={refused}"
+    if "не найден" not in refused[0][1]:
+        return f"сырой текст отказа потерян: {refused[0][1]!r}"
+    if exit_code(0, len(refused)) != 9:
+        return (f"код прохода при отказе строки {exit_code(0, len(refused))}, ждали РОВНО 9 -- "
+                f"2 запрещён: свип читает 2 как «не измеряли» и спрятал бы измеренные строки")
+    return None
+
+
+def _tooth_refusal_is_not_green() -> str | None:
+    """Отказавшая строка -- третий исход: не «мутаций», не «прошло молча».
+
+    Бухгалтерия итоговых строк -- тоже место вакуумной зелени: отказ, попавший
+    в счётчик измеренных или молчавших, выглядел бы работой прибора.
+    """
+    B = b"x MARK y MARK z"
+    rows = [
+        {"id": "R1", "check": "c", "kind": "literal", "anchor": "ZZZZ",
+         "repl": "ZZZ", "also": "", "expect": "1"},
+        {"id": "O1", "check": "c", "kind": "literal", "anchor": "MARK",
+         "repl": "MARX", "also": "", "expect": "2"},
+    ]
+    jobs, _inapp, refused = build_jobs(rows, None, Path("/fixture-image"), B)
+    line = summary_line(len(jobs), 0)
+    if "мутаций=1" not in line or "R1" in line:
+        return f"отказавшая строка попала в счётчик мутаций: {line}"
+    if "молча/чужой дверью=0" not in line:
+        return f"отказавшая строка попала в счётчик молчаний: {line}"
+    rline = refusal_line(refused)
+    if "отказов прибора=1" not in rline or "R1" not in rline:
+        return f"перечень отказов не назвал счётчик и строку: {rline}"
+    return None
+
+
+def _tooth_no_refusal_same_outcome() -> str | None:
+    """Строка без отказа строится и кодируется ТОЧНО как до правки.
+
+    Граница громкого отказа (#335): ветка отказа стреляет в области действия
+    и не шире -- обёртка построения не имеет права менять исход строк, чьи
+    строители не отказывают. Эталон кортежа -- формула, которой main строил
+    задания ДО этой волны.
+    """
+    B = b"x MARK y MARK z"
+    row = {"id": "O1", "check": "c", "kind": "literal", "anchor": "MARK",
+           "repl": "MARX", "also": "c2; c3", "expect": "2"}
+    image = Path("/fixture-image")
+    jobs, inapp, refused = build_jobs([row], None, image, B)
+    want = {"c"}
+    want |= {x.strip() for x in "c2; c3".split(";") if x.strip()}
+    expect_job = ("O1", "c", str(image), edits_literal(B, row), sorted(want))
+    if jobs != [expect_job]:
+        return f"исход строки изменился: {jobs!r}"
+    if inapp or refused:
+        return f"без отказа нет иных исходов: inapp={[r['id'] for r in inapp]} refused={refused}"
+    if exit_code(0, 0) != 0:
+        return "нулевых bad/refused хватило на ненулевой код"
+    return None
+
+
+def _tooth_seven_is_upstream() -> str | None:
+    """Код 7 занят кит-таблицей с ПРОТИВОПЛОЖНЫМ действием -- ждать апстрим
+    и НЕ краснить. Проход, измеривший строки, требует краснить и искать
+    дефект; повторный захват кода молча перевернул бы реакцию свипа. Зуб
+    границы: exit_code не имеет права отвечать 7 ни на каком входе."""
+    for bad_n in range(6):
+        for refused_n in range(6):
+            if exit_code(bad_n, refused_n) == 7:
+                return (f"exit_code({bad_n}, {refused_n}) = 7 -- "
+                        f"код занят ожиданием апстрима")
+    return None
+
+
+def self_check() -> int:
+    """Герметичная самопроверка: без образа и замка.
+
+    Ветви edits_literal (#149): каждый сценарий обязан провалиться при
+    удалении СВОЕЙ ветви -- иначе разводка двух отказов зелена вакуумно
+    (в норме n==expect, ветвь дрейфа не срабатывает, и её удаление обычный
+    прогон не заметит). База b"x MARK y MARK z" несёт ровно два вхождения
+    MARK. Зубы #350 ниже держат третий исход строки (отказ прибора) в
+    границе этой строки -- и в бухгалтерии итоговых строк.
     """
     B = b"x MARK y MARK z"
 
@@ -874,7 +1051,21 @@ def self_check() -> int:
             print(f"checks-teeth self-check: {name}: ждали {exp[1]} правок, получили {len(res)}", flush=True)
         else:
             print(f"checks-teeth self-check: {name}: OK", flush=True)
-    print(f"checks-teeth self-check: ИТОГ сценариев={len(cases)} провалов={bad}", flush=True)
+    teeth = (
+        ("строитель-отказ-не-роняет-проход", _tooth_builder_refusal_is_row_scoped),
+        ("отказ-не-зелёный", _tooth_refusal_is_not_green),
+        ("вне-области-отказа-нет", _tooth_no_refusal_same_outcome),
+        ("код-7-занят-апстримом", _tooth_seven_is_upstream),
+    )
+    for name, fn in teeth:
+        reason = fn()
+        if reason:
+            bad += 1
+            print(f"checks-teeth self-check: {name}: ПРОШЛА МОЛЧА -- {reason}", flush=True)
+        else:
+            print(f"checks-teeth self-check: {name}: OK", flush=True)
+    total = len(cases) + len(teeth)
+    print(f"checks-teeth self-check: ИТОГ сценариев={total} провалов={bad}", flush=True)
     return 0 if bad == 0 else 1
 
 
@@ -999,28 +1190,13 @@ def main() -> int:
     print(f"checks-teeth: КОНТРОЛЬ без мутации: ЗЕЛЁНО ({image})", flush=True)
 
     base = image.read_bytes()
-    jobs = []
-    inapp_rows = []
-    try:
-        for row in rows:
-            if picked is not None and row["id"] not in picked:
-                continue
-            if row["kind"] == "inapplicable":
-                inapp_rows.append(row)
-                continue
-            if row["kind"] == "derived":
-                edits = DERIVED[row["id"]](base)
-            elif row["kind"] == "literal":
-                edits = edits_literal(base, row)
-            else:
-                raise Refusal(f"{row['id']}: неизвестный вид мутации {row['kind']}")
-            want = {row["check"]}
-            want |= {x.strip() for x in row["also"].split(";") if x.strip()}
-            jobs.append((row["id"], row["check"], str(image), edits, sorted(want)))
-    except Refusal as exc:
-        print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-        return 2
+    jobs, inapp_rows, refused = build_jobs(rows, picked, image, base)
     del base
+    # Построчный исход отказа печатается сразу с id и сырым текстом; счётчик
+    # и перечень -- в итоговых строках, после измерения остальных строк.
+    for rid, why in refused:
+        print(f"checks-teeth: МУТАЦИЯ {rid}: ОТКАЗ ПРИБОРА -- {why}",
+              file=sys.stderr, flush=True)
 
     bad = 0
     try:
@@ -1050,12 +1226,18 @@ def main() -> int:
               "мутации не измерены", file=sys.stderr, flush=True)
         return 2
 
+    measured_inapp = 0
     for row in inapp_rows:
         try:
             reason = run_inapplicable_tooth(row)
         except Refusal as exc:
-            print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-            return 2
+            # Тот же третий исход, что у строителей literal/derived: отказ
+            # зуба неприменимости -- свойство строки, остальные идут дальше.
+            refused.append((row["id"], str(exc)))
+            print(f"checks-teeth: МУТАЦИЯ {row['id']}: ОТКАЗ ПРИБОРА -- {exc}",
+                  file=sys.stderr, flush=True)
+            continue
+        measured_inapp += 1
         want = [row["check"]]
         want += [x.strip() for x in row["also"].split(";") if x.strip()]
         if reason:
@@ -1066,10 +1248,11 @@ def main() -> int:
             print(f"checks-teeth: МУТАЦИЯ {row['id']}: RED «{'» + «'.join(want)}»",
                   flush=True)
 
-    print(f"checks-teeth: ИТОГ мутаций={len(jobs) + len(inapp_rows)} "
-          f"прошло молча/чужой дверью={bad}", flush=True)
+    print(summary_line(len(jobs) + measured_inapp, bad), flush=True)
+    if refused:
+        print(refusal_line(refused), flush=True)
     lock.close()                       # замок снимается ПОСЛЕ последнего замера
-    return 0 if bad == 0 else 1
+    return exit_code(bad, len(refused))
 
 
 if __name__ == "__main__":
