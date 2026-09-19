@@ -6718,10 +6718,65 @@ fi
 # (гейты разбора, формы, стенды, числа), спрошено выше -- до того, как tweakcc
 # переписал хоть один байт.
 echo "==> Applying our multi-provider patches"
+# Реестр выключенных шагов идёт в раннер ТЕКСТОМ скрипта: песочница adhoc
+# (Node --permission без грантов, process.env срезан) не имеет ни файловой
+# системы, ни окружения -- другого канала у реестра нет. Единственный дом
+# решения -- tools/our-steps-off.txt; подстановка идёт в ЯКОРНУ строку
+# STEPS_OFF раннера, и имя-призрак ловит САМ раннер (сверка с именами
+# объявленных шагов в конце скрипта) -- здесь состав только переносится, а не
+# судится: второй судья значил бы два дома одного правила.
+# Отсутствующий или пустой реестр -- НОРМА: составление пропускается, раннеру
+# уходит файл как есть, все шаги включены.
+STEPS_OFF_SRC="$HERE/tools/our-steps-off.txt"
+OUR_PATCH_RUN="$OUR_PATCH"
+if [[ -s "$STEPS_OFF_SRC" ]]; then
+  STEPS_OFF_TMP="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл компоновки реестра\n' >&2; exit 2; }
+  [ -n "$STEPS_OFF_TMP" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь компоновки реестра пуст\n' >&2; exit 2; }
+  # Код возврата -- без пайпа: под set -e отказ питона сам роняет прогон.
+  python3 - "$OUR_PATCH" "$STEPS_OFF_SRC" "$STEPS_OFF_TMP" <<'STEPSCOMP'
+import json, sys
+
+patch, registry, out = sys.argv[1], sys.argv[2], sys.argv[3]
+src = open(patch, encoding='utf-8').read()
+ANCHOR = 'const STEPS_OFF = [];'
+if src.count(ANCHOR) != 1:
+    print(f'ОТКАЗ ПРИБОРА: якорь STEPS_OFF встречается {src.count(ANCHOR)} раз '
+          f'(ожидался ровно один) в {patch}', file=sys.stderr)
+    sys.exit(2)
+names, rows = [], {}
+with open(registry, encoding='utf-8') as fh:
+    for n, line in enumerate(fh, 1):
+        raw = line.rstrip('\n')
+        if not raw.strip() or raw.lstrip().startswith('#'):
+            continue
+        parts = raw.split('\t')
+        if len(parts) != 2 or not all(parts):
+            print(f'ОТКАЗ ПРИБОРА: неразобранная строка {n} в {registry} '
+                  f'(нужны два поля: имя шага TAB причина)', file=sys.stderr)
+            sys.exit(2)
+        if parts[0] in rows:
+            print(f'ОТКАЗ ПРИБОРА: две строки на шаг {parts[0]!r} в {registry} '
+                  f'(строки {rows[parts[0]]} и {n})', file=sys.stderr)
+            sys.exit(2)
+        rows[parts[0]] = n
+        names.append(parts[0])
+if not names:
+    print(f'ОТКАЗ ПРИБОРА: реестр {registry} не пуст, а записей не найдено', file=sys.stderr)
+    sys.exit(2)
+open(out, 'w', encoding='utf-8').write(
+    src.replace(ANCHOR, 'const STEPS_OFF = ' + json.dumps(names) + ';'))
+print(f'Реестр выключенных шагов: подставлено записей {len(names)} в раннер',
+      file=sys.stderr)
+STEPSCOMP
+  OUR_PATCH_RUN="$STEPS_OFF_TMP"
+fi
 "${TWEAKCC[@]}" adhoc-patch \
-  --script "@$OUR_PATCH" \
+  --script "@$OUR_PATCH_RUN" \
   -p "$BIN" \
   --confirm-possible-dangerous-patch
+if [[ -n "${STEPS_OFF_TMP:-}" ]]; then
+  rm -f "$STEPS_OFF_TMP"
+fi
 
 # --- 3b. bytecode census of the modules our patches touched -------------------
 # КОНСТРЕЙНТ: строго ПОСЛЕ применения наших правок (предмет измерения — их
@@ -6783,7 +6838,7 @@ fi
 # --- 5. verify ---------------------------------------------------------------
 echo "==> Verifying"
 python3 - "$BIN" "$OUR_PATCH" <<'PY'
-import os, re, sys
+import json, os, re, sys
 d = open(sys.argv[1], 'rb').read()
 src = open(sys.argv[2], encoding='utf-8').read()
 ID = rb'[A-Za-z_$][\w$]*'
@@ -7723,6 +7778,112 @@ def _read_inapplicable(path):
     return rows
 
 
+def _read_steps_off(path):
+    """Реестр выключенных шагов -- для проверяющей стороны.
+
+    Отсутствующий файл -- НОРМА (все шаги включены), а НЕ отказ: дом
+    заводится первой выключенной записью, и требовать его на каждой машине --
+    значило бы отказывать сборкам без единого выключенного шага. Неразобранная
+    строка и дубль имени -- отказ прибора: тихий пропуск снял бы защиту с
+    состава, а молчаливый дубль позволил бы править не ту строку, что читает
+    раннер.
+    """
+    if not os.path.isfile(path):
+        return {}
+    rows = {}
+    with open(path, encoding='utf-8') as fh:
+        for n, line in enumerate(fh, 1):
+            raw = line.rstrip('\n')
+            if not raw.strip() or raw.lstrip().startswith('#'):
+                continue
+            parts = raw.split('\t')
+            if len(parts) != 2 or not all(parts):
+                print(f'ОТКАЗ ПРИБОРА: неразобранная строка {n} в {path} '
+                      f'(нужны два поля: имя шага TAB причина)', file=sys.stderr)
+                sys.exit(2)
+            if parts[0] in rows:
+                print(f'ОТКАЗ ПРИБОРА: две строки на шаг {parts[0]!r} в {path} '
+                      f'(строки {rows[parts[0]]} и {n})', file=sys.stderr)
+                sys.exit(2)
+            rows[parts[0]] = (n, parts[1])
+    return rows
+
+
+_CARRIER_KEYS = ('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', 'CLAUDE_JUDGE_CARRIER',
+                 'CLAUDE_JUDGE', 'CLAUDE_PROMPTS')
+
+
+def _mod_carrier_pins():
+    """Живые значения ручек носителя -- из ДОМА, который читает боевой путь.
+
+    CONSTRAINT: источник -- env-карта settings.json дома проб: хост кладёт её
+    ПОВЕРХ process.env, поэтому ключ, стоящий в ней, и есть живое значение в
+    ЛЮБОМ контексте запуска. Ключа в ней нет -- живое значение берётся из
+    process.env контекста запуска, на стороне сборки это неизмеримо; такая
+    ручка считается НЕЗАКРЕПЛЁННОЙ и попадает в текст отказа по имени, а не
+    угадывается. Дом отсутствует вовсе -- пустая карта: ни одна ручка не
+    закреплена, носитель не установлен. Файл есть, но не читается или не
+    разбирается -- ОТКАЗ ПРИБОРА, а не вердикт: сломанный вход нельзя ни
+    принять, ни отвергнуть.
+    """
+    home = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.join(os.path.expanduser('~'), '.claude')
+    path = os.path.join(home, 'settings.json')
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as fh:
+            env_map = json.load(fh).get('env') or {}
+    except (OSError, ValueError) as exc:
+        print(f'ОТКАЗ ПРИБОРА: живые настройки носителя не читаются: {path}: {exc}',
+              file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(env_map, dict):
+        print(f'ОТКАЗ ПРИБОРА: env-карта настроек не объект: {path}', file=sys.stderr)
+        sys.exit(2)
+    # CONSTRAINT: наружу уходят ТОЛЬКО четыре ручки носителя. Дом настроек
+    # держит и посторонние ключи (материал учётки в их числе), а отказ этой
+    # проверки печатает значения поимённо -- сужение на ВХОДЕ закрывает класс
+    # «будущая правка напечатала карту целиком», а не полагается на дисциплину
+    # места печати.
+    return {str(k): ('' if v is None else str(v))
+            for k, v in env_map.items() if str(k) in _CARRIER_KEYS}
+
+
+def _step26_mod_road(pins):
+    """Несёт ли мод-дорога правило в ЭТОЙ конфигурации; (несёт, что не сошлось).
+
+    CONSTRAINT: условия -- семантика САМОГО мода, каждым своим литералом
+    (дом -- hooks/register.ts плагина catalyst-probes), не наша выдумка:
+      hooks   -- мод вообще загружен: value in {"1","true"} (та же пара,
+                 что пинит читатель SWITCH выше -- дверца function-hooks);
+      carrier -- `env.JUDGE_CARRIER.trim().toLowerCase() !== "mod"` скипает
+                 правило в applyPromptRules (gate: "judge");
+      judge   -- envOn: unset/""/"0"/"false"/"off"/"no" -- выключено;
+      prompts -- formOn: unset/"" -- ВКЛЮЧЕНО (умолчание мода), off-слова --
+                 выключено, и applyPromptRules гаснет целиком.
+    Смена любого из этих литералов в моде обязана прийти сюда той же волной.
+    """
+    unmet = []
+    hooks = pins.get('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', '').strip().lower()
+    if hooks not in ('1', 'true'):
+        unmet.append('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS='
+                     + (pins.get('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS')
+                        or '<не закреплён в settings.json>'))
+    carrier = pins.get('CLAUDE_JUDGE_CARRIER', '').strip().lower()
+    if carrier != 'mod':
+        unmet.append('CLAUDE_JUDGE_CARRIER='
+                     + (pins.get('CLAUDE_JUDGE_CARRIER')
+                        or '<не закреплён в settings.json>'))
+    judge = pins.get('CLAUDE_JUDGE', '').strip().lower()
+    if judge in ('', '0', 'false', 'off', 'no'):
+        unmet.append('CLAUDE_JUDGE='
+                     + (pins.get('CLAUDE_JUDGE') or '<не закреплён в settings.json>'))
+    prompts = pins.get('CLAUDE_PROMPTS', '').strip().lower()
+    if prompts in ('0', 'false', 'off', 'no'):
+        unmet.append('CLAUDE_PROMPTS=' + pins.get('CLAUDE_PROMPTS', ''))
+    return (not unmet), unmet
+
+
 def _image_version(d):
     found = set(re.findall(rb'// Version: ([0-9]+\.[0-9]+\.[0-9]+)', d))
     if len(found) != 1:
@@ -7733,6 +7894,9 @@ def _image_version(d):
 
 
 _NOTE_FMT = "  [NOTE] {name}: {ver} step 29: {reason}"
+# NOTE выключенного шага: субъект -- OUR decision (реестр), не версия образа,
+# поэтому полей «ver/step» у него нет -- причина одна и приезжает из реестра.
+_NOTE_OFF_FMT = "  [NOTE] {name}: шаг выключен реестром our-steps-off.txt: {reason}"
 
 
 def _step29_verdict(d, src):
@@ -7991,6 +8155,41 @@ def _cancellation_rule_is_whole(d):
     return True
 
 
+# Шаг 26 -- первый шаг с ВЫКЛЮЧАТЕЛЕМ, и его таблица исходов зеркальна шагу 29
+# плюс третий, КРАСНЫЙ исход носителя: note (реестр объявил шаг выключенным,
+# следа в образе нет, И мод-дорога несёт правило в этой конфигурации --
+# объявленное состояние, не непрошедшая правка), fail-stale (реестр объявил
+# выключенным, а правило в образе ЕСТЬ -- запись пережила свою причину),
+# fail-carrier (реестр объявил выключенным, а мод-дорога в текущей конфигурации
+# пропускается -- правило не несёт НИКТО: снятие носителя обязано быть слышным,
+# класс той самой двери, что гасит точечно, а отказывает в обслуживании),
+# proceed (шаг не выключен -- проверка идёт как всегда, состояние носителя её
+# не касается). ГРАНИЦА fail-carrier: стреляет ТОЛЬКО на записи реестра с
+# неработающим носителем; активный носитель и отсутствие записи не краснят
+# ничего.
+# КАРТА «шаг -> проверки» ПОИМЁННАЯ и ведётся руками: у каждого шага свои
+# проверки, и новая запись реестра обязана в той же волне провести сюда свои
+# имена -- родовой предикат по имени шага мерил бы чужое.
+_STEP26_NAME = '26 dispatch-cancellation rule in the system prompt'
+_STEP26_CHECK = 'dispatch-cancellation rule reaches the main loop'
+
+
+def _step26_verdict(d):
+    off = _read_steps_off(
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
+                     'tools', 'our-steps-off.txt'))
+    reason = off.get(_STEP26_NAME)
+    if reason is None:
+        return {'status': 'proceed'}
+    if _cancellation_rule_is_whole(d):
+        return {'status': 'fail', 'fail_kind': 'stale', 'reason': reason[1]}
+    carries, unmet = _step26_mod_road(_mod_carrier_pins())
+    if carries:
+        return {'status': 'note', 'reason': reason[1]}
+    return {'status': 'fail', 'fail_kind': 'carrier',
+            'reason': reason[1], 'unmet': unmet}
+
+
 def _statusline_throttle_raised(d):
     """The constant the debounce actually reads, in the debounce's OWN module.
 
@@ -8063,6 +8262,7 @@ def _dispatch_keeps_its_model(d):
 _probe_full = d
 
 _S29 = _step29_verdict(_probe_full, src)
+_S26 = _step26_verdict(_probe_full)
 
 checks = {
     'routing (claude-* -> subscription)': _routing_agrees_with_connection(d),
@@ -8264,7 +8464,10 @@ checks = {
     # instruction -- reissue only with the named change, never repeat the
     # identical call, this is not the permission system -- is gone. The clauses
     # that make it actionable are pinned individually.
-    'dispatch-cancellation rule reaches the main loop': _cancellation_rule_is_whole(d),
+    _STEP26_CHECK: (
+        'note' if _S26['status'] == 'note' else
+        False if _S26['status'] == 'fail' else
+        _cancellation_rule_is_whole(d)),
     # Step 12 also rewrites what the schema TELLS the model about a fork's model
     # override; stock says the override is ignored, which is false once the code
     # honours it. Nothing measured that, so restoring the stock sentence left all
@@ -8353,7 +8556,9 @@ if len(checks) != EXPECTED_CHECKS:
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
     sys.exit(1)
 for name, ok in checks.items():
-    if ok == 'note':
+    if ok == 'note' and _S26['status'] == 'note' and name == _STEP26_CHECK:
+        print(_NOTE_OFF_FMT.format(name=name, reason=_S26['reason']))
+    elif ok == 'note':
         print(_NOTE_FMT.format(name=name, ver=_S29['ver'], reason=_S29['reason']))
     else:
         print(f"  [{'OK' if ok else 'FAIL'}] {name}")
@@ -8362,6 +8567,19 @@ if _S29.get('fail_kind') == 'undeclared':
     print(_S29['ready'])
 elif _S29.get('fail_kind') == 'stale':
     print(f"декларация неприменимости пережила причину: {_S29['ver']} step 29")
+if _S26.get('fail_kind') == 'stale':
+    print(f'реестр выключенных шагов объявил шаг выключенным, а правило в образе'
+          f' есть -- запись пережила причину: {_STEP26_NAME}')
+if _S26.get('fail_kind') == 'carrier':
+    # ОБЕ стороны в тексте: запись реестра объявила шаг выключенным, И
+    # носитель-мод здесь не работает. Имя отказа («carrier») отлично от
+    # «stale», а не сошедшиеся ручки названы поимённо -- два отказа с одним
+    # текстом неразличимы.
+    print(f'НОСИТЕЛЬ ОТСУТСТВУЕТ (carrier): запись реестра объявила шаг '
+          f'выключенным, а носитель-мод в этой конфигурации не работает -- '
+          f'правило не несёт никто: {_STEP26_NAME}: {_S26["reason"]}')
+    for u in _S26['unmet']:
+        print(f'  не сошлось: {u}')
 sys.exit(0 if all(checks.values()) else 1)
 PY
 

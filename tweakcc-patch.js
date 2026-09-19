@@ -32,6 +32,17 @@ const failures = [];
 // stops the run. A step missing from the output must not be readable as
 // "nothing happened" when the truth is "nothing was there to patch".
 const inapplicable = [];
+// A step switched off by the registry (tools/our-steps-off.txt) lands here:
+// the body is NOT executed, the state is declared in every summary, and
+// nothing is added to `failures` -- a stale locator inside a step that never
+// runs has nothing to break. Unlike `inapplicable` (upstream deleted the
+// subject) this is OUR decision, and the registry is its only home: turning
+// a step back on is a one-line registry edit, never a code revert.
+const stepsOff = [];
+// Every name a step('…') call declares during this run. The registry arrives
+// as injected text, so the only honest check for a typo'd registry name is
+// against the names the script has itself declared by the time it ends.
+const declaredSteps = [];
 
 // A minified name can contain `$`: in 2.1.239 the session matcher is called
 // `$jS`. In a regex SOURCE `$` is the end-of-line anchor, and a name injected
@@ -90,7 +101,21 @@ const editModuleAt = (pos, fn) => {
 // discovery otherwise costs a full unpack/repack cycle. Nothing is written when
 // anything failed: the final throw discards all edits, so a half-patched binary
 // is still impossible.
+// CONSTRAINT: the single decision home for switched-off steps is
+// tools/our-steps-off.txt. The adhoc sandbox has no filesystem and no
+// environment (Node --permission, process.env replaced), so script text is
+// the only channel the registry can take: claude-patch-all.sh substitutes
+// the registry entries into this literal before handing the script to
+// tweakcc, keying on this exact line. The empty default keeps a directly
+// invoked script fully on -- no pipeline, no registry, every step runs.
+const STEPS_OFF = [];
+
 const step = (name, fn) => {
+  declaredSteps.push(name);
+  if (STEPS_OFF.includes(name)) {
+    stepsOff.push(name);
+    return;
+  }
   try {
     fn();
   } catch (error) {
@@ -3471,6 +3496,21 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 // the four steps written after it ran unguarded — a broken locator among them
 // was recorded and never read, so the build reported success while the patch
 // was missing (that is exactly how step 26 first shipped as a no-op).
+
+// A registry name no declared step answers to is an instrument failure, not a
+// patch outcome: the entry disables nothing, and a green run would leave the
+// operator believing a step is off when it never was. The name must ride the
+// message so the typo is audible. An empty registry, an absent one (injected
+// as empty) and a registry whose every name matched are all normal states --
+// this fires on ghosts only, never wider.
+const ghosts = STEPS_OFF.filter(name => !declaredSteps.includes(name));
+if (ghosts.length > 0) {
+  throw new Error(
+    `multi-provider patch: steps-off registry names step(s) no code declares: ` +
+    `${ghosts.join(', ')} -- nothing was disabled by them (nothing written)`,
+  );
+}
+
 if (failures.length > 0) {
   // Two very different causes produce the same list of "site not found", and
   // they need opposite responses: a CONTAINER change (the bundle stopped being
@@ -3499,6 +3539,10 @@ if (failures.length > 0) {
   throw new Error(
     `multi-provider patch: ${failures.length} of ${total} patches ` +
     `could not be applied (nothing written):\n  - ${failures.join('\n  - ')}` +
+    (stepsOff.length > 0
+      ? `\noff by steps-off registry, body not executed (tools/our-steps-off.txt):` +
+        `\n  - ${stepsOff.join('\n  - ')}`
+      : '') +
     (inapplicable.length > 0
       ? `\ninapplicable in this build (subject deleted upstream, nothing to patch):` +
         `\n  - ${inapplicable.join('\n  - ')}`
@@ -3512,6 +3556,10 @@ if (failures.length > 0) {
 // silence here is exactly the no-op defect the end-of-file gate exists for.
 console.error(
   `multi-provider patch: applied ${applied.length} edits:\n  - ${applied.join('\n  - ')}` +
+    (stepsOff.length > 0
+      ? `\noff by steps-off registry, body not executed (tools/our-steps-off.txt):` +
+        `\n  - ${stepsOff.join('\n  - ')}`
+      : '') +
     (inapplicable.length > 0
       ? `\ninapplicable in this build (subject deleted upstream, nothing to patch):` +
         `\n  - ${inapplicable.join('\n  - ')}`
