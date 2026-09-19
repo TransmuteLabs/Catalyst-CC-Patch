@@ -485,20 +485,34 @@ the guard into two of nine stands (`tools/probes-sync-bench.sh`,
 asks: does anything READ the handles we declare? Every key of `env` in a
 settings file must have a reader in one of four places -- the host image (a
 structural access: any identifier dot NAME, or a bracket access preceded by
-something indexable), our own CODE (documentation does not count: a mention
-in a doc would legalize a dead handle), a `${NAME}` substitution elsewhere in
-the same settings file (how an MCP server entry takes a key from `env`), or
-an explicitly `--external` declared consumer outside every inspected home.
+something indexable), our own CODE, recognized STRUCTURALLY per language
+(identifier dot NAME or an indexable-preceded bracket access in JS-family
+files, `os.environ["NAME"]` / `os.environ.get("NAME"...)` / `os.getenv("NAME"...)`
+/ `environ["NAME"]` in Python, `env::var("NAME")` / `env::var_os("NAME")` in
+Rust, `$NAME` / `${NAME...}` / `export NAME` / the `NAME=... command` prefix
+in shell -- a bare substring mention does not count: in a comment, a name
+list or a test fixture it would legalize a dead handle), a `${NAME}`
+substitution elsewhere in the same settings file (how an MCP server entry
+takes a key from `env`), or an explicitly `--external` declared consumer
+outside every inspected home.
 
 A handle whose name the image knows but never reads is reported as МЁРТВАЯ; a
-handle no one anywhere reads is БЕСХОЗНАЯ; either is exit 3. Exit 2 covers an
-unreadable image, a `--external` name that turns out to HAVE a reader (the
-owner was named twice and once wrongly), and -- the positive control -- a
-`--control` handle that is not found readable, because an instrument that
-cannot find a known-live reader has no right to a verdict on the rest, and an
-`--ours` home that yields no file of any scanned extension -- a silent home is
-indistinguishable from a home without readers, which is exactly how a live
-handle once got reported БЕСХОЗНАЯ. Exit 5 is zero declared handles
+handle no one anywhere reads is БЕСХОЗНАЯ; a handle our code mentions as a
+substring but never accesses structurally is УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ -- all
+three are exit 3: a handle without a reader stays a handle without a reader.
+Exit 6 is its own state, ТОЛЬКО-СБОРКА: a handle whose only structural reader
+lives in a `dist` build product while the source has none -- that is a
+build/source divergence, not a dead handle, and conflating the two would hide
+it (`dist` stays in SKIP_DIR of the first pass; a second pass walks only
+`dist` directories and only the names still without a reader). Exit 2 covers
+an unreadable image, a `--external` name that turns out to HAVE a reader (the
+owner was named twice and once wrongly), and -- the positive controls -- a
+`--control` handle not found readable in the image or a `--control-ours`
+handle not found structurally readable in our code, because an instrument
+that cannot find a known-live reader has no right to a verdict on the rest,
+and an `--ours` home that yields no file of any scanned extension -- a silent
+home is indistinguishable from a home without readers, which is exactly how a
+live handle once got reported БЕСХОЗНАЯ. Exit 5 is zero declared handles
 (ПУСТО ≠ НОЛЬ).
 
 The image is read with python latin-1 only because the subject is a BYTE
@@ -506,7 +520,16 @@ image, not text: grep returns zero on it where python finds eleven. The
 rule does not generalize to anything merely containing NUL -- on UTF-8 text
 a latin-1 decode mangles non-ASCII and yields a false empty result that is
 indistinguishable from a measurement. Teeth:
-`tools/env-handles-live-guard-teeth.sh` (15, count pinned).
+`tools/env-handles-live-guard-teeth.sh` (40, count pinned). The guard is
+also called on the REAL tree by `claude-patch-all.sh` right after its teeth,
+via `--homes tools/env-guard-ours.txt`: an EXHAUSTIVE split of the family
+root's visible child directories into `[ours]` (scanned) and `[foreign]`
+(reference homes, NOT scanned -- someone else's code must not legalize our
+handle). A child in neither section, a name absent from the tree, a name in
+both, or a missing/empty `[ours]` each drop the instrument (exit 2, with the
+offending names); a `[ours]` child that yields no code file is a fact of the
+tree (the name was verified against it), not a failure, unlike the strict
+`--ours` mode.
 
 Written because `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=99999` sat in the
 settings for an unknown number of versions while 2.1.276 read it nowhere --

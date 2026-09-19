@@ -1,0 +1,40 @@
+# CONSTRAINT: ИСЧЕРПЫВАЮЩЕЕ разделение ВИДИМЫХ каталогов-детей корня семьи
+# на [ours] (осматриваются) и [foreign] (референсные, НЕ осматриваются:
+# чужой код не легализует нашу ручку). Каталог-ребёнок вне обоих списков
+# роняет ПРИБОР (rc=2) с именем -- дрейф дерева обязан ломать прибор, а не
+# предмет; направление fail-closed: забытый НАШ дом даёт громкую красноту,
+# забытый ЧУЖОЙ давал бы тихую зелень. Корень семьи сам по себе домом не
+# является; скрытые (.имя) дети не дома. Классификация по происхождению:
+# origin TransmuteLabs/* или наша авторская работа без удалёнки = наш;
+# чужой автор (parcadei/katsos/zzet) или сборник чужих репо (CC-Mods) = чужой.
+# Синтаксис: 'root <путь>' ровно один раз ('~' разворачивается); секции
+# '[ours]' и '[foreign]'; внутри -- по одному ИМЕНИ ребёнка в строке;
+# '#' -- комментарий.
+root ~/work/SIB/Transmutation/Nexus/Catalyst
+[ours]
+Catalyst
+Catalyst-CC-Patch
+Catalyst-Judge-Eval
+Catalyst-KB
+Catalyst-arenas
+Catalyst-programs
+Catalyst-tweakcc
+ContinuousClaude
+bloks
+catalyst-cli
+catalyst-cli-core-audit
+fastedit-rs
+llm-tldr-go
+llm-tldr-rust
+ouros
+programs
+tldr-code
+toon-go
+toon-rs
+[foreign]
+CC-Mods
+ContinuousClaudeV4.7
+dsh-claude-cli
+fastedit
+gortex
+llm-tldr

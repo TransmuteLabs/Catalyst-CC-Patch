@@ -13,7 +13,7 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GUARD="${GUARD:-$KIT/tools/env-handles-live-guard.sh}"
-EXPECTED_TEETH=15
+EXPECTED_TEETH=40
 
 PASSED=0; FAILED=0; RAN=0; WORKDIR=''
 # CONSTRAINT: конец объявляет себя САМ (__DONE=1). Голый EXIT-трап съедает
@@ -48,11 +48,16 @@ ok()  { PASSED=$((PASSED + 1)); printf '  ok     %s\n' "$1"; }
 bad() { FAILED=$((FAILED + 1)); printf '  ПРОВАЛ %s\n' "$1"; }
 
 CTRL=CTRL_HANDLE
+# CONSTRAINT: положительный контроль второй стороны: OURS_CTRL обязан
+# читаться СТРУКТУРНО в placeholder.ts каждого зуба; ручкой он не является
+# ни в одной фикстуре, поэтому чужие зубы не зеленит.
+OURS_CTRL=OURS_CONTROL_HANDLE
 mkdir -p "$WORKDIR/ours"
 # CONSTRAINT: дом --ours обязан быть НЕпустым во всех зубах, кроме зуба 14:
-# гвард роняет прибор на молчащем доме. Файл нейтрален -- ни одного имени
-# ручки в нём нет, иначе он зеленил бы чужие зубы.
-printf '// нейтральный файл фикстуры\n' > "$WORKDIR/ours/placeholder.ts"
+# гвард роняет прибор на молчащем доме. Файл несёт ТОЛЬКО контрольного
+# читателя OURS_CTRL -- ни одного имени ручки в нём нет, иначе он зеленил
+# бы чужие зубы.
+printf '// контроль прибора: %s\nconst _probe = process.env.%s;\n' "$OURS_CTRL" "$OURS_CTRL" > "$WORKDIR/ours/placeholder.ts"
 
 # Фикстура образа: контрольная ручка ЧИТАЕТСЯ (e.CTRL_HANDLE), NUL внутри.
 mk_image() {   # $1 -- добавочный текст
@@ -75,7 +80,7 @@ PY
 run_guard() {
   GUARD_RC=0
   GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
-                --control "$CTRL" --ours "$WORKDIR/ours" "$@") || GUARD_RC=$?
+                --control "$CTRL" --control-ours "$OURS_CTRL" --ours "$WORKDIR/ours" "$@") || GUARD_RC=$?
 }
 
 # 1. ручка с читателем-членом в образе -> 0
@@ -271,9 +276,386 @@ tooth_15() {
   else bad "15 ждали rc=0 и «читает наш код 1», получили rc=$rc :: $out"; fi
 }
 
+# 16. упоминание имени в комментарии .sh -- НЕ читатель: подстрочный счёт
+#     зеленит ручку, которой нет доступа; имя названо УПОМЯНУТОЙ-НО-НЕ-ЧИТАЕМОЙ
+tooth_16() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf '# комментарий: ручка CMT_SH_SIXTEEN здесь только упомянута\n' > "$WORKDIR/ours/comment.sh"
+  mk_settings '{"CMT_SH_SIXTEEN":"x"}'
+  run_guard --label t16
+  rm -f "$WORKDIR/ours/comment.sh"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_SH_SIXTEEN"* && "$GUARD_OUT" == *"упомянута-но-не-читается 1"* ]]; then
+    ok '16 упоминание в комментарии .sh -> 3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ'
+  else bad "16 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_SH_SIXTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 17. упоминание имени в комментарии .py -- НЕ читатель
+tooth_17() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf '# see CMT_PY_SEVENTEEN for details\npass\n' > "$WORKDIR/ours/comment.py"
+  mk_settings '{"CMT_PY_SEVENTEEN":"x"}'
+  run_guard --label t17
+  rm -f "$WORKDIR/ours/comment.py"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_PY_SEVENTEEN"* ]]; then
+    ok '17 упоминание в комментарии .py -> 3'
+  else bad "17 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_PY_SEVENTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 18. упоминание имени в комментарии .ts -- НЕ читатель
+tooth_18() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf '// CMT_TS_EIGHTEEN is documented here\n' > "$WORKDIR/ours/comment.ts"
+  mk_settings '{"CMT_TS_EIGHTEEN":"x"}'
+  run_guard --label t18
+  rm -f "$WORKDIR/ours/comment.ts"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_TS_EIGHTEEN"* ]]; then
+    ok '18 упоминание в комментарии .ts -> 3'
+  else bad "18 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_TS_EIGHTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 19. упоминание имени в комментарии .rs -- НЕ читатель
+tooth_19() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf '// CMT_RS_NINETEEN documented in a comment\n' > "$WORKDIR/ours/comment.rs"
+  mk_settings '{"CMT_RS_NINETEEN":"x"}'
+  run_guard --label t19
+  rm -f "$WORKDIR/ours/comment.rs"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_RS_NINETEEN"* ]]; then
+    ok '19 упоминание в комментарии .rs -> 3'
+  else bad "19 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_RS_NINETEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 20. py: os.environ["ИМЯ"] -- читатель
+tooth_20() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'import os\nv = os.environ["PY_IDX_TWENTY"]\n' > "$WORKDIR/ours/reader.py"
+  mk_settings '{"PY_IDX_TWENTY":"x"}'
+  run_guard --label t20
+  rm -f "$WORKDIR/ours/reader.py"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '20 os.environ["ИМЯ"] в .py -> 0'
+  else bad "20 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 21. py: os.environ.get("ИМЯ", ...) -- читатель (именованный вызов)
+tooth_21() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'import os\nv = os.environ.get("PY_ENVGET_TWENTYONE", "d")\n' > "$WORKDIR/ours/reader.py"
+  mk_settings '{"PY_ENVGET_TWENTYONE":"x"}'
+  run_guard --label t21
+  rm -f "$WORKDIR/ours/reader.py"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '21 os.environ.get("ИМЯ",...) в .py -> 0'
+  else bad "21 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 22. py: os.getenv("ИМЯ") -- читатель
+tooth_22() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'import os\nv = os.getenv("PY_GETENV_TWENTYTWO")\n' > "$WORKDIR/ours/reader.py"
+  mk_settings '{"PY_GETENV_TWENTYTWO":"x"}'
+  run_guard --label t22
+  rm -f "$WORKDIR/ours/reader.py"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '22 os.getenv("ИМЯ") в .py -> 0'
+  else bad "22 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 23. py: environ["ИМЯ"] после from os import environ -- читатель
+tooth_23() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'from os import environ\nv = environ["PY_BARE_TWENTYTHREE"]\n' > "$WORKDIR/ours/reader.py"
+  mk_settings '{"PY_BARE_TWENTYTHREE":"x"}'
+  run_guard --label t23
+  rm -f "$WORKDIR/ours/reader.py"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '23 environ["ИМЯ"] в .py -> 0'
+  else bad "23 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 24. py: getenv("ИМЯ_ДРУГОЕ") -- НЕ читатель для ИМЯ: имя call-аргумента
+#     обязано совпадать целиком, упомянутая подстрока не считается
+tooth_24() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'import os\nv = os.getenv("PYCALL_TWENTYFOUR_ALT")\n' > "$WORKDIR/ours/reader.py"
+  mk_settings '{"PYCALL_TWENTYFOUR":"x"}'
+  run_guard --label t24
+  rm -f "$WORKDIR/ours/reader.py"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"PYCALL_TWENTYFOUR"* ]]; then
+    ok '24 getenv("ИМЯ_ДРУГОЕ") не читатель для ИМЯ -> 3'
+  else bad "24 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ PYCALL_TWENTYFOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 25. rs: env::var("ИМЯ") -- читатель
+tooth_25() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'let d = env::var("RS_TWENTYFIVE").ok();\n' > "$WORKDIR/ours/hook.rs"
+  mk_settings '{"RS_TWENTYFIVE":"x"}'
+  run_guard --label t25
+  rm -f "$WORKDIR/ours/hook.rs"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '25 env::var("ИМЯ") в .rs -> 0'
+  else bad "25 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 26. rs: std::env::var_os("ИМЯ") -- читатель (полный префикс тоже покрыт)
+tooth_26() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'let d = std::env::var_os("RS_TWENTYSIX");\n' > "$WORKDIR/ours/hook.rs"
+  mk_settings '{"RS_TWENTYSIX":"x"}'
+  run_guard --label t26
+  rm -f "$WORKDIR/ours/hook.rs"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '26 std::env::var_os("ИМЯ") в .rs -> 0'
+  else bad "26 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 27. sh: ${ИМЯ:-x} -- читатель (параметрическое расширение)
+tooth_27() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'echo "${SH_DEF_TWENTYSEVEN:-x}"\n' > "$WORKDIR/ours/script.sh"
+  mk_settings '{"SH_DEF_TWENTYSEVEN":"x"}'
+  run_guard --label t27
+  rm -f "$WORKDIR/ours/script.sh"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '27 ${ИМЯ:-x} в .sh -> 0'
+  else bad "27 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 28. sh: $ИМЯ -- читатель
+tooth_28() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'echo "$SH_PLAIN_TWENTYEIGHT"\n' > "$WORKDIR/ours/script.sh"
+  mk_settings '{"SH_PLAIN_TWENTYEIGHT":"x"}'
+  run_guard --label t28
+  rm -f "$WORKDIR/ours/script.sh"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '28 $ИМЯ в .sh -> 0'
+  else bad "28 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 29. sh: export ИМЯ -- читатель
+tooth_29() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'export SH_EXPORT_TWENTYNINE\n' > "$WORKDIR/ours/script.sh"
+  mk_settings '{"SH_EXPORT_TWENTYNINE":"x"}'
+  run_guard --label t29
+  rm -f "$WORKDIR/ours/script.sh"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '29 export ИМЯ в .sh -> 0'
+  else bad "29 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 30. sh: префикс окружения ИМЯ=... команда -- читатель
+tooth_30() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'SH_PREFIX_THIRTY=1 /usr/bin/env true\n' > "$WORKDIR/ours/script.sh"
+  mk_settings '{"SH_PREFIX_THIRTY":"x"}'
+  run_guard --label t30
+  rm -f "$WORKDIR/ours/script.sh"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '30 префикс ИМЯ=... команда в .sh -> 0'
+  else bad "30 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 31. голое ИМЯ в тексте .sh (без $, без =) -- НЕ читатель
+tooth_31() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'echo BARE_THIRTYONE here\n' > "$WORKDIR/ours/script.sh"
+  mk_settings '{"BARE_THIRTYONE":"x"}'
+  run_guard --label t31
+  rm -f "$WORKDIR/ours/script.sh"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"BARE_THIRTYONE"* ]]; then
+    ok '31 голое ИМЯ в .sh -> 3'
+  else bad "31 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ BARE_THIRTYONE, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 32. граница идентификатора: ИМЯ_СУФФИКС не читатель для ИМЯ во всех
+#     языковых формах сразу (js-член, sh-скобки, py-скобки, rs-вызов)
+tooth_32() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'const v = process.env.SUFFIX_THIRTYTWO_X;\n' > "$WORKDIR/ours/s1.ts"
+  printf 'echo "${SUFFIX_THIRTYTWO_Y}"\n' > "$WORKDIR/ours/s2.sh"
+  printf 'import os\nv = os.environ["SUFFIX_THIRTYTWO_Z"]\n' > "$WORKDIR/ours/s3.py"
+  printf 'let d = env::var("SUFFIX_THIRTYTWO_W").ok();\n' > "$WORKDIR/ours/s4.rs"
+  mk_settings '{"SUFFIX_THIRTYTWO":"x"}'
+  run_guard --label t32
+  rm -f "$WORKDIR/ours/s1.ts" "$WORKDIR/ours/s2.sh" "$WORKDIR/ours/s3.py" "$WORKDIR/ours/s4.rs"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"SUFFIX_THIRTYTWO"* ]]; then
+    ok '32 ИМЯ_СУФФИКС не читатель для ИМЯ (4 языка) -> 3'
+  else bad "32 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ SUFFIX_THIRTYTWO, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 33. js: скобочный доступ cfg["ИМЯ"] с индексируемым перед [ -- читатель
+tooth_33() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'const v = settings["JS_BR_THIRTYTHREE"];\n' > "$WORKDIR/ours/reader.ts"
+  mk_settings '{"JS_BR_THIRTYTHREE":"x"}'
+  run_guard --label t33
+  rm -f "$WORKDIR/ours/reader.ts"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '33 идентификатор["ИМЯ"] в .ts -> 0'
+  else bad "33 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 34. js: ЛИТЕРАЛ МАССИВА ["ИМЯ"] в нашем коде -- НЕ читатель (нет
+#      индексируемого перед [) -- тот же класс, что зуб 12 у образа
+tooth_34() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'const names = ["JS_ARR_THIRTYFOUR"];\n' > "$WORKDIR/ours/reader.ts"
+  mk_settings '{"JS_ARR_THIRTYFOUR":"x"}'
+  run_guard --label t34
+  rm -f "$WORKDIR/ours/reader.ts"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"JS_ARR_THIRTYFOUR"* ]]; then
+    ok '34 литерал массива ["ИМЯ"] в .ts -> 3'
+  else bad "34 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ JS_ARR_THIRTYFOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 35. читатель есть ТОЛЬКО в каталоге dist (SKIP_DIR первого прохода) --
+#     расхождение сборки и исходника, СВОЙ код 6 и своя строка
+tooth_35() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/ours/dist"
+  printf 'const v = process.env.DIST_THIRTYFIVE;\n' > "$WORKDIR/ours/dist/reader.ts"
+  mk_settings '{"DIST_THIRTYFIVE":"x"}'
+  run_guard --label t35
+  rm -rf "$WORKDIR/ours/dist"
+  if [[ $GUARD_RC -eq 6 && "$GUARD_OUT" == *"ТОЛЬКО-СБОРКА"*"DIST_THIRTYFIVE"* && "$GUARD_OUT" == *"только-сборка 1"* ]]; then
+    ok '35 читатель только в dist -> 6 ТОЛЬКО-СБОРКА'
+  else bad "35 ждали rc=6 ТОЛЬКО-СБОРКА DIST_THIRTYFIVE, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 36. мёртвый контроль нашего кода -> 2 ПРИБОР НЕДОСТУПЕН, вердикта нет
+tooth_36() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"ANY_THIRTYSIX":"x"}'
+  run_guard --label t36 --control-ours NO_SUCH_OURS
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"ПРИБОР НЕДОСТУПЕН"* && "$GUARD_OUT" != *"ВЕРДИКТ"* ]]; then
+    ok '36 мёртвый контроль-наш -> 2 без вердикта'
+  else bad "36 ждали rc=2 ПРИБОР НЕДОСТУПЕН без ВЕРДИКТ, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# Фикстура разделения домов: fakeroot с детьми-каталогами, файл [ours]/[foreign].
+mk_homes_file() {   # $1 -- содержимое секций после root
+  printf 'root %s\n%s\n' "$WORKDIR/fakeroot" "$1" > "$WORKDIR/homes.txt"
+}
+
+# 37. каталог-ребёнок корня вне обоих списков -> 2 с ИМЕНЕМ каталога:
+#     дрейф дерева ломает ПРИБОР, а не предмет (fail-closed)
+tooth_37() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA" "$WORKDIR/fakeroot/forB" "$WORKDIR/fakeroot/unC"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  mk_homes_file '[ours]
+ourA
+[foreign]
+forB'
+  mk_settings '{"ANY_37":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t37) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"ПРИБОР НЕДОСТУПЕН"* && "$GUARD_OUT" == *"unC"* && "$GUARD_OUT" != *"ВЕРДИКТ"* ]]; then
+    ok '37 каталог вне [ours]/[foreign] -> 2 с именем unC'
+  else bad "37 ждали rc=2 ПРИБОР НЕДОСТУПЕН с unC без ВЕРДИКТ, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 38. имя, читаемое ТОЛЬКО в ЧУЖОМ доме, -- НЕ читатель: чужой код не
+#     легализует нашу ручку
+tooth_38() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA" "$WORKDIR/fakeroot/forB"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  printf 'const x = process.env.FOREIGN_ONLY_38;\n' > "$WORKDIR/fakeroot/forB/reader.ts"
+  mk_homes_file '[ours]
+ourA
+[foreign]
+forB'
+  mk_settings '{"FOREIGN_ONLY_38":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t38) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"БЕСХОЗНАЯ"*"FOREIGN_ONLY_38"* ]]; then
+    ok '38 читатель только в чужом доме -> 3 БЕСХОЗНАЯ'
+  else bad "38 ждали rc=3 БЕСХОЗНАЯ FOREIGN_ONLY_38, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 39. то же имя, читаемое в НАШЕМ доме, -- читатель (позитив к 38)
+tooth_39() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA" "$WORKDIR/fakeroot/forB"
+  printf 'const v = process.env.%s;\nconst y = process.env.OURS_READ_39;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/reader.ts"
+  printf 'const x = process.env.OURS_READ_39;\n' > "$WORKDIR/fakeroot/forB/other.ts"
+  mk_homes_file '[ours]
+ourA
+[foreign]
+forB'
+  mk_settings '{"OURS_READ_39":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t39) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '39 тот же читатель в нашем доме -> 0'
+  else bad "39 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 40. оба списка непусты и ПОКРЫВАЮТ всех детей -> сверка молчит, прибор
+#     доходит до предмета (два наших дома, читатель во втором)
+tooth_40() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA" "$WORKDIR/fakeroot/ourD" "$WORKDIR/fakeroot/forB"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  printf 'const d = process.env.MULTI_FORTY;\n' > "$WORKDIR/fakeroot/ourD/reader.ts"
+  mk_homes_file '[ours]
+ourA
+ourD
+[foreign]
+forB'
+  mk_settings '{"MULTI_FORTY":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t40) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '40 полное покрытие двумя нашими -> 0'
+  else bad "40 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
 tooth_1; tooth_2; tooth_3; tooth_4; tooth_5; tooth_6; tooth_7
 tooth_8; tooth_9; tooth_10; tooth_11; tooth_12; tooth_13
 tooth_14; tooth_15
+tooth_16; tooth_17; tooth_18; tooth_19; tooth_20; tooth_21
+tooth_22; tooth_23; tooth_24; tooth_25; tooth_26; tooth_27
+tooth_28; tooth_29; tooth_30; tooth_31; tooth_32; tooth_33
+tooth_34; tooth_35; tooth_36; tooth_37; tooth_38; tooth_39
+tooth_40
 
 printf '%s прошло, %s провалов, ожидалось %s\n' "$PASSED" "$FAILED" "$EXPECTED_TEETH"
 if [[ $RAN -ne $EXPECTED_TEETH ]]; then
