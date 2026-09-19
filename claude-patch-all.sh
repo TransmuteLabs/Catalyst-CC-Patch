@@ -1086,7 +1086,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 130 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 129 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -6620,7 +6620,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 130 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 129 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -7924,20 +7924,6 @@ def _sudo_refusal_is_neutralised(d):
     setup = re.search(rb'!1&&process\.env\.IS_SANDBOX!=="1"&&'
                       rb'!' + ID + rb'\.CLAUDE_CODE_BUBBLEWRAP\)', d)
     return bool(guarded and setup)
-
-def _claude_md_alternates_are_tried(d):
-    """The full alternate list AND the descriptor that must not be handed over.
-
-    Two adjacent names in a literal prove neither. The part that can produce a
-    WRONG answer rather than a missing one is the fourth argument: passing the
-    storage descriptor to an alternate makes the loader serve CLAUDE.md's own
-    bytes under another name, so the step passes `void 0` there deliberately.
-    """
-    names = b'["AGENTS.md","GEMINI.md","CRUSH.md","QWEN.md","IFLOW.md","WARP.md","copilot-instructions.md"]'
-    if names not in d:
-        return False
-    return bool(re.search(rb'await ' + ID + rb'\$tw\(__sw\(__p,__n\),' + ID + rb','
-                          rb'__c\?__sw\(__c,__n\):' + ID + rb',void 0\)', d))
 
 
 def _refusal_routes_read_the_config(d):
@@ -9898,12 +9884,6 @@ checks = {
     # `void 0` -- and the step's own second anchor (the bare phrase) is checked
     # too, so a reworded upstream cannot pass unnoticed.
     'root/sudo refusal neutralised': _sudo_refusal_is_neutralised(d),
-    # Two adjacent names in a literal proved neither the full list nor the part
-    # that can give a WRONG answer instead of a missing one: the alternates are
-    # read with `void 0` in place of the storage descriptor, and swapping that
-    # back makes the loader serve CLAUDE.md's bytes under another name. Both are
-    # pinned now.
-    'CLAUDE.md alternates tried': _claude_md_alternates_are_tried(d),
     # step 28: both site-B halves are OPT-IN -- with the handle set the
     # mapped refusal target stops being downgraded to the family default and
     # the top of the lineup stops being excluded from the fallback walk;
@@ -9964,7 +9944,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 130
+EXPECTED_CHECKS = 129
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -9988,7 +9968,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 130 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 129 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна

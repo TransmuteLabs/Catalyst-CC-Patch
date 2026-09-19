@@ -438,17 +438,6 @@ does not parse), so the four needed settings were done differently.
    `refuseBypassUnderRoot`. tweakcc edits only the first (its
    `String.match` stops there), i.e. its variant left the setting
    half-applied.
-4. `claudeMdAltNames` (step 25) — a wrapper around the SINGLE memory-file
-   reading function: if nothing exists at `…/CLAUDE.md`, AGENTS.md,
-   GEMINI.md, CRUSH.md, QWEN.md, IFLOW.md, WARP.md,
-   copilot-instructions.md are tried. tweakcc's approach (editing the
-   error-interception block) misses here: with a store descriptor, a
-   missing file is returned by the normal `absent`, not an exception. For
-   the alternative the descriptor is NOT reused — it names one key and
-   would return CLAUDE.md's bytes under someone else's name.
-   Verified with a negative control: a directory containing only
-   AGENTS.md — the old image answers "NO", the new one reads and follows
-   the instruction from the file.
 
 A TRAP caught right here: the first version of the pipeline check looked
 for `var X=500` and gave GREEN on a CLEAN image — there are six such
