@@ -6134,12 +6134,12 @@ scenario_192() {   # САЙТЫ ВЫЗОВА: диагност и классиф
   # читают ШЕСТЬ дверей, и пин обязан перечислять их всех -- перечень
   # владельцев и есть обоснование пина: без него число протухает молча и
   # законный новый сайт краснит ценз (волна 183, ровно этот случай):
-  #   claude-patch-all.sh:1253  __tw_reconcile_misses      (сверка непроходов)
-  #   claude-patch-all.sh:2015  __tw_check_applied_level   (уровень)
-  #   claude-patch-all.sh:2456  __tw_check_off_set         (множество выключенных)
-  #   claude-patch-all.sh:2615  __tw_check_prompt_conflicts (конфликты накладок)
-  #   claude-patch-all.sh:5116  стадия ценза байткода      (версия цели)
-  #   claude-patch-all.sh:5122  стадия ценза байткода      (сверка бэкапа tweakcc)
+  #   __tw_reconcile_misses      (сверка непроходов)
+  #   __tw_check_applied_level   (уровень)
+  #   __tw_check_off_set         (множество выключенных)
+  #   __tw_check_prompt_conflicts (конфликты накладок)
+  #   стадия ценза байткода      (версия цели)
+  #   стадия ценза байткода      (сверка бэкапа tweakcc)
   word_n=$(grep -c '__first_word "' "$src" || true)
   bytes_n=$(grep -c '__ver_from_bytes "' "$src" || true)
   LAST_EVID="$LAST_EVID сайтов первого слова=$word_n сайтов версии-из-байтов=$bytes_n"
@@ -8889,7 +8889,7 @@ MUT_PAT=(x
   '    base = pkg\[:-len\("-musl"\)\] if pkg\.endswith\("-musl"\) else pkg'
   "die\('список набран для платформы %s, а цель -- %s\. Это не подмена '"
   'if declared != target_platform:'
-  '  \[\[ "\$\(__host_os\)" == "darwin" \]\]'
+  '  \[\[ "\$__hos" == "darwin" \]\]'
   '  if \[\[ "\$GATE_TARGET" != "\$__host_pair" \]\]; then'
   'if \[\[ "\$__BIN_OS" != "\$\{__HOST_PAIR%%-\*\}" \]\]; then'
   '    rm -rf "\$GATE_HOME"\n    return 0'
@@ -8962,7 +8962,7 @@ MUT_PAT=(x
   '  LC_ALL=C grep -a -o -m1 '"'"'// Version: \[0-9\]\[0-9\.\]\*'"'"' "\$1" \| head -1 \| sed '"'"'s\|// Version: \|\|'"'"' \|\| true'
   '  LC_ALL=C grep -a -o -m1 '"'"'// Version: \[0-9\]\[0-9\.\]\*'"'"' "\$1" \| head -1 \| sed '"'"'s\|// Version: \|\|'"'"' \|\| true'
   '    SRC_VER="\$\(__first_word "\$SRC_OUT"\)"'
-  '  # переподписан\.\n  __ver="\$\(__ver_from_bytes "\$__bin"\)"'
+  '__BC_VER="\$\(__ver_from_bytes "\$BIN"\)" \|\| true'
   # Волна t106: дверь конфликтов синхронизации накладок -- иглы мутаций.
   'if \(\( __conf > __want_conf \)\); then'
   'NOTE: конфликты накладок tweakcc на'
@@ -8971,7 +8971,7 @@ MUT_PAT=(x
   'if \(\( __conf > 0 \)\); then'
   'if \(\( __outage > 0 \|\| __outage_dl > 0 \)\); then'
   # Волна t106 (доводка): иглы мутаций ценза сайтов и снятого глушения.
-  'if ! __tw_check_prompt_conflicts "\$TWEAKCC_OUT" "\$BIN"; then'
+  '    __tw_check_prompt_conflicts "\$TWEAKCC_OUT" "\$BIN" \|\| __tw_conf_rc=\$\?'
   '  LC_ALL=C grep -a -c '\''Could not find system prompt'\'' "\$1" \|\| true'
   '  LC_ALL=C grep -a -F '\''WARNING: Conflicts detected for'\'' "\$1"'
   'LC_ALL=C grep -a '\''Could not find system prompt'\'' "\$__out"'
@@ -8980,9 +8980,9 @@ MUT_PAT=(x
   # дверь обвала вложена в тело двери уровня -- игла берёт её собственный сайт.
   'if ! __tw_check_anchor "\$TWEAKCC_OUT"; then'
   'if ! __tw_check_result_rows "\$TWEAKCC_OUT"; then'
-  'if ! __tw_reconcile_misses "\$TWEAKCC_OUT" "\$BIN"; then'
+  '      __tw_reconcile_misses "\$TWEAKCC_OUT" "\$BIN" \|\| __rec_rc=\$\?'
   '__tw_check_applied_level "\$TWEAKCC_OUT" "\$BIN" \|\| __tw_level_rc=\$\?'
-  'if ! __tw_check_off_set "\$TWEAKCC_OUT" "\$BIN"; then'
+  '    __tw_check_off_set "\$TWEAKCC_OUT" "\$BIN" \|\| __tw_off_rc=\$\?'
   '__tw_prompt_outage_door "\$__ver"'
   # Волна t107: игла -- литерал сверки (у умолчания тот же SHA в другой форме,
   # совпадение ровно одно). Волна 53: сам SHA из иглы УБРАН -- зашитый пин
@@ -9264,7 +9264,7 @@ MUT_REP=(x
   '    base = pkg'
   "die('платформы разошлись: %s и %s. Это не подмена '"
   'if True:'
-  '  [[ "$(__host_os)" == "linux" ]]'
+  '  [[ "$__hos" == "linux" ]]'
   '  if false; then'
   'if false; then'
   $'    rm -rf "$GATE_HOME"\n    :'
@@ -9344,8 +9344,7 @@ MUT_REP=(x
   '  printf '"'"'9.9.9\n'"'"''
   '  LC_ALL=C grep -a -o -m1 '"'"'// Version'"'"' "$1" | head -1 | sed '"'"'s|// Version: ||'"'"' || true'
   '    SRC_VER="$(printf '"'"'%s\n'"'"' "$SRC_OUT" | awk '"'"'NR==1{print $1; exit}'"'"')"'
-  '  # переподписан.
-  __ver="$(LC_ALL=C grep -a -o -m1 '"'"'// Version: [0-9][0-9.]*'"'"' "$__bin" | head -1 | sed '"'"'s|// Version: ||'"'"')"'
+  '__BC_VER="" || true'
   # Волна t106: дверь конфликтов синхронизации накладок -- замены мутаций.
   'if false; then'
   'NOTE: КОНФЛИКТЫ накладок tweakcc НЕ на'
@@ -9355,7 +9354,7 @@ MUT_REP=(x
   'if false; then'
   # Волна t106 (доводка): замены -- убрать САЙТ ВЫЗОВА (тело двери цело, блок
   # остаётся синтаксически целым) и вернуть глушение stderr у трёх чтений.
-  'if false; then'
+  '    :'
   '  LC_ALL=C grep -a -c '\''Could not find system prompt'\'' "$1" 2>/dev/null || true'
   '  LC_ALL=C grep -a -F '\''WARNING: Conflicts detected for'\'' "$1" 2>/dev/null'
   'LC_ALL=C grep -a '\''Could not find system prompt'\'' "$__out" 2>/dev/null'
@@ -9364,9 +9363,9 @@ MUT_REP=(x
   # вызовов (захват кода возврата остаётся и никогда не срабатывает).
   'if false; then'
   'if false; then'
-  'if false; then'
+  '      :'
   'true "$TWEAKCC_OUT" "$BIN" || __tw_level_rc=$?'
-  'if false; then'
+  '    :'
   'true "$__ver"'
   # Волна t107: замена возвращает сверке СТАРЫЙ SHA -- «бамп забыл второе
   # место» воспроизведён буквально.
