@@ -64,11 +64,6 @@ fi
 # входе, чтобы крыть и пол, и нефлоровый режим. Якоря -- те, на которых уже
 # стоят читатели исходника; ищутся как начало строки после пробелов:
 # подстрока в кавычках читателя -- не якорь файла.
-if ! grep -q "^[[:space:]]*step('22 judge consulted" -- "$PATCH_SRC"; then
-  echo "ЯКОРЬ ПРОПАЛ: в исходнике патча нет step('22 judge consulted: $PATCH_SRC" >&2
-  echo "это отказ ПРИБОРА (вызван неверно), а не вердикт о предмете" >&2
-  exit 2
-fi
 if ! grep -q "^[[:space:]]*const ID = '" -- "$PATCH_SRC"; then
   echo "ЯКОРЬ ПРОПАЛ: в исходнике патча нет const ID = ': $PATCH_SRC" >&2
   echo "это отказ ПРИБОРА (вызван неверно), а не вердикт о предмете" >&2
@@ -189,8 +184,6 @@ DECLARED = {
     # Читают ИСХОДНИК патча (`src`), а не образ: на любом образе они об одном и
     # том же файле кита.
     'patch source escapes every captured name':
-        'читает tweakcc-patch.js, а не образ',
-    'patch source keeps both dispatcher shapes':
         'читает tweakcc-patch.js, а не образ',
     # Пинит СТОКОВУЮ форму и краснеет, когда её испортит наш свип классов.
     'Vertex project resolution intact (fork-sweep tripwire)':

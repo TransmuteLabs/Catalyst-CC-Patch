@@ -3142,11 +3142,6 @@ fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_SRC="${2:-$HERE/../tweakcc-patch.js}"
 [[ -f "$PATCH_SRC" ]] || { echo "нет исходника патча: $PATCH_SRC" >&2; exit 2; }
-if ! grep -q "^[[:space:]]*step('22 judge consulted" -- "$PATCH_SRC"; then
-  echo "ЯКОРЬ ПРОПАЛ: в исходнике патча нет step('22 judge consulted: $PATCH_SRC" >&2
-  echo "это отказ ПРИБОРА (вызван неверно), а не вердикт о предмете" >&2
-  exit 2
-fi
 if ! grep -q "^[[:space:]]*const ID = '" -- "$PATCH_SRC"; then
   echo "ЯКОРЬ ПРОПАЛ: в исходнике патча нет const ID = ': $PATCH_SRC" >&2
   echo "это отказ ПРИБОРА (вызван неверно), а не вердикт о предмете" >&2

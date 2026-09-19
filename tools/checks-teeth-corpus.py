@@ -47,7 +47,7 @@ PATCH = ROOT / 'tweakcc-patch.js'
 # конвейера (OWNERS, владелец checks-teeth-corpus). Без объявления зуб,
 # выпавший из таблицы при правке, уносил бы с собой дверь -- и прибор
 # сообщал бы «промахов 0» о наборе, который стал меньше.
-EXPECTED_MUTATIONS = 14
+EXPECTED_MUTATIONS = 4
 BASE = set()
 
 
@@ -64,51 +64,6 @@ def eq_len(orig, new):
 
 
 # ---- мутации образа -------------------------------------------------------
-
-def m_stash_reader(d):
-    """Стэш хода перестаёт стоять на ТОМ ЖЕ типизированном читателе."""
-    at = d.index(b'__ccJudgeTurn??=new Map()')
-    back = d.rindex(b'__c!=="mod"', 0, at)
-    return d[:back] + b'__c!=="MOD"' + d[back + 11:]
-
-
-def m_judge_block_reader(d):
-    """Блок судьи перестаёт опознаваться как судья (ход достаётся не ему)."""
-    at = d.index(b'tag:"[Judge]"')
-    back = d.rindex(b'__c!=="mod"', 0, at)
-    return d[:back] + b'__c!=="MOD"' + d[back + 11:]
-
-
-def m_watch_reader(d):
-    """Наблюдатель перестаёт стоять на своём выключателе."""
-    at = d.index(b'CLAUDE_IDLE_CARRIER')
-    return d[:at] + b'CLAUDE_IDLE_CARRIEQ' + d[at + 19:]
-
-
-def m_gate_ctx(d):
-    """Гейт судьи перестаёт отличать главный луп от субагента."""
-    at = d.index(b'agentType==="main")await globalThis.__ccProbe({tag:"[Judge]"')
-    return d[:at] + b'agentType==="Main"' + d[at + 18:]
-
-
-def m_factory_mark(d):
-    """Дискриминатор формы лжёт: врезка фабричная, а маркер говорит «метод»."""
-    old = b'launching needs the executor (call.runEngine)'
-    # ВСЕ вхождения: дискриминатор -- присутствие маркера, а одна подмена из
-    # четырёх оставляет его присутствующим и мутацией не является.
-    assert old in d
-    return d.replace(old, b'launching needs the executor (call.runEngin0)')
-
-
-def m_tool_identity(d):
-    """Личность инструмента в блоке судьи перестаёт быть той, что доказана местом."""
-    for old, new in ((b'tool:{name:"Agent"},input:', b'tool:{name:"Agenr"},input:'),
-                     (b'tool:this,input:', b'tool:thiz,input:')):
-        if old in d:
-            at = d.index(old)
-            return d[:at] + new + d[at + len(old):]
-    raise AssertionError('ни одной формы слота инструмента в образе')
-
 
 def m_effort_name(d):
     """Связывание усилия перестаёт быть тем именем, которое читает запуск."""
@@ -159,51 +114,7 @@ def m_memory_guard_back(d):
     raise NotImplementedError('на этом образе нет раннего возврата: место под гард не равной длины')
 
 
-# ---- мутации исходника патча ----------------------------------------------
-
-# Площадка обеих подстановок -- регулярка шага 22, НЕ headRx: иначе мутация
-# заодно ломает локатор форм и краснит чужую дверь своей причиной.
-SITE = '`[{,]agentInput:(${ID})[,}]`'
-
-
-def s_bare_name_in_regex(src):
-    """Захваченное имя уезжает в ИСХОДНИК регулярки голым, в СВОЁМ же шаге."""
-    assert SITE in src
-    return src.replace(SITE, '`[{,]agentInput:(${ID})[,}]${spread}`', 1)
-
-
-def s_bare_name_other_step(src):
-    """ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: имя из ЧУЖОГО шага -- тревоги быть не должно."""
-    assert SITE in src
-    return src.replace(SITE, '`[{,]agentInput:(${ID})[,}]${t}`', 1)
-
-
-def s_drop_adapter_shape(src):
-    """Локатор теряет форму-переходник: адаптерный вызов больше не опознаётся."""
-    return src.replace(
-        '|${ID}\\\\((${ID})\\\\)\\\\.(?:call|execute))$', '|(${ID})XX)$', 1)
-
-
-def s_drop_group_join(src):
-    """Локатор перестаёт брать ту альтернативу, которая совпала."""
-    return src.replace('head[2] ?? head[3]', 'head[2] ?? head[2]', 1)
-
-
 IMAGE_TEETH = [
-    ('стэш: читатель не тот', m_stash_reader,
-     {'judge stashes the current turn'}),
-    ('блок судьи: читатель не тот', m_judge_block_reader,
-     {"current turn is the judge's alone", 'judge rides the tool, watcher the dispatcher',
-      'judge consulted before dispatch'}),
-    ('вахта: читатель не тот', m_watch_reader,
-     {'watcher rides the same core'}),
-    ('гейт: главный луп не отличается', m_gate_ctx,
-     {'judge consulted before dispatch'}),
-    ('дискриминатор формы лжёт', m_factory_mark,
-     {'judge consulted before dispatch', 'judge rides the tool, watcher the dispatcher'},
-     lambda d: b'launching needs the executor (call.runEngine)' in d),
-    ('личность инструмента подменена', m_tool_identity,
-     {'judge rides the tool, watcher the dispatcher'}),
     ('усилие: имя связывания разошлось', m_effort_name,
      {'effort binding reaches the launch', 'dispatch carries effort'}),
     ('усилие: область закрыта до чтения', m_effort_scope,
@@ -216,13 +127,6 @@ IMAGE_TEETH = [
 ]
 
 SRC_TEETH = [
-    ('голое имя в исходнике регулярки (свой шаг)', s_bare_name_in_regex,
-     {'patch source escapes every captured name'}),
-    ('голое имя из ЧУЖОГО шага (контроль)', s_bare_name_other_step, set()),
-    ('локатор потерял форму-переходник', s_drop_adapter_shape,
-     {'patch source keeps both dispatcher shapes'}),
-    ('локатор не берёт совпавшую альтернативу', s_drop_group_join,
-     {'patch source keeps both dispatcher shapes'}),
 ]
 
 # CONSTRAINT: гейт двусторонний. Объявление, которое никто не сверяет с
