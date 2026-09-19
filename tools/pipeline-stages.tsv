@@ -21,6 +21,8 @@ docnum-sync-check	Сверка чисел в доках	Сверка чисел 
 lock-inheritance-gate	Гейт наследования замка	Гейт наследования замка	exit	always
 docnum-anchor-census	Перепись якорей таблицы гейта чисел	Перепись якорей таблицы гейта чисел	exit	always
 docnum-teeth	Зубы гейта чисел	Зубы гейта чисел	exit	cond-silent
+stand-env-guard-teeth	Зубы гварда герметичности стендов	Зубы гварда герметичности стендов	exit	always
+env-handles-live-teeth	Зубы гварда живости ручек	Зубы гварда живости ручек	exit	always
 executors-census	Перепись исполнителей инструментов	Перепись исполнителей инструментов	exit	always
 stage-census	Перепись стадий конвейера	Перепись стадий конвейера	exit	always
 unpacker-fetch	Fetching the unpacker	Fetching the unpacker	exit	cond-silent

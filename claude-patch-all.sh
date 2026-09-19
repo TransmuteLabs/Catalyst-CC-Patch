@@ -5820,7 +5820,7 @@ python3 "$(dirname "$0")/tools/orphan-stand-gate.py" 9>&- || {
 # стадия источника не заявлена строкой канона, если строка канона мертва, если
 # pin sweep:<field> висит на несуществующем поле sweep.sh, либо счёт стадий
 # разошёлся с EXPECTED_STAGES. Так "стадия пиняема по умолчанию".
-EXPECTED_STAGES=31
+EXPECTED_STAGES=33
 echo "==> Перепись стадий конвейера"
 python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
     --source "$0" \
