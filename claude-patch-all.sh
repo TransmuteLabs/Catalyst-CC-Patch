@@ -8057,6 +8057,12 @@ _NOTE_OFF_PREDATES_FMT = ("  [NOTE] {name}: образ {img_ver} собран д
 _NOTE_OFF_CARRIER_FMT = ("  [NOTE] {name}: площадка {site} без носителя судьи "
                          "(объявлено our-carrier-absent.txt): ручки {handles}: "
                          "{reasons}")
+# Обе причины выключенного шага одной строкой (#403C): субъект -- ШАГ, а не
+# проверка. CONSTRAINT: причины независимы -- «мы выключили» и «апстрим вырезал
+# предмет» суть разные факты о разных сторонах; порядок фиксирован: сперва
+# выключение (решение наше), затем неприменимость (факт апстрима).
+_NOTE_BOTH_CAUSES_FMT = ("шаг {name}: выключен реестром ({reason}); "
+                         "предмета нет в {ver} ({basis})")
 
 
 def _step29_verdict(d, src):
@@ -8395,25 +8401,46 @@ def _step26_verdict(d):
     if row is None:
         return {'status': 'proceed'}
     _n, floor_raw, reason = row
+    # CONSTRAINT (#403C): вердикт смотрит ОБА реестра. Причины выключения и
+    # неприменимости независимы: «мы выключили» (our-steps-off.txt) и «апстрим
+    # вырезал предмет» (our-patch-inapplicable.txt) -- разные факты о разных
+    # сторонах, и вторая не имеет права пропадать молча. Номер шага -- цифровой
+    # префикс имени (формат объявления step('NN …')); пара читается для
+    # ТЕКУЩЕЙ версии образа.
+    img_raw = _image_version(d)
+    step_no = _STEP26_NAME.split(' ', 1)[0]
+    if not step_no.isdigit():
+        print(f'ОТКАЗ ПРИБОРА: имя шага {_STEP26_NAME!r} не начинается с '
+              f'номера -- пару декларации неприменимости не собрать',
+              file=sys.stderr)
+        sys.exit(2)
+    _hit = _read_inapplicable(
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
+                     'tools', 'our-patch-inapplicable.txt')).get(
+            (img_raw, step_no))
+    _inapp = (img_raw, _hit[1]) if _hit else None
     if _cancellation_rule_is_whole(d):
-        img_raw = _image_version(d)
         img = _version_tuple(img_raw, 'версия образа')
         floor = _version_tuple(floor_raw,
                                'версия-пол реестра our-steps-off.txt')
         if img < floor:
             return {'status': 'note', 'note_kind': 'predates',
-                    'img_ver': img_raw, 'floor_ver': floor_raw, 'reason': reason}
-        return {'status': 'fail', 'fail_kind': 'stale', 'reason': reason}
+                    'img_ver': img_raw, 'floor_ver': floor_raw, 'reason': reason,
+                    'inapp': _inapp}
+        return {'status': 'fail', 'fail_kind': 'stale', 'reason': reason,
+                'inapp': _inapp}
     carries, unmet = _step26_mod_road(_mod_carrier_pins())
     if carries:
-        return {'status': 'note', 'note_kind': 'off', 'reason': reason}
+        return {'status': 'note', 'note_kind': 'off', 'reason': reason,
+                'inapp': _inapp}
     note, undeclared = _carrier_absent_gate(
         os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
                      'tools', 'our-carrier-absent.txt'), unmet)
     if note is not None:
+        note['inapp'] = _inapp
         return note
     return {'status': 'fail', 'fail_kind': 'carrier',
-            'reason': reason, 'unmet': undeclared}
+            'reason': reason, 'unmet': undeclared, 'inapp': _inapp}
 
 
 def _statusline_throttle_raised(d):
@@ -8819,6 +8846,13 @@ if _S26.get('fail_kind') == 'carrier':
           f'правило не несёт никто: {_STEP26_NAME}: {_S26["reason"]}')
     for u in _S26['unmet']:
         print(f'  не сошлось: {u}')
+if _S26.get('inapp'):
+    # Обе причины выключенного шага (#403C): печатается при ЛЮБОМ исходе
+    # вердикта выключения -- пропавшая молча вторая причина скрывала бы от
+    # оператора, что возвращать шаг бесполезно: предмета в этой версии нет.
+    print(_NOTE_BOTH_CAUSES_FMT.format(
+        name=_STEP26_NAME, reason=_S26['reason'], ver=_S26['inapp'][0],
+        basis=_S26['inapp'][1]))
 sys.exit(0 if all(checks.values()) else 1)
 PY
 

@@ -66,9 +66,11 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-# 27 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
-# проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B).
-EXPECTED_ENTRY_TEETH = 27
+# 33 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
+# проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B) + 6 зубов
+# проекции базы корпусного стенда (docnum:other -- «шаг -> проверки» есть ИМЯ
+# карты, не счёт проверок конвейера; #403C).
+EXPECTED_ENTRY_TEETH = 33
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -3301,6 +3303,383 @@ def _tooth_step7_caller_distinguishes_3_and_5() -> str | None:
     return None
 
 
+# --- зубы проекции базы корпусного стенда (#403C) ---------------------------
+
+_CORPUS_TOOL = ROOT / "tools" / "checks-teeth-corpus.py"
+_CORPUS_CONTROL_MARK = "КОНТРОЛЬ ПРОВАЛЕН"
+# Фикстура карты: шаг 26 (его обработчик известен коду карты) проведён в
+# проверку, ВХОДЯЩУЮ в двери корпусного стенда, -- проекции нужен именно
+# такой шаг; живая пара «шаг 26 -> его проверка» в двери корпуса не входит.
+_CORPUS_MAP_ROW = _STEP26_ROW + " | s26 | session memory forced on"
+_CORPUS_OFF_REG = _STEP26_ROW + "\t2.1.278\tзуб 403C: проверка входит в двери корпуса\n"
+_CORPUS_QUIET_REG = "# зуб 403C: выключенных записей нет\n"
+_CORPUS_GHOST_STEP = "403C шаг без строки карты"
+_CORPUS_DOOR = "session memory forced on"
+# Маркеры констрейнта шапки corpus-прибора: конвейерное происхождение
+# предмета и объявление команды сырого патча ручным воспроизведением.
+_CORPUS_HEADER_MARKS = ("конвейером", "sweep.sh", "claude-patch-all.sh",
+                        "ДРУГОЙ предмет")
+
+
+def _load_corpus(mutator=None):
+    """Модуль корпусного прибора: оригинал или копия с мутацией текста.
+
+    ROOT/PATCH возвращаются дому кита: копия лежит вне дома, и её пути
+    указывали бы в пустоту; предмет мутации -- поведение прибора, а не пути
+    импорта копии. RUNNER остаётся за вызывающим (зубы подменяют его
+    раннером-пустышкой).
+    """
+    src = _CORPUS_TOOL.read_text(encoding="utf-8")
+    if mutator is not None:
+        src = mutator(src)
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-corpus403c.") as raw:
+        mod_path = Path(raw) / "checks-teeth-corpus-403c.py"
+        mod_path.write_text(src, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "checks_teeth_corpus_403c", mod_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.ROOT = ROOT
+        mod.PATCH = ROOT / "tweakcc-patch.js"
+        return mod
+
+
+def _fake_corpus_runner(lines) -> Path:
+    """Раннер-пустышка: печатает названные строки -- управляемая база."""
+    td = Path(tempfile.mkdtemp(prefix="checks-teeth-crun."))
+    r = td / "runner.sh"
+    body = "#!/bin/bash\n" + "".join(f"echo '  {ln}'\n" for ln in lines)
+    r.write_text(body, encoding="utf-8")
+    r.chmod(0o755)
+    return r
+
+
+def _corpus_fixtures(raw: Path, registry_text: str):
+    reg = raw / "our-steps-off.txt"
+    reg.write_text(registry_text, encoding="utf-8")
+    map_path = raw / "our-step-checks.txt"
+    map_path.write_text(_CORPUS_MAP_ROW + "\n", encoding="utf-8")
+    return reg, map_path
+
+
+def _corpus_probe(mod, registry_text: str, runner_lines) -> tuple:
+    """(база проекции или текст отказа, rc run_one, вывод) на фикстурах."""
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-cprobe.") as raw:
+        reg, map_path = _corpus_fixtures(Path(raw), registry_text)
+        try:
+            base = mod.base_projection(reg, map_path)
+        except Exception as exc:                    # noqa: BLE001
+            return f"::отказ:: {exc}", None, ""
+        img = Path(raw) / "product.bin"
+        img.write_bytes(b"// Version: 2.1.278\nstub\n")
+        mod.RUNNER = _fake_corpus_runner(runner_lines)
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            rc = mod.run_one(img, Path(raw), base)
+        return base, rc, buf_out.getvalue() + buf_err.getvalue()
+
+
+def _corpus_header_names_pipeline(doc) -> bool:
+    """Констрейнт конвейерного происхождения в ШАПКЕ, структурно."""
+    if not doc:
+        return False
+    return all(m in doc for m in _CORPUS_HEADER_MARKS)
+
+
+def _tooth_corpus_base_is_projection() -> str | None:
+    """З1 (#403C): выключенный шаг с проверкой в дверях корпуса -- база НЕ пуста.
+
+    База корпусного прибора -- проекция реестра выключений, а не константа:
+    боевой продукт собирается конвейером с подстановкой реестра, и база,
+    совпавшая с проекцией, не имеет права читаться отказом «КОНТРОЛЬ
+    ПРОВАЛЕН». Мутация возвращает константой пустое множество -- объявленная
+    дельта снова отказала бы прибором (класс #382/#383, #400).
+    """
+    mod = _load_corpus()
+    base, rc, out = _corpus_probe(mod, _CORPUS_OFF_REG, [f"[FAIL] {_CORPUS_DOOR}"])
+    if isinstance(base, str):
+        return f"проекция отказала на проведённом шаге: {base}"
+    if base != {_CORPUS_DOOR}:
+        return f"ожидаемая база не совпала с проекцией: {sorted(base)!r}"
+    if _CORPUS_CONTROL_MARK in out:
+        return "база совпала с проекцией, а прибор напечатал КОНТРОЛЬ ПРОВАЛЕН"
+    if rc == 2:
+        return f"база совпала, а прибор ответил кодом 2: rc={rc}"
+    try:
+        mut = _load_corpus(lambda t: _once_replace(
+            t, "    return base\n", "    return set()\n", "зуб З1: проекция"))
+    except Exception as exc:                        # noqa: BLE001
+        return f"мутант не строится: {exc}"
+    mbase, mrc, mout = _corpus_probe(mut, _CORPUS_OFF_REG,
+                                     [f"[FAIL] {_CORPUS_DOOR}"])
+    if isinstance(mbase, str):
+        return f"мутант отказал вместо пустой базы: {mbase}"
+    if mbase != set():
+        return f"мутация не погасила проекцию: {sorted(mbase)!r}"
+    if _CORPUS_CONTROL_MARK not in mout or mrc != 2:
+        return (f"мутация не обратила исход: КОНТРОЛЬ ПРОВАЛЕН обязан "
+                f"прозвучать на объявленной дельте: rc={mrc}")
+    return None
+
+
+def _tooth_corpus_base_empty_when_nothing_off() -> str | None:
+    """З2 (#403C): пустой реестр -- база пуста, прибор зелен.
+
+    Зуб «вне области отказа НЕТ»: без выключенных записей контроль не
+    отказывает и не краснит. Мутация отказывает на нуле записей -- норма
+    читалась бы поломкой прибора.
+    """
+    mod = _load_corpus()
+    base, rc, out = _corpus_probe(mod, _CORPUS_QUIET_REG, ["[OK] anything"])
+    if isinstance(base, str):
+        return f"пустой реестр отказал: {base}"
+    if base != set():
+        return f"пустой реестр дал непустую базу: {sorted(base)!r}"
+    if _CORPUS_CONTROL_MARK in out or rc == 2:
+        return "пустая база без красных прочиталась отказом контроля"
+    try:
+        mut = _load_corpus(lambda t: _once_replace(
+            t,
+            "        names = module._read_registry_names(reg)\n",
+            "        names = module._read_registry_names(reg)\n"
+            "        if not names:\n"
+            "            raise CorpusRefusal('мутация З2: пустой реестр -- отказ')\n",
+            "зуб З2: отказ на нуле записей"))
+    except Exception as exc:                        # noqa: BLE001
+        return f"мутант не строится: {exc}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="checks-teeth-z2m.") as raw:
+            reg, map_path = _corpus_fixtures(Path(raw), _CORPUS_QUIET_REG)
+            mut.base_projection(reg, map_path)
+    except Exception:                               # noqa: BLE001
+        return None
+    return "мутация пережила зуб: пустой реестр не отказал"
+
+
+def _tooth_corpus_unmapped_step_refuses() -> str | None:
+    """З3 (#403C): выключенный шаг без строки карты -- ОТКАЗ ПРИБОРА.
+
+    Отказ называет шаг по имени; НЕ пустая база и НЕ молчание. Мутация
+    глотает непроведённый шаг молчаливым пропуском -- отказ исчезает, зуб
+    краснеет.
+    """
+    ghost_reg = f"{_CORPUS_GHOST_STEP}\t2.1.278\tзуб З3: строка не проведена\n"
+    mod = _load_corpus()
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-z3c.") as raw:
+        reg, map_path = _corpus_fixtures(Path(raw), ghost_reg)
+        try:
+            base = mod.base_projection(reg, map_path)
+        except Exception as exc:                    # noqa: BLE001
+            text = str(exc)
+            if _CORPUS_GHOST_STEP not in text:
+                return f"отказ не назвал шаг по имени: {exc}"
+            if "не проведён" not in text and "карту" not in text:
+                return f"отказ не назвал требуемое действие: {exc}"
+        else:
+            return f"непроведённый шаг не отказал: база {sorted(base)!r}"
+    try:
+        mut = _load_corpus(_corpus_unmapped_mutator)
+    except Exception as exc:                        # noqa: BLE001
+        return f"мутант не строится: {exc}"
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-z3m.") as raw:
+        reg, map_path = _corpus_fixtures(Path(raw), ghost_reg)
+        try:
+            base = mut.base_projection(reg, map_path)
+        except Exception:                           # noqa: BLE001
+            return "мутация не сняла отказ непроведённого шага"
+        if base != set():
+            return f"мутант построил базу из непроведённого шага: {sorted(base)!r}"
+    return None
+
+
+def _corpus_unmapped_mutator(text: str) -> str:
+    """Мутация З3: непроведённый шаг глотается молчаливым пропуском."""
+    return _once_replace(
+        text,
+        "        if name not in rows:\n"
+        "            raise CorpusRefusal(\n"
+        "                f'шаг {name!r} выключен реестром {reg}, но не проведён в '\n"
+        "                f'карту {mpath} -- ожидаемая база не строится')\n",
+        "        if name not in rows:\n"
+        "            continue\n",
+        "зуб З3: молчаливый пропуск")
+
+
+def _tooth_corpus_header_names_pipeline_subject() -> str | None:
+    """З4 (#403C): шапка corpus-прибора несёт констрейнт конвейерного предмета.
+
+    Боевой предмет собирается конвейером (sweep.sh -> claude-patch-all.sh
+    --target), а показанная команда сырого патча объявлена ручным
+    воспроизведением ДРУГОГО предмета. Текст ищется в docstring --
+    структурно, не по номеру строки. Мутация вырезает строки констрейнта --
+    детектор обязан потерять их.
+    """
+    mod = _load_corpus()
+    if not _corpus_header_names_pipeline(mod.__doc__):
+        return "шапка corpus-прибора не несёт констрейнт о конвейерном предмете"
+    src = _CORPUS_TOOL.read_text(encoding="utf-8")
+    stripped = "\n".join(
+        ln for ln in src.split("\n")
+        if not any(m in ln for m in _CORPUS_HEADER_MARKS))
+    try:
+        mut = _load_corpus(lambda _t, _s=stripped: _s)
+    except Exception as exc:                        # noqa: BLE001
+        return f"мутант не строится: {exc}"
+    if _corpus_header_names_pipeline(mut.__doc__):
+        return "мутация вырезала констрейнт, а детектор его всё ещё видит"
+    return None
+
+
+# Якорь мутации З5: поиск пары «версия × шаг» в _step26_verdict (гашение
+# второй причины -- исходный дефект Д4: причина неприменимости пропадала
+# молча). Якорь мутации З6: прикрепление причины безусловно -- без пары.
+_INAPP_PAIR_ANCHOR = "            (img_raw, step_no))"
+_INAPP_PAIR_REPL = "            (img_raw, '403C-no-such-step'))"
+_INAPP_ATTACH_ANCHOR = "    _inapp = (img_raw, _hit[1]) if _hit else None\n"
+_INAPP_ATTACH_ALWAYS = (
+    "    _inapp = (img_raw, 'мутация З6') if _hit else (img_raw, 'мутация З6')\n"
+)
+# Якорь мутации З5 (перевёрнутый порядок причин): литерал формата.
+_BOTH_CAUSES_FMT_ANCHOR = (
+    "_NOTE_BOTH_CAUSES_FMT = (\"шаг {name}: выключен реестром ({reason}); \"\n"
+    "                         \"предмета нет в {ver} ({basis})\")\n"
+)
+_BOTH_CAUSES_ORDER_REPL = (
+    "_NOTE_BOTH_CAUSES_FMT = (\"шаг {name}: предмета нет в {ver} ({basis}); \"\n"
+    "                         \"выключен реестром ({reason})\")\n"
+)
+_S26_DECL_EXTRA = "2.1.278\t26\tзуб З5 403C: предмет шага 26 вырезан апстримом\n"
+_BOTH_INAPP_MARK = "предмета нет в 2.1.278"
+_BOTH_OFF_MARK = "выключен реестром"
+
+
+def _decl_with_26(text: str) -> str:
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + _S26_DECL_EXTRA
+
+
+def _both_causes_line(out: str) -> str:
+    for line in out.splitlines():
+        if _BOTH_INAPP_MARK in line:
+            return line.strip()
+    return ""
+
+
+def _tooth_both_registries_name_both_causes() -> str | None:
+    """З5 (#403C): шаг в ОБОИХ реестрах -- ОБЕ причины одной строкой.
+
+    Порядок фиксирован: сперва выключение (решение наше), затем
+    неприменимость (факт апстрима). Мутации: погашенный поиск пары (вторая
+    причина пропадает молча -- дефект Д4) и перевёрнутый порядок.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    decl = _decl_with_26(_kit_decl_text())
+    with _carrier_pins({"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
+                        "CLAUDE_JUDGE_CARRIER": "mod", "CLAUDE_JUDGE": "1"}):
+        td, script, patch = _temp_kit(decl_text=decl)
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _NOTE_OFF_MARK not in out:
+                return f"контроль: NOTE выключения не напечатан: {out[-300:]!r}"
+            line = _both_causes_line(out)
+            if not line:
+                return "контроль: строка обеих причин отсутствует"
+            if _STEP26_ROW not in line:
+                return f"контроль: строка причин не назвала шаг: {line!r}"
+            if "зуб З5 403C" not in line:
+                return f"контроль: строка причин не несёт основание декларации: {line!r}"
+            if line.index(_BOTH_OFF_MARK) > line.index(_BOTH_INAPP_MARK):
+                return f"контроль: порядок причин перевёрнут: {line!r}"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        try:
+            td, script, patch = _temp_kit(
+                decl_text=decl,
+                script_repl=(_INAPP_PAIR_ANCHOR, _INAPP_PAIR_REPL))
+        except Exception as exc:                    # noqa: BLE001
+            return f"мутант пары не строится: {exc}"
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _both_causes_line(out):
+                return "мутация пережила зуб: пара погашена, а обе причины печатаются"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        try:
+            td, script, patch = _temp_kit(
+                decl_text=decl,
+                script_repl=(_BOTH_CAUSES_FMT_ANCHOR, _BOTH_CAUSES_ORDER_REPL))
+        except Exception as exc:                    # noqa: BLE001
+            return f"мутант порядка не строится: {exc}"
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            line = _both_causes_line(out)
+            if not line:
+                return "мутация переворота не напечатала строку причин"
+            if line.index(_BOTH_OFF_MARK) < line.index(_BOTH_INAPP_MARK):
+                return f"мутация пережила зуб: порядок не перевёрнут: {line!r}"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_single_registry_names_one_cause() -> str | None:
+    """З6 (#403C): шаг только в реестре выключений -- ровно ОДНА причина.
+
+    Тексты исходов «одна причина» и «обе причины» попарно различимы.
+    Мутация прикрепляет вторую причину без пары декларации -- исход одной
+    причины получает текст второй, зуб краснеет.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    pins = {"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
+            "CLAUDE_JUDGE_CARRIER": "mod", "CLAUDE_JUDGE": "1"}
+    with _carrier_pins(pins):
+        td, script, patch = _temp_kit()
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _NOTE_OFF_MARK not in out:
+                return "контроль: NOTE выключения не напечатан"
+            if _both_causes_line(out):
+                return "контроль: без пары в декларации напечатаны ОБЕ причины"
+            one_line = _step26_note_line(out)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        td, script, patch = _temp_kit(decl_text=_decl_with_26(_kit_decl_text()))
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            both_line = _both_causes_line(out)
+            if not both_line:
+                return "контроль: строка обеих причин не напечатана"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        if not one_line:
+            return "контроль: NOTE-строка одной причины не найдена"
+        if one_line == both_line:
+            return "тексты исходов «одна причина» и «обе причины» неразличимы"
+        if _BOTH_INAPP_MARK in one_line:
+            return "строка одной причины несёт текст второй"
+        try:
+            td, script, patch = _temp_kit(
+                script_repl=(_INAPP_ATTACH_ANCHOR, _INAPP_ATTACH_ALWAYS))
+        except Exception as exc:                    # noqa: BLE001
+            return f"мутант прикрепления не строится: {exc}"
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if not _both_causes_line(out):
+                return "мутация пережила зуб: причина не прикрепилась без пары"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
 def self_check() -> int:
     """Герметичная самопроверка: без образа и замка.
 
@@ -3426,6 +3805,12 @@ def main() -> int:
         ("step-checks-single-home", _tooth_step_checks_single_home),
         ("step7-teeth-off-by-registry-code5", _tooth_step7_teeth_off_by_registry_code5),
         ("step7-caller-distinguishes-3-and-5", _tooth_step7_caller_distinguishes_3_and_5),
+        ("corpus-base-is-projection", _tooth_corpus_base_is_projection),
+        ("corpus-base-empty-when-nothing-off", _tooth_corpus_base_empty_when_nothing_off),
+        ("corpus-unmapped-step-refuses", _tooth_corpus_unmapped_step_refuses),
+        ("corpus-header-names-pipeline-subject", _tooth_corpus_header_names_pipeline_subject),
+        ("both-registries-name-both-causes", _tooth_both_registries_name_both_causes),
+        ("single-registry-names-one-cause", _tooth_single_registry_names_one_cause),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "

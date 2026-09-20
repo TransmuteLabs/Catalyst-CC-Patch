@@ -19,7 +19,14 @@
 ни больше ни меньше. Лишняя красная -- мутация задела чужую дверь и зубом не
 является; отсутствие своей -- проверка не поднимается.
 
-Продукты прибор НЕ собирает. Готовятся они так (по одному на версию корпуса).
+CONSTRAINT (#403C): боевой предмет этого стенда собирается конвейером --
+tools/sweep.sh зовёт claude-patch-all.sh с --target, и конвейер подставляет
+реестр выключенных шагов в mktemp-копию патча: продукт несёт ОБЪЯВЛЕННЫЕ
+выключения, и ожидаемая база есть ПРОЕКЦИЯ этого реестра на двери стенда.
+Команда сырого патча ниже -- ручное воспроизведение, дающее ДРУГОЙ предмет
+(без подстановки реестра): она служит диагностике отдельной версии, а не
+сборке боевого предмета. Продукты прибор НЕ собирает. Готовятся они так
+(по одному на версию корпуса).
 Имя файла корпуса берётся из ЕДИНСТВЕННОГО дома -- литерал суффикса здесь писать
 нельзя: стенд (сценарий 37) требует, чтобы суффикс жил в одном месте, иначе смена
 суффикса поедет только у одной стороны и прогон останется зелёным на старых байтах.
@@ -34,6 +41,7 @@
 мерить (нет образа, база не совпала с объявленной); 4 -- длина таблицы зубов
 разошлась с объявленной (EXPECTED_MUTATIONS).
 """
+import importlib.util
 import re
 import subprocess
 import sys
@@ -48,7 +56,6 @@ PATCH = ROOT / 'tweakcc-patch.js'
 # выпавший из таблицы при правке, уносил бы с собой дверь -- и прибор
 # сообщал бы «промахов 0» о наборе, который стал меньше.
 EXPECTED_MUTATIONS = 4
-BASE = set()
 
 
 def reds(img, src=None):
@@ -129,16 +136,69 @@ IMAGE_TEETH = [
 SRC_TEETH = [
 ]
 
+# CONSTRAINT (#403C): базовые красные -- ПРОЕКЦИЯ реестра выключений на двери
+# этого стенда, а не константа: продукт собирается конвейером с подстановкой
+# реестра, и выключенный шаг, чьи проверки входят в двери, обязан краснеть в
+# базе. Константа читала бы ОБЪЯВЛЕННУЮ дельту как отказ прибора («база не
+# совпала») -- тот же класс, что #382/#383 и #400. Двери -- объединение
+# want-множеств зубов: проверки, которые этот стенд объявляет своими.
+CORPUS_DOORS = frozenset(
+    name for row in IMAGE_TEETH for name in row[2]) | frozenset(
+    name for row in SRC_TEETH for name in row[2])
+
+
+class CorpusRefusal(Exception):
+    """Прибор не может мерить (код 2)."""
+
+
+def base_projection(registry=None, map_path=None):
+    """Ожидаемая база красных -- проекция реестра выключений (#403C).
+
+    Имена выключенных шагов читает единственный дом разбора реестра
+    (tools/steps-off-registry.js --names -- через модуль tools/step-checks.py),
+    карту «шаг -> проверки» -- единственный дом tools/step-checks.py.
+    Шаг без строки карты -- ОТКАЗ ПРИБОРА с именем шага (тот же контракт, что
+    у гейта карты), а не молчаливое пустое множество: проекция, потерявшая
+    шаг молча, мерила бы не тот предмет.
+    """
+    reg = registry if registry is not None else str(
+        ROOT / 'tools' / 'our-steps-off.txt')
+    mpath = map_path if map_path is not None else str(
+        ROOT / 'tools' / 'our-step-checks.txt')
+    spec = importlib.util.spec_from_file_location(
+        'corpus_step_checks', str(ROOT / 'tools' / 'step-checks.py'))
+    if spec is None or spec.loader is None:
+        raise CorpusRefusal(
+            f'модуль карты шагов не загружается: {ROOT / "tools" / "step-checks.py"}')
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise CorpusRefusal(f'модуль карты шагов не исполняется: {exc}') from exc
+    try:
+        names = module._read_registry_names(reg)
+        rows = module.read_step_checks(mpath)
+    except Exception as exc:
+        raise CorpusRefusal(f'реестр или карта шагов не читается: {exc}') from exc
+    base = set()
+    for name in names:
+        if name not in rows:
+            raise CorpusRefusal(
+                f'шаг {name!r} выключен реестром {reg}, но не проведён в '
+                f'карту {mpath} -- ожидаемая база не строится')
+        base |= set(rows[name][1]) & CORPUS_DOORS
+    return base
+
 # CONSTRAINT: гейт двусторонний. Объявление, которое никто не сверяет с
 # фактической длиной, протухает молча -- ровно так счётчик становится
 # украшением вместо затвора.
 _ACTUAL_TEETH = len(IMAGE_TEETH) + len(SRC_TEETH)
 
 
-def run_one(img, tmp):
+def run_one(img, tmp, expected):
     base, rc, _ = reds(img)
     print(f'== база {img.name}: rc={rc} красных={sorted(base)}')
-    if base != BASE:
+    if base != expected:
         print('КОНТРОЛЬ ПРОВАЛЕН: база не совпала с объявленной', file=sys.stderr)
         return 2
     d0 = img.read_bytes()
@@ -157,7 +217,7 @@ def run_one(img, tmp):
         assert len(d) == len(d0), (name, len(d), len(d0))
         mut.write_bytes(d)
         got, _, _ = reds(mut)
-        delta = got - BASE
+        delta = got - expected
         ok = delta == want
         print(f'  [{"ЗУБ" if ok else "МИМО"}] {name}: покраснело {sorted(delta)}'
               + ('' if ok else f' ; ждали {sorted(want)}'))
@@ -172,7 +232,7 @@ def run_one(img, tmp):
             print(f'  [ПРИБОР] {name}: мутация ничего не изменила'); bad += 1; continue
         ms.write_text(s, encoding='utf-8')
         got, _, _ = reds(img, ms)
-        delta = got - BASE
+        delta = got - expected
         ok = delta == want
         print(f'  [{"ЗУБ" if ok else "МИМО"}] {name}: покраснело {sorted(delta)}'
               + ('' if ok else f' ; ждали {sorted(want)}'))
@@ -201,11 +261,19 @@ def main():
     if missing:
         print('нет продукта: ' + ', '.join(str(i) for i in missing), file=sys.stderr)
         return 2
+    # Ожидаемая база строится ДО замеров (#403C): отказ проекции -- отказ
+    # прибора (код 2), а не краснота зубов; печатается, с чем сверяли.
+    try:
+        expected = base_projection()
+    except CorpusRefusal as exc:
+        print(f'ОТКАЗ ПРИБОРА: {exc}', file=sys.stderr)
+        return 2
+    print(f'== ожидаемая база (проекция реестра выключений): {sorted(expected)}')
     with tempfile.TemporaryDirectory(prefix='teeth-corpus-') as td:
         tmp = Path(td)
         worst = 0
         for img in imgs:
-            rc = run_one(img, tmp)
+            rc = run_one(img, tmp, expected)
             worst = max(worst, rc if rc == 2 else (1 if rc else 0))
         return worst
 
