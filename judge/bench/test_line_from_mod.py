@@ -36,16 +36,16 @@ def main():
         'tool': 'Bash', 'agent': '', 'dtMs': 3, 'used': 1, 'cls': 'c',
     }
 
-    line = compact._line_from_mod(dict(base, sid=SID), 'mod-a.json')
+    line = compact._line_from_mod(dict(base, sid=SID), 'mod-a.json', 'judge')
     check('улика с sid -> строка несёт sid тем же значением',
           line.get('sid') == SID, f'sid в строке: {line.get("sid")!r}')
 
-    line = compact._line_from_mod(dict(base), 'mod-b.json')
+    line = compact._line_from_mod(dict(base), 'mod-b.json', 'judge')
     check('улика без sid -> ключа sid в строке нет вовсе',
           'sid' not in line, f'есть ключ sid: {"sid" in line}')
 
     line = compact._line_from_mod(dict(base, sid='sid-unavailable'),
-                                  'mod-c.json')
+                                  'mod-c.json', 'judge')
     check('sentinel "sid-unavailable" доезжает дословно',
           line.get('sid') == 'sid-unavailable',
           f'sid в строке: {line.get("sid")!r}')
@@ -54,11 +54,11 @@ def main():
     # обязана сломать первую проверку -- иначе зуб не отличил бы перенос
     # поля от молчаливой потери и его зелень пуста.
     probe = lambda: compact._line_from_mod(dict(base, sid=SID),
-                                           'mod-a.json').get('sid') == SID
+                                           'mod-a.json', 'judge').get('sid') == SID
     real = compact._line_from_mod
 
-    def line_without_sid(rec, filename):
-        line = real(rec, filename)
+    def line_without_sid(rec, filename, probe):
+        line = real(rec, filename, probe)
         line.pop('sid', None)
         return line
 
@@ -74,6 +74,43 @@ def main():
         print('отрицательный контроль НЕ сработал: подмена без sid '
               'осталась зелёной')
     check('отрицательный контроль: подмена без sid краснеет', red)
+
+    # --- #374: класс свёртки -- ОДИН дом --------------------------------
+    #
+    # CONSTRAINT: зуб на пробу "form" -- главный в этой группе. Снятая
+    # литеральная таблица знала только судью и вернула бы REFUSE как 'skip';
+    # дом формы объявляет REFUSE свёрнутым. Возврат второго дома краснеет
+    # ровно здесь.
+    line = compact._line_from_mod(
+        dict(base, outcome='block_not_enforced'), 'mod-d.json', 'judge')
+    check('готовый класс улики едет ДОСЛОВНО, без пересчёта',
+          line.get('outcome') == 'block_not_enforced',
+          f'outcome: {line.get("outcome")!r}')
+
+    line = compact._line_from_mod(dict(base), 'mod-e.json', 'judge')
+    check('улика без класса: BLOCK судьи взят из дома как block',
+          line.get('outcome') == 'block', f'outcome: {line.get("outcome")!r}')
+
+    line = compact._line_from_mod(dict(base, kind='OK'), 'mod-f.json', 'judge')
+    check('улика без класса: OK судьи взят из дома как ok',
+          line.get('outcome') == 'ok', f'outcome: {line.get("outcome")!r}')
+
+    line = compact._line_from_mod(dict(base, kind='REFUSE'), 'mod-g.json', 'form')
+    check('проба form: REFUSE свёрнут по ДОМУ ФОРМЫ (литеральная таблица '
+          'дала бы skip)',
+          line.get('outcome') == 'block', f'outcome: {line.get("outcome")!r}')
+
+    line = compact._line_from_mod(dict(base, kind='TIMEOUT'), 'mod-h.json', 'judge')
+    check('служебный исход остаётся литеральным: TIMEOUT -> skip',
+          line.get('outcome') == 'skip', f'outcome: {line.get("outcome")!r}')
+
+    refused = False
+    try:
+        compact._line_from_mod(dict(base, kind=None), 'mod-i.json', 'judge')
+    except SystemExit as exc:
+        refused = (exc.code == 2)
+    check('улика без вида -- ОТКАЗ прибора кодом 2, а не тихий skip',
+          refused, f'отказ: {refused}')
 
     failed = [name for name, ok in RESULTS if not ok]
     print(f'проверок: {len(RESULTS)}, провалено: {len(failed)}')

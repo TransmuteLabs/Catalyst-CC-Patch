@@ -107,19 +107,43 @@ def _warn(probe, text):
     print(f'[{probe}] {text}', file=sys.stderr)
 
 
-def _outcome_of(kind):
-    if kind in ('OK', 'WARN'):
-        return 'ok'
-    if kind in ('BLOCK', 'STOP', 'DENY'):
-        return 'block'
-    if kind == 'NONE':
-        return 'block_no_verdict'
-    if kind == 'SKIP':
-        return 'skip'
+# CONSTRAINT (#374): служебные исходы прибора -- НЕ виды вердикта и в доме
+# словаря не объявлены; их места остаются литеральными по обе стороны (тот же
+# набор в моде, outcomeOf). Это решение, а не недосмотр: «вердикта нет» и
+# причина, по которой его нет, не могут зависеть от словаря пробы.
+_SERVICE_OUTCOME = {
+    'NONE': 'block_no_verdict',
+    'TIMEOUT': 'skip',
+    'TRUNCATED': 'skip',
+    'SKIP': 'skip',
+    'STALE_EPOCH': 'skip',
+}
+
+
+def _outcome_by_home(kind, probe, filename):
+    """Класс свёртки вида ПО ДОМУ пробы; неопределимость -- отказ прибора.
+
+    CONSTRAINT: литеральной таблицы видов здесь больше нет. Она была ВТОРЫМ
+    домом правила, не знала пробы и расходилась с модом на пяти видах
+    (PASS/WARN/REFUSE формы, SILENT/NUDGE бездействия), а расхождение было
+    видно только сличением двух домов.
+    """
+    if not kind:
+        # CONSTRAINT: улика без вида -- ПОВРЕЖДЁННАЯ улика, а не пропуск.
+        # Молчаливый 'skip' положил бы её в метриках рядом с честными
+        # пропусками, и потеря вердикта стала бы неотличима от его отсутствия.
+        print(f'улика без вида вердикта: {filename} (проба "{probe}") -- '
+              'класс свёртки неопределим', file=sys.stderr)
+        raise SystemExit(2)
+    if kind in _SERVICE_OUTCOME:
+        return _SERVICE_OUTCOME[kind]
+    emits, folds = replay.verdict_vocabulary(probe=probe)
+    if kind in emits:
+        return 'block' if kind in folds else 'ok'
     return 'skip'
 
 
-def _line_from_mod(rec, filename):
+def _line_from_mod(rec, filename, probe):
     kind = rec.get('kind')
     rest = rec.get('rest') or rec.get('by') or ''
     t0 = rec.get('t0')
@@ -135,7 +159,10 @@ def _line_from_mod(rec, filename):
         'agent': rec.get('agent'),
         'sid': rec.get('sid'),
         'ms': rec.get('dtMs') if rec.get('dtMs') is not None else 0,
-        'outcome': _outcome_of(kind),
+        # CONSTRAINT: готовое поле улики -- ПЕРВИЧНО: мод посчитал класс один
+        # раз и положил ТО ЖЕ значение в свою журнальную строку. Пересчёт
+        # здесь вернул бы второй дом правила через чёрный ход.
+        'outcome': rec.get('outcome') or _outcome_by_home(kind, probe, filename),
         'verdict': verdict,
         'jm': rec.get('used'),
         'rec': filename,
@@ -265,7 +292,7 @@ def fold_mod_records(journal_path, records_dir, probe, dry_run=False):
         if not isinstance(loaded, dict):
             unread += 1
             continue
-        line = _line_from_mod(loaded, rec_field)
+        line = _line_from_mod(loaded, rec_field, loaded.get('probe') or probe)
         new_lines.append(json.dumps(line, ensure_ascii=False))
         added += 1
     if new_lines and not dry_run:
