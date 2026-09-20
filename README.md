@@ -490,12 +490,30 @@ something indexable), our own CODE, recognized STRUCTURALLY per language
 (identifier dot NAME or an indexable-preceded bracket access in JS-family
 files, `os.environ["NAME"]` / `os.environ.get("NAME"...)` / `os.getenv("NAME"...)`
 / `environ["NAME"]` in Python, `env::var("NAME")` / `env::var_os("NAME")` in
-Rust, `$NAME` / `${NAME...}` / `export NAME` / the `NAME=... command` prefix
+Rust, `os.Getenv("NAME")` / `os.LookupEnv("NAME")` in Go, `$NAME` /
+`${NAME...}` / `export NAME` / the `NAME=... command` prefix
 in shell -- a bare substring mention does not count: in a comment, a name
 list or a test fixture it would legalize a dead handle), a `${NAME}`
 substitution elsewhere in the same settings file (how an MCP server entry
-takes a key from `env`), or an explicitly `--external` declared consumer
-outside every inspected home.
+takes a key from `env`), or a declared consumer outside every inspected home
+(`--external NAME`, or the registry `--external-file`).
+
+`.go` is in CODE_EXT by measurement, not for list completeness: the `[ours]`
+homes hold 280 `.go` files and 16 live `os.Getenv("NAME")` calls, and without
+it the guard printed a soft "home with no code files" for `llm-tldr-go` and
+`toon-go` and did not inspect them at all -- a whole declared-ours home fell
+out of the subject silently. Same class as the earlier `.rs` addition.
+
+The registry `tools/env-handles-external.txt` (`NAME<TAB>owner`) exists
+because the handle population comes from the USER's settings, where our
+handles and third-party program keys are mixed. The user's settings are the
+user's to edit, so the only honest move is to name the foreign ones HERE,
+each with the MEASUREMENT that justifies it -- a row without a reason is
+indistinguishable from a forgotten row a year later. Every parse failure
+(missing file, row without a reason, duplicate name, first field that is not
+a handle name, registry yielding no name at all) drops the instrument with
+its OWN named refusal: two refusals sharing one code and one string are
+indistinguishable.
 
 A handle whose name the image knows but never reads is reported as МЁРТВАЯ; a
 handle no one anywhere reads is БЕСХОЗНАЯ; a handle our code mentions as a
@@ -514,14 +532,18 @@ that cannot find a known-live reader has no right to a verdict on the rest,
 and an `--ours` home that yields no file of any scanned extension -- a silent
 home is indistinguishable from a home without readers, which is exactly how a
 live handle once got reported БЕСХОЗНАЯ. Exit 5 is zero declared handles
-(ПУСТО ≠ НОЛЬ).
+(ПУСТО ≠ НОЛЬ). Exit 7 is ЛИШНЯЯ ДЕКЛАРАЦИЯ: a name the registry declares
+external that is no longer in the settings at all -- the registry must not be
+able to rot silently. It is checked LAST, after 6 and 3, deliberately: a stale
+row reclassifies no handle, so a refusal placed earlier would have hidden the
+real findings behind it.
 
 The image is read with python latin-1 only because the subject is a BYTE
 image, not text: grep returns zero on it where python finds eleven. The
 rule does not generalize to anything merely containing NUL -- on UTF-8 text
 a latin-1 decode mangles non-ASCII and yields a false empty result that is
 indistinguishable from a measurement. Teeth:
-`tools/env-handles-live-guard-teeth.sh` (40, count pinned). The guard is
+`tools/env-handles-live-guard-teeth.sh` (49, count pinned). The guard is
 also called on the REAL tree by `claude-patch-all.sh` right after its teeth,
 via `--homes tools/env-guard-ours.txt`: an EXHAUSTIVE split of the family
 root's visible child directories into `[ours]` (scanned) and `[foreign]`

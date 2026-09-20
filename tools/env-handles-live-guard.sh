@@ -51,8 +51,13 @@ import json, os, re, sys
 # бесхозной -- ложная тревога того самого класса, который он ловит.
 # CONSTRAINT: .md / .toml / .json сюда НЕ входят: упоминание имени в доке
 # или в конфиге легализовало бы мёртвую ручку, читателя у неё нет.
+# CONSTRAINT: .go входит по замеру 2026-09-20, не для полноты списка: в
+# домах [ours] 280 файлов .go и 16 живых os.Getenv("ИМЯ") (семейство TLDR_*
+# в llm-tldr-go/config.go). Без .go гвард печатал про llm-tldr-go и toon-go
+# мягкое "дом без кодовых файлов" и НЕ осматривал их вовсе -- целый
+# объявленный-нашим дом выпадал из предмета молча.
 CODE_EXT = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".sh", ".zsh",
-            ".bash", ".rs")
+            ".bash", ".rs", ".go")
 # CONSTRAINT: target -- продукт сборки Rust. Он попал сюда вместе с .rs: без
 # него гвард читал бы сгенерированный код как наш и мог объявить читателем то,
 # чего в исходниках нет (а заодно обходил бы дерево в тысячи раз дольше).
@@ -77,6 +82,7 @@ def die_usage(extra=""):
     sys.stderr.write(
         "env-handles-live-guard: вызов: [--settings <файл>] [--image <файл>] "
         "[--ours <каталог> ...] [--homes <файл>] [--external <ИМЯ> ...] "
+        "[--external-file <файл>] "
         "[--control <ИМЯ>] [--control-ours <ИМЯ>] [--label <строка>]\n"
     )
     sys.exit(2)
@@ -85,11 +91,12 @@ def die_usage(extra=""):
 def parse_args(argv):
     settings, image, ours, control, label = DEFAULT_SETTINGS, DEFAULT_IMAGE, [], DEFAULT_CONTROL, ""
     control_ours, homes = DEFAULT_CONTROL_OURS, None
-    external = []
+    external, external_file = [], None
     i = 1
     while i < len(argv):
         a = argv[i]
-        if a in ("--settings", "--image", "--control", "--control-ours", "--label", "--homes"):
+        if a in ("--settings", "--image", "--control", "--control-ours", "--label",
+                 "--homes", "--external-file"):
             if i + 1 >= len(argv):
                 die_usage()
             v = argv[i + 1]; i += 2
@@ -98,6 +105,7 @@ def parse_args(argv):
             elif a == "--control": control = v
             elif a == "--control-ours": control_ours = v
             elif a == "--homes": homes = v
+            elif a == "--external-file": external_file = v
             else: label = v
         elif a == "--ours":
             if i + 1 >= len(argv):
@@ -111,7 +119,8 @@ def parse_args(argv):
             die_usage("неизвестный аргумент: %s" % a)
     if homes and ours:
         die_usage("--homes и --ours взаимно исключают друг друга")
-    return settings, image, ours, homes, control, control_ours, label, external
+    return (settings, image, ours, homes, control, control_ours, label,
+            external, external_file)
 
 
 def read_image(path):
@@ -162,6 +171,19 @@ def rs_env_forms(name):
     ]
 
 
+def go_env_forms(name):
+    n = re.escape(name)
+    # CONSTRAINT: требуется ИМЕНОВАННЫЙ вызов (Getenv / LookupEnv) -- имя в
+    # строковом литерале читателем не считается, иначе перечень ручек в
+    # []string{"ИМЯ"} зеленил бы мёртвую ручку (тот же случай, что зуб 34).
+    # CONSTRAINT: Go допускает обратные кавычки как строковый литерал,
+    # поэтому обе формы кавычек обязательны.
+    return [
+        r"(?<![A-Za-z0-9_$])Getenv\(\s*[\"`]" + n + r"[\"`]",
+        r"(?<![A-Za-z0-9_$])LookupEnv\(\s*[\"`]" + n + r"[\"`]",
+    ]
+
+
 def sh_env_forms(name):
     n = re.escape(name)
     # CONSTRAINT: голое ИМЯ без `$` и без `=` читателем не является;
@@ -186,6 +208,11 @@ def reader_in_our_code(txt, name, ext):
         forms = py_env_forms(name)
     elif ext == ".rs":
         forms = rs_env_forms(name)
+    elif ext == ".go":
+        # CONSTRAINT: ветка .go обязана стоять ДО else: без неё Go-файл
+        # мерился бы шелл-формами, и `$ИМЯ` в строке лога читался бы
+        # как доступ к окружению.
+        forms = go_env_forms(name)
     else:  # .sh .zsh .bash
         forms = sh_env_forms(name)
     return sum(len(re.findall(f, txt)) for f in forms)
@@ -239,6 +266,54 @@ def collect_our_code(dirs, strict_empty=True):
                 "env-handles-live-guard: дом без кодовых файлов "
                 "(имя сверено с деревом, не отказ): %s\n" % d)
     return out
+
+
+EXT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def load_external_registry(path, label):
+    # CONSTRAINT: реестр объявляет ручки, потребитель которых живёт ВНЕ
+    # дерева семьи (сторонние программы юзера). Настройки юзера правит
+    # только он сам, поэтому единственный честный ход прибора -- назвать
+    # чужое чужим у себя, с ИМЕНЕМ ВЛАДЕЛЬЦА в той же строке: запись без
+    # основания через год неотличима от забытой.
+    # CONSTRAINT: каждый отказ разбора -- отказ ПРИБОРА (код 2) со своим
+    # текстом. Направление fail-closed: нечитаемый реестр обязан ломать
+    # прибор, а не молча давать пустой список и красить предмет.
+    tag = "env-handles-live-guard[%s]:" % label
+    if not os.path.isfile(path):
+        sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр внешних ручек не прочитан: %s\n"
+                         % (tag, path))
+        sys.exit(2)
+    names, seen = [], {}
+    for lineno, raw in enumerate(
+            open(path, "r", encoding="utf-8").read().splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = raw.split("\t", 1)
+        name = parts[0].strip()
+        reason = parts[1].strip() if len(parts) > 1 else ""
+        if not EXT_NAME_RE.match(name):
+            sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр %s строка %d: имя не похоже "
+                             "на ручку окружения: %r\n" % (tag, path, lineno, name))
+            sys.exit(2)
+        if not reason:
+            sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр %s строка %d: у имени %s нет "
+                             "основания (нужен формат ИМЯ<TAB>владелец)\n"
+                             % (tag, path, lineno, name))
+            sys.exit(2)
+        if name in seen:
+            sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр %s: имя %s объявлено дважды "
+                             "(строки %d и %d)\n" % (tag, path, name, seen[name], lineno))
+            sys.exit(2)
+        seen[name] = lineno
+        names.append(name)
+    if not names:
+        sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр внешних ручек %s не дал ни одного "
+                         "имени\n" % (tag, path))
+        sys.exit(2)
+    return names
 
 
 def load_and_verify_homes(path, tag):
@@ -343,7 +418,10 @@ def scan_dist_readers(dirs, wanted):
 
 
 def main():
-    settings_p, image_p, ours, homes, control, control_ours, label, external = parse_args(sys.argv)
+    (settings_p, image_p, ours, homes, control, control_ours, label,
+     external, external_file) = parse_args(sys.argv)
+    if external_file:
+        external = external + load_external_registry(external_file, label)
     try:
         cfg = json.load(open(settings_p, "r", encoding="utf-8"))
     except (OSError, ValueError) as x:
@@ -434,6 +512,9 @@ def main():
             sys.stdout.write("УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ (наш код знает имя, доступа нет): %s\n" % n)
         for n in unknown:
             sys.stdout.write("БЕСХОЗНАЯ (читателя нет ни в образе, ни в нашем коде): %s\n" % n)
+        for n in extra_ext:
+            sys.stdout.write("ЛИШНЯЯ ДЕКЛАРАЦИЯ (объявлена внешней, а в настройках "
+                             "её нет): %s\n" % n)
         sys.stdout.write("%s %s\n" % (tag, counts))
         sys.stdout.write("%s %s\n" % (tag, verdict))
         sys.exit(code)
@@ -445,6 +526,15 @@ def main():
         refuse(6, "ВЕРДИКТ ЧИТАТЕЛЬ ТОЛЬКО В СБОРКЕ -- расхождение сборки и исходника")
     if declared_unread or unknown or ours_mention_only:
         refuse(3, "ВЕРДИКТ ЕСТЬ РУЧКА БЕЗ ЧИТАТЕЛЯ")
+    # CONSTRAINT: код 7 стоит ПОСЛЕДНИМ намеренно. Протухшая запись реестра
+    # ничего не маскирует (лишнее имя ни одну ручку не переклассифицирует),
+    # а отказ, поставленный раньше, спрятал бы настоящие находки 6 и 3 --
+    # ровно тот случай, когда ранняя ветка отказа скрывает предмет.
+    # CONSTRAINT: молча считать лишнюю декларацию нельзя: реестр, чья причина
+    # исчезла, обязан звучать, иначе он гниёт вечно.
+    if extra_ext:
+        refuse(7, "ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ -- имя объявлено внешним, "
+                  "а в настройках его больше нет")
     sys.stdout.write("%s ВЕРДИКТ ВСЕ РУЧКИ ЖИВЫ -- %s\n" % (tag, counts))
     sys.exit(0)
 

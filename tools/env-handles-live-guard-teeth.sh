@@ -13,7 +13,7 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GUARD="${GUARD:-$KIT/tools/env-handles-live-guard.sh}"
-EXPECTED_TEETH=40
+EXPECTED_TEETH=49
 
 PASSED=0; FAILED=0; RAN=0; WORKDIR=''
 # CONSTRAINT: конец объявляет себя САМ (__DONE=1). Голый EXIT-трап съедает
@@ -648,6 +648,133 @@ forB'
   rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
 }
 
+# --- реестр внешних ручек (--external-file) и предикат Go -------------------
+# CONSTRAINT: реестр -- ФАЙЛ, а не набор флагов: каждый отказ его разбора
+# обязан иметь СВОЙ зуб. Два отказа с одним кодом и одной строкой
+# неразличимы, поэтому зубы 42--46 требуют ИМЯ отказа, а не только код 2.
+mk_ext_file() {   # $1 -- содержимое реестра
+  printf '%s\n' "$1" > "$WORKDIR/external.txt"
+}
+
+# 41. --external-file на бесхозную -> 0, имя названо (файл РАЗОБРАН, не проглочен)
+tooth_41() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"EXT_FILE_41":"k"}'
+  mk_ext_file "$(printf '# шапка\n\nEXT_FILE_41\tсторонняя программа, замер такой-то')"
+  run_guard --label t41 --external-file "$WORKDIR/external.txt"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"объявлено-внешним 1 (EXT_FILE_41)"* ]]; then
+    ok '41 реестр разобран -> 0, имя названо'
+  else bad "41 ждали rc=0 и «объявлено-внешним 1 (EXT_FILE_41)», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -f "$WORKDIR/external.txt"
+}
+
+# 42. реестр НАЗВАН, но отсутствует -> 2 со СВОИМ именем отказа
+tooth_42() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"EXT_FILE_42":"k"}'
+  rm -f "$WORKDIR/external.txt"
+  run_guard --label t42 --external-file "$WORKDIR/external.txt"
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"реестр внешних ручек не прочитан"* ]]; then
+    ok '42 реестр отсутствует -> 2 со своим именем'
+  else bad "42 ждали rc=2 «реестр внешних ручек не прочитан», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 43. строка без основания -> 2 со СВОИМ именем (запись без причины = забытая)
+tooth_43() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"EXT_FILE_43":"k"}'
+  mk_ext_file 'EXT_FILE_43'
+  run_guard --label t43 --external-file "$WORKDIR/external.txt"
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"EXT_FILE_43"*"нет основания"* ]]; then
+    ok '43 имя без основания -> 2 со своим именем'
+  else bad "43 ждали rc=2 «нет основания» EXT_FILE_43, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -f "$WORKDIR/external.txt"
+}
+
+# 44. имя объявлено ДВАЖДЫ -> 2 со СВОИМ именем и обеими строками
+tooth_44() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"EXT_FILE_44":"k"}'
+  mk_ext_file "$(printf 'EXT_FILE_44\tпервое основание\nEXT_FILE_44\tвторое основание')"
+  run_guard --label t44 --external-file "$WORKDIR/external.txt"
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"EXT_FILE_44"*"объявлено дважды"* ]]; then
+    ok '44 дубль имени в реестре -> 2 со своим именем'
+  else bad "44 ждали rc=2 «объявлено дважды» EXT_FILE_44, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -f "$WORKDIR/external.txt"
+}
+
+# 45. первое поле -- не имя ручки -> 2 со СВОИМ именем (защита от сдвига полей)
+tooth_45() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"EXT_FILE_45":"k"}'
+  mk_ext_file "$(printf 'не имя ручки\tоснование')"
+  run_guard --label t45 --external-file "$WORKDIR/external.txt"
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"не похоже"* ]]; then
+    ok '45 первое поле не имя ручки -> 2 со своим именем'
+  else bad "45 ждали rc=2 «не похоже на ручку», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -f "$WORKDIR/external.txt"
+}
+
+# 46. реестр из одних комментариев -> 2 (пустой реестр неотличим от забытого)
+tooth_46() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"EXT_FILE_46":"k"}'
+  mk_ext_file "$(printf '# только комментарий\n\n# и ещё один')"
+  run_guard --label t46 --external-file "$WORKDIR/external.txt"
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"не дал ни одного имени"* ]]; then
+    ok '46 реестр без единого имени -> 2 со своим именем'
+  else bad "46 ждали rc=2 «не дал ни одного имени», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -f "$WORKDIR/external.txt"
+}
+
+# 47. имя в реестре исчезло из настроек -> 7 ЛИШНЯЯ ДЕКЛАРАЦИЯ
+#     CONSTRAINT: прочие корзины в этой фикстуре ПУСТЫ намеренно -- иначе
+#     зуб мерил бы приоритет кодов, а не сам отказ 7.
+tooth_47() {
+  RAN=$((RAN + 1))
+  mk_image 'let q=cfg.LIVE_47;'
+  mk_settings '{"LIVE_47":"x"}'
+  mk_ext_file "$(printf 'GONE_47\tоснование было, ручка из настроек ушла')"
+  run_guard --label t47 --external-file "$WORKDIR/external.txt"
+  if [[ $GUARD_RC -eq 7 && "$GUARD_OUT" == *"ЛИШНЯЯ ДЕКЛАРАЦИЯ"*"GONE_47"* \
+        && "$GUARD_OUT" == *"ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ"* ]]; then
+    ok '47 протухшая запись реестра -> 7, имя названо'
+  else bad "47 ждали rc=7 ЛИШНЯЯ ДЕКЛАРАЦИЯ GONE_47, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -f "$WORKDIR/external.txt"
+}
+
+# 48. Go: os.Getenv("ИМЯ") -- читатель
+tooth_48() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'package main\nimport "os"\nfunc f() string { return os.Getenv("GO_READ_48") }\n' > "$WORKDIR/ours/reader.go"
+  mk_settings '{"GO_READ_48":"1"}'
+  run_guard --label t48
+  rm -f "$WORKDIR/ours/reader.go"
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
+    ok '48 Go os.Getenv -> читатель, 0'
+  else bad "48 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 49. Go: имя в литерале []string{"ИМЯ"} -- НЕ читатель (зеркало зуба 34)
+tooth_49() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  printf 'package main\nvar names = []string{"GO_LIST_49", "OTHER"}\n' > "$WORKDIR/ours/list.go"
+  mk_settings '{"GO_LIST_49":"1"}'
+  run_guard --label t49
+  rm -f "$WORKDIR/ours/list.go"
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"GO_LIST_49"* ]]; then
+    ok '49 Go литерал перечня -> не читатель, 3'
+  else bad "49 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ GO_LIST_49, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
 tooth_1; tooth_2; tooth_3; tooth_4; tooth_5; tooth_6; tooth_7
 tooth_8; tooth_9; tooth_10; tooth_11; tooth_12; tooth_13
 tooth_14; tooth_15
@@ -655,7 +782,8 @@ tooth_16; tooth_17; tooth_18; tooth_19; tooth_20; tooth_21
 tooth_22; tooth_23; tooth_24; tooth_25; tooth_26; tooth_27
 tooth_28; tooth_29; tooth_30; tooth_31; tooth_32; tooth_33
 tooth_34; tooth_35; tooth_36; tooth_37; tooth_38; tooth_39
-tooth_40
+tooth_40; tooth_41; tooth_42; tooth_43; tooth_44; tooth_45
+tooth_46; tooth_47; tooth_48; tooth_49
 
 printf '%s прошло, %s провалов, ожидалось %s\n' "$PASSED" "$FAILED" "$EXPECTED_TEETH"
 if [[ $RAN -ne $EXPECTED_TEETH ]]; then

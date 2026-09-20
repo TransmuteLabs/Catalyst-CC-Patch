@@ -5812,7 +5812,12 @@ if [[ ! -f "$__env_guard_homes" ]]; then
   echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: НЕ ИЗМЕРЯЛИ -- файл разделения домов отсутствует (rc=2)" >&2
   exit 2
 fi
-bash "$(dirname "$0")/tools/env-handles-live-guard.sh" --label "реальное дерево" --homes "$__env_guard_homes" 9>&- || {
+__env_guard_ext="$(dirname "$0")/tools/env-handles-external.txt" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен каталог дерева для реестра внешних ручек\n' >&2; exit 2; }
+if [[ ! -f "$__env_guard_ext" ]]; then
+  echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: НЕ ИЗМЕРЯЛИ -- реестр внешних ручек отсутствует (rc=2)" >&2
+  exit 2
+fi
+bash "$(dirname "$0")/tools/env-handles-live-guard.sh" --label "реальное дерево" --homes "$__env_guard_homes" --external-file "$__env_guard_ext" 9>&- || {
   __rc=$?
   case $__rc in
     2) echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: НЕ ИЗМЕРЯЛИ -- прибор отказал (rc=2)" >&2
@@ -5823,6 +5828,8 @@ bash "$(dirname "$0")/tools/env-handles-live-guard.sh" --label "реальное
        exit 5 ;;
     6) echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: ЧИТАТЕЛЬ ТОЛЬКО В СБОРКЕ -- расхождение сборки и исходника (имена выше)" >&2
        exit 6 ;;
+    7) echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: ЛИШНЯЯ ДЕКЛАРАЦИЯ -- имя в tools/env-handles-external.txt исчезло из настроек (имена выше)" >&2
+       exit 7 ;;
     *) echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: неизвестный ответ гварда (rc=$__rc)" >&2
        exit 1 ;;
   esac
