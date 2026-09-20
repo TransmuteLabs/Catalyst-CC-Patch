@@ -397,22 +397,133 @@ I8_ANCHOR = "if dver != _WITHDRAW_VERSION:\n        continue"
 I8_REPL = "if False:\n        continue"
 
 
-def _version_image(ver: str, *, orig: bool = False) -> Path:
-    """273 собранный (наш след жив); 274 и пол -- пристинный. orig=True -- всегда .orig."""
-    base = Path.home() / ".local" / "share" / "claude" / "versions"
-    built = base / ver
-    orig_p = base / f"{ver}.orig"
-    if orig or ver == "2.1.274":
-        if orig_p.is_file():
-            return orig_p
-        if built.is_file():
-            return built
-    else:
-        if built.is_file():
-            return built
-        if orig_p.is_file():
-            return orig_p
-    raise Refusal(f"нет образа {ver} в {base}")
+# Единственная оставшаяся адресация к дому образов: реальный пристин последней
+# версии. База флоровых фикстур и якорь против вакуумности (#354); старые
+# версии прибору зубов больше не нужны (#355).
+PRISTINE_LATEST = Path.home() / ".local" / "share" / "claude" / "versions" / "2.1.278.orig"
+
+# Предмет шага 29 в формах игл блока проверок (claude-patch-all.sh):
+# стоковый отказ бюджета (_MOD_BUDGET_REFUSAL) со стоковой производной порога
+# и наша toPrimitive-форма (_mod_budget_ceiling_is_operator_set). Свидетель
+# "the session's model budget for this plugin is spent" живёт В отказе: это
+# хвост его иглы.
+_STEP29_STOCK = (
+    b"if((Qq.get(Ww)??0)+Ee>=Cc)throw new Zz(`${Ww}: $.model.complete: "
+    b"the session's model budget for this plugin is spent`)\n"
+    b"var Vv=Cc*Nn;\n"
+)
+_STEP29_OURS = (
+    b"var Cc={[Symbol.toPrimitive](){let Tt=process.env.CLAUDE_CODE_MOD_MODEL_BUDGET;"
+    b'if(Tt===void 0||Tt==="")return Infinity;let Rr=Number(Tt);'
+    b"return Number.isFinite(Rr)&&Rr>0?Rr:Infinity}};\n"
+)
+
+
+def _step29_witnesses() -> list[str]:
+    """Свидетели шага 29 из якоря WITNESSES в tweakcc-patch.js.
+
+    CONSTRAINT: тот же якорь и тот же регексп, что у _step29_witnesses_from_src
+    блока проверок (claude-patch-all.sh): своя копия списка без гвардии
+    разошлась бы с патчем молча (#197). Пропажа якоря и пустой список --
+    отказ прибора, а не тишина.
+    """
+    src = (ROOT / "tweakcc-patch.js").read_text(encoding="utf-8")
+    m = re.search(
+        r"step\('29 mod-API session model budget ceiling becomes operator-set'"
+        r".*?const WITNESSES = \[(.*?)\];",
+        src, re.S)
+    if not m:
+        raise Refusal("якорь WITNESSES шага 29 пропал из tweakcc-patch.js")
+    witnesses = [a or b for a, b in re.findall(
+        r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'', m.group(1))]
+    if not witnesses:
+        raise Refusal("WITNESSES шага 29 извлечён пустым")
+    return witnesses
+
+
+def _step29_subject(*, ours: bool) -> bytes:
+    """Живой предмет шага 29: сток и свидетели вне стока; наша форма -- по требованию.
+
+    CONSTRAINT: порог «предмета нет» -- ВСЕ свидетели мертвы, поэтому предмет
+    обязан нести все пять; свидетель внутри стока не дублируется. Наша
+    toPrimitive-форма включается только для нефлоровых зубов: пол мерит
+    пристиноподобную базу, и зелёная НЕобъявленная запись (ceiling с нашим
+    патчем) роняет его как extra.
+    """
+    data = _STEP29_STOCK
+    if ours:
+        data += _STEP29_OURS
+    for w in _step29_witnesses():
+        enc = w.encode("utf-8")
+        if enc not in _STEP29_STOCK:
+            data += enc + b"\n"
+    return data
+
+
+def _new_fixture() -> Path:
+    handle, path = tempfile.mkstemp(prefix="checks-teeth.%d." % os.getpid(), suffix=".bin")
+    os.close(handle)
+    # Имя в формате копий воркера: обломки убитого воркера подбирает
+    # weed_worker_leftovers, иначе пристинные копии копились бы без предела.
+    return Path(path)
+
+
+def _fixture_light(ver: str, *, live: bool) -> Path:
+    fx = _new_fixture()
+    try:
+        data = b"var A=1;\n// Version: " + ver.encode() + b"\nvar B=2;\n"
+        if live:
+            data += _step29_subject(ours=True)
+        fx.write_bytes(data)
+    except BaseException:
+        fx.unlink(missing_ok=True)
+        raise
+    return fx
+
+
+def _fixture_floor(ver: str, *, live: bool) -> Path:
+    """Пол сходится только там, где зелёны ВСЕ объявленные стоковые записи.
+
+    Огрызок их не несёт (замер 2026-09-20: rc=1), поэтому база фикстуры пола --
+    реальный пристин. Маркер версии переписывается РАВНОЙ ДЛИНОЙ во всех
+    вхождениях: различное значение остаётся ровно одно, смещения не едут.
+    """
+    if not PRISTINE_LATEST.is_file():
+        raise Refusal(f"нет реального пристина для базы фикстур пола: {PRISTINE_LATEST}")
+    old = b"// Version: 2.1.278"
+    new = b"// Version: " + ver.encode()
+    if len(new) != len(old):
+        raise Refusal(f"маркер {new!r} не равен длине пристинного -- копия сдвинулась бы")
+    fx = _new_fixture()
+    try:
+        shutil.copyfile(PRISTINE_LATEST, fx)
+        with open(fx, "r+b") as fh:
+            raw = fh.read()
+            if raw.count(old) < 1:
+                raise Refusal("маркер версии пропал из пристина")
+            fh.seek(0)
+            fh.write(raw.replace(old, new))
+        if live:
+            with open(fx, "ab") as fh:
+                fh.write(b"\n// step 29 live subject\n")
+                fh.write(_step29_subject(ours=False))
+    except BaseException:
+        fx.unlink(missing_ok=True)
+        raise
+    return fx
+
+
+def _version_image(ver: str, *, live: bool, floor: bool = False) -> Path:
+    """Фикстура вместо живого образа старой версии (#354).
+
+    Предмет зубов I1..I8 -- реакция прибора на пару «версия × наличие
+    предмета», а версию прибор читает ОДНОЙ строкой (_image_version в
+    checks-on-image.sh). live=False -- свидетелей шага 29 нет; live=True --
+    все пять плюс формы, которые проверки шага 29 читают как живой предмет.
+    """
+    if floor:
+        return _fixture_floor(ver, live=live)
+    return _fixture_light(ver, live=live)
 
 
 def _parse_registry(out: str) -> dict[str, str]:
@@ -528,25 +639,27 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
     mid = row["id"]
     td = None
     img_copy = None
+    fx = None
     try:
         if mid == "I1":
-            img = _version_image("2.1.274")
+            fx = img = _version_image("2.1.274", live=False)
             td, script, patch = _temp_kit()
             ctrl = _run_checks(script, img, patch)
-            if "[NOTE]" not in (ctrl.stdout or ""):
-                return "контроль: на 2.1.274 с декларацией [NOTE] нет"
             tags = _step29_tags(ctrl.stdout or "")
             if any(tags[n] != "NOTE" for n in STEP29_BOTH):
                 return f"контроль: шаг 29 не NOTE {tags}"
             shutil.rmtree(td, ignore_errors=True)
             td, script, patch = _temp_kit(script_repl=(I1_ANCHOR, I1_REPL))
             mut = _run_checks(script, img, patch)
-            if "[NOTE]" in (mut.stdout or ""):
-                return "печать убрана, а [NOTE] остался -- форматтер не единственный источник"
+            # CONSTRAINT: взгляд сужен до тегов шага 29 -- глобальное «нет [NOTE]»
+            # ломается от постороннего NOTE (реестр our-steps-off.txt).
+            mt = _step29_tags(mut.stdout or "")
+            if any(mt[n] for n in STEP29_BOTH):
+                return "печать убрана, а NOTE шага 29 остался -- форматтер не единственный источник"
             return None
 
         if mid == "I2":
-            img = _version_image("2.1.274")
+            fx = img = _version_image("2.1.274", live=False)
             td, script, patch = _temp_kit(decl_text=_decl_without_274(_kit_decl_text()))
             ctrl = _run_checks(script, img, patch)
             tags = _step29_tags(ctrl.stdout or "")
@@ -570,7 +683,7 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
             return f"после мутации безусловного NOTE исход не тот {mt}"
 
         if mid == "I3":
-            img = _version_image("2.1.273")
+            fx = img = _version_image("2.1.273", live=True)
             td, script, patch = _temp_kit(decl_text=_decl_with_273(_kit_decl_text()))
             ctrl = _run_checks(script, img, patch)
             tags = _step29_tags(ctrl.stdout or "")
@@ -592,7 +705,7 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
             return f"после снятия отказа «пережила причину» исход не зелёный {mt}"
 
         if mid == "I4":
-            img = _version_image("2.1.273")
+            fx = img = _version_image("2.1.273", live=True)
             handle, img_copy = tempfile.mkstemp(
                 prefix="checks-teeth.%d." % os.getpid(), suffix=".bin")
             os.close(handle)
@@ -617,7 +730,7 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
             return f"порог any() не покраснил шаг 29 {mt}"
 
         if mid == "I5":
-            img = _version_image("2.1.273")
+            fx = img = _version_image("2.1.273", live=True)
             td, script, patch = _temp_kit(patch_repl=(I5_ANCHOR, I5_REPL))
             mut = _run_checks(script, img, patch)
             mt = _step29_tags(mut.stdout or "")
@@ -626,7 +739,7 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
             return f"WITNESSES в патче изменены, шаг 29 не FAIL {mt} -- список не из src"
 
         if mid == "I6":
-            img = _version_image("2.1.274")
+            fx = img = _version_image("2.1.274", live=False, floor=True)
             td, script, patch = _temp_kit()
             runner = td / "tools" / "checks-on-image.sh"
             ctrl = _run_floor(script, img, patch, runner)
@@ -645,7 +758,7 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
             return None
 
         if mid == "I7":
-            img = _version_image("2.1.274")
+            fx = img = _version_image("2.1.274", live=False, floor=True)
             td, script, patch = _temp_kit(decl_text=_decl_without_274(_kit_decl_text()))
             runner = td / "tools" / "checks-on-image.sh"
             ctrl = _run_floor(script, img, patch, runner)
@@ -664,7 +777,7 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
                     f"не сделала пол зелёным rc={mut.returncode}")
 
         if mid == "I8":
-            img = _version_image("2.1.273", orig=True)
+            fx = img = _version_image("2.1.273", live=True, floor=True)
             td, script, patch = _temp_kit()
             runner = td / "tools" / "checks-on-image.sh"
             ctrl = _run_floor(script, img, patch, runner)
@@ -687,11 +800,41 @@ def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
     finally:
         if td is not None:
             shutil.rmtree(td, ignore_errors=True)
+        if fx is not None:
+            fx.unlink(missing_ok=True)
         if img_copy is not None:
             try:
                 os.unlink(img_copy)
             except FileNotFoundError:
                 pass
+
+
+def _tooth_anchor_real_278() -> str | None:
+    """Якорь против вакуумности фикстур: РЕАЛЬНЫЙ образ 2.1.278.
+
+    Без якоря набор фикстур согласован сам с собой и ничего не доказывает о
+    живом дереве: прибор обязан прочитать с реального образа версию и
+    применить декларацию той же логикой, что и на фикстуре. Исход запинен:
+    свидетели шага 29 на 2.1.278 мертвы, декларации для 2.1.278 в доме нет
+    (#324 -- отдельная задача) -- значит FAIL/undeclared с готовой строкой;
+    обходить этот исход здесь нельзя.
+    """
+    if not PRISTINE_LATEST.is_file():
+        raise Refusal(f"нет реального пристина 2.1.278: {PRISTINE_LATEST}")
+    td, script, patch = _temp_kit()
+    try:
+        r = _run_checks(script, PRISTINE_LATEST, patch)
+        tags = _step29_tags(r.stdout or "")
+        out = (r.stdout or "") + (r.stderr or "")
+        if any(tags[n] != "FAIL" for n in STEP29_BOTH):
+            return f"якорь: шаг 29 на реальном 2.1.278 не FAIL/undeclared {tags}"
+        if "объявить неприменимость:" not in out:
+            return "якорь: нет готовой строки «объявить неприменимость»"
+        if "2.1.278\t29\t" not in out:
+            return "якорь: готовая строка не для 2.1.278"
+        return None
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
 
 
 def pipeline_lock_path() -> str:
@@ -999,6 +1142,60 @@ def _tooth_seven_is_upstream() -> str | None:
     return None
 
 
+def pick_ids(raw: str | None, known: set[str]) -> set[str] | None:
+    """Разбор --id: None -- весь набор, иначе НЕПУСТОЕ подмножество known.
+
+    CONSTRAINT: выбор, не назвавший ни одной строки (`--id ,`, `--id " "`,
+    `--id ""`), ОТКАЗЫВАЕТ, а не мерит ноль строк: зелёный «ИТОГ мутаций=0»
+    неотличим от прохода, измерившего предмет, -- та же вакуумная зелень,
+    что и неизмеренная мутация, только в бухгалтерии.
+    """
+    if raw is None:
+        return None
+    picked = {x.strip() for x in raw.split(",") if x.strip()}
+    if not picked:
+        raise Refusal(f"выбор пуст -- --id «{raw}» не назвал ни одной строки")
+    unknown = picked - known
+    if unknown:
+        raise Refusal(f"нет таких строк: {sorted(unknown)}")
+    return picked
+
+
+def _tooth_empty_pick_refuses() -> str | None:
+    """Вырожденный --id отказывает, а не мерит ноль строк.
+
+    Область сторожа: пустой выбор не имеет потребителей образа, и контроль
+    красноты пропускает его ПО ПОСТРОЕНИЮ -- единственный сторож здесь сам
+    разбор. Без него `--id ,` печатал RC=0 «ИТОГ мутаций=0», неотличимый от
+    измеренного прохода.
+    """
+    known = {"I1", "C1"}
+    for raw in ("", ",", " ", ",,", " , "):
+        try:
+            got = pick_ids(raw, known)
+        except Refusal as exc:
+            if "выбор пуст" not in str(exc):
+                return f"--id «{raw}»: отказ без слов «выбор пуст»: {exc}"
+            continue
+        return f"--id «{raw}» не отказал: {got!r}"
+    try:
+        got = pick_ids("I1", known)
+    except Refusal as exc:
+        return f"живой выбор отказал: {exc}"
+    if got != {"I1"}:
+        return f"живой выбор разобран как {got!r}"
+    if pick_ids(None, known) is not None:
+        return "отсутствие ключа перестало значить весь набор"
+    try:
+        pick_ids("I9", known)
+    except Refusal as exc:
+        if "нет таких строк" not in str(exc):
+            return f"опечатка отказала без слов «нет таких строк»: {exc}"
+    else:
+        return "опечатка I9 не отказала"
+    return None
+
+
 def self_check() -> int:
     """Герметичная самопроверка: без образа и замка.
 
@@ -1056,6 +1253,7 @@ def self_check() -> int:
         ("отказ-не-зелёный", _tooth_refusal_is_not_green),
         ("вне-области-отказа-нет", _tooth_no_refusal_same_outcome),
         ("код-7-занят-апстримом", _tooth_seven_is_upstream),
+        ("пустой-выбор-отказывает", _tooth_empty_pick_refuses),
     )
     for name, fn in teeth:
         reason = fn()
@@ -1150,14 +1348,11 @@ def main() -> int:
     except Refusal as exc:
         print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
         return 2
-    picked = None
-    if opts.id:
-        picked = {x.strip() for x in opts.id.split(",") if x.strip()}
-        unknown = picked - {r["id"] for r in rows}
-        if unknown:
-            print(f"checks-teeth: ОТКАЗ ПРИБОРА -- нет таких строк: {sorted(unknown)}",
-                  file=sys.stderr)
-            return 2
+    try:
+        picked = pick_ids(opts.id, {r["id"] for r in rows})
+    except Refusal as exc:
+        print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
+        return 2
     n_img = sum(1 for r in rows if r["kind"] in ("literal", "derived"))
     n_inapp = sum(1 for r in rows if r["kind"] == "inapplicable")
     n_other = len(rows) - n_img - n_inapp
@@ -1174,22 +1369,34 @@ def main() -> int:
               f"объявлено {EXPECTED_INAPPLICABLE_TEETH}", file=sys.stderr)
         return 4
 
-    # Контроль: названный образ обязан быть ЗЕЛЁНЫМ до мутаций. Иначе краснота
-    # ничего не докажет -- она была и без нас.
-    try:
-        red, _ = reds(image)
-    except Refusal as exc:
-        print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-        return 2
-    if red:
-        print("checks-teeth: КОНТРОЛЬ ПРОВАЛЕН -- образ красен ещё до мутаций:",
-              file=sys.stderr)
-        for name in red:
-            print("    " + name, file=sys.stderr)
-        return 2
-    print(f"checks-teeth: КОНТРОЛЬ без мутации: ЗЕЛЁНО ({image})", flush=True)
-
-    base = image.read_bytes()
+    # CONSTRAINT (#335): громкий отказ стреляет в области действия и не шире.
+    # Контроль красноты защищает мутационные зубы -- им нужен зелёный базис
+    # активного образа, иначе краснота ничего не докажет (она была и без нас).
+    # Зубы неприменимости работают на фикстурах и активный образ не читают:
+    # в наборе без мутационных строк контроль не гоняется вовсе, иначе точечная
+    # краснота образа отказывала бы в обслуживании зубов, которых образ не
+    # касается.
+    n_img_picked = sum(1 for r in rows
+                       if r["kind"] in ("literal", "derived")
+                       and (picked is None or r["id"] in picked))
+    if n_img_picked:
+        try:
+            red, _ = reds(image)
+        except Refusal as exc:
+            print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
+            return 2
+        if red:
+            print("checks-teeth: КОНТРОЛЬ ПРОВАЛЕН -- образ красен ещё до мутаций:",
+                  file=sys.stderr)
+            for name in red:
+                print("    " + name, file=sys.stderr)
+            return 2
+        print(f"checks-teeth: КОНТРОЛЬ без мутации: ЗЕЛЁНО ({image})", flush=True)
+        base = image.read_bytes()
+    else:
+        print("checks-teeth: КОНТРОЛЬ красноты пропущен -- в наборе нет строк, "
+              "читающих активный образ", flush=True)
+        base = b""
     jobs, inapp_rows, refused = build_jobs(rows, picked, image, base)
     del base
     # Построчный исход отказа печатается сразу с id и сырым текстом; счётчик
@@ -1247,6 +1454,23 @@ def main() -> int:
         else:
             print(f"checks-teeth: МУТАЦИЯ {row['id']}: RED «{'» + «'.join(want)}»",
                   flush=True)
+
+    # Якорь против вакуумности см. в docstring функции: положительный контроль
+    # фикстур на реальном образе; не входит в EXPECTED_INAPPLICABLE_TEETH --
+    # он не строка таблицы и не мутация.
+    try:
+        reason = _tooth_anchor_real_278()
+    except Refusal as exc:
+        refused.append(("anchor-278", str(exc)))
+        print(f"checks-teeth: ЯКОРЬ 2.1.278: ОТКАЗ ПРИБОРА -- {exc}",
+              file=sys.stderr, flush=True)
+    else:
+        if reason:
+            bad += 1
+            print(f"checks-teeth: ЯКОРЬ 2.1.278: ПРОШЛА МОЛЧА -- {reason}", flush=True)
+        else:
+            print("checks-teeth: ЯКОРЬ 2.1.278: ПОДТВЕРЖДЁН "
+                  "(шаг 29 FAIL/undeclared + готовая строка)", flush=True)
 
     print(summary_line(len(jobs) + measured_inapp, bad), flush=True)
     if refused:
