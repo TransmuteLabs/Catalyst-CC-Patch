@@ -95,26 +95,18 @@ WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/step7-teeth.XXXXXX") \
   || refuse "не создан временный каталог"
 [ -n "${WORKDIR}" ] || refuse "путь временного каталога пуст"
 
-# CONSTRAINT: на маке нет timeout; каждый прогон обёрнут perl-alarm, чтобы
-# зависший node не молчал вечно -- молчание потока дороже отказа.
-RUN_TIMEOUT=420
-
-# Предмет: копия образа + конвейерная нейтрализация двух чтений флага тем же
-# форком (эквивалент patchExtraction + findExtractModeFlagCall на 278).
-# ПИН: ровно 2 вхождения -- extraction gate и extract-mode predicate; иное
-# число значит другой предмет, мерить им этим стендом нельзя.
-cp "${IMAGE}" "${WORKDIR}/subject"
-NEUT_RC=0
-perl -e 'alarm shift; exec @ARGV' "${RUN_TIMEOUT}" \
-  node "${FORK}" adhoc-patch \
-    --string 'P("tengu_passport_quail",!1)' '!0' \
-    -p "${WORKDIR}/subject" \
-    --confirm-possible-dangerous-patch > "${WORKDIR}/neutral.log" 2>&1 || NEUT_RC=$?
-if [[ "${NEUT_RC}" -ne 0 ]]; then
-  refuse "нейтрализация не применилась (rc=${NEUT_RC}): $(cat "${WORKDIR}/neutral.log")"
+# Предмет строит ОБЩИЙ дом рецепта tools/fixture-build.sh (#407): копия
+# образа + конвейерная нейтрализация двух чтений флага (эквивалент
+# patchExtraction + findExtractModeFlagCall на 278). ПИН «Replaced 2
+# occurrence(s)» и часовой прогона (perl-alarm) держит дом рецепта;
+# CONSTRAINT: вторая копия рецепта в стендe расходилась бы с домом молча
+# (Ф5 #407).
+BUILD_RC=0
+bash "${KIT}/tools/fixture-build.sh" neutralize "${IMAGE}" "${WORKDIR}/subject" \
+  > "${WORKDIR}/neutral.log" 2>&1 || BUILD_RC=$?
+if [[ "${BUILD_RC}" -ne 0 ]]; then
+  refuse "нейтрализация не построена (rc=${BUILD_RC}): $(cat "${WORKDIR}/neutral.log}")"
 fi
-grep -F -q 'Replaced 2 occurrence(s)' "${WORKDIR}/neutral.log" \
-  || refuse "нейтрализация легла не двумя заменами: $(grep -F 'Replaced' "${WORKDIR}/neutral.log")"
 
 # Мутация: замена с требованием ровно одного вхождения якоря в копии ПАТЧА.
 # Исчезнувший якорь (правка ушла вперёд) -- отказ прибора, не зелёный зуб.
@@ -138,15 +130,15 @@ open(dest, 'w', encoding='utf-8').write(text)
 PY
 }
 
-# Прогон копии патча по СВОЕЙ копии предмета; код и лог -- в глобальные.
+# Прогон копии патча по СВОЕЙ копии предмета -- общий дом рецепта
+# fixture-build.sh (apply); код и лог -- в глобальные, вывод прогона лежит
+# в run.$2.log.
 RUN_RC=0
 run_patch() {  # $1 script, $2 tag
-  cp "${WORKDIR}/subject" "${WORKDIR}/img.$2"
-  RUN_RC=0
-  perl -e 'alarm shift; exec @ARGV' "${RUN_TIMEOUT}" \
-    node "${FORK}" adhoc-patch \
-      --script "@$1" -p "${WORKDIR}/img.$2" \
-      --confirm-possible-dangerous-patch > "${WORKDIR}/run.$2.log" 2>&1 || RUN_RC=$?
+  BUILD_RC=0
+  bash "${KIT}/tools/fixture-build.sh" apply "$1" "${WORKDIR}/subject" \
+    "${WORKDIR}/img.$2" > "${WORKDIR}/run.$2.log" 2>&1 || BUILD_RC=$?
+  RUN_RC="${BUILD_RC}"
 }
 
 ok()  { PASSED=$((PASSED + 1)); printf '  ok     %s\n' "$1"; }

@@ -20,12 +20,15 @@ tweakcc восстанавливает свой бэкап поверх назв
 Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
   0  каждая мутация покраснела СВОЮ проверку и только её
   1  мутация прошла молча либо покрасила чужую дверь; сюда же зуб входа,
-     который не поймал нарушенный контракт вызова раннера
+     который не поймал нарушенный контракт вызова раннера, и зуб фазы
+     фикстуры (#407)
   2  прибор не может мерить: якорь пропал/слишком широк, замена длиннее якоря,
      либо КОНТРОЛЬ провален -- названный образ красен ещё до мутаций; сюда же
-     относится нарушенный контракт вызова: --jobs < 1 (круг 26, K-14)
+     относится нарушенный контракт вызова: --jobs < 1 (круг 26, K-14);
+     сюда же НЕ ИЗМЕРЕНО фазы фикстуры (#407)
   4  длина таблицы разошлась с объявленной (EXPECTED_MUTATIONS)
      либо число зубов входа разошлось с EXPECTED_ENTRY_TEETH
+     либо зубов фикстуры -- с EXPECTED_FIXTURE_TEETH (#407)
   3  замок конвейера держит живая сборка -- НЕ МЕРИЛИ, повтор поможет
   5  мерить нечего: на этой машине нет собранного образа
   6  сломано окружение либо машинерия замка: нет bash, нет
@@ -66,13 +69,21 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-# 35 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
+# 34 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
 # проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B) + 6 зубов
 # проекции базы корпусного стенда (docnum:other -- «шаг -> проверки» есть ИМЯ
 # карты, не счёт проверок конвейера; #403C) + 2 зуба порядка фаз входа и
 # мутаций (docnum:other -- «фазы» здесь порядок этапов прибора, не счёт
-# шагов конвейера; #408).
-EXPECTED_ENTRY_TEETH = 35
+# шагов конвейера; #408) - 3 зуба, ушедшие в фазу фикстуры (#407: предмет
+# СТРОИТСЯ, а не предполагается), + 2 зуба границы свёртки выходов фаз
+# (docnum:other -- #407 и Р6 есть номер задачи и решение её брифа, не счёт
+# зубов).
+EXPECTED_ENTRY_TEETH = 34
+# Зубы фазы фикстуры шага 26 (#407): идут ПОСЛЕ замка конвейера, предмет --
+# ПОСТРОЕННЫЙ образ «2.1.278 + шаг 26». 4 = 3 переведённых со входа (Р4)
+# + 1 зуб положительного контроля фикстуры (гейт #407); docnum:other --
+# Р4 и гейт #407 есть решения брифа задачи, не счётчики стенда.
+EXPECTED_FIXTURE_TEETH = 4
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -1455,6 +1466,25 @@ def _phase_skipped(code: int, why: str, entry_bad: int) -> int:
     """
     print(f"checks-teeth: {why}", file=sys.stderr)
     print(_unmeasured_line(why), flush=True)
+    # CONSTRAINT (#407): итог фазы фикстуры печатается ВСЕГДА -- фаза стоит
+    # ниже этих точек и не может исполниться, если проход ушёл здесь.
+    print(_fixture_unmeasured_line(why), flush=True)
+    return _phase_exit(code, entry_bad)
+
+
+def _phase_exit(code: int, entry_bad: int) -> int:
+    """Код точки выхода ПОСЛЕ итога входа: свёртка с объявленной границей (#407).
+
+    CONSTRAINT (Р6 #407): коды «НЕ ИЗМЕРЕНО» (2, 3, 5, 6) при красном входе
+    отдаются как 1 -- найденный дефект входа не имеет права уехать под код
+    «не мерили» (тот же класс подмены, что чинила #408). CONSTRAINT: код 4
+    НЕ сворачивается: расхождение набора с пином -- само найденный дефект
+    (недоверенная опись обесценивает счёты) и доминирует над красным входом;
+    асимметрия объявлена ЗДЕСЬ, а не побочным голым выходом. Причину точки
+    печатает вызывающий ПРЕЖНИМ текстом в обоих случаях.
+    """
+    if code == 4:
+        return 4
     return 1 if entry_bad else code
 
 
@@ -1536,6 +1566,212 @@ _PREDATES_MARK = "собран до версии-пола"
 _STALE_MARK = "запись пережила причину"
 _STEP26_CHECK = "dispatch-cancellation rule reaches the main loop"
 _STEP26_ROW = "26 dispatch-cancellation rule in the system prompt"
+
+
+# --- фаза фикстуры шага 26 (#407) ---------------------------------------------
+#
+# Предмет трёх зубов СТРОИТСЯ, а не предполагается: в живом 2.1.278 текста
+# правила нет (шаг выключен реестром ДО сборки, Ф1 #407), поэтому обе ветки
+# пола вердикта на живом образе недостижимы. Фикстура -- копия пристина
+# 2.1.278 с конвейерной нейтрализацией и ПРИМЕНЁННЫМ шагом 26 -- строится
+# общим домом рецепта tools/fixture-build.sh (механизм K1 разбора #407).
+FIXTURE_BUILDER = ROOT / "tools" / "fixture-build.sh"
+FIXTURE_FORK = (Path.home() / "work" / "SIB" / "Transmutation" / "Nexus" /
+                "Catalyst" / "Catalyst-tweakcc" / "dist" / "index.mjs")
+_FIXTURE_STATE: dict[str, object] = {}
+
+
+def _fixture_unmeasured_line(reason: str) -> str:
+    """Итог фазы фикстуры, которая не измерила свой предмет (#407).
+
+    CONSTRAINT: форма отлична от измеренной -- «не измерено» и «ноль» одной
+    строкой неразличимы (тот же класс, что у _unmeasured_line, #408).
+    """
+    return f"checks-teeth: ИТОГ фикстур=НЕ ИЗМЕРЕНО -- {reason}"
+
+
+def _fixture_missing_tool() -> str | None:
+    """Инструментарий фазы до его запуска: отсутствие -- НЕ ИЗМЕРЕНО, не отказ."""
+    if not FIXTURE_BUILDER.is_file():
+        return f"нет общего дома рецепта: {FIXTURE_BUILDER}"
+    if shutil.which("node") is None:
+        return "нет node для сборки фикстуры"
+    if not FIXTURE_FORK.is_file():
+        return f"нет форка для сборки фикстуры: {FIXTURE_FORK}"
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина для базы фикстуры: {PRISTINE_LATEST}"
+    if not (ROOT / "tweakcc-patch.js").is_file():
+        return f"нет патча для фикстуры: {ROOT / 'tweakcc-patch.js'}"
+    return None
+
+
+def _step26_fixture() -> tuple[Path | None, str | None]:
+    """Фикстура «2.1.278 + применённый шаг 26» (#407); (None, причина) -- не построена.
+
+    CONSTRAINT (Р2 #407): строится ОДИН раз за прогон, лениво -- только когда
+    фаза фикстуры исполняется; живёт в одном месте и убирается в конце фазы
+    (_fixture_cleanup). Две копии образа по ~218 МБ живут одновременно --
+    принято (Р2 #407).
+    """
+    cached = _FIXTURE_STATE.get("path")
+    if isinstance(cached, Path):
+        return cached, None
+    miss = _fixture_missing_tool()
+    if miss is not None:
+        return None, miss
+    td = Path(tempfile.mkdtemp(prefix="checks-teeth-fixture407."))
+    subject = td / "subject"
+    fixture = td / "fixture"
+    _FIXTURE_STATE["dir"] = td
+    r1 = subprocess.run(
+        ["bash", str(FIXTURE_BUILDER), "neutralize", str(PRISTINE_LATEST),
+         str(subject)], capture_output=True, text=True, errors="replace")
+    if r1.returncode != 0:
+        return None, ("нейтрализация не построена (rc=%d): %s" % (
+            r1.returncode, (r1.stderr or r1.stdout or "")[-400:]))
+    r2 = subprocess.run(
+        ["bash", str(FIXTURE_BUILDER), "apply", str(ROOT / "tweakcc-patch.js"),
+         str(subject), str(fixture)],
+        capture_output=True, text=True, errors="replace")
+    if r2.returncode != 0:
+        return None, ("шаг 26 не применён к фикстуре (rc=%d): %s" % (
+            r2.returncode, (r2.stderr or r2.stdout or "")[-400:]))
+    _FIXTURE_STATE["path"] = fixture
+    return fixture, None
+
+
+def _fixture_cleanup() -> None:
+    """Убрать предмет фазы (#407): каталог и состояние -- целиком."""
+    d = _FIXTURE_STATE.pop("dir", None)
+    _FIXTURE_STATE.pop("path", None)
+    if d is not None:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _step26_fixture_control(fixture: Path) -> str | None:
+    """Положительный контроль фикстуры: вердикт шага 26 дошёл до ВЕТКИ ПОЛА.
+
+    CONSTRAINT (Р3 #407): строка шага 26 в выводе обязана быть исходом ветки
+    пола -- при боевом реестре (пол 2.1.278 = версия образа) это отказ
+    stale, а при поле выше версии образа -- NOTE провенанса; NOTE выключения
+    означает, что правила в образе НЕТ -- сборка отдала НЕ-предмет. Контроль
+    не прошёл -- все зубы фазы уходят в НЕ ИЗМЕРЕНО с названной причиной:
+    молча зеленеть запрещено (ровно тот дефект, который чинит волна).
+    """
+    td, script, patch = _temp_kit()
+    try:
+        r = _run_checks(script, fixture, patch)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    out = (r.stdout or "") + (r.stderr or "")
+    if f"[FAIL] {_STEP26_CHECK}" in out and _STALE_MARK in out:
+        return None
+    if _PREDATES_MARK in out:
+        return None
+    if "шаг выключен" in out:
+        return ("вердикт шага 26 -- NOTE выключения: правила в образе нет, "
+                "фикстура не построена")
+    return "вердикт шага 26 не достиг ветки пола: " + (out or "вывод пуст")[-300:]
+
+
+def _fixture_phase(entry_bad: int) -> int:
+    """Фаза фикстуры шага 26 (#407): предмет СТРОИТСЯ, зубы идут по построенному.
+
+    CONSTRAINT (Р5 #407): фаза стоит ПОСЛЕ взятия замка конвейера -- она
+    строит и читает образ, а контрактом входной фазы («не зависеть от образа
+    и не занимать замок») это запрещено. Итог печатается ВСЕГДА, включая
+    «НЕ ИЗМЕРЕНО -- причина». Возврат: 1 -- найденный дефект; 4 -- разошёлся
+    пин набора (объявленная граница Р6: доминирует); 2 -- НЕ ИЗМЕРЕНО;
+    0 -- измерено и зелено.
+    """
+    fixture_teeth = (
+        ("steps-off-floor-predates", _tooth_steps_off_floor_predates),
+        ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
+        ("carrier-absent-texts-distinct", _tooth_carrier_absent_texts_distinct),
+        ("fixture-control-is-load-bearing", _tooth_fixture_control_is_load_bearing),
+    )
+    if len(fixture_teeth) != EXPECTED_FIXTURE_TEETH:
+        print(f"checks-teeth: ОТКАЗ -- зубов фикстуры {len(fixture_teeth)}, "
+              f"объявлено {EXPECTED_FIXTURE_TEETH}", file=sys.stderr)
+        return 4
+    fixture, why = _step26_fixture()
+    ctrl = None
+    if fixture is not None:
+        try:
+            ctrl = _step26_fixture_control(fixture)
+        except Refusal as exc:
+            ctrl = str(exc)
+        if ctrl is not None:
+            why = f"положительный контроль фикстуры: {ctrl}"
+    bad = 0
+    unmeasured = 0
+    for name, fn in fixture_teeth:
+        if fixture is None or ctrl is not None:
+            unmeasured += 1
+            print(f"checks-teeth: ФИКСТУРА {name}: НЕ ИЗМЕРЕНО -- {why}",
+                  flush=True)
+            continue
+        try:
+            reason = fn(fixture)
+        except Refusal as exc:
+            unmeasured += 1
+            print(f"checks-teeth: ФИКСТУРА {name}: НЕ ИЗМЕРЕНО -- {exc}",
+                  flush=True)
+            continue
+        if reason:
+            bad += 1
+            print(f"checks-teeth: ФИКСТУРА {name}: ПРОШЛА МОЛЧА -- {reason}",
+                  flush=True)
+        else:
+            print(f"checks-teeth: ФИКСТУРА {name}: OK", flush=True)
+    _fixture_cleanup()
+    if unmeasured and not bad:
+        print(_fixture_unmeasured_line(why), flush=True)
+        return _phase_exit(2, entry_bad)
+    print(f"checks-teeth: ИТОГ фикстур={len(fixture_teeth)} "
+          f"молча/неверно={bad} не измерено={unmeasured}", flush=True)
+    return 1 if bad else 0
+
+
+def _tooth_fixture_control_is_load_bearing(_fixture: Path) -> str | None:
+    """Положительный контроль фикстуры -- несущий, не декорация (гейт #407).
+
+    Сборка, отдающая образ БЕЗ целого правила, обязана увести ВСЕ зубы фазы
+    в НЕ ИЗМЕРЕНО с названной причиной -- а не зелёный и не «ПРОШЛА МОЛЧА».
+    Контроль обязан падать на пристине (правила там нет -- Ф1 #407), а фаза
+    с такой «сборкой» -- не мерить. Предмет фикстуры самому зубу не нужен:
+    он мерит контроль, а не правило. Рекурсии нет: зуб фазы вызывается
+    только после прошедшего контроля, а здесь контроль падает ДО зубов.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина для плеча контроля: {PRISTINE_LATEST}"
+    try:
+        ctrl = _step26_fixture_control(PRISTINE_LATEST)
+    except Refusal as exc:
+        return f"контроль на пристине отказал прибором: {exc}"
+    if ctrl is None:
+        return "контроль зелёнет на образе БЕЗ целого правила -- вакуумный"
+    saved = dict(_FIXTURE_STATE)
+    _FIXTURE_STATE.clear()
+    _FIXTURE_STATE["path"] = PRISTINE_LATEST
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            code = _fixture_phase(0)
+        out = buf.getvalue()
+    finally:
+        _FIXTURE_STATE.clear()
+        _FIXTURE_STATE.update(saved)
+    if "ПРОШЛА МОЛЧА" in out:
+        return f"фаза с образом без правила измерила зубы: rc={code}: {out!r}"
+    for name in ("steps-off-floor-predates", "steps-off-floor-from-registry",
+                 "carrier-absent-texts-distinct", "fixture-control-is-load-bearing"):
+        if f"ФИКСТУРА {name}: НЕ ИЗМЕРЕНО" not in out:
+            return f"зуб {name} не назван в исходе НЕ ИЗМЕРЕНО: {out!r}"
+    if "положительный контроль фикстуры" not in out:
+        return f"причина НЕ ИЗМЕРЕНО не названа: {out!r}"
+    return None
+
 
 # --- зубы карты шагов (docnum:other -- «шаг -> проверки» есть ИМЯ карты; #403B) -------------------------------------
 # Гейт карты обязан отличать отказ СВОЙ (код 3: запись без строки карты) от
@@ -1679,31 +1915,33 @@ def _tooth_kit_steps_off_src() -> str | None:
     return None
 
 
-def _tooth_steps_off_floor_predates() -> str | None:
-    """Ветвь predates жива на активном образе (#373). None -- зуб зелёный.
+def _tooth_steps_off_floor_predates(fixture: Path) -> str | None:
+    """Ветвь predates жива на ПОСТРОЕННОМ предмете (#373, #407).
 
-    Активный образ собран ДО решения выключить шаг (правило в нём целое по
-    праву), и вердикт обязан быть NOTE провенанса, а не отказ stale. Мутация
-    гасит сравнение версий -- ветвь недостижима, прогон обязан покраснеть;
-    мутация не покраснела -- зуб отдаёт причину.
+    CONSTRAINT (#407): прежняя посылка «активный образ собран ДО решения
+    выключить шаг -- правило в нём целое по праву» мертва: в живом 2.1.278
+    правила НЕТ (шаг выключен реестром до сборки, Ф1), и обе ветки пола были
+    недостижимы. Предмет СТРОИТСЯ: фикстура «пристин + шаг 26» с полом,
+    перестеленным выше версии образа, -- вердикт обязан быть NOTE провенанса,
+    а не отказом stale. Мутация гасит сравнение версий -- ветвь недостижима,
+    прогон обязан покраснеть; мутация не покраснела -- зуб отдаёт причину.
     """
-    image = default_image()
-    if image is None or not image.is_file():
-        return "нет активного образа -- плечу predates нечего мерить"
-    td, script, patch = _temp_kit()
+    mtd, mscript, mpatch = _temp_kit()
     try:
-        r = _run_checks(script, image, patch)
+        _kit_registry_refloor(mtd, "2.1.999")
+        r = _run_checks(mscript, fixture, mpatch)
         out = (r.stdout or "") + (r.stderr or "")
         if _PREDATES_MARK not in out:
-            return f"на живом образе нет NOTE провенанса «{_PREDATES_MARK}»"
+            return f"на фикстуре с перестеленным полом нет NOTE провенанса «{_PREDATES_MARK}»"
         if f"[FAIL] {_STEP26_CHECK}" in out:
             return "NOTE провенанса напечатан ВМЕСТЕ с [FAIL] проверки шага 26"
     finally:
-        shutil.rmtree(td, ignore_errors=True)
+        shutil.rmtree(mtd, ignore_errors=True)
     mtd, mscript, mpatch = _temp_kit(
         script_repl=(FLOOR_PREDATES_ANCHOR, FLOOR_PREDATES_REPL))
     try:
-        mr = _run_checks(mscript, image, mpatch)
+        _kit_registry_refloor(mtd, "2.1.999")
+        mr = _run_checks(mscript, fixture, mpatch)
         mout = (mr.stdout or "") + (mr.stderr or "")
         if f"[FAIL] {_STEP26_CHECK}" not in mout:
             return "мутация не сняла сравнение версий: [FAIL] шага 26 не вернулся"
@@ -1725,26 +1963,26 @@ def _kit_registry_refloor(td: Path, floor: str) -> None:
     p.write_text(text[:m.start(1)] + floor + text[m.end(1):], encoding="utf-8")
 
 
-def _tooth_steps_off_floor_from_registry() -> str | None:
-    """Версия-пол читается ИЗ РЕЕСТРА, а не зашита литералом в коде (#373).
+def _tooth_steps_off_floor_from_registry(fixture: Path) -> str | None:
+    """Версия-пол читается ИЗ РЕЕСТРА, а не зашита литералом в коде (#373, #407).
 
     Класс «якорь, заморозивший чужое число»: зашитый в коде пол не видел бы
-    правки реестра. Низкий пол обязан покраснить прогон (пол больше не
-    оправдывает образ), высокий -- вернуть NOTE провенанса; оба плеча схожи
-    при зашитом поле -- зуб отдаёт причину.
+    правки реестра. CONSTRAINT (#407): оба плеча идут на ПОСТРОЕННОЙ фикстуре
+    «пристин + шаг 26» -- на живом образе правила нет и плечам нечего мерить
+    (Ф1). Низкий пол обязан покраснить прогон (пол больше не оправдывает
+    образ), высокий -- вернуть NOTE провенанса; при зашитом поле схожи оба
+    плеча -- зуб отдаёт причину, и текст «пол не читается из реестра»
+    достижим ТОЛЬКО когда пол действительно не читается.
     """
     home = ROOT / "tools" / "our-steps-off.txt"
     if not re.search(r"(?m)^" + re.escape(_STEP26_ROW) + r"\t[0-9][0-9.]*\t",
                      home.read_text(encoding="utf-8")):
         return "дом реестра не несёт версию-пол вторым полем строки шага 26"
-    image = default_image()
-    if image is None or not image.is_file():
-        return "нет активного образа -- плечам пола нечего мерить"
     for floor, want_fail in (("2.1.200", True), ("2.1.999", False)):
         td, script, patch = _temp_kit()
         try:
             _kit_registry_refloor(td, floor)
-            r = _run_checks(script, image, patch)
+            r = _run_checks(script, fixture, patch)
             out = (r.stdout or "") + (r.stderr or "")
             failed = f"[FAIL] {_STEP26_CHECK}" in out
             if want_fail:
@@ -2325,19 +2563,17 @@ def _tooth_carrier_absent_missing_file_is_norm() -> str | None:
     return None
 
 
-def _tooth_carrier_absent_texts_distinct() -> str | None:
-    """Тексты трёх NOTE и отказа carrier -- РАЗЛИЧНЫ (#389).
+def _tooth_carrier_absent_texts_distinct(fixture: Path) -> str | None:
+    """Тексты трёх NOTE и отказа carrier -- РАЗЛИЧНЫ (#389, #407).
 
     Прогоны: выключение -- носитель работает в контролируемом доме;
-    провенанс -- активный образ с целым правилом; объявленное отсутствие --
-    пристин с полным объявлением. Мутация сводит формат нового NOTE к
+    провенанс -- ПОСТРОЕННАЯ фикстура «пристин + шаг 26» с перестеленным
+    полем (живой образ правила не несёт -- Ф1 #407); объявленное отсутствие
+    -- пристин с полным объявлением. Мутация сводит формат нового NOTE к
     формату NOTE выключения -- исходы одной строкой, зуб краснеет.
     """
     if not PRISTINE_LATEST.is_file():
         return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
-    image = default_image()
-    if image is None or not image.is_file():
-        return "нет активного образа -- плечу провенанса нечего мерить"
     site = _kit_carrier_site()
     with _carrier_pins({"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
                         "CLAUDE_JUDGE_CARRIER": "mod", "CLAUDE_JUDGE": "1"}):
@@ -2364,7 +2600,8 @@ def _tooth_carrier_absent_texts_distinct() -> str | None:
     note_mut = _step26_note_line(rm.stdout or "")
     td, script, patch = _temp_kit()
     try:
-        rc_ = _run_checks(script, image, patch)
+        _kit_registry_refloor(td, "2.1.999")
+        rc_ = _run_checks(script, fixture, patch)
     finally:
         shutil.rmtree(td, ignore_errors=True)
     note_predates = _step26_note_line(rc_.stdout or "")
@@ -3846,6 +4083,161 @@ def _tooth_phases_unmeasured_mutation_is_not_zero() -> str | None:
     return None
 
 
+# --- зубы границы свёртки выходов фаз (docnum:other -- #407 и Р6 есть номер
+# задачи и решение её брифа, не счёт зубов) ------------------------------------
+#
+# Предмет -- приоритет кодов ПОСЛЕ итога входа: отказ прибора (2) не имеет
+# права маскировать красный вход, а расхождение набора с пином (4) доминирует
+# над обоими -- и это ОБЪЯВЛЕННАЯ граница _phase_exit, не побочный голый код.
+_PHASE_EXIT_BOUNDARY = "    if code == 4:\n        return 4\n"
+_PHASES407_STUB_RUNNER = "# stub: достаточно существования двери раннера\n"
+# Якорь пина мутаций собирается конкатенацией: цельный литерал в теле зуба
+# дал бы третье вхождение в снимок (определение + два кита зуба), и
+# _once_replace отказал бы на снимке, а не на предмете зуба.
+_PHASES407_PIN_OLD = "EXPECTED_MUTATIONS = " + "13"
+_PHASES407_PIN_NEW = "EXPECTED_MUTATIONS = " + "12"
+_PHASES407_RED_CALL = (
+    "    for name, fn in entry_teeth:\n"
+    '        reason = ("мутация снимка: единственный красный вход"\n'
+    '                  if name == "single-registry-names-one-cause" '
+    "else None)")
+# Якорь свёртки для приманки зуба refusal-does-not-mask-entry: код 2
+# возвращается к голому выходу -- красный вход снова маскируется.
+_PHASES407_BAIT_UNMASK_2 = ("    if code == 4:\n        return 4\n",
+                            "    if code in (2, 4):\n        return code\n")
+# Якорь свёртки для приманки зуба pin-mismatch-outranks-entry: код 4
+# сворачивается в приоритет входа -- недоверенная опись уехала бы под дефект.
+_PHASES407_BAIT_COLLAPSE_4 = ("    if code == 4:\n        return 4\n",
+                              "    if False:\n        return 4\n")
+
+
+def _phases407_kit(entry_new: str,
+                   extra: tuple[tuple[str, str, str], ...] = (),
+                   *, with_script: bool = False):
+    """Снимок прибора для зубов Р6: копия в <td>/tools/ + заглушка раннера.
+
+    Заглушка раннера проводит снимок до точек выхода мутационной фазы, не
+    давая ей мерить; реальная таблица копируется целиком -- точки выхода
+    стоят после её чтения. with_script добавляет конвейер и дом правила
+    heredoc: двери реестра полей нужен AST исходника. CONSTRAINT: снимок не
+    читает живой образ (--image указывает на заглушку) и не занимает замок
+    конвейера (личный CLAUDE_PATCH_LOCK) -- контракт входной фазы цел.
+    """
+    td, copy = _phases_kit(entry_new, extra)
+    tools = td / "tools"
+    (tools / "checks-on-image.sh").write_text(_PHASES407_STUB_RUNNER,
+                                              encoding="utf-8")
+    shutil.copy2(TABLE, tools / "checks-mutations.tsv")
+    if with_script:
+        shutil.copy2(ROOT / "claude-patch-all.sh", td / "claude-patch-all.sh")
+        shutil.copy2(ROOT / "tools" / "heredoc-anchor.py",
+                     tools / "heredoc-anchor.py")
+        # CONSTRAINT: дверь реестра полей резолвит ключ через канал карты --
+        # модуль разбора и сама карта обязаны ехать в снимок, иначе дверь
+        # отказывает прибором ДО точки выхода, которую меряет зуб.
+        shutil.copy2(ROOT / "tools" / "step-checks.py", tools / "step-checks.py")
+        shutil.copy2(ROOT / "tools" / "our-step-checks.txt",
+                     tools / "our-step-checks.txt")
+    return td, copy
+
+
+def _phases407_run(copy: Path, td: Path,
+                   *extra_args: str) -> subprocess.CompletedProcess:
+    stub = Path(td) / "stub-image"
+    stub.write_bytes(b"stub\n")
+    env = dict(os.environ)
+    env["CLAUDE_PATCH_LOCK"] = str(Path(td) / "private.lock")
+    return subprocess.run(
+        [sys.executable, str(copy), "--image", str(stub), *extra_args],
+        capture_output=True, text=True, errors="replace", env=env)
+
+
+def _tooth_phases_refusal_does_not_mask_entry() -> str | None:
+    """Отказ прибора (2) после итога входа не маскирует красный вход (Р6 #407).
+
+    Снимок с единственным красным входом и отказом разбора --id обязан дать
+    rc=1 (найденный дефект важнее «не измерено»), а причина отказа --
+    остаться напечатанной. Приманка возвращает коду 2 голый выход -- вход
+    снова маскируется, зуб краснеет.
+    """
+    td, copy = _phases407_kit(_PHASES407_RED_CALL)
+    try:
+        r = _phases407_run(copy, td, "--id", "ZZZ")
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 1:
+            return (f"красный вход + отказ прибора обязан давать rc=1: "
+                    f"rc={r.returncode} {out!r}")
+        if "ОТКАЗ ПРИБОРА" not in out or "нет таких строк" not in out:
+            return f"причина отказа не напечатана: {out!r}"
+        if "ИТОГ вход=" not in out or "молча/неверно=1" not in out:
+            return f"входной итог не «ровно один красный»: {out!r}"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    td, copy = _phases407_kit(
+        _PHASES407_RED_CALL,
+        ((_PHASES407_BAIT_UNMASK_2[0], _PHASES407_BAIT_UNMASK_2[1],
+          "зуб Р6: код 2 снова не сворачивается"),))
+    try:
+        m = _phases407_run(copy, td, "--id", "ZZZ")
+        mout = (m.stdout or "") + (m.stderr or "")
+        # Приманка обязана ВОССТАНОВИТЬ маскирование (голый код 2) -- этот
+        # исход ловится сценарием выше; иное значит, что якорь приманки мёртв.
+        if m.returncode != 2:
+            return (f"приманка не вернула голый код 2 -- якорь устарел, "
+                    f"зуб мёртв: rc={m.returncode} {mout!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_phases_pin_mismatch_outranks_entry() -> str | None:
+    """Расхождение набора с пином (4) доминирует над красным входом (Р6 #407).
+
+    Красный вход + разошедшийся пин мутаций даёт rc=4 (docnum:other -- код
+    возврата прибора, не счёт стенда), а поведение
+    -- быть ОБЪЯВЛЕННОЙ границей _phase_exit («код 4 не сворачивается»), не
+    побочным голым выходом: зуб проверяет и поведение, и присутствие границы
+    в коде прибора. Приманка сворачивает и код 4 -- rc падает до 1, зуб
+    краснеет.
+    """
+    own = Path(__file__).read_text(encoding="utf-8")
+    if own.count(_PHASE_EXIT_BOUNDARY) != 1:
+        return ("граница «код 4 не сворачивается» не объявлена в коде "
+                "прибора -- доминирование пина побочно")
+    td, copy = _phases407_kit(
+        _PHASES407_RED_CALL,
+        ((_PHASES407_PIN_OLD, _PHASES407_PIN_NEW,
+          "зуб Р6: пин мутаций разошёлся"),),
+        with_script=True)
+    try:
+        r = _phases407_run(copy, td)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 4:
+            return (f"красный вход + расхождение пина обязаны давать rc=4: "
+                    f"rc={r.returncode} {out!r}")
+        if "ОТКАЗ -- мутаций" not in out or "объявлено 12" not in out:
+            return f"причина расхождения пина не напечатана: {out!r}"
+        if "ИТОГ вход=" not in out or "молча/неверно=1" not in out:
+            return f"входной итог не «ровно один красный»: {out!r}"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    td, copy = _phases407_kit(
+        _PHASES407_RED_CALL,
+        ((_PHASES407_PIN_OLD, _PHASES407_PIN_NEW,
+          "зуб Р6: пин мутаций разошёлся"),
+         (_PHASES407_BAIT_COLLAPSE_4[0], _PHASES407_BAIT_COLLAPSE_4[1],
+          "зуб Р6: код 4 свёрнут в приоритет входа")),)
+    try:
+        m = _phases407_run(copy, td)
+        mout = (m.stdout or "") + (m.stderr or "")
+        if m.returncode != 1:
+            return (f"приманка не свернула код 4 в приоритет входа -- якорь "
+                    f"устарел, зуб мёртв: rc={m.returncode} {mout!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
 def self_check() -> int:
     """Герметичная самопроверка: без образа и замка.
 
@@ -3947,8 +4339,6 @@ def main() -> int:
         ("wrong-patch-src", _tooth_wrong_patch_src),
         ("real-patch-src", _tooth_real_patch_src),
         ("kit-steps-off-src", _tooth_kit_steps_off_src),
-        ("steps-off-floor-predates", _tooth_steps_off_floor_predates),
-        ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
         ("steps-off-arity-both-sides", _tooth_steps_off_arity_both_sides),
         ("steps-off-zero-rows-all-sides", _tooth_steps_off_zero_rows_all_sides),
         ("mutations-name-in-registry", _tooth_mutations_name_in_registry),
@@ -3963,7 +4353,6 @@ def main() -> int:
         ("carrier-absent-foreign-site", _tooth_carrier_absent_foreign_site),
         ("carrier-absent-parse-refuses", _tooth_carrier_absent_parse_refuses),
         ("carrier-absent-missing-file-is-norm", _tooth_carrier_absent_missing_file_is_norm),
-        ("carrier-absent-texts-distinct", _tooth_carrier_absent_texts_distinct),
         ("step-checks-unmapped-step-refuses", _tooth_step_checks_unmapped_step_refuses),
         ("step-checks-mapped-step-passes", _tooth_step_checks_mapped_step_passes),
         ("step-checks-dash-is-declared-empty", _tooth_step_checks_dash_is_declared_empty),
@@ -3981,6 +4370,10 @@ def main() -> int:
          _tooth_phases_entry_red_keeps_mutation_summary),
         ("phases-unmeasured-mutation-is-not-zero",
          _tooth_phases_unmeasured_mutation_is_not_zero),
+        ("phases-refusal-does-not-mask-entry",
+         _tooth_phases_refusal_does_not_mask_entry),
+        ("phases-pin-mismatch-outranks-entry",
+         _tooth_phases_pin_mismatch_outranks_entry),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
@@ -4041,7 +4434,7 @@ def main() -> int:
         picked = pick_ids(opts.id, {r["id"] for r in rows})
     except Refusal as exc:
         print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-        return 2
+        return _phase_exit(2, entry_bad)
     # Дверь реестра: имена полей 2 и 6 обязаны существовать в checks
     # конвейера (docnum:other -- номера КОЛОНОК таблицы, не счётчики кита).
     # Стоит ДО мутационной фазы и не зависит от --id: таблица -- цельный
@@ -4050,21 +4443,29 @@ def main() -> int:
         check_row_names(rows, set(_pipeline_check_names()))
     except Refusal as exc:
         print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-        return 2
+        return _phase_exit(2, entry_bad)
     n_img = sum(1 for r in rows if r["kind"] in ("literal", "derived"))
     n_inapp = sum(1 for r in rows if r["kind"] == "inapplicable")
     n_other = len(rows) - n_img - n_inapp
     if n_other:
         print(f"checks-teeth: ОТКАЗ -- неизвестный kind у {n_other} строк",
               file=sys.stderr)
-        return 4
+        return _phase_exit(4, entry_bad)
     if n_img != EXPECTED_MUTATIONS:
         print(f"checks-teeth: ОТКАЗ -- мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}",
               file=sys.stderr)
-        return 4
+        return _phase_exit(4, entry_bad)
     if n_inapp != EXPECTED_INAPPLICABLE_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов неприменимости {n_inapp}, "
               f"объявлено {EXPECTED_INAPPLICABLE_TEETH}", file=sys.stderr)
+        return _phase_exit(4, entry_bad)
+
+    # CONSTRAINT (#407, Р5): зубы фикстуры идут ПОСЛЕ замка конвейера: они
+    # строят и читают образ, а контрактом входной фазы («не зависеть от
+    # образа и не занимать замок») это запрещено. Код 4 пина фазы --
+    # объявленная граница (Р6): доминирует и не сворачивается.
+    fx_code = _fixture_phase(entry_bad)
+    if fx_code == 4:
         return 4
 
     # CONSTRAINT (#335): громкий отказ стреляет в области действия и не шире.
@@ -4095,13 +4496,13 @@ def main() -> int:
             red, _ = reds(image)
         except Refusal as exc:
             print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-            return 2
+            return _phase_exit(2, entry_bad)
         if red:
             print("checks-teeth: КОНТРОЛЬ ПРОВАЛЕН -- образ красен ещё до мутаций:",
                   file=sys.stderr)
             for name in red:
                 print("    " + name, file=sys.stderr)
-            return 2
+            return _phase_exit(2, entry_bad)
         print(f"checks-teeth: КОНТРОЛЬ без мутации: ЗЕЛЁНО ({image})", flush=True)
         base = image.read_bytes()
     else:
@@ -4146,7 +4547,7 @@ def main() -> int:
         # объявлял бы красным китом сломанный прибор.
         print("checks-teeth: НЕ МЕРИЛ -- воркер умер (SIGKILL/OOM), "
               "мутации не измерены", file=sys.stderr, flush=True)
-        return 2
+        return _phase_exit(2, entry_bad)
 
     measured_inapp = 0
     for row in inapp_rows:
@@ -4195,9 +4596,17 @@ def main() -> int:
     lock.close()                       # замок снимается ПОСЛЕ последнего замера
     # CONSTRAINT (#408): дефект входной фазы стоит в приоритете дефектов
     # мутаций -- зелёная мутационная фаза не имеет права затереть красный
-    # вход (1 > 9 > 0); «не измерено» сюда не доходит -- оно вернулось выше
-    # своим кодом.
-    return exit_code(bad or entry_bad, len(refused))
+    # вход; «не измерено» мутаций сюда не доходит -- оно вернулось выше
+    # своим кодом. CONSTRAINT (#407, Р5): приоритет итогов расширен на фазу
+    # фикстуры без перестройки старых ступеней: найденный дефект (1) >
+    # отказ прибора (9) > «не измерено» фазы фикстуры (2) > чистый ноль.
+    if bad or entry_bad or fx_code == 1:
+        return 1
+    if refused:
+        return 9
+    if fx_code == 2:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
