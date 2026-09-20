@@ -42,7 +42,10 @@ tweakcc восстанавливает свой бэкап поверх назв
 from __future__ import annotations
 
 import argparse
+import ast
+import contextlib
 import fcntl
+import functools
 import glob
 import importlib.util
 import io
@@ -60,13 +63,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 32
+EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-EXPECTED_ENTRY_TEETH = 6
+EXPECTED_ENTRY_TEETH = 7
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
-# README/D37 разъедется с таблицей, а README этой волне править нельзя.
+# README/D37 разъедется с таблицей.
 EXPECTED_INAPPLICABLE_TEETH = 8
 ID = rb"[A-Za-z_$][A-Za-z0-9_$]*"
 # Приманка кладётся ЗАВЕДОМО вне окна (оно +-20000 байт в обе стороны): так мутация
@@ -104,17 +107,128 @@ def default_image() -> Path | None:
     return None
 
 
-def read_table() -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for line in io.open(TABLE, encoding="utf-8"):
+def read_table() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for ln, line in enumerate(io.open(TABLE, encoding="utf-8"), 1):
         if line.startswith("#") or not line.strip():
             continue
         parts = line.rstrip("\n").split("\t")
         if len(parts) != 8:
-            raise Refusal(f"строка таблицы не из восьми полей: {parts[:2]}")
-        rows.append(dict(zip(("id", "check", "kind", "anchor", "repl", "also", "expect", "note"),
-                             parts)))
+            raise Refusal(f"строка {ln} таблицы не из восьми полей: {parts[:2]}")
+        row: dict[str, object] = dict(zip(("id", "check", "kind", "anchor", "repl",
+                                           "also", "expect", "note"), parts))
+        row["lineno"] = ln
+        rows.append(row)
     return rows
+
+
+@functools.lru_cache(maxsize=1)
+def _pipeline_check_names() -> frozenset[str]:
+    """Имена реестра checks конвейера: AST-разбором, не регуляркой.
+
+    CONSTRAINT: тело heredoc достаётся ЕДИНСТВЕННЫМ домом правила
+    tools/heredoc-anchor.py (загрузка importlib по образцу стадии сверки
+    конвейера) -- местная копия правила уже расходилась с домом (волна 230).
+    Ключи словаря читаются обходом ast.Dict; ключ-ast.Name резолвится
+    присваиванием строковой константы в ТОМ ЖЕ теле. Регуляркой ключи не
+    достаются: комментарий у EXPECTED_CHECKS фиксирует два неверных
+    пересчёта регуляркой, ломавшейся на экранированном апострофе внутри
+    `current turn is the judge\'s alone`. Неразрешённый ключ -- отказ
+    прибора: имя-призрак проскочил бы дверь молча.
+    """
+    anchor_path = ROOT / "tools" / "heredoc-anchor.py"
+    spec = importlib.util.spec_from_file_location(
+        "checks_teeth_heredoc_anchor", str(anchor_path))
+    if spec is None or spec.loader is None:
+        raise Refusal(f"дом правила heredoc не загружается: {anchor_path}")
+    anchor = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(anchor)
+    except Exception as exc:
+        raise Refusal(f"дом правила heredoc не исполняется: {exc}") from exc
+    victim = ROOT / "claude-patch-all.sh"
+    if not victim.is_file():
+        raise Refusal(f"нет конвейера для реестра checks: {victim}")
+    found: list[tuple[ast.Module, ast.Dict]] = []
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-registry.") as td:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = anchor.bodies(str(victim), td)
+        if rc != 0:
+            raise Refusal(f"тела heredoc конвейера не извлекаются: rc={rc}")
+        try:
+            count = int(buffer.getvalue().strip())
+        except ValueError as exc:
+            raise Refusal(f"дом правила не назвал число тел: {buffer.getvalue()!r}") from exc
+        for i in range(1, count + 1):
+            body_path = Path(td) / ("body.%d.py" % i)
+            try:
+                tree = ast.parse(body_path.read_text(encoding="utf-8"))
+            except SyntaxError as exc:
+                raise Refusal(f"тело heredoc №{i} не разбирается как Python: {exc}") from exc
+            for node in tree.body:
+                if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)
+                        and node.targets[0].id == "checks"
+                        and isinstance(node.value, ast.Dict)):
+                    found.append((tree, node.value))
+    if len(found) != 1:
+        raise Refusal(f"словарь checks в телах конвейера найден {len(found)} раз -- ждём ровно один")
+    tree, dic = found[0]
+    consts: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            consts[node.targets[0].id] = node.value.value
+    names: set[str] = set()
+    for key in dic.keys:
+        if key is None:
+            raise Refusal("ключ checks -- распаковка **без имени: реестр не перечислим")
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            names.add(key.value)
+        elif isinstance(key, ast.Name):
+            if key.id not in consts:
+                raise Refusal(f"ключ checks {key.id} не разрешается строковой константой "
+                              f"в том же теле: {ast.dump(key)}")
+            names.add(consts[key.id])
+        else:
+            raise Refusal(f"ключ checks не строка и не имя: {ast.dump(key)}")
+    if not names:
+        raise Refusal("реестр checks конвейера извлечён пустым")
+    return frozenset(names)
+
+
+def check_row_names(rows: list[dict[str, object]], registry: set[str]) -> None:
+    """Дверь реестра: имена полей 2 и 6 таблицы обязаны существовать в checks.
+
+    CONSTRAINT: поле 6 покрыто наравне с полем 2 -- «ещё одна ожидаемая
+    красная», которой нет в реестре, тихо ослабляла бы зуб до одной двери.
+    Отказы двух полей несут РАЗНЫЕ тексты: два отказа одной строкой
+    неразличимы. Id обязан быть уникален: реестр без уникальности ключа
+    читается не так, как правится.
+    """
+    problems: list[str] = []
+    seen: dict[str, int] = {}
+    for row in rows:
+        rid = str(row["id"])
+        ln = int(row["lineno"])
+        if rid in seen:
+            problems.append(f"строка {ln} ({rid}): id уже объявлен строкой {seen[rid]}")
+        else:
+            seen[rid] = ln
+        check = str(row["check"])
+        if check not in registry:
+            problems.append(f"строка {ln} ({rid}): поле 2: имя проверки «{check}» "
+                            f"вне реестра checks конвейера")
+        for name in str(row.get("also", "")).split(";"):
+            name = name.strip()
+            if name and name not in registry:
+                problems.append(f"строка {ln} ({rid}): поле 6: имя ещё-красной «{name}» "
+                                f"вне реестра checks конвейера")
+    if problems:
+        raise Refusal("\n".join(problems))
 
 
 def edits_literal(base: bytes, row: dict[str, str]) -> list[tuple[int, bytes]]:
@@ -1454,6 +1568,93 @@ def _tooth_empty_pick_refuses() -> str | None:
     return None
 
 
+_GHOST_CHECK = "a ghost check that exists nowhere"
+
+# Якорь мутации зуба mutations-name-in-registry: ветвь поля 6 двери.
+# Мутация гасит её безусловным continue -- копия прибора перестаёт видеть
+# призрак в поле 6, и ловит это только плечо зуба, мерящее поле 6.
+NAME_DOOR_FIELD6_ANCHOR = (
+    "        for name in str(row.get(\"also\", \"\")).split(\";\"):\n"
+    "            name = name.strip()\n"
+    "            if name and name not in registry:\n"
+)
+NAME_DOOR_FIELD6_REPL = (
+    "        for name in str(row.get(\"also\", \"\")).split(\";\"):\n"
+    "            name = name.strip()\n"
+    "            continue\n"
+    "            if name and name not in registry:\n"
+)
+
+
+def _tooth_mutations_name_in_registry() -> str | None:
+    """Дверь реестра имён пинит ОБА поля таблицы. None -- зуб зелёный.
+
+    Ветвь поля 6 мерится и на мутации самой двери: копия прибора с погашенной
+    ветвью поля 6 обязана перестать отказывать на призраке в поле 6 -- иначе
+    зуб зелоне и на двери, знающей одно поле. Положительный контроль --
+    живая таблица: дверь, краснеющая всегда, ничего не пинит.
+    """
+    try:
+        registry = set(_pipeline_check_names())
+    except Refusal as exc:
+        return f"реестр checks конвейера не читается: {exc}"
+    live = sorted(registry)[0]
+    base = {"id": "G1", "kind": "literal", "anchor": "A", "repl": "B",
+            "also": "", "expect": "1", "lineno": 7}
+    row2 = dict(base, check=_GHOST_CHECK)
+    try:
+        check_row_names([row2], registry)
+    except Refusal as exc:
+        t2 = str(exc)
+        if "строка 7" not in t2 or _GHOST_CHECK not in t2 or "поле 2" not in t2:
+            return f"отказ поля 2 не назвал строку, поле и имя: {t2!r}"
+    else:
+        return "имя-призрак в поле 2 прошло дверь молча"
+    row6 = dict(base, check=live, also=_GHOST_CHECK)
+    try:
+        check_row_names([row6], registry)
+    except Refusal as exc:
+        t6 = str(exc)
+        if "строка 7" not in t6 or _GHOST_CHECK not in t6 or "поле 6" not in t6:
+            return f"отказ поля 6 не назвал строку, поле и имя: {t6!r}"
+        if t6 == t2:
+            return "отказы поля 2 и поля 6 неразличимы"
+    else:
+        return "имя-призрак в поле 6 прошло дверь молча"
+    dup = [dict(base, check=live, lineno=7), dict(base, check=live, lineno=8)]
+    try:
+        check_row_names(dup, registry)
+    except Refusal as exc:
+        if "строка 8" not in str(exc) or "G1" not in str(exc):
+            return f"дубль id не назвал строку и id: {exc!r}"
+    else:
+        return "дубль id прошёл дверь молча"
+    own = Path(__file__).read_text(encoding="utf-8")
+    mutated = _once_replace(own, NAME_DOOR_FIELD6_ANCHOR, NAME_DOOR_FIELD6_REPL,
+                            "зуб: ветвь поля 6 двери")
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-namedoor.") as raw:
+        mod = Path(raw) / "checks-teeth-mutated.py"
+        mod.write_text(mutated, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "checks_teeth_mutated_namedoor", mod)
+        mut = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mut)
+        try:
+            mut.check_row_names([row6], registry)
+        except Refusal:
+            return "копия без ветви поля 6 всё ещё отказывает на призраке поля 6"
+    try:
+        rows = read_table()
+    except Refusal as exc:
+        return f"живая таблица не читается: {exc}"
+    try:
+        check_row_names(rows, registry)
+    except Refusal as exc:
+        return (f"дверь красна на живой таблице -- реестр без призраков "
+                f"обязан молчать: {exc}")
+    return None
+
+
 def self_check() -> int:
     """Герметичная самопроверка: без образа и замка.
 
@@ -1512,6 +1713,7 @@ def self_check() -> int:
         ("вне-области-отказа-нет", _tooth_no_refusal_same_outcome),
         ("код-7-занят-апстримом", _tooth_seven_is_upstream),
         ("пустой-выбор-отказывает", _tooth_empty_pick_refuses),
+        ("имена-обоих-полей-в-реестре", _tooth_mutations_name_in_registry),
     )
     for name, fn in teeth:
         reason = fn()
@@ -1557,6 +1759,7 @@ def main() -> int:
         ("steps-off-floor-predates", _tooth_steps_off_floor_predates),
         ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
         ("steps-off-arity-both-sides", _tooth_steps_off_arity_both_sides),
+        ("mutations-name-in-registry", _tooth_mutations_name_in_registry),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
@@ -1612,6 +1815,14 @@ def main() -> int:
         return 2
     try:
         picked = pick_ids(opts.id, {r["id"] for r in rows})
+    except Refusal as exc:
+        print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
+        return 2
+    # Дверь реестра: имена полей 2 и 6 обязаны существовать в checks конвейера.
+    # Стоит ДО мутационной фазы и не зависит от --id: таблица -- цельный
+    # документ, а не набор выбранных строк.
+    try:
+        check_row_names(rows, set(_pipeline_check_names()))
     except Refusal as exc:
         print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
         return 2
