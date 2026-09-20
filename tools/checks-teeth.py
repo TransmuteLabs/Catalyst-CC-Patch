@@ -49,6 +49,7 @@ import functools
 import glob
 import importlib.util
 import io
+import json
 import os
 import time
 import re
@@ -65,7 +66,7 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-EXPECTED_ENTRY_TEETH = 13
+EXPECTED_ENTRY_TEETH = 19
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -704,8 +705,8 @@ def _once_replace(text: str, old: str, new: str, what: str) -> str:
 
 
 def _temp_kit(*, decl_text: str | None = None, script_repl=None, patch_repl=None,
-              runner_repl=None):
-    """Снимок кита: скрипт + патч + дом декларации + раннер пола. Правка только снимка."""
+              runner_repl=None, carrier_text: str | None = None):
+    """Снимок кита: скрипт + патч + дома реестров + раннер пола. Правка только снимка."""
     td = Path(tempfile.mkdtemp(prefix="checks-teeth-inapp."))
     script_dst = td / "claude-patch-all.sh"
     patch_dst = td / "tweakcc-patch.js"
@@ -724,6 +725,15 @@ def _temp_kit(*, decl_text: str | None = None, script_repl=None, patch_repl=None
     steps_off_src = ROOT / "tools" / "our-steps-off.txt"
     if steps_off_src.is_file():
         shutil.copy2(steps_off_src, tools / "our-steps-off.txt")
+    # CONSTRAINT: дом объявления отсутствия носителя ОБЯЗАН ехать в снимок
+    # кита: гейт шага 26 ищет его рядом со скриптом, и снимок без дома молча
+    # читал бы «ничего не объявлено» -- то же, что у our-steps-off.txt (#373).
+    # Отсутствие файла в доме -- норма (ничего не объявлено), копия не нужна.
+    carrier_src = ROOT / "tools" / "our-carrier-absent.txt"
+    if carrier_text is not None:
+        (tools / "our-carrier-absent.txt").write_text(carrier_text, encoding="utf-8")
+    elif carrier_src.is_file():
+        shutil.copy2(carrier_src, tools / "our-carrier-absent.txt")
     decl_path = tools / "our-patch-inapplicable.txt"
     if decl_text is None:
         src = ROOT / "tools" / "our-patch-inapplicable.txt"
@@ -771,19 +781,20 @@ def _decl_with_273(text: str) -> str:
     return text + extra
 
 
-_KIT_FN_WANTED = ("_image_version", "_read_inapplicable")
+_KIT_FN_WANTED = ("_image_version", "_read_inapplicable", "_carrier_site")
 
 
 @functools.lru_cache(maxsize=1)
 def _kit_body_functions() -> dict[str, str]:
     """Исходники функций правил из питоньего тела блока проверок кита.
 
-    CONSTRAINT (#353): правила «версия образа» и «разбор дома декларации»
-    живут в ките (`_image_version` и `_read_inapplicable` в
-    claude-patch-all.sh); местная копия расходилась бы с проверяющей стороной
-    молча. Тело достаётся ЕДИНСТВЕННЫМ домом правила heredoc
-    (tools/heredoc-anchor.py) -- тем же путём, что и реестр checks у
-    _pipeline_check_names; каждое имя обязано встретиться РОВНО один раз.
+    CONSTRAINT (#353): правила «версия образа», «разбор дома декларации» и
+    «площадка реестра объявлений» живут в ките (`_image_version`,
+    `_read_inapplicable` и `_carrier_site` в claude-patch-all.sh); местная
+    копия расходилась бы с проверяющей стороной молча. Тело достаётся
+    ЕДИНСТВЕННЫМ домом правила heredoc (tools/heredoc-anchor.py) -- тем же
+    путём, что и реестр checks у _pipeline_check_names; каждое имя обязано
+    встретиться РОВНО один раз.
     """
     anchor_path = ROOT / "tools" / "heredoc-anchor.py"
     spec = importlib.util.spec_from_file_location(
@@ -877,6 +888,18 @@ def _declared_pairs() -> dict[tuple[str, str], tuple[int, str]]:
                           f"(код {exc.code}): {buf.getvalue().strip()}")
     finally:
         os.unlink(path)
+
+
+def _kit_carrier_site() -> str:
+    """Площадка -- правилом кита `_carrier_site`, без местной копии (#353, #389).
+
+    Расхождение поймает зуб carrier-absent-declared-note: записи фикстуры
+    перестанут подходить к площадке, NOTE не напечатается, зуб уйдёт в красный.
+    """
+    ns: dict[str, object] = {"os": os}
+    exec(compile(_kit_body_functions()["_carrier_site"],
+                 "<kit:_carrier_site>", "exec"), ns)
+    return ns["_carrier_site"]()
 
 
 @functools.lru_cache(maxsize=1)
@@ -1614,6 +1637,378 @@ def _tooth_steps_off_arity_both_sides() -> str | None:
     return None
 
 
+# --- зубы объявленного отсутствия носителя (#389) ---------------------------
+#
+# Фикстуры плеча: ручки носителя читаются из КОНТРОЛИРУЕМОГО CLAUDE_CONFIG_DIR
+# (пустой каталог -- не закреплена ни одна; settings.json с env-картой --
+# носитель работает), поэтому unmet определён конфигурацией зуба, а не живым
+# домом юзера. Предмет всех плеч -- исход шага 26 на пристине 2.1.278:
+# прочие проверки красны там ПО ПОСТРОЕНИЮ (патчей в пристине нет).
+_CARRIER_FAIL_MARK = "НОСИТЕЛЬ ОТСУТСТВУЕТ (carrier)"
+_CARRIER_ABSENT_MARK = "без носителя судьи"
+_NOTE_OFF_MARK = "шаг выключен реестром our-steps-off.txt"
+_CARRIER_UNMET_HANDLES = ("CLAUDE_CODE_ENABLE_FUNCTION_HOOKS",
+                          "CLAUDE_JUDGE_CARRIER", "CLAUDE_JUDGE")
+_CARRIER_FIXTURE_BASIS = "#236-фикстура: носителей моделей на площадке нет по построению, судить некому"
+
+
+@contextlib.contextmanager
+def _carrier_pins(pins: dict[str, str]):
+    """CLAUDE_CONFIG_DIR на время прогона: ручки носителя -- из контролируемого дома.
+
+    Восстановление обязательно: соседние зуби и якорь 2.1.278 читают живой дом.
+    """
+    saved = os.environ.get("CLAUDE_CONFIG_DIR")
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-carriercfg.") as td:
+        if pins:
+            (Path(td) / "settings.json").write_text(
+                json.dumps({"env": pins}), encoding="utf-8")
+        os.environ["CLAUDE_CONFIG_DIR"] = td
+        try:
+            yield
+        finally:
+            if saved is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = saved
+
+
+def _carrier_registry_text(site: str, handles: list[str]) -> str:
+    """Фикстура дома объявлений: записи ТОЛЬКО названных ручек площадки."""
+    return ("# fixture: our-carrier-absent.txt (#389)\n"
+            + "".join(f"{site}\t{h}\t{_CARRIER_FIXTURE_BASIS}\n" for h in handles))
+
+
+def _step26_note_line(out: str) -> str:
+    """Строка NOTE шага 26 целиком: субъект различимости текстов исходов."""
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("[NOTE] ") and _STEP26_CHECK in s:
+            return s
+    return ""
+
+
+# Якорь мутации зуба carrier-absent-declared-note: чтение дома объявлений в
+# гейте. Мутация подменяет чтение пустым словарём -- реестр не читается вовсе.
+GATE_READ_ANCHOR = (
+    "    for (row_site, handle), (_n, basis) in _read_carrier_absent(path).items():\n"
+)
+GATE_READ_REPL = (
+    "    for (row_site, handle), (_n, basis) in {}.items():\n"
+)
+
+# Якорь мутации зуба carrier-absent-partial-stays-red: гашение расширяется до
+# «любая объявленная ручка гасит всё» -- частичное объявление перестаёт
+# оставлять необъявленные ручки в отказе.
+GATE_ANY_ANCHOR = "    if unmet and not undeclared:\n"
+GATE_ANY_REPL = "    if unmet and declared:\n"
+
+# Якорь мутации зуба carrier-absent-foreign-site: поле площадки игнорируется.
+GATE_SITE_ANCHOR = "        if row_site == site:\n"
+GATE_SITE_REPL = "        if True:\n"
+
+# Якорь мутации зуба carrier-absent-parse-refuses: ветвь отказа неразобранной
+# строки глотает её молчаливым пропуском.
+CARRIER_PARSE_ANCHOR = (
+    "            if len(parts) != 3 or not all(parts):\n"
+    "                print(f'ОТКАЗ ПРИБОРА: неразобранная строка {n} в реестре '\n"
+    "                      f'our-carrier-absent.txt: {path}', file=sys.stderr)\n"
+    "                sys.exit(2)\n"
+)
+CARRIER_PARSE_REPL = (
+    "            if len(parts) != 3 or not all(parts):\n"
+    "                continue\n"
+)
+
+# Якорь мутации зуба carrier-absent-missing-file-is-norm: гейт возвращает
+# безусловный NOTE -- отсутствие файла больше не держит отказ carrier.
+GATE_UNCONDITIONAL_ANCHOR = (
+    "    note, undeclared = _carrier_absent_gate(\n"
+    "        os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),\n"
+    "                     'tools', 'our-carrier-absent.txt'), unmet)\n"
+)
+GATE_UNCONDITIONAL_REPL = (
+    "    note, undeclared = {'status': 'note', 'note_kind': 'carrier-absent',\n"
+    "                        'site': '', 'handles': [], 'reasons': []}, []\n"
+)
+
+# Якорь мутации зуба carrier-absent-texts-distinct: формат NOTE объявленного
+# отсутствия сводится к формату NOTE выключения -- два исхода одной строкой.
+CARRIER_FMT_ANCHOR = (
+    '_NOTE_OFF_CARRIER_FMT = ("  [NOTE] {name}: площадка {site} без носителя судьи "\n'
+    '                         "(объявлено our-carrier-absent.txt): ручки {handles}: "\n'
+    '                         "{reasons}")\n'
+)
+CARRIER_FMT_REPL = (
+    '_NOTE_OFF_CARRIER_FMT = ("  [NOTE] {name}: шаг выключен реестром "\n'
+    '                         "our-steps-off.txt: {reasons}")\n'
+)
+
+
+def _tooth_carrier_absent_declared_note() -> str | None:
+    """Объявленная площадка + ровно объявленные ручки -> NOTE шестого исхода (#389).
+
+    Мутация снимает чтение дома объявлений -- NOTE обязан смениться отказом
+    carrier с теми же ручками. Предмет -- исход шага 26: прочие проверки на
+    пристине красны по построению (патчей там нет).
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    site = _kit_carrier_site()
+    text = _carrier_registry_text(site, list(_CARRIER_UNMET_HANDLES))
+    with _carrier_pins({}):
+        td, script, patch = _temp_kit(carrier_text=text)
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if f"[FAIL] {_STEP26_CHECK}" in out:
+                return "контроль: объявленная конфигурация покраснела шагом 26"
+            if _CARRIER_FAIL_MARK in out:
+                return "контроль: NOTE напечатан ВМЕСТЕ с отказом carrier"
+            if _CARRIER_ABSENT_MARK not in out:
+                return "контроль: NOTE объявленного отсутствия не напечатан"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        td, script, patch = _temp_kit(
+            carrier_text=text, script_repl=(GATE_READ_ANCHOR, GATE_READ_REPL))
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _CARRIER_ABSENT_MARK in out:
+                return "мутация сняла чтение реестра, а NOTE остался"
+            if _CARRIER_FAIL_MARK not in out or f"[FAIL] {_STEP26_CHECK}" not in out:
+                return "мутация сняла чтение реестра, а отказ carrier не вернулся"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+# CONSTRAINT полярности мутационной фазы зубов ниже: None возвращается ТОГДА
+# И ТОЛЬКО ТОГДА, когда мутация произвела предсказанный ею эффект; строка --
+# когда эффекта нет, то есть мутация прошла молча. Обратный порядок делает
+# зуб зелёным на невредимой двери и красным на сломанной. Эталон --
+# _tooth_carrier_absent_declared_note.
+def _tooth_carrier_absent_partial_stays_red() -> str | None:
+    """Вне области отказа НЕТ: объявлена одна ручка, не сошлись две (#389).
+
+    Объявлены только CLAUDE_JUDGE_CARRIER и CLAUDE_JUDGE; HOOKS не закреплена
+    и НЕ объявлена -- отказ carrier обязан остаться, текст называет именно
+    необъявленную ручку, объявленные из текста погашены. Мутация расширяет
+    гашение до «любая объявленная ручка гасит всё» -- частичное объявление
+    уносит отказ в NOTE, зуб краснеет.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    site = _kit_carrier_site()
+    text = _carrier_registry_text(site, ["CLAUDE_JUDGE_CARRIER", "CLAUDE_JUDGE"])
+    with _carrier_pins({}):
+        td, script, patch = _temp_kit(carrier_text=text)
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if f"[FAIL] {_STEP26_CHECK}" not in out or _CARRIER_FAIL_MARK not in out:
+                return "контроль: частичное объявление не оставило отказ carrier"
+            if "не сошлось: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=" not in out:
+                return "контроль: текст отказа не назвал НЕОБЪЯВЛЕННУЮ ручку"
+            for h in ("CLAUDE_JUDGE_CARRIER", "CLAUDE_JUDGE"):
+                if f"не сошлось: {h}=" in out:
+                    return f"контроль: текст отказа назвал ОБЪЯВЛЕННУЮ ручку {h}"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        td, script, patch = _temp_kit(
+            carrier_text=text, script_repl=(GATE_ANY_ANCHOR, GATE_ANY_REPL))
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _CARRIER_FAIL_MARK in out or f"[FAIL] {_STEP26_CHECK}" in out:
+                return "мутация «любая объявленная гасит всё» НЕ унесла отказ при частичном объявлении"
+            return None
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_carrier_absent_foreign_site() -> str | None:
+    """Чужая площадка: записи есть, но на ДРУГОЙ хост -- отказ как прежде (#389).
+
+    Мутация игнорирует поле площадки -- чужие записи применяются к этой
+    машине и уносят отказ, зуб краснеет.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    text = _carrier_registry_text("чужая-площадка-389", list(_CARRIER_UNMET_HANDLES))
+    with _carrier_pins({}):
+        td, script, patch = _temp_kit(carrier_text=text)
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _CARRIER_FAIL_MARK not in out or f"[FAIL] {_STEP26_CHECK}" not in out:
+                return "контроль: чужая площадка не дала отказа carrier"
+            for h in _CARRIER_UNMET_HANDLES:
+                if f"не сошлось: {h}=" not in out:
+                    return f"контроль: чужая запись погасила ручку {h}"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        td, script, patch = _temp_kit(
+            carrier_text=text, script_repl=(GATE_SITE_ANCHOR, GATE_SITE_REPL))
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _CARRIER_FAIL_MARK in out or f"[FAIL] {_STEP26_CHECK}" in out:
+                return "мутация, игнорирующая поле площадки, НЕ унесла отказ"
+            return None
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_carrier_absent_parse_refuses() -> str | None:
+    """Разбор дома объявлений: неразобранная строка и дубль -- ОТКАЗ с номером (#389).
+
+    Мутация глотает неразобранную строку молчаливым пропуском -- отказ
+    прибора исчезает, зуб краснеет.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    with _carrier_pins({}):
+        site = _kit_carrier_site()
+        two_field = f"# fixture (#389)\n{site}\tCLAUDE_JUDGE\n"
+        dup = (f"# fixture (#389)\n{site}\tCLAUDE_JUDGE\tосн-1\n"
+               f"{site}\tCLAUDE_JUDGE\tосн-2\n")
+        for label, text, marks in (
+            ("двухполосная", two_field, ("неразобранная строка 2",)),
+            ("дубль ключа", dup, ("две строки на пару", "(строки 2 и 3)")),
+        ):
+            td, script, patch = _temp_kit(carrier_text=text)
+            try:
+                r = _run_checks(script, PRISTINE_LATEST, patch)
+                out = (r.stdout or "") + (r.stderr or "")
+                if r.returncode != 2:
+                    return f"контроль: {label} не отказала прибором (rc={r.returncode})"
+                missing = [m for m in marks if m not in out]
+                if missing:
+                    return f"контроль: отказ {label} не назвал {missing}"
+            finally:
+                shutil.rmtree(td, ignore_errors=True)
+        td, script, patch = _temp_kit(
+            carrier_text=two_field, script_repl=(CARRIER_PARSE_ANCHOR, CARRIER_PARSE_REPL))
+        try:
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if r.returncode == 2:
+                if "неразобранная строка 2" in out:
+                    return "мутация не погасила отказ неразобранной строки"
+                return f"мутация отказала прибором чужим текстом: {out[-300:]!r}"
+            return None
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+
+def _tooth_carrier_absent_missing_file_is_norm() -> str | None:
+    """Отсутствующий/пустой дом объявлений -- НОРМА: отказ carrier прежний (#389).
+
+    Мутация возвращает из гейта безусловный NOTE -- отсутствие файла
+    превращается в тихий NOTE, зуб краснеет.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    with _carrier_pins({}):
+        for label, drop in (("отсутствующий", True), ("пустой", False)):
+            td, script, patch = _temp_kit()
+            try:
+                reg = td / "tools" / "our-carrier-absent.txt"
+                if drop:
+                    reg.unlink(missing_ok=True)
+                else:
+                    reg.write_text("", encoding="utf-8")
+                r = _run_checks(script, PRISTINE_LATEST, patch)
+                out = (r.stdout or "") + (r.stderr or "")
+                if _CARRIER_ABSENT_MARK in out:
+                    return f"контроль: {label} файл дал NOTE без объявления"
+                if _CARRIER_FAIL_MARK not in out or f"[FAIL] {_STEP26_CHECK}" not in out:
+                    return f"контроль: {label} файл унёс отказ carrier"
+            finally:
+                shutil.rmtree(td, ignore_errors=True)
+        td, script, patch = _temp_kit(
+            script_repl=(GATE_UNCONDITIONAL_ANCHOR, GATE_UNCONDITIONAL_REPL))
+        try:
+            (td / "tools" / "our-carrier-absent.txt").unlink(missing_ok=True)
+            r = _run_checks(script, PRISTINE_LATEST, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            if _CARRIER_FAIL_MARK in out or f"[FAIL] {_STEP26_CHECK}" in out:
+                return "мутация НЕ превратила отсутствие файла в тихий NOTE"
+            return None
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_carrier_absent_texts_distinct() -> str | None:
+    """Тексты трёх NOTE и отказа carrier -- РАЗЛИЧНЫ (#389).
+
+    Прогоны: выключение -- носитель работает в контролируемом доме;
+    провенанс -- активный образ с целым правилом; объявленное отсутствие --
+    пристин с полным объявлением. Мутация сводит формат нового NOTE к
+    формату NOTE выключения -- исходы одной строкой, зуб краснеет.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина 2.1.278: {PRISTINE_LATEST}"
+    image = default_image()
+    if image is None or not image.is_file():
+        return "нет активного образа -- плечу провенанса нечего мерить"
+    site = _kit_carrier_site()
+    with _carrier_pins({"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
+                        "CLAUDE_JUDGE_CARRIER": "mod", "CLAUDE_JUDGE": "1"}):
+        td, script, patch = _temp_kit()
+        try:
+            ra = _run_checks(script, PRISTINE_LATEST, patch)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    note_off = _step26_note_line(ra.stdout or "")
+    text = _carrier_registry_text(site, list(_CARRIER_UNMET_HANDLES))
+    with _carrier_pins({}):
+        td, script, patch = _temp_kit(carrier_text=text)
+        try:
+            rb = _run_checks(script, PRISTINE_LATEST, patch)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        td, script, patch = _temp_kit(
+            carrier_text=text, script_repl=(CARRIER_FMT_ANCHOR, CARRIER_FMT_REPL))
+        try:
+            rm = _run_checks(script, PRISTINE_LATEST, patch)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    note_absent = _step26_note_line(rb.stdout or "")
+    note_mut = _step26_note_line(rm.stdout or "")
+    td, script, patch = _temp_kit()
+    try:
+        rc_ = _run_checks(script, image, patch)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    note_predates = _step26_note_line(rc_.stdout or "")
+    if not note_off or not note_absent or not note_predates:
+        return (f"контроль: какой-то NOTE не напечатан: off={note_off!r} "
+                f"absent={note_absent!r} predates={note_predates!r}")
+    if len({note_off, note_absent, note_predates}) != 3:
+        return "контроль: два NOTE-исхода печатаются одной строкой"
+    if _NOTE_OFF_MARK not in note_off:
+        return "контроль: NOTE выключения без своего маркера"
+    if _PREDATES_MARK not in note_predates:
+        return "контроль: NOTE провенанса без своего маркера"
+    if (_CARRIER_ABSENT_MARK not in note_absent
+            or "our-carrier-absent.txt" not in note_absent):
+        return "контроль: NOTE объявленного отсутствия без своего маркера"
+    for label, note in (("off", note_off), ("predates", note_predates),
+                        ("absent", note_absent)):
+        if _CARRIER_FAIL_MARK in note:
+            return f"контроль: NOTE {label} несёт текст отказа carrier"
+    if _NOTE_OFF_MARK in note_mut:
+        return None
+    if _CARRIER_ABSENT_MARK in note_mut:
+        return "мутация НЕ свела NOTE объявленного отсутствия к тексту NOTE выключения"
+    return f"мутация не напечатала NOTE шага 26: {note_mut!r}"
+
+
 def _tooth_builder_refusal_is_row_scoped() -> str | None:
     """Отказ строителя одной строки не ослепляет остальные (#350).
 
@@ -2254,6 +2649,12 @@ def main() -> int:
         ("undeclared-step-refuses", _tooth_undeclared_step_refuses),
         ("setup-failure-refuses", _tooth_setup_failure_refuses),
         ("m2-padding-keeps-tail", _tooth_m2_padding_keeps_tail),
+        ("carrier-absent-declared-note", _tooth_carrier_absent_declared_note),
+        ("carrier-absent-partial-stays-red", _tooth_carrier_absent_partial_stays_red),
+        ("carrier-absent-foreign-site", _tooth_carrier_absent_foreign_site),
+        ("carrier-absent-parse-refuses", _tooth_carrier_absent_parse_refuses),
+        ("carrier-absent-missing-file-is-norm", _tooth_carrier_absent_missing_file_is_norm),
+        ("carrier-absent-texts-distinct", _tooth_carrier_absent_texts_distinct),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
@@ -2267,9 +2668,13 @@ def main() -> int:
             print(f"checks-teeth: ВХОД {name}: ПРОШЛА МОЛЧА -- {reason}", flush=True)
         else:
             print(f"checks-teeth: ВХОД {name}: OK", flush=True)
+    # CONSTRAINT: итог входной фазы печатается ВСЕГДА, как итог мутационной:
+    # под условием entry_bad нулевой итог был неотличим от фазы, которая не
+    # исполнилась вовсе (пусто != ноль), и число измеренных зубов оператор не
+    # видел ни в одном зелёном прогоне.
+    print(f"checks-teeth: ИТОГ вход={len(entry_teeth)} молча/неверно={entry_bad}",
+          flush=True)
     if entry_bad:
-        print(f"checks-teeth: ИТОГ вход={len(entry_teeth)} молча/неверно={entry_bad}",
-              flush=True)
         return 1
 
     if not RUNNER.is_file():

@@ -7839,6 +7839,55 @@ def _read_steps_off(path):
     return rows
 
 
+def _carrier_site():
+    """Площадка реестра объявлений: имя хоста до первой точки.
+
+    CONSTRAINT: имя принадлежит МАШИНЕ, а не ядру (uname -s не годится: обе
+    площадки могут оказаться Linux), нормализация срезает mDNS-суффикс
+    .local -- иначе имя мака подвижно. Протухание записи о площадке, которой
+    больше нет, изнутри одной машины не детектируется вовсе -- прибор видит
+    только свой хост; направление при этом fail-safe: сменилось имя хоста --
+    запись не подходит, и отказ carrier возвращается.
+    """
+    return os.uname().nodename.split('.', 1)[0]
+
+
+def _read_carrier_absent(path):
+    """Дом объявления отсутствия носителя на площадке.
+
+    CONSTRAINT: отсутствие носителя -- свойство ПЛОЩАДКИ, а не записи о
+    выключенном шаге, поэтому дом отдельный, а не поле our-steps-off.txt:
+    вторая запись с тем же основанием иначе продублировала бы перечень
+    площадок и разошлась бы с ним. Ключ -- «площадка × ручка», не площадка
+    целиком: появится на площадке одна ручка судьи без другой -- отказ
+    carrier обязан вернуться. Отсутствующий или пустой файл -- НОРМА (ничего
+    не объявлено), неразобранная строка и дубль пары -- отказ прибора: тихий
+    пропуск снял бы защиту с состава, а молчаливый дубль позволил бы править
+    не ту строку, что читает проверяющая сторона.
+    """
+    if not os.path.isfile(path):
+        return {}
+    rows = {}
+    with open(path, encoding='utf-8') as fh:
+        for n, line in enumerate(fh, 1):
+            raw = line.rstrip('\n')
+            if not raw.strip() or raw.lstrip().startswith('#'):
+                continue
+            parts = raw.split('\t')
+            if len(parts) != 3 or not all(parts):
+                print(f'ОТКАЗ ПРИБОРА: неразобранная строка {n} в реестре '
+                      f'our-carrier-absent.txt: {path}', file=sys.stderr)
+                sys.exit(2)
+            key = (parts[0], parts[1])
+            if key in rows:
+                print(f'ОТКАЗ ПРИБОРА: две строки на пару {parts[0]} × {parts[1]} '
+                      f'в реестре our-carrier-absent.txt '
+                      f'(строки {rows[key][0]} и {n})', file=sys.stderr)
+                sys.exit(2)
+            rows[key] = (n, parts[2])
+    return rows
+
+
 _CARRIER_KEYS = ('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', 'CLAUDE_JUDGE_CARRIER',
                  'CLAUDE_JUDGE', 'CLAUDE_PROMPTS')
 
@@ -7914,6 +7963,33 @@ def _step26_mod_road(pins):
     return (not unmet), unmet
 
 
+def _carrier_absent_gate(path, unmet):
+    """Объявленное отсутствие носителя: (NOTE-вердикт или None, остаток unmet).
+
+    CONSTRAINT: объявление гасит отказ ТОЛЬКО в своей области -- NOTE выходит
+    тогда и только тогда, когда множество не сошедшихся ручек ЦЕЛИКОМ
+    объявлено для этой площадки; не сошлась ручка без записи -- отказ carrier
+    остаётся, и его текст называет именно необъявленные ручки (объявленные из
+    текста погашены). Имя ручки -- часть её строки unmet до первого «=»:
+    значения ручек «=» содержать могут, имена -- нет.
+    """
+    site = _carrier_site()
+    declared = {}
+    for (row_site, handle), (_n, basis) in _read_carrier_absent(path).items():
+        if row_site == site:
+            declared[handle] = basis
+    undeclared = [u for u in unmet if u.split('=', 1)[0] not in declared]
+    if unmet and not undeclared:
+        handles = [u.split('=', 1)[0] for u in unmet]
+        reasons = []
+        for h in handles:
+            if declared[h] not in reasons:
+                reasons.append(declared[h])
+        return {'status': 'note', 'note_kind': 'carrier-absent', 'site': site,
+                'handles': handles, 'reasons': reasons}, undeclared
+    return None, undeclared
+
+
 def _image_version(d):
     found = set(re.findall(rb'// Version: ([0-9]+\.[0-9]+\.[0-9]+)', d))
     if len(found) != 1:
@@ -7932,6 +8008,13 @@ _NOTE_OFF_FMT = "  [NOTE] {name}: шаг выключен реестром our-s
 # два исхода одной строкой неразличимы.
 _NOTE_OFF_PREDATES_FMT = ("  [NOTE] {name}: образ {img_ver} собран до версии-пола "
                           "{floor_ver} записи -- правило в образе по праву: {reason}")
+# NOTE объявленного отсутствия носителя: субъект -- ПЛОЩАДКА и РУЧКИ из
+# реестра объявлений, не запись реестра шагов и не возраст образа; текст не
+# переиспользует формулировки выключения и провенанса -- исходы одной строкой
+# неразличимы.
+_NOTE_OFF_CARRIER_FMT = ("  [NOTE] {name}: площадка {site} без носителя судьи "
+                         "(объявлено our-carrier-absent.txt): ручки {handles}: "
+                         "{reasons}")
 
 
 def _step29_verdict(d, src):
@@ -8195,16 +8278,22 @@ def _cancellation_rule_is_whole(d):
 # образе нет, И мод-дорога несёт правило в этой конфигурации -- объявленное
 # состояние, не непрошедшая правка), note-predates (правило в образе ЦЕЛОЕ, но
 # образ собран до версии-пола записи -- правило в образе по праву, реестр не
-# отставал), fail-stale (правило целое И версия образа НЕ НИЖЕ версии-пола --
-# запись пережила свою причину), fail-carrier (следа в образе нет, а мод-дорога
-# в текущей конфигурации пропускается -- правило не несёт НИКТО: снятие
-# носителя обязано быть слышным, класс той самой двери, что гасит точечно, а
-# отказывает в обслуживании), proceed (шаг не выключен -- проверка идёт как
-# всегда, состояние носителя её не касается). ГРАНИЦА fail-stale: стреляет
-# ТОЛЬКО когда версия-пол записи не выше версии образа; образ-предок пола
-# уходит в note-predates. ГРАНИЦА fail-carrier: стреляет ТОЛЬКО на записи
-# реестра с неработающим носителем; активный носитель и отсутствие записи не
-# краснят ничего.
+# отставал), note-carrier-absent (следа в образе нет, мод-дорога не несёт
+# правило, НО площадка ОБЪЯВИЛА отсутствие носителя для всех не сошедшихся
+# ручек в our-carrier-absent.txt -- объявленное состояние площадки, не
+# непрошедшая правка), fail-stale (правило целое И версия образа НЕ НИЖЕ
+# версии-пола -- запись пережила свою причину), fail-carrier (следа в образе
+# нет, а мод-дорога в текущей конфигурации пропускается -- правило не несёт
+# НИКТО: снятие носителя обязано быть слышным, класс той самой двери, что
+# гасит точечно, а отказывает в обслуживании), proceed (шаг не выключен --
+# проверка идёт как всегда, состояние носителя её не касается). ГРАНИЦА
+# fail-stale: стреляет ТОЛЬКО когда версия-пол записи не выше версии образа;
+# образ-предок пола уходит в note-predates. ГРАНИЦА fail-carrier: стреляет
+# ТОЛЬКО на записи реестра с неработающим носителем; активный носитель и
+# отсутствие записи не краснят ничего. ГРАНИЦА note-carrier-absent: гасит
+# ТОЛЬКО ручки, объявленные ДЛЯ ЭТОЙ площадки (ключ «площадка × ручка»);
+# не сошлась ручка без записи -- остаётся fail-carrier, и текст отказа
+# называет именно необъявленные ручки.
 # КАРТА «шаг -> проверки» ПОИМЁННАЯ и ведётся руками: у каждого шага свои
 # проверки, и новая запись реестра обязана в той же волне провести сюда свои
 # имена -- родовой предикат по имени шага мерил бы чужое.
@@ -8241,8 +8330,13 @@ def _step26_verdict(d):
     carries, unmet = _step26_mod_road(_mod_carrier_pins())
     if carries:
         return {'status': 'note', 'note_kind': 'off', 'reason': reason}
+    note, undeclared = _carrier_absent_gate(
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
+                     'tools', 'our-carrier-absent.txt'), unmet)
+    if note is not None:
+        return note
     return {'status': 'fail', 'fail_kind': 'carrier',
-            'reason': reason, 'unmet': unmet}
+            'reason': reason, 'unmet': undeclared}
 
 
 def _statusline_throttle_raised(d):
@@ -8612,11 +8706,17 @@ if len(checks) != EXPECTED_CHECKS:
     sys.exit(1)
 for name, ok in checks.items():
     if ok == 'note' and _S26['status'] == 'note' and name == _STEP26_CHECK:
-        # Ветвление по ВИДУ NOTE: провенанс и выключение -- разные исходы.
+        # Ветвление по ВИДУ NOTE: провенанс, выключение и объявленное
+        # отсутствие -- разные исходы.
         if _S26.get('note_kind') == 'predates':
             print(_NOTE_OFF_PREDATES_FMT.format(
                 name=name, img_ver=_S26['img_ver'], floor_ver=_S26['floor_ver'],
                 reason=_S26['reason']))
+        elif _S26.get('note_kind') == 'carrier-absent':
+            print(_NOTE_OFF_CARRIER_FMT.format(
+                name=name, site=_S26['site'],
+                handles=', '.join(_S26['handles']),
+                reasons='; '.join(_S26['reasons'])))
         else:
             print(_NOTE_OFF_FMT.format(name=name, reason=_S26['reason']))
     elif ok == 'note':
@@ -8635,7 +8735,8 @@ if _S26.get('fail_kind') == 'carrier':
     # ОБЕ стороны в тексте: запись реестра объявила шаг выключенным, И
     # носитель-мод здесь не работает. Имя отказа («carrier») отлично от
     # «stale», а не сошедшиеся ручки названы поимённо -- два отказа с одним
-    # текстом неразличимы.
+    # текстом неразличимы. Ручки, объявленные отсутствующими для ЭТОЙ
+    # площадки, из текста погашены: отказ называет именно необъявленные.
     print(f'НОСИТЕЛЬ ОТСУТСТВУЕТ (carrier): запись реестра объявила шаг '
           f'выключенным, а носитель-мод в этой конфигурации не работает -- '
           f'правило не несёт никто: {_STEP26_NAME}: {_S26["reason"]}')
