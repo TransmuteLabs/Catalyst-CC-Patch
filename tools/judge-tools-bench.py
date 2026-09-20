@@ -63,11 +63,13 @@ ANCHOR = ROOT / "tools" / "heredoc-anchor.py"
 # покрытия агента), доработка 227b -- сценарии 62-63 (docnum:subset -- тот же
 # класс: изоляция OSError-отказа пробы, валидация имени пробы); счётчик
 # растёт вместе с ними по тому же правилу, что и раньше (круг 25, E-4).
-EXPECTED_SCENARIOS = 63
+# волна #378 -- сценарии 64-65 (docnum:subset -- диапазон номеров новых
+# сценариев, не счёт набора): зубы judge/bench вводятся в гейт.
+EXPECTED_SCENARIOS = 65
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 73
+EXPECTED_MUTATIONS = 75
 # CONSTRAINT (волна 227b): каждая итоговая строка compact.py несёт имя пробы
 # префиксом [<probe>] -- ВСЕГДА, включая одиночную пробу (урок #207: рядом с
 # числом стоит имя владельца; условный «префикс только при списке» делает разбор
@@ -2698,6 +2700,40 @@ def scenario_63() -> None:
                     f"отказ имени тронул дом: {bad!r}")
 
 
+def _judge_bench_tooth(name: str) -> None:
+    """Прогнать зуб judge/bench сабпроцессом; его провал -- провал сценария.
+
+    CONSTRAINT (#378): зуб без вызывающего зелен по памяти оператора. Оба файла
+    judge/bench синхронизируются в дом (scripts/probes-sync.sh) и укладываются в
+    кит (scripts/kit-build.sh), но до этой волны их не исполнял НИ ОДИН гейт:
+    поломка, устаревание или потеря прошли бы молча. Дом вызова -- здесь:
+    предмет обоих зубов (judge/*.py) и есть предмет этого стенда.
+    CONSTRAINT: путь берётся от ROOT, а не от живого дерева -- под самопроверкой
+    ROOT есть корень КОПИИ, и мутация обязана доставать до предмета зуба.
+    CONSTRAINT: вывод зуба входит в сообщение о провале целиком -- причина
+    мутации сверяется по тексту провала сценария, и обрезанный хвост сделал бы
+    две разные поломки неразличимыми.
+    """
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "judge" / "bench" / name)],
+        capture_output=True, text=True, errors="replace")
+    tail = (done.stdout + done.stderr).strip()
+    require(done.returncode == 0,
+            f"{name}: rc={done.returncode}, а не 0 -- {tail}")
+    require("провалено: 0" in done.stdout,
+            f"{name}: итог не объявил ноль провалов -- {tail}")
+
+
+def scenario_64() -> None:
+    """Зуб свёртки исходов (judge/bench/test_line_from_mod.py) -- в гейте."""
+    _judge_bench_tooth("test_line_from_mod.py")
+
+
+def scenario_65() -> None:
+    """Зуб разрешителя улик (judge/bench/test_recstore.py) -- в гейте."""
+    _judge_bench_tooth("test_recstore.py")
+
+
 def run_scenarios() -> int:
     outputs: list[dict[str, int]] = []
     module = import_patcher()
@@ -2765,6 +2801,8 @@ def run_scenarios() -> int:
         (61, scenario_61),
         (62, scenario_62),
         (63, scenario_63),
+        (64, scenario_64),
+        (65, scenario_65),
     ]
     mismatches = 0
     for number, case in cases:
@@ -3754,6 +3792,29 @@ def mutation_m73(root: Path) -> None:
     )
 
 
+def mutation_m74(root: Path) -> None:
+    # Дом свёртки снова забывает пробу: словарь берётся у "judge" при любой
+    # пробе -- ровно дефект #374. Виды судьи от этого не меняются, краснеет
+    # только зуб 64 (REFUSE пробы "form" сворачивается в skip вместо block).
+    replace_once(
+        root / "judge" / "compact.py",
+        "    emits, folds = replay.verdict_vocabulary(probe=probe)\n",
+        "    emits, folds = replay.verdict_vocabulary(probe='judge')  # M74\n",
+        "M74",
+    )
+
+
+def mutation_m75(root: Path) -> None:
+    # Разрешитель перестаёт сводить значение-путь к basename: на голых именах
+    # поведение то же, поэтому краснеет только зуб 65.
+    replace_once(
+        root / "judge" / "recstore.py",
+        "    name = os.path.basename(rec)\n",
+        "    name = rec  # M75: значение-путь больше не сводится к basename\n",
+        "M75",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -3832,6 +3893,8 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M71", mutation_m71, 61, "агент без failover не краснит"),
     ("M72", mutation_m72, 62, "отказ пробы не изолирован"),
     ("M73", mutation_m73, 63, "имя пробы не отвергнуто кодом 2"),
+    ("M74", mutation_m74, 64, "проба form: REFUSE свёрнут по ДОМУ ФОРМЫ"),
+    ("M75", mutation_m75, 65, "resolve: значение-путь сводится к basename"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно
