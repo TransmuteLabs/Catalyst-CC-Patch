@@ -3,15 +3,16 @@
 
 Коды выхода (подмножество общей таблицы кита -- шапка claude-patch-all.sh):
   0  разметка завершена
-  2  прибор не может мерить: ДОМ словарей (tweakcc-patch.js) не найден ни в
-     одной из ДВУХ раскладок -- корень дерева кита и дом раскатанных
-     инструментов (см. DEFAULT_SOURCES) -- либо найден и не прочитан,
-     словарь пробы в нём не объявлен, либо дом РАЗОШЁЛСЯ с поставленным
-     образом (зашитый словарь не подставляется: расхождение с тем, что
+  2  прибор не может мерить: ДОМ словарей (hooks/register.ts мода
+     catalyst-probes) не найден ни в одной из ДВУХ раскладок -- раскатка,
+     названная реестром исполняемого, и соседний register.ts в доме
+     инструментов (см. default_source) -- либо найден и не прочитан,
+     словарь пробы в нём не объявлен, либо дом РАЗОШЁЛСЯ с каноном мода в
+     дереве семьи (зашитый словарь не подставляется: расхождение с тем, что
      исполняется, даёт неверную разметку). Круг 28, F-10: прежде эти выходы
      отдавались кодом 1 через sys.exit('строка') -- «отказ по существу»,
      хотя по существу здесь отказываться не о чем, чинить надо вход.
-     Волна 40b: ОТСУТСТВИЕ образа кодом 2 больше не является -- сверка с
+     Волна 40b: ОТСУТСТВИЕ канона кодом 2 больше не является -- сверка с
      ним объявляется пропущенной в stderr, а словарь берётся из дома.
 """
 import argparse
@@ -23,49 +24,121 @@ import os
 import re
 import sys
 
-# Дом словаря вердиктов -- АВТОРСКИЙ ИСХОДНИК патча: он пишет те байты, которые
-# потом стоят в образе, а образ -- производное от него. Словарь, вычитанный из
-# производного, называет домом копию: прибор отказывал кодом 2 на машине без
-# пропатченной установки, хотя предмет замера лежал в дереве рядом (волна 40b).
-# Путь считается от __file__, а не от cwd: инструменты зовут из любого каталога.
+# Дом словаря вердиктов -- РАСКАТАННЫЙ экземпляр мода catalyst-probes:
+# реестр исполняемого называет запись "catalyst-probes@catalyst", словарь --
+# hooks/register.ts внутри её installPath. КАНОН мода живёт в дереве семьи
+# (тот же способ хода к нему, что у scripts/claude-mods.sh: $KIT/../Catalyst)
+# и дом сверяется с ним. Путь считается от __file__, а не от cwd:
+# инструменты зовут из любого каталога.
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 KIT_ROOT = os.path.dirname(TOOLS_DIR)
-# Один файл живёт в ДВУХ раскладках: в дереве кита он лежит в корне
-# (judge/ -- подкаталог), а раскатанный дом инструментов несёт его СОСЕДОМ
-# (scripts/probes-sync.sh кладёт его в $TOOLS_HOME). Раскладка измеряется
-# по наличию файла, а не выводится из имени дома: раскатанный контур обязан
-# работать без дерева кита. В ~/.claude (стоковый каталог пользователя)
-# исходник не кладётся.
-DEFAULT_SOURCES = (
-    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),
-    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),
-)
-SOURCE_ENV = 'CLAUDE_JUDGE_PATCH_SRC'
-# Единственный дом умолчания образа на весь контур: у validate.py и
-# adjudicate.py своей копии этой строки быть не должно -- три копии одной
-# константы расходятся молча.
+FAMILY_ROOT = os.path.dirname(KIT_ROOT)
+# Запасная раскладка -- соседний register.ts в доме инструментов
+# (scripts/probes-sync.sh кладёт его в $TOOLS_HOME): раскатанный контур
+# обязан работать без дерева семьи. Глоб по каталогам кэша плагинов
+# ЗАПРЕЩЁН: версий там десятки, и лексикографический максимум не есть
+# исполняемая (#334) -- реестр единственный называет работающее.
+NEIGHBOUR_SOURCE = os.path.join(TOOLS_DIR, 'register.ts')
+# Ручка источника переименована по новому дому; прежнее имя читается как
+# запасное -- рабочий обход живого контура не должен умирать молча.
+SOURCE_ENV = 'CLAUDE_JUDGE_VOCAB_SRC'
+SOURCE_ENV_LEGACY = 'CLAUDE_JUDGE_PATCH_SRC'
+# Единственный дом умолчания образа на весь контур: adjudicate.py берёт его
+# здесь (своей копии у него быть не должно -- три копии одной константы
+# расходятся молча). Сверка с образом снята вместе с предметом, но константа
+# остаётся контрактом CLI соседа.
 DEFAULT_IMAGE = '~/.local/bin/claude'
-# Признак НОСИТЕЛЯ наших проб. Образ без метки -- не наша сборка (сток либо
-# чужая), и сверять с ним нечего; образ С меткой, но без словаря пробы --
-# расхождение, а не «нечего сверять». Замерено 2026-09-07 (`grep -a -c -F`):
-# метка стоит в собранном 2.1.263 и отсутствует в его пристинном близнеце.
-CARRIER_MARK = b'globalThis.__ccProbe'
-# Ключ кэша -- ТРОЙКА (дом, образ, проба): под ключом без дома два разных дома
+# Реестр и канон вынесены в ручки для герметичности стенда: копия дерева
+# кита не должна мерить живую установку мода.
+REGISTRY_ENV = 'CLAUDE_JUDGE_MOD_REGISTRY'
+DEFAULT_REGISTRY = '~/.claude/plugins/installed_plugins.json'
+PROBES_PLUGIN_KEY = 'catalyst-probes@catalyst'
+MOD_CANON_ENV = 'CLAUDE_JUDGE_MOD_CANON'
+MOD_CANON = os.path.join(FAMILY_ROOT, 'Catalyst', 'plugins',
+                         'catalyst-probes', 'hooks', 'register.ts')
+# Признак НОСИТЕЛЯ МОДА -- замена CARRIER_MARK в роли часового сверки
+# (метка образа globalThis.__ccProbe умерла вместе с образом: на 2.1.278
+# бинарь проб не несёт). Файл без признака -- не наш мод (чужой либо
+# оборванный), и сверять его с домом нечем; НАШ мод без дома словаря --
+# расхождение, а не «нечего сверять». Признак обязан стоять в ЛЮБОЙ версии
+# мода, не только после появления самого дома, -- иначе мод до волны
+# читался бы «чужим файлом».
+MOD_CARRIER_MARK = b'export const MOD_VERSION'
+# Ключ кэша -- ПАРА (дом, проба): под ключом без дома два разных дома
 # отдавали бы один словарь.
 _VOCAB_CACHE = {}
 
 
-def default_source():
-    """Первый СУЩЕСТВУЮЩИЙ кандидат раскладки; None, когда нет ни одного.
+def _registry_paths():
+    """installPath-ы записей мода из реестра исполняемого либо (None, причина)."""
+    path = os.path.realpath(os.path.expanduser(
+        os.environ.get(REGISTRY_ENV) or DEFAULT_REGISTRY))
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None, f'реестра исполняемого нет по пути {path}'
+    except (OSError, ValueError) as err:
+        return None, (f'реестр исполняемого не прочитан: {path} '
+                      f'({err.__class__.__name__})')
+    plugins = data.get('plugins') if isinstance(data, dict) else None
+    records = plugins.get(PROBES_PLUGIN_KEY) if isinstance(plugins, dict) else None
+    if not isinstance(records, list) or not records:
+        return None, (f'в реестре исполняемого {path} нет записей '
+                      f'"{PROBES_PLUGIN_KEY}"')
+    paths = [rec.get('installPath') for rec in records
+             if isinstance(rec, dict) and rec.get('installPath')]
+    if not paths:
+        return None, (f'записи "{PROBES_PLUGIN_KEY}" в {path} не несут installPath')
+    return paths, None
 
-    None, а не первый кандидат: звонящий обязан назвать в отказе ВСЕ
-    кандидаты -- иначе починка выглядит как «не тот путь» вместо «файла
-    нет ни в одной раскладке».
+
+def deployed_source():
+    """(раскатка|None, отказ|None, причина_реестра|None) по реестру исполняемого.
+
+    Берётся ПЕРВАЯ запись, чей installPath существует на диске: записей
+    может быть несколько (разный scope). Отказ непуст только когда реестр
+    НАЗВАЛ раскладки, которых на диске нет, -- это отказ прибора с названной
+    причиной, а не повод молча мерить соседнюю раскладку.
     """
-    for cand in DEFAULT_SOURCES:
-        if os.path.exists(os.path.expanduser(cand)):
-            return cand
-    return None
+    paths, why = _registry_paths()
+    if paths is None:
+        return None, None, why
+    named = [os.path.join(os.path.expanduser(p), 'hooks', 'register.ts')
+             for p in paths]
+    for cand in named:
+        if os.path.exists(cand):
+            return cand, None, why
+    return None, ('реестр исполняемого называет раскатки мода, которых нет '
+                  'на диске: ' + ', '.join(named)), why
+
+
+def default_source():
+    """(Первый СУЩЕСТВУЮЩИЙ кандидат раскладки, отказ реестра|None).
+
+    Кандидаты: раскатка, названная реестром исполняемого, затем соседний
+    register.ts в доме инструментов. None, а не первый кандидат: звонящий
+    обязан назвать в отказе ВСЕ кандидаты -- иначе починка выглядит как
+    «не тот путь» вместо «файла нет ни в одной раскладке». Отказ реестра
+    (раскладки названы, но их нет на диске) поднимается звонящим кодом 2 и
+    откатом к соседу НЕ гасится.
+    """
+    deployed, refusal, _why = deployed_source()
+    if deployed is not None:
+        return deployed, refusal
+    if refusal is not None:
+        return None, refusal
+    if os.path.exists(NEIGHBOUR_SOURCE):
+        return NEIGHBOUR_SOURCE, None
+    return None, None
+
+
+def default_source_candidates():
+    """Обе раскладки словами -- для отказа «ни в одной раскладке»."""
+    deployed, refusal, why = deployed_source()
+    first = deployed if deployed is not None else (
+        'раскатка мода по реестру (' + (refusal or why) + ')')
+    return [first, 'соседний ' + NEIGHBOUR_SOURCE]
 
 
 # Общие argparse-типы числовых ручек судейских инструментов. Дом -- replay.py:
@@ -175,76 +248,95 @@ def vocabulary_from_image(image_path, probe='judge'):
 
 
 def _scan_source(data, probe):
-    """(rx, act) из АВТОРСКОГО ИСХОДНИКА патча либо None.
+    """(emits, folds) из ИСХОДНИКА мода (hooks/register.ts) либо None.
 
-    Форма извлечения та же, что у образа, и отличается ровно классом «любой
-    знак»: образ -- одна строка, а исходник склеивает JS-литералы через
-    переводы строк и комментарии между полями. Запрет на пересечение границы
-    соседней пробы сохранён -- он и здесь единственное, что держит окно.
+    Форма дома -- записи { probe, emits, folds }: emits описывает поле
+    `verdict` улики (ПРОПИСНЫЕ виды), folds -- класс свёртки для метрик
+    прибора. Класс [\\s\\S]: TS-исходник многострочный. Запрет на
+    пересечение границы соседней пробы сохранён и перепривязан на `probe:`
+    -- записи дома идут подряд, и проба без своего словаря взяла бы
+    соседний.
     """
-    pattern = (rb'dirName:"' + re.escape(probe.encode()) +
-               rb'"(?:(?!dirName:")[\s\S]){0,4000}?rx:"([^"]+)",act:"([^"]+)"')
+    pattern = (rb'probe:\s*"' + re.escape(probe.encode()) +
+               rb'"(?:(?!probe:\s*")[\s\S]){0,4000}?emits:\s*"([^"]+)",\s*folds:\s*"([^"]+)"')
     found = re.search(pattern, data)
     if not found:
         return None
     return (found.group(1).decode().split('|'), found.group(2).decode().split('|'))
 
 
-def _cross_check_image(home, image, probe, source):
-    """Сверка дома с образом. Расхождение -- код 2; пропуск -- ОБЪЯВЛЕН.
+def _cross_check_canon(home, source, probe):
+    """Сверка дома с КАНОНОМ мода. Расхождение -- код 2; пропуск -- ОБЪЯВЛЕН.
 
     Пропуск без следа неотличим от сверки, которая прошла, поэтому у каждого
     исхода «сверять нечем» есть своя строка в stderr с названной причиной.
     """
+    canon = os.path.realpath(os.path.expanduser(
+        os.environ.get(MOD_CANON_ENV) or MOD_CANON))
     try:
-        with open(image, 'rb') as fh:
+        with open(canon, 'rb') as fh:
             data = fh.read()
     except OSError as err:
-        print(f'сверка с образом ПРОПУЩЕНА: образа нет по пути {image} '
+        print(f'сверка с каноном ПРОПУЩЕНА: канона нет по пути {canon} '
               f'({err.__class__.__name__})', file=sys.stderr)
         return
-    if CARRIER_MARK not in data:
-        print(f'сверка с образом ПРОПУЩЕНА: образ {image} не несёт наших проб '
-              f'(нет метки {CARRIER_MARK.decode()})', file=sys.stderr)
+    if MOD_CARRIER_MARK not in data:
+        print(f'сверка с каноном ПРОПУЩЕНА: {canon} не несёт признака мода '
+              f'({MOD_CARRIER_MARK.decode()}) -- чужой файл либо оборванная '
+              'копия', file=sys.stderr)
         return
-    shipped = _scan_image(data, probe)
-    if shipped is None:
-        # Носитель БЕЗ словаря пробы -- расхождение, а не «нечего сверять»:
-        # метка говорит, что пробы в образе есть, значит эта пропала.
-        print(f'дом и образ РАСХОДЯТСЯ по пробе "{probe}": дом {source} объявляет '
-              f'rx="{"|".join(home[0])}",act="{"|".join(home[1])}"; образ {image} '
-              'несёт наши пробы, но словаря этой пробы в нём нет -- поставленный '
-              'образ собран не из этого дерева', file=sys.stderr)
+    canon_home = _scan_source(data, probe)
+    if canon_home is None:
+        # Наш мод БЕЗ словаря пробы -- расхождение, а не «нечего сверять»:
+        # признак мода говорит, что носитель наш, значит дом словаря в нём
+        # обязан быть.
+        print(f'дом и канон РАСХОДЯТСЯ по пробе "{probe}": дом {source} '
+              f'объявляет emits="{"|".join(home[0])}",'
+              f'folds="{"|".join(home[1])}"; канон {canon} -- наш мод, но '
+              'словаря этой пробы в нём нет -- раскатка либо источник '
+              'собраны не из этого дерева', file=sys.stderr)
         raise SystemExit(2)
-    if shipped != home:
-        print(f'дом и образ РАСХОДЯТСЯ по пробе "{probe}": дом {source} -- '
-              f'rx="{"|".join(home[0])}",act="{"|".join(home[1])}"; образ {image} -- '
-              f'rx="{"|".join(shipped[0])}",act="{"|".join(shipped[1])}" -- '
-              'поставленный образ собран не из этого дерева', file=sys.stderr)
+    if canon_home != home:
+        print(f'дом и канон РАСХОДЯТСЯ по пробе "{probe}": дом {source} -- '
+              f'emits="{"|".join(home[0])}",folds="{"|".join(home[1])}"; '
+              f'канон {canon} -- '
+              f'emits="{"|".join(canon_home[0])}",'
+              f'folds="{"|".join(canon_home[1])}" -- '
+              'раскатка либо источник собраны не из этого дерева', file=sys.stderr)
         raise SystemExit(2)
 
 
 def verdict_vocabulary(image_path=None, probe='judge', source_path=None):
-    """Словарь пробы из ДОМА, сверенный с образом, когда образ есть.
+    """Словарь пробы из ДОМА, сверенный с каноном, когда канон есть.
 
     Зашитый словарь не подставляется ни при каком исходе: расхождение с тем,
     что исполняется, даёт неверную разметку корпуса, на которую потом
-    опирается выбор модели.
+    опирается выбор модели. image_path сохранён контрактом validate.py и
+    adjudicate.py; сверка с образом снята вместе с предметом: на 2.1.278
+    бинарь проб не несёт вовсе.
     """
-    chosen = source_path or os.environ.get(SOURCE_ENV) or default_source()
+    chosen = (source_path or os.environ.get(SOURCE_ENV)
+              or os.environ.get(SOURCE_ENV_LEGACY))
+    if chosen is None:
+        chosen, registry_refusal = default_source()
+        if registry_refusal is not None:
+            # Реестр НАЗВАЛ раскатку, которой на диске нет: код 2 с названной
+            # причиной, а не молчаливый откат к соседней раскладке.
+            print('дом словарей вердиктов не найден: ' + registry_refusal,
+                  file=sys.stderr)
+            raise SystemExit(2)
     if chosen is None:
         # Код 2 -- прибор не может мерить. Названы ВСЕ кандидаты: раскладок
         # две, и «не тот путь» -- неверный диагноз.
+        candidates = default_source_candidates()
         print('дом словарей вердиктов не найден ни в одной раскладке: '
-              + ', '.join(DEFAULT_SOURCES)
-              + '; положите tweakcc-patch.js рядом с китом или в дом '
-                f'инструментов либо назовите его путь в {SOURCE_ENV}',
-              file=sys.stderr)
+              + ', '.join(candidates)
+              + f'; раскатайте мод ({PROBES_PLUGIN_KEY}) либо положите '
+                'hooks/register.ts рядом с judge-инструментами либо назовите '
+                f'его путь в {SOURCE_ENV}', file=sys.stderr)
         raise SystemExit(2)
     source = os.path.realpath(os.path.expanduser(chosen))
-    image = os.path.realpath(os.path.expanduser(
-        image_path or os.environ.get('CLAUDE_JUDGE_IMAGE') or DEFAULT_IMAGE))
-    key = (source, image, probe)
+    key = (source, probe)
     if key in _VOCAB_CACHE:
         return _VOCAB_CACHE[key]
     try:
@@ -269,7 +361,7 @@ def verdict_vocabulary(image_path=None, probe='judge', source_path=None):
               'зашитый словарь не подставляется — расхождение с тем, что '
               'исполняется, даёт неверную разметку', file=sys.stderr)
         raise SystemExit(2)
-    _cross_check_image(home, image, probe, source)
+    _cross_check_canon(home, source, probe)
     _VOCAB_CACHE[key] = home
     return home
 

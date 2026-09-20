@@ -827,77 +827,63 @@ def import_tool(name: str) -> ModuleType:
     return module
 
 
-def seeded_replay(vocab: dict[str, tuple[list[str], list[str]]]) -> tuple[ModuleType, str]:
+def seeded_replay(vocab: dict[str, tuple[list[str], list[str]]]) -> ModuleType:
     """replay с ПОДСТАВЛЕННЫМ словарём: стенд герметичен и байтов не читает.
 
-    Ключ кэша -- тройка (дом, образ, проба) с волны 40b: дом берётся у самого
-    модуля, а не пишется здесь второй копией -- в мутантной копии дерева он
-    другой, и посев мимо ключа молча вернул бы стенд к чтению настоящих
-    файлов.
+    Ключ кэша -- пара (дом, проба): дом берётся у самого модуля, а не
+    пишется здесь второй копией -- в мутантной копии дерева он другой, и
+    посев мимо ключа молча вернул бы стенд к чтению настоящих файлов.
     """
     module = import_tool("replay")
-    # Дом разрешается ДО mkstemp: отказ ниже уронил бы уже созданный файл
-    # образа, и стенд копил бы мусор ровно на тех мутациях, которые он ловит.
-    src = module.default_source()
+    # Дом разрешается ДО посева: отказ ниже означал бы, что кэч сажать некуда.
+    src, _refusal = module.default_source()
     require(src is not None,
             "дом словарей не найден ни в одной раскладке: посев ушёл бы мимо ключа")
     home = os.path.realpath(os.path.expanduser(src))
-    handle, path = tempfile.mkstemp(prefix="judge-bench-image.")
-    os.close(handle)
-    real = os.path.realpath(path)
     for probe, values in vocab.items():
-        module._VOCAB_CACHE[(home, real, probe)] = values
-    os.environ["CLAUDE_JUDGE_IMAGE"] = real
-    return module, path
+        module._VOCAB_CACHE[(home, probe)] = values
+    return module
 
 
 def scenario_21() -> None:
     """Разметка вердикта повторяет ОБРАЗ: двоеточие обязательно, регистр не важен."""
-    module, image = seeded_replay({"judge": (["OK", "BLOCK", "WARN"], ["BLOCK"])})
-    try:
-        require(module.klass("OKAY, данных не хватает") == "EMPTY",
-                "слово без двоеточия снова классифицируется как вердикт")
-        require(module.klass("ok: причина") == "OK",
-                "строчный вердикт не разобран либо возвращён не в каноне словаря")
-        require(module.verdict_of("свободный текст модели") == "",
-                "текст без строки вердикта снова выдаётся за вердикт")
-        raw = '{"choices":[{"message":{"content":"ok: всё в порядке"}}]}'
-        require(module.verdict_of(raw) == "ok: всё в порядке", "вердикт из содержимого потерян")
-    finally:
-        os.unlink(image)
-        os.environ.pop("CLAUDE_JUDGE_IMAGE", None)
+    module = seeded_replay({"judge": (["OK", "BLOCK", "WARN"], ["BLOCK"])})
+    require(module.klass("OKAY, данных не хватает") == "EMPTY",
+            "слово без двоеточия снова классифицируется как вердикт")
+    require(module.klass("ok: причина") == "OK",
+            "строчный вердикт не разобран либо возвращён не в каноне словаря")
+    require(module.verdict_of("свободный текст модели") == "",
+            "текст без строки вердикта снова выдаётся за вердикт")
+    raw = '{"choices":[{"message":{"content":"ok: всё в порядке"}}]}'
+    require(module.verdict_of(raw) == "ok: всё в порядке", "вердикт из содержимого потерян")
 
 
 def scenario_22() -> None:
     """Идентичность пробы протянута: словарь чужой пробы не размечает записи."""
-    module, image = seeded_replay({
+    module = seeded_replay({
         "judge": (["OK", "BLOCK"], ["BLOCK"]),
         "idle-watch": (["ASK", "SKIP"], ["ASK"]),
     })
-    try:
-        require(module.klass("ask: пора спросить", "idle-watch") == "ASK",
-                "словарь пробы не применён")
-        require(module.klass("ask: пора спросить") == "EMPTY",
-                "судейский словарь принял чужой класс")
-        helped = subprocess.run([sys.executable, str(ROOT / "judge" / "replay.py"), "--help"],
-                                capture_output=True, text=True, errors="replace")
-        require("--probe" in helped.stdout, "у replay.py нет аргумента --probe")
+    require(module.klass("ask: пора спросить", "idle-watch") == "ASK",
+            "словарь пробы не применён")
+    require(module.klass("ask: пора спросить") == "EMPTY",
+            "судейский словарь принял чужой класс")
+    helped = subprocess.run([sys.executable, str(ROOT / "judge" / "replay.py"), "--help"],
+                            capture_output=True, text=True, errors="replace")
+    require("--probe" in helped.stdout, "у replay.py нет аргумента --probe")
 
-        adj = import_tool("adjudicate")
-        adj.replay._VOCAB_CACHE.update(module._VOCAB_CACHE)
-        prompt = adj.load_vocabulary(image, "idle-watch")
-        require("ASK" in prompt and "BLOCK" not in prompt,
-                "промт адъюдикатора не перерисован под словарь пробы")
+    adj = import_tool("adjudicate")
+    adj.replay._VOCAB_CACHE.update(module._VOCAB_CACHE)
+    prompt = adj.load_vocabulary(None, "idle-watch")
+    require("ASK" in prompt and "BLOCK" not in prompt,
+            "промт адъюдикатора не перерисован под словарь пробы")
 
-        text = (ROOT / "judge" / "validate.py").read_text(encoding="utf-8")
-        # Свойство ФОРМЫ: путь метрик тянет за собой сеть и записи, поэтому
-        # проба здесь пинится текстом вызова, и это объявлено.
-        require("replay.verdict_of(sent['raw'], PROBE_ID)" in text
-                and "replay.klass(verdict, PROBE_ID)" in text,
-                "validate размечает записи судейским словарём независимо от --probe")
-    finally:
-        os.unlink(image)
-        os.environ.pop("CLAUDE_JUDGE_IMAGE", None)
+    text = (ROOT / "judge" / "validate.py").read_text(encoding="utf-8")
+    # Свойство ФОРМЫ: путь метрик тянет за собой сеть и записи, поэтому
+    # проба здесь пинится текстом вызова, и это объявлено.
+    require("replay.verdict_of(sent['raw'], PROBE_ID)" in text
+            and "replay.klass(verdict, PROBE_ID)" in text,
+            "validate размечает записи судейским словарём независимо от --probe")
 
 
 def scenario_23() -> None:
@@ -1464,15 +1450,17 @@ def toy_judge_records(directory: Path, count: int = 5) -> None:
         (directory / f"rec-{i}.json").write_text(json.dumps(record), encoding="utf-8")
 
 
-def run_validate_run(records: Path, image: Path, out: Path,
+def run_validate_run(records: Path, source: Path, out: Path,
                      *extra: str) -> subprocess.CompletedProcess[str]:
     """Прогон validate.py run в герметичном окружении.
 
     Адрес -- заведомо закрытый порт: единственный ожидаемый исход канала --
-    отказ соединения, пойманный в error-строку прогона. Образ -- синтетическая
-    фикстура (словарь из synthetic_image), дом проб не перенаправляется:
-    --url и --models перекрывают все, что validate мог бы прочитать из
-    боевого probes.toml.
+    отказ соединения, пойманный в error-строку прогона. Дом словарей --
+    синтетическая фикстура (synthetic_mod), переданная ручкой источника:
+    живая раскатка реестра и канон дерева семьи на машине стенда негерметичны,
+    поэтому ручки реестра и канона указывают в несуществующие пути, и сверка
+    обязана объявить пропуск, а не читать чужие дома. --image остаётся в
+    вызове как аргумент клиента: прибор его больше не читает.
     """
     command = [
         sys.executable, str(ROOT / "judge" / "validate.py"), "run",
@@ -1480,12 +1468,18 @@ def run_validate_run(records: Path, image: Path, out: Path,
         "--models", "bench-model",
         "--channel", "http",
         "--url", "http://127.0.0.1:1",
-        "--image", str(image),
+        "--image", str(source),
         "--out", str(out),
         *extra,
     ]
     env = dict(os.environ)
     env.pop("ANTHROPIC_BASE_URL", None)
+    for name in ("CLAUDE_JUDGE_VOCAB_SRC", "CLAUDE_JUDGE_PATCH_SRC",
+                 "CLAUDE_JUDGE_MOD_REGISTRY", "CLAUDE_JUDGE_MOD_CANON"):
+        env.pop(name, None)
+    env["CLAUDE_JUDGE_VOCAB_SRC"] = str(source)
+    env["CLAUDE_JUDGE_MOD_REGISTRY"] = "/nonexistent/installed_plugins.json"
+    env["CLAUDE_JUDGE_MOD_CANON"] = "/nonexistent/register.ts"
     return subprocess.run(command, capture_output=True, text=True, errors="replace", env=env)
 
 
@@ -1501,30 +1495,39 @@ def scenario_38() -> None:
         records = base / "records"
         records.mkdir()
         toy_judge_records(records, 5)
-        image = base / "image"
-        synthetic_image(image)
+        source = base / "register.ts"
+        synthetic_mod(source)
         out = base / "out.jsonl"
 
         for tool, args, env_extra in (
             # validate: полный прогон нужен потому, что отказ обязан прийти ОТ
-            # argparse, а не от отсутствия образа -- иначе на машине без образа
+            # argparse, а не от отсутствия дома -- иначе на машине без раскатки
             # неотремонтированное дерево отвечало бы кодом 2 впустую.
             ("validate.py",
              ["run", "--records", str(records), "--models", "bench-model",
               "--channel", "http", "--url", "http://127.0.0.1:1",
-              "--image", str(image), "--out", str(out), "--limit=-1"], None),
+              "--image", str(source), "--out", str(out), "--limit=-1"], None),
             ("adjudicate.py",
              [str(records), "--model", "bench-model", "--channel", "http",
-              "--image", str(image), "--dry-run", "--limit=-1"],
+              "--image", str(source), "--dry-run", "--limit=-1"],
              {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}),
             ("replay.py",
              [str(records), "--model", "bench-model", "--channel", "http",
               "--url", "http://127.0.0.1:1", "--limit=-1"],
-             {"CLAUDE_JUDGE_IMAGE": str(image),
+             {"CLAUDE_JUDGE_VOCAB_SRC": str(source),
               "ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}),
         ):
             env = dict(os.environ)
             env.pop("ANTHROPIC_BASE_URL", None)
+            # Ручки дома -- для ВСЕХ трёх читателей: без них мутант M45
+            # берёт код 2 у живого реестра копии, и провал приходит не той
+            # причиной, которую заявляет зуб.
+            for name in ("CLAUDE_JUDGE_VOCAB_SRC", "CLAUDE_JUDGE_PATCH_SRC",
+                         "CLAUDE_JUDGE_MOD_REGISTRY", "CLAUDE_JUDGE_MOD_CANON"):
+                env.pop(name, None)
+            env["CLAUDE_JUDGE_VOCAB_SRC"] = str(source)
+            env["CLAUDE_JUDGE_MOD_REGISTRY"] = "/nonexistent/installed_plugins.json"
+            env["CLAUDE_JUDGE_MOD_CANON"] = "/nonexistent/register.ts"
             if env_extra:
                 env.update(env_extra)
             done = subprocess.run(
@@ -1537,7 +1540,7 @@ def scenario_38() -> None:
 
         # Ноль сохраняет действующий смысл «без потолка»: пять записей -- пять
         # строк прогона.
-        done = run_validate_run(records, image, out, "--limit=0")
+        done = run_validate_run(records, source, out, "--limit=0")
         require(done.returncode == 0,
                 f"--limit=0 не прошёл прогон: rc={done.returncode}\n"
                 f"{done.stdout}{done.stderr}")
@@ -1558,10 +1561,10 @@ def scenario_39() -> None:
         records = base / "records"
         records.mkdir()
         toy_judge_records(records, 1)
-        image = base / "image"
-        synthetic_image(image)
+        source = base / "register.ts"
+        synthetic_mod(source)
         for value in ("0", "-1", "nan", "240000"):
-            done = run_validate_run(records, image, base / "out.jsonl",
+            done = run_validate_run(records, source, base / "out.jsonl",
                                     f"--timeout={value}")
             combined = done.stdout + done.stderr
             require(done.returncode == 2,
@@ -1574,7 +1577,7 @@ def scenario_39() -> None:
                         "timeout_ms соседнего toml -- в миллисекундах")
         # Здоровое значение по-прежнему принимается: затянуть гайки до «не
         # работает никогда» -- не чинка.
-        done = run_validate_run(records, image, base / "out.jsonl", "--timeout=30")
+        done = run_validate_run(records, source, base / "out.jsonl", "--timeout=30")
         require(done.returncode == 0,
                 f"--timeout=30 отвергнут здоровым значением: rc={done.returncode}\n"
                 f"{done.stdout}{done.stderr}")
@@ -1787,227 +1790,265 @@ def scenario_44() -> None:
                 os.environ["CLAUDE_JUDGE_LABELLED_DIR"] = saved
 
 
-# --- волна 40b: дом словарей вердиктов и перекрёстная сверка с образом --------
+# --- волна 40b: дом словарей вердиктов и перекрёстная сверка -------------------
 #
-# Форма ЖИВОГО дома -- многострочная склейка JS-литералов с комментариями между
-# полями (tweakcc-patch.js): от `dirName:"judge"` до его словаря там тринадцать
-# строк. Фикстура повторяет ИМЕННО эту форму, а не её сокращение: скан по классу
-# `[^\n]` (форма образа) на ней не сходится, и это её положительный контроль.
-SOURCE_JUDGE_DESC = (
-    "    'tag:\"[Judge]\",dirName:\"judge\",arm:!0,' +\n"
-    "      // Между дескриптором и словарём стоят поля и комментарии -- ровно\n"
-    "      // то, из-за чего однострочный класс здесь не годится.\n"
-    "      'turn:()=>{let __x=globalThis.__ccJudgeTurn?.get($5);return __x||[]},' +\n"
-    "      'selfId:()=>$5,turnLost:()=>!1,' +\n"
-    "      'rx:\"OK|BLOCK|STOP|DENY|WARN\",act:\"BLOCK|STOP|DENY\",' +\n"
-    "      'fb:\"You judge one dispatch.\",' +\n"
-)
-SOURCE_IDLE_DESC = (
-    "    'tag:\"[Watch]\",dirName:\"idle-watch\",arm:!1,label:\"FLEET\",' +\n"
-    "      'rx:\"SILENT|NUDGE\",act:\"NUDGE\",' +\n"
-)
+# Форма ЖИВОГО дома -- многострочный TS-исходник мода (hooks/register.ts):
+# от `probe: "judge"` до его словаря -- поля и комментарии. Фикстура повторяет
+# ИМЕННО эту форму, а не её сокращение: скан по однострочному классу (форма
+# образа) на ней не сходится, и это её положительный контроль.
+def synthetic_mod(path: Path, judge_emits: str = "OK|BLOCK|STOP|DENY|WARN",
+                  judge_folds: str = "BLOCK|STOP|DENY") -> None:
+    """Дом словарей игрушечной формы: та же многострочность, что у живого.
 
-
-def synthetic_source(path: Path, judge_rx: str = "OK|BLOCK|STOP|DENY|WARN") -> None:
-    """Дом словарей игрушечной формы: та же многострочность, что у живого."""
-    body = ("// синтетический дом стенда\n"
-            + SOURCE_JUDGE_DESC.replace("OK|BLOCK|STOP|DENY|WARN", judge_rx)
-            + SOURCE_IDLE_DESC)
+    Признак мода обязателен: без него сверка объявляет файл «чужим» и
+    пропускается, -- сценарии расхождения тогда не воспроизводят предмет.
+    """
+    body = ("// синтетический register.ts стенда\n"
+            "export const MOD_VERSION = \"0.0.0-bench\"\n"
+            "const VERDICT_VOCAB = [\n"
+            "  { probe: \"judge\",\n"
+            "    // Между именем пробы и словарём стоят поля и комментарии -- ровно\n"
+            "    // то, из-за чего однострочный класс здесь не годится.\n"
+            f"    emits: \"{judge_emits}\", folds: \"{judge_folds}\" }},\n"
+            "  { probe: \"form\", emits: \"PASS|WARN|REFUSE\", folds: \"REFUSE|WARN\" },\n"
+            "  { probe: \"idle-watch\", emits: \"SILENT|NUDGE\", folds: \"NUDGE\" },\n"
+            "  { probe: \"*\", emits: \"OK|WARN|BLOCK|SILENT|NUDGE\", folds: \"BLOCK\" },\n"
+            "]\n")
     path.write_text(body, encoding="utf-8")
 
 
-def carrier_image(path: Path, body: str) -> None:
-    """Образ-НОСИТЕЛЬ: одна строка плюс метка ядра проб.
-
-    Без метки образ читается как «не наша сборка», и сверка пропускается --
-    тогда сценарий о расхождении не воспроизводил бы расхождение вовсе.
-    """
-    path.write_bytes(("var A=1;globalThis.__ccProbe??=async function(__o){};" + body).encode())
+def synthetic_registry(path: Path, moddir: Path) -> None:
+    """Реестр исполняемого игрушечной формы: одна запись с installPath."""
+    path.write_text(json.dumps({"plugins": {"catalyst-probes@catalyst": [
+        {"scope": "user", "installPath": str(moddir)}]}}), encoding="utf-8")
 
 
-def run_vocabulary(probe: str, image: Path | str | None = None,
-                   source: Path | str | None = None) -> subprocess.CompletedProcess[str]:
+def run_vocabulary(probe: str, source: Path | str | None = None,
+                   canon: Path | str | None = None,
+                   registry: Path | str | None = None,
+                   ) -> subprocess.CompletedProcess[str]:
     """verdict_vocabulary отдельным процессом: нужен ИМЕННО код выхода и stderr.
 
-    Обе ручки передаются переменными окружения, а не аргументами: так заодно
+    Все ручки передаются переменными окружения, а не аргументами: так заодно
     проверяется лестница «аргумент -> переменная -> умолчание», которой
     пользуются validate.py и adjudicate.py.
     """
     code = ("import json, sys, replay\n"
             "print(json.dumps(replay.verdict_vocabulary(None, sys.argv[1])))\n")
     env = dict(os.environ)
-    env.pop("CLAUDE_JUDGE_PATCH_SRC", None)
-    env.pop("CLAUDE_JUDGE_IMAGE", None)
+    for name in ("CLAUDE_JUDGE_VOCAB_SRC", "CLAUDE_JUDGE_PATCH_SRC",
+                 "CLAUDE_JUDGE_MOD_REGISTRY", "CLAUDE_JUDGE_MOD_CANON"):
+        env.pop(name, None)
     if source is not None:
-        env["CLAUDE_JUDGE_PATCH_SRC"] = str(source)
-    if image is not None:
-        env["CLAUDE_JUDGE_IMAGE"] = str(image)
+        env["CLAUDE_JUDGE_VOCAB_SRC"] = str(source)
+    if canon is not None:
+        env["CLAUDE_JUDGE_MOD_CANON"] = str(canon)
+    if registry is not None:
+        env["CLAUDE_JUDGE_MOD_REGISTRY"] = str(registry)
     return subprocess.run([sys.executable, "-c", code, probe], cwd=str(ROOT / "judge"),
                           capture_output=True, text=True, errors="replace", env=env)
 
 
 def scenario_45() -> None:
-    """Дом словарей -- ИСХОДНИК патча: машина БЕЗ образа мерит, а не отказывает.
+    """Дом словарей -- register.ts мода: машина БЕЗ канона мерит, а не отказывает.
 
-    Прибор вычитывал словарь регекспом из ПРОПАТЧЕННОГО образа, и на машине без
-    установленного пропатченного claude отказывал кодом 2: 2026-09-07 стенд
-    падал так на сценариях 38 и 39 И на маке, И на воркере. Образ -- производное
-    от tweakcc-patch.js; дом -- файл, который пишет байты.
+    Дом -- раскатка, названная реестром исполняемого (hooks/register.ts);
+    канон дерева -- сверка, а не источник, и без него прибор обязан мерить,
+    объявив пропуск. Реестр игрушечный: живая раскатка на машине стенда
+    негерметична.
     """
-    patch = (ROOT / "tweakcc-patch.js").read_text(encoding="utf-8")
-    # Положительный контроль фикстуры: сократится дом -- сценарий перестанет
-    # воспроизводить предмет и «пройдёт» на чём угодно.
-    for declared in ('rx:"OK|BLOCK|STOP|DENY|WARN",act:"BLOCK|STOP|DENY",',
-                     'rx:"PASS|WARN|REFUSE",act:"REFUSE|WARN",',
-                     'rx:"SILENT|NUDGE",act:"NUDGE",'):
-        require(patch.count(declared) == 1,
-                f"дом не объявляет словарь ровно один раз: {declared}")
-    head = patch.index('dirName:"judge"')
-    gap = patch[head:patch.index('rx:"OK|BLOCK', head)]
-    require(gap.count("\n") > 1,
-            f"дом стал однострочным на этом участке ({gap.count(chr(10))} переводов) -- "
-            "многострочный класс скана больше ничего не доказывает")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        moddir = base / "mod"
+        (moddir / "hooks").mkdir(parents=True)
+        synthetic_mod(moddir / "hooks" / "register.ts")
+        registry = base / "installed_plugins.json"
+        synthetic_registry(registry, moddir)
+        # Положительный контроль фикстуры: сократится дом -- сценарий перестанет
+        # воспроизводить предмет и «пройдёт» на чём угодно.
+        text = (moddir / "hooks" / "register.ts").read_text(encoding="utf-8")
+        for declared in ('emits: "OK|BLOCK|STOP|DENY|WARN", folds: "BLOCK|STOP|DENY"',
+                         'emits: "PASS|WARN|REFUSE", folds: "REFUSE|WARN"',
+                         'emits: "SILENT|NUDGE", folds: "NUDGE"'):
+            require(text.count(declared) == 1,
+                    f"дом не объявляет словарь ровно один раз: {declared}")
+        head = text.index('probe: "judge"')
+        gap = text[head:text.index('emits: "OK|BLOCK', head)]
+        require(gap.count("\n") > 1,
+                f"дом стал однострочным на этом участке ({gap.count(chr(10))} переводов) -- "
+                "многострочный класс скана больше ничего не доказывает")
 
-    for probe, rx, act in (("judge", ["OK", "BLOCK", "STOP", "DENY", "WARN"], ["BLOCK", "STOP", "DENY"]),
-                           ("form", ["PASS", "WARN", "REFUSE"], ["REFUSE", "WARN"]),
-                           ("idle-watch", ["SILENT", "NUDGE"], ["NUDGE"])):
-        done = run_vocabulary(probe, image="/nonexistent/claude-image")
-        require(done.returncode == 0,
-                f"прибор отказал без образа на пробе {probe} (rc={done.returncode}): "
-                f"{(done.stderr or '').strip()[:300]}")
-        require(json.loads(done.stdout) == [rx, act],
-                f"словарь пробы {probe} прочитан не из дома: {done.stdout.strip()}")
+        for probe, rx, act in (("judge", ["OK", "BLOCK", "STOP", "DENY", "WARN"], ["BLOCK", "STOP", "DENY"]),
+                               ("form", ["PASS", "WARN", "REFUSE"], ["REFUSE", "WARN"]),
+                               ("idle-watch", ["SILENT", "NUDGE"], ["NUDGE"])):
+            done = run_vocabulary(probe, registry=registry,
+                                  canon="/nonexistent/register.ts")
+            require(done.returncode == 0,
+                    f"прибор отказал без канона на пробе {probe} (rc={done.returncode}): "
+                    f"{(done.stderr or '').strip()[:300]}")
+            require(json.loads(done.stdout) == [rx, act],
+                    f"словарь пробы {probe} прочитан не из дома: {done.stdout.strip()}")
 
 
 def scenario_46() -> None:
-    """Пропуск сверки с образом ОБЪЯВЛЕН: молчание неотличимо от сверки.
+    """Пропуск сверки с каноном ОБЪЯВЛЕН: молчание неотличимо от сверки.
 
-    Два разных «сверять нечем» -- образа нет по пути и образ есть, но наших
-    проб не несёт (сток либо чужая сборка). У каждого своя строка с причиной.
+    Два разных «сверять нечем» -- канона нет по пути и канон есть, но это
+    не наш мод (чужой файл либо оборванная копия). У каждого своя строка
+    с причиной.
     """
-    done = run_vocabulary("judge", image="/nonexistent/claude-image")
-    require(done.returncode == 0, f"rc={done.returncode}: {(done.stderr or '').strip()[:300]}")
-    require("сверка с образом ПРОПУЩЕНА" in done.stderr
-            and "/nonexistent/claude-image" in done.stderr,
-            f"пропуск сверки не объявлен при отсутствии образа: {done.stderr.strip()[:300]!r}")
-
     with tempfile.TemporaryDirectory() as tmp:
-        stock = Path(tmp) / "stock-image"
-        # Ни метки ядра проб, ни дескрипторов: ровно то, что лежит в
-        # ~/.local/bin/claude на машине без нашей установки.
-        stock.write_bytes(b"var A=1;function nothingOfOurs(){}")
-        done = run_vocabulary("judge", image=stock)
+        base = Path(tmp)
+        moddir = base / "mod"
+        (moddir / "hooks").mkdir(parents=True)
+        synthetic_mod(moddir / "hooks" / "register.ts")
+        registry = base / "installed_plugins.json"
+        synthetic_registry(registry, moddir)
+
+        done = run_vocabulary("judge", registry=registry,
+                              canon="/nonexistent/register.ts")
+        require(done.returncode == 0, f"rc={done.returncode}: {(done.stderr or '').strip()[:300]}")
+        require("сверка с каноном ПРОПУЩЕНА" in done.stderr
+                and "/nonexistent/register.ts" in done.stderr,
+                f"пропуск сверки не объявлен при отсутствии канона: {done.stderr.strip()[:300]!r}")
+
+        # Ни признака мода, ни записей словаря: ровно то, что стоит по пути
+        # канона на машине без дерева семьи.
+        stock = base / "stock-register.ts"
+        stock.write_text("export const WHATEVER = 1\n", encoding="utf-8")
+        done = run_vocabulary("judge", registry=registry, canon=stock)
         require(done.returncode == 0,
-                f"стоковый образ принят за расхождение (rc={done.returncode}): "
+                f"чужой файл принят за расхождение (rc={done.returncode}): "
                 f"{(done.stderr or '').strip()[:300]}")
-        require("не несёт наших проб" in done.stderr,
-                f"пропуск сверки со стоковым образом не объявлен: {done.stderr.strip()[:300]!r}")
+        require("не несёт признака мода" in done.stderr,
+                f"пропуск сверки с чужим каноном не объявлен: {done.stderr.strip()[:300]!r}")
         require(json.loads(done.stdout) == [["OK", "BLOCK", "STOP", "DENY", "WARN"],
                                             ["BLOCK", "STOP", "DENY"]],
                 f"словарь при пропущенной сверке взят не из дома: {done.stdout.strip()}")
 
 
 def scenario_47() -> None:
-    """Дом и образ РАСХОДЯТСЯ -- отказ кодом 2, и названы ОБА словаря.
+    """Дом и канон РАСХОДЯТСЯ -- отказ кодом 2, и названы ОБА словаря.
 
-    Расхождение значит, что поставленный образ собран не из этого дерева.
-    Молча предпочесть любую из сторон -- дать неверную разметку корпуса.
+    Расхождение значит, что раскатка либо источник собраны не из этого
+    дерева. Молча предпочесть любую из сторон -- дать неверную разметку
+    корпуса.
     """
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
-        source = base / "tweakcc-patch.js"
-        synthetic_source(source, judge_rx="OK|BLOCK")
-        image = base / "carrier-image"
-        carrier_image(image, 'dirName:"judge",arm:!0,rx:"OK|BLOCK|STOP|DENY|WARN",'
-                             'act:"BLOCK|STOP|DENY",fb:"x"};')
+        source = base / "register.ts"
+        synthetic_mod(source, judge_emits="OK|BLOCK")
+        canon = base / "canon-register.ts"
+        synthetic_mod(canon)
 
-        done = run_vocabulary("judge", image=image, source=source)
-        require(done.returncode == 2,
-                f"расхождение дома и образа не отвергнуто кодом 2 (rc={done.returncode}): "
-                f"{done.stdout.strip()[:200]}")
-        require("OK|BLOCK\"" in done.stderr and "OK|BLOCK|STOP|DENY|WARN" in done.stderr,
-                f"отказ назвал не оба словаря: {done.stderr.strip()[:400]!r}")
+        control = run_vocabulary("judge", source=source, canon=canon)
+        require(control.returncode == 2,
+                f"расхождение дома и канона не отвергнуто кодом 2 (rc={control.returncode}): "
+                f"{control.stdout.strip()[:200]}")
+        require("OK|BLOCK\"" in control.stderr and "OK|BLOCK|STOP|DENY|WARN" in control.stderr,
+                f"отказ назвал не оба словаря: {control.stderr.strip()[:400]!r}")
 
-        # Носитель БЕЗ словаря пробы -- то же расхождение, а не «нечего сверять»:
-        # метка говорит, что пробы в образе есть, значит эта пропала.
-        gone = base / "carrier-without-judge"
-        carrier_image(gone, 'dirName:"idle-watch",arm:!1,rx:"SILENT|NUDGE",act:"NUDGE"};')
-        done = run_vocabulary("judge", image=gone, source=source)
+        # Сошедшиеся дом и канон мерят: положительный контроль, без него
+        # «отвергнуто кодом 2» не отличить от «отвергнуто всегда».
+        same = run_vocabulary("judge", source=canon, canon=canon)
+        require(same.returncode == 0,
+                f"сошедшаяся пара отвергнута (rc={same.returncode}): "
+                f"{(same.stderr or '').strip()[:300]}")
+
+        # Наш мод БЕЗ словаря пробы -- то же расхождение, а не «нечего
+        # сверять»: признак мода говорит, что носитель наш, значит эта
+        # запись пропала.
+        gone = base / "canon-without-judge.ts"
+        synthetic_mod(gone)
+        lines = gone.read_text(encoding="utf-8").splitlines(keepends=True)
+        gone.write_text("".join(line for line in lines
+                                if 'probe: "judge"' not in line
+                                and 'emits: "OK|BLOCK|STOP|DENY|WARN"' not in line),
+                        encoding="utf-8")
+        done = run_vocabulary("judge", source=source, canon=gone)
         require(done.returncode == 2,
-                f"носитель без словаря пробы принят за сверку (rc={done.returncode})")
+                f"канон без словаря пробы принят за сверку (rc={done.returncode})")
         require("словаря этой пробы в нём нет" in done.stderr,
                 f"отказ не назвал причину пропажи: {done.stderr.strip()[:400]!r}")
 
 
 def scenario_48() -> None:
-    """Пробы, которой нет в ДОМЕ, не существует: словарь не крадётся у образа.
+    """Пробы, которой нет в ДОМЕ, не существует: словарь не крадётся у канона.
 
-    Дверь волны 22 (проба «mute-probe» и чужой соседний словарь) переехала на
-    верхний вход вместе с домом: раньше кражу мог совершить только скан образа,
-    теперь -- ещё и подстановка зашитого словаря на месте отказа.
+    Дверь волны 22 (проба «mute-probe» и чужой соседний словарь) осталась на
+    верхнем входе вместе с домом: кражу совершала бы подстановка зашитого
+    словаря на месте отказа.
     """
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
-        source = base / "tweakcc-patch.js"
-        synthetic_source(source)
-        image = base / "carrier-image"
-        # В образе у чужой пробы словарь ЕСТЬ -- красть есть что.
-        carrier_image(image, 'dirName:"judge",arm:!0,rx:"OK|BLOCK|STOP|DENY|WARN",'
-                             'act:"BLOCK|STOP|DENY",fb:"x"};var B=2;'
-                             'dirName:"mute-probe",arm:!1,rx:"MUTE|LOUD",act:"MUTE",fb:"y"};')
+        source = base / "register.ts"
+        synthetic_mod(source)
+        # В каноне у чужой пробы словарь ЕСТЬ -- красть есть что.
+        canon = base / "canon-register.ts"
+        synthetic_mod(canon)
+        carrier = canon.read_text(encoding="utf-8").replace(
+            '  { probe: "idle-watch", emits: "SILENT|NUDGE", folds: "NUDGE" },',
+            '  { probe: "idle-watch", emits: "SILENT|NUDGE", folds: "NUDGE" },\n'
+            '  { probe: "mute-probe", emits: "MUTE|LOUD", folds: "MUTE" },')
 
-        control = run_vocabulary("judge", image=image, source=source)
+        control = run_vocabulary("judge", source=source, canon=canon)
         require(control.returncode == 0,
                 f"положительный контроль не прошёл: judge не прочитан (rc={control.returncode}): "
                 f"{(control.stderr or '').strip()[:300]}")
 
-        # Сперва БЕЗ образа: сверка тогда пропущена, и единственное, что стоит
-        # между «пробы нет» и выдуманным ответом, -- сам отказ дома. С образом
+        # Сперва БЕЗ канона: сверка тогда пропущена, и единственное, что стоит
+        # между «пробы нет» и выдуманным ответом, -- сам отказ дома. С каноном
         # отказ приходил бы и от сверки, то есть дверь дома проверялась бы
         # чужим часовым.
-        done = run_vocabulary("mute-probe", image="/nonexistent/claude-image", source=source)
+        done = run_vocabulary("mute-probe", source=source,
+                              canon="/nonexistent/register.ts")
         require(done.returncode == 2,
                 f"проба вне дома не отвергнута кодом 2 (rc={done.returncode}): "
                 f"{done.stdout.strip()[:200]}")
         require("не объявлен в доме" in done.stderr,
                 f"отказ не назвал дом причиной: {done.stderr.strip()[:300]!r}")
 
-        # И с носителем, у которого своя проба со СВОИМ словарём: отказ обязан
-        # остаться -- образ не источник ни при каких условиях.
-        done = run_vocabulary("mute-probe", image=image, source=source)
+        # И с каноном, у которого своя проба со СВОИМ словарём: отказ обязан
+        # остаться -- канон не источник ни при каких условиях.
+        done = run_vocabulary("mute-probe", source=source, canon=carrier)
         require(done.returncode == 2,
-                f"проба вне дома взяла словарь у образа (rc={done.returncode}): "
+                f"проба вне дома взяла словарь у канона (rc={done.returncode}): "
                 f"{done.stdout.strip()[:200]}")
+        require("не объявлен в доме" in done.stderr,
+                f"отказ не назвал дом причиной: {done.stderr.strip()[:300]!r}")
 
 
 def scenario_49() -> None:
     """Раскатанный дом инструментов резолвится САМ: исходник лежит СОСЕДОМ.
 
-    Раскатка (scripts/probes-sync.sh) кладёт judge/*.py и tweakcc-patch.js в
-    ОДИН каталог, а резолвер знал только раскладку дерева кита -- 2026-09-07
-    любой вызов словаря в раскатанном доме отказывал кодом 2 (волна 42).
-    Половина Б -- положительный контроль половины А: без отказа, называющего
-    ОБА кандидата, «словарь нашёлся» неотличимо от «резолвер вернул что
-    попало».
+    Раскатка (scripts/probes-sync.sh) кладёт judge/*.py и register.ts в
+    ОДИН каталог, а резолвер знал только раскладку реестра исполняемого --
+    любой вызов словаря в раскатанном доме отказывал бы кодом 2. Половина Б
+    -- положительный контроль половины А: без отказа, называющего ОБА
+    кандидата, «словарь нашёлся» неотличимо от «резолвер вернул что
+    попало». Реестр отцеплен ручкой в несуществующий путь: живая установка
+    мода на машине стенда негерметична.
     """
     saved = {name: os.environ.get(name)
-             for name in ("CLAUDE_JUDGE_PATCH_SRC", "CLAUDE_JUDGE_IMAGE")}
+             for name in ("CLAUDE_JUDGE_VOCAB_SRC", "CLAUDE_JUDGE_PATCH_SRC",
+                          "CLAUDE_JUDGE_MOD_REGISTRY", "CLAUDE_JUDGE_MOD_CANON")}
     spec_name = "judge_tools_bench_deployed_replay"
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
         tools = base / "judge"
         tools.mkdir()
         shutil.copy2(ROOT / "judge" / "replay.py", tools / "replay.py")
-        neighbour = tools / "tweakcc-patch.js"
-        shutil.copy2(ROOT / "tweakcc-patch.js", neighbour)
-        # Фикстура обязана быть ИМЕННО раскатанной раскладкой: исходник на
-        # уровне кита вернул бы сценарий к СТАРОЙ ступени, и соседняя не
-        # измерялась бы вовсе.
-        require(not (base / "tweakcc-patch.js").exists(),
-                "фикстура несёт исходник на уровне кита -- измеряется старая ступень")
+        neighbour = tools / "register.ts"
+        synthetic_mod(neighbour)
+        # Фикстура обязана быть ИМЕННО раскатанной раскладкой: живой реестр
+        # снова перехватил бы резолв, и соседняя ступень не измерялась бы
+        # вовсе. Реестр отцеплен в несуществующий путь: его отсутствие --
+        # единственное состояние, в котором соседняя ступень законна.
+        registry = "/nonexistent/installed_plugins.json"
 
         for name in saved:
             os.environ.pop(name, None)
+        os.environ["CLAUDE_JUDGE_MOD_REGISTRY"] = str(registry)
         try:
             # Копия грузится ПО СВОЕМУ ПУТИ: import_tool берёт replay из дерева
             # кита, а предмет здесь -- раскладка, которую модуль считает от
@@ -2020,9 +2061,9 @@ def scenario_49() -> None:
             sys.modules[spec_name] = module
             spec.loader.exec_module(module)
 
-            # Образа нет по пути -- это ОБЪЯВЛЕННЫЙ пропуск сверки (волна 40b),
-            # а не отказ: предмет сценария -- дом, а не сверка.
-            image = str(base / "nonexistent-claude-image")
+            # Канона по пути нет (копия лежит во временном каталоге вне дерева
+            # семьи) -- это ОБЪЯВЛЕННЫЙ пропуск сверки, а не отказ: предмет
+            # сценария -- дом, а не сверка.
 
             def vocabulary(probe="judge"):
                 """Словарь В ПРОЦЕССЕ с перехватом stderr: отказ разбирается текстом.
@@ -2036,8 +2077,7 @@ def scenario_49() -> None:
                 sys.stderr = noise
                 module._VOCAB_CACHE.clear()
                 try:
-                    return module.verdict_vocabulary(image_path=image,
-                                                     probe=probe), None, noise.getvalue()
+                    return module.verdict_vocabulary(probe=probe), None, noise.getvalue()
                 except SystemExit as error:
                     return None, error.code, noise.getvalue()
                 finally:
@@ -2054,7 +2094,8 @@ def scenario_49() -> None:
             home, code, said = vocabulary()
             require(code == 2,
                     f"дом без единой раскладки не отвергнут кодом 2 (код {code}): {home}")
-            require(all(cand in said for cand in module.DEFAULT_SOURCES),
+            require(all(cand in said
+                        for cand in module.default_source_candidates()),
                     f"отказ назвал не оба кандидата раскладки: {said.strip()[:300]!r}")
         finally:
             sys.modules.pop(spec_name, None)
@@ -3416,13 +3457,15 @@ def mutation_m52(root: Path) -> None:
 
 
 def mutation_m53(root: Path) -> None:
-    # Ступень КОРНЯ кита снята: в дереве кита исходник лежит в корне, и без
-    # неё прибор отказывает там, где предмет замера лежит рядом.
+    # Ступень РЕЕСТРА снята: раскатанный мод не резолвится, хотя реестр
+    # называет установку, и прибор отказывает там, где предмет замера
+    # объявлен.
     replace_once(
         root / "judge" / "replay.py",
-        "    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),\n"
-        "    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),\n",
-        "    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),\n",
+        "    deployed, refusal, _why = deployed_source()\n"
+        "    if deployed is not None:\n"
+        "        return deployed, refusal\n",
+        "    deployed, refusal, _why = None, None, None\n",
         "M53",
     )
 
@@ -3432,7 +3475,7 @@ def mutation_m54(root: Path) -> None:
     # становится неотличимо от «сверка прошла».
     replace_once(
         root / "judge" / "replay.py",
-        "        print(f'сверка с образом ПРОПУЩЕНА: образа нет по пути {image} '\n"
+        "        print(f'сверка с каноном ПРОПУЩЕНА: канона нет по пути {canon} '\n"
         "              f'({err.__class__.__name__})', file=sys.stderr)\n"
         "        return\n",
         "        return\n",
@@ -3441,10 +3484,10 @@ def mutation_m54(root: Path) -> None:
 
 
 def mutation_m55(root: Path) -> None:
-    # Сверка с образом снята: дом и поставленный образ расходятся молча.
+    # Сверка с каноном снята: дом и канон расходятся молча.
     replace_once(
         root / "judge" / "replay.py",
-        "    if shipped != home:\n",
+        "    if canon_home != home:\n",
         "    if False:\n",
         "M55",
     )
@@ -3467,12 +3510,13 @@ def mutation_m56(root: Path) -> None:
 
 def mutation_m57(root: Path) -> None:
     # Ступень СОСЕДА снята (обратная к M53): раскатанный дом инструментов
-    # снова не резолвится, хотя исходник лежит в нём рядом с judge/*.py.
+    # снова не резолвится, хотя register.ts лежит в нём рядом с judge/*.py.
     replace_once(
         root / "judge" / "replay.py",
-        "    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),\n"
-        "    os.path.join(TOOLS_DIR, 'tweakcc-patch.js'),\n",
-        "    os.path.join(KIT_ROOT, 'tweakcc-patch.js'),\n",
+        "    if os.path.exists(NEIGHBOUR_SOURCE):\n"
+        "        return NEIGHBOUR_SOURCE, None\n"
+        "    return None, None\n",
+        "    return None, None\n",
         "M57",
     )
 
@@ -3482,8 +3526,8 @@ def mutation_m58(root: Path) -> None:
     # тот путь» вместо «файла нет ни в одной раскладке».
     replace_once(
         root / "judge" / "replay.py",
-        "', '.join(DEFAULT_SOURCES)",
-        "DEFAULT_SOURCES[0]",
+        "', '.join(candidates)",
+        "candidates[0]",
         "M58",
     )
 
@@ -3767,9 +3811,9 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M50", mutation_m50, 42, "молчание о чужом ключе"),
     ("M51", mutation_m51, 43, "усечённый target не переписан"),
     ("M52", mutation_m52, 44, "граница строки не восстановлена"),
-    ("M53", mutation_m53, 45, "прибор отказал без образа"),
-    ("M54", mutation_m54, 46, "пропуск сверки не объявлен при отсутствии образа"),
-    ("M55", mutation_m55, 47, "расхождение дома и образа не отвергнуто кодом 2"),
+    ("M53", mutation_m53, 45, "прибор отказал без канона"),
+    ("M54", mutation_m54, 46, "пропуск сверки не объявлен при отсутствии канона"),
+    ("M55", mutation_m55, 47, "расхождение дома и канона не отвергнуто кодом 2"),
     ("M56", mutation_m56, 48, "проба вне дома не отвергнута кодом 2"),
     ("M57", mutation_m57, 49, "раскатанная раскладка не резолвится"),
     ("M58", mutation_m58, 49, "отказ назвал не оба кандидата раскладки"),
@@ -3839,9 +3883,9 @@ COPIED_FILES: tuple[str, ...] = (
     "claude_patch.py",
     "set-model-costs.py",
     "claude-patch-all.sh",
-    # Дом словарей вердиктов (волна 40b): без него копия отказывает кодом 2 на
-    # первом же чтении словаря, и контроль без мутации красен -- мутации тогда
-    # не доказывают ничего.
+    # Ядро проб для toy_kit (сценарии 28/37 гоняют раскатку probes-sync.sh) и
+    # дом ручек носителя для probe-bench.js: без него копия падает раньше
+    # собственных зубов.
     "tweakcc-patch.js",
     "tools/judge-tools-bench.py",
     "tools/probe-bench.js",
