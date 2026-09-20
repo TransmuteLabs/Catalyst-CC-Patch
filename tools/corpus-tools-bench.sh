@@ -585,7 +585,7 @@ sha=$(shasum -a 256 "$target" 2>/dev/null | awk '{print $1}') || { printf 'за�
 #                     безусловный заголовок отвязал бы след от исхода;
 #   checks-floor   -- УСЛОВНЫЙ исход «ПОЛ ПРОВЕРОК СОШЁЛСЯ» оттуда же.
 __stg_except=' stage-census interface-gate checks-floor '
-__stg_tbl="$(dirname "$0")/tools/pipeline-stages.tsv"
+__stg_tbl="$(dirname "$0")/tools/pipeline-stages.tsv" || { printf 'заглушка конвейера: не получен каталог дерева для канона стадий\n' >&2; exit 2; }
 [[ -r "$__stg_tbl" ]] || { printf 'заглушка конвейера: канон стадий %s не читается -- метки стадий не построить\n' "$__stg_tbl" >&2; exit 2; }
 while IFS=$'\t' read -r __stg_id __stg_src __stg_log __stg_pin __stg_cond; do
   [[ "$__stg_cond" == always ]] || continue

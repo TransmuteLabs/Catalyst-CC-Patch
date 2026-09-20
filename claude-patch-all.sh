@@ -5807,7 +5807,7 @@ bash "$(dirname "$0")/tools/env-handles-live-guard-teeth.sh" 9>&- || {
 # дома НЕ осматриваются); каталог вне разделения и любой дрейф файла роняют
 # ПРИБОР (rc=2) с именем, а не зеленят предмет.
 echo "==> Гвард живости ручек на реальном дереве"
-__env_guard_homes="$(dirname "$0")/tools/env-guard-ours.txt"
+__env_guard_homes="$(dirname "$0")/tools/env-guard-ours.txt" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен каталог дерева для разделения домов\n' >&2; exit 2; }
 if [[ ! -f "$__env_guard_homes" ]]; then
   echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: НЕ ИЗМЕРЯЛИ -- файл разделения домов отсутствует (rc=2)" >&2
   exit 2
