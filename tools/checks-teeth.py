@@ -1379,6 +1379,19 @@ def main() -> int:
     n_img_picked = sum(1 for r in rows
                        if r["kind"] in ("literal", "derived")
                        and (picked is None or r["id"] in picked))
+    n_inapp_picked = sum(1 for r in rows
+                         if r["kind"] == "inapplicable"
+                         and (picked is None or r["id"] in picked))
+    # CONSTRAINT: прогон читает ДВА образа -- названный ключом (мутации и
+    # контроль красноты) и пристин 2.1.278 (база фикстур неприменимости и
+    # якоря). Назван обязан быть КАЖДЫЙ: свип зовёт прибор с образом СВОЕЙ
+    # волны, и умолчание о второй базе заставляет читателя лога отнести к
+    # названному образу вывод зубов, говоривших о другой версии.
+    if n_img_picked:
+        print(f"checks-teeth: ОБРАЗ мутаций и контроля: {image}", flush=True)
+    if n_inapp_picked:
+        print(f"checks-teeth: БАЗА фикстур неприменимости и якоря: "
+              f"{PRISTINE_LATEST}", flush=True)
     if n_img_picked:
         try:
             red, _ = reds(image)
