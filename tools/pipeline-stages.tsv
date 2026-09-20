@@ -43,3 +43,4 @@ judge-serves	СУДЬЯ СЛУЖИТ	СУДЬЯ СЛУЖИТ	exit	cond-silent
 cleanup-old-versions	Cleaning up previous versions	Cleaning up previous versions	exit	cond-silent
 activation	Активация|РАСХОЖДЕНИЕ ОБЪЯВЛЕНО	Активация: собранная версия активна	exit	cond-silent
 refresh-model-prices	Refreshing model prices	Refreshing model prices	EXEMPT:refresh цен объявлен never-fatal, SKIP_MODELS на каждой сборке	cond-silent
+step-checks-gate	Гейт карты шагов	Гейт карты шагов	exit	always

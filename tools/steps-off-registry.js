@@ -60,16 +60,41 @@ function readStepsOff(stepsPath) {
   return off;
 }
 
-// CLI-вход для приборов (зубы checks-teeth): печать и код возврата живут
-// здесь, семантика разбора -- только в readStepsOff выше.
+// CLI-вход для приборов (зубы checks-teeth, стенд шага 7, гейт карты):
+//   node steps-off-registry.js <реестр>              -- «записей: N», код 0/2
+//   node steps-off-registry.js <реестр> --names      -- имя записи на строку, код 0/2
+//   node steps-off-registry.js <реестр> --has <имя>  -- код 0: запись есть;
+//        1: записи нет; 2: отказ разбора.
+// CONSTRAINT: печать и коды возврата живут здесь, семантика разбора --
+// только в readStepsOff выше; второй CLI-обёртке здесь не место.
 if (require.main === module) {
-  const stepsPath = process.argv[2] ?? null;
-  try {
-    const off = readStepsOff(stepsPath);
-    console.log(`записей: ${off.size}`);
-  } catch (error) {
-    console.error(`модуль steps-off-registry: ${error.message}`);
+  const argv = process.argv.slice(2);
+  const stepsPath = argv[0] ?? null;
+  if (stepsPath !== null && stepsPath.startsWith('--')) {
+    console.error('модуль steps-off-registry: первым аргументом ожидается путь к реестру');
     process.exitCode = 2;
+  } else {
+    const namesMode = argv.includes('--names');
+    const hasIdx = argv.indexOf('--has');
+    try {
+      if (namesMode && hasIdx !== -1) {
+        throw new Error('CLI: --names и --has вместе не зовутся');
+      }
+      if (hasIdx !== -1 && hasIdx + 1 >= argv.length) {
+        throw new Error('CLI: после --has нужно имя шага');
+      }
+      const off = readStepsOff(stepsPath);
+      if (hasIdx !== -1) {
+        process.exitCode = off.has(argv[hasIdx + 1]) ? 0 : 1;
+      } else if (namesMode) {
+        for (const name of off.keys()) console.log(name);
+      } else {
+        console.log(`записей: ${off.size}`);
+      }
+    } catch (error) {
+      console.error(`модуль steps-off-registry: ${error.message}`);
+      process.exitCode = 2;
+    }
   }
 }
 

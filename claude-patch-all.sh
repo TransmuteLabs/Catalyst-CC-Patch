@@ -5889,6 +5889,11 @@ bash "$(dirname "$0")/tools/step7-window-teeth.sh" 9>&- || {
     4) echo "ЗУБЫ ОКНА ШАГА 7: прогнано либо прошло не столько, сколько" >&2
        echo "  объявлено пином EXPECTED_TEETH (rc=4)" >&2
        exit 4 ;;
+    # CONSTRAINT: код 3 и код 5 -- РАЗНЫЕ причины с РАЗНЫМИ владельцами:
+    # дельта дерева (окружение машины) против решения реестра
+    # our-steps-off.txt (оператор). Слитые в один код или один текст, они
+    # неразличимы; оба исхода прогон не останавливают.
+    5) echo "ЗУБЫ ОКНА ШАГА 7: НЕ ИЗМЕРЕНО -- шаг 7 выключен реестром our-steps-off.txt (rc=5)" >&2 ;;
     *) echo "ОКНО ШАГА 7 БЕЗ ЗУБОВ: мутация не покраснела своей" >&2
        echo "  причиной (rc=$__rc)" >&2
        exit 1 ;;
@@ -5925,7 +5930,7 @@ python3 "$(dirname "$0")/tools/orphan-stand-gate.py" 9>&- || {
 # стадия источника не заявлена строкой канона, если строка канона мертва, если
 # pin sweep:<field> висит на несуществующем поле sweep.sh, либо счёт стадий
 # разошёлся с EXPECTED_STAGES. Так "стадия пиняема по умолчанию".
-EXPECTED_STAGES=37
+EXPECTED_STAGES=38
 echo "==> Перепись стадий конвейера"
 python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
     --source "$0" \
@@ -6762,6 +6767,27 @@ echo "==> Applying our multi-provider patches"
 # судится: второй судья значил бы два дома одного правила.
 # Отсутствующий или пустой реестр -- НОРМА: составление пропускается, раннеру
 # уходит файл как есть, все шаги включены.
+# Гейт карты «шаг -> проверки» (tools/our-step-checks.txt, свойство КИТА):
+# каждая запись реестра обязана нести строку карты, иначе компоновка ниже
+# выключит шаг, а проверяющая сторона о нём не узнает -- его проверки упадут
+# «предмета нет» без объяснения, мимо вердиктов реестра. CONSTRAINT: отказ
+# ДО компоновки и ДО сборки образа: образ, собранный из непроведённого
+# решения, никто не ведёт. Код 3 называет шаг (в отказе гейта выше); код 2 --
+# отказ прибора: карта или реестр не читаются.
+# CONSTRAINT: стадия объявляет себя `==>` И несёт строку канона
+# tools/pipeline-stages.tsv (id step-checks-gate). Перепись стадий требует
+# ОБЪЯВЛЕНИЯ, а не молчания: снять метку, чтобы пройти перепись, -- значит
+# сделать гейт невидимым в логе и неотличимым от невыполненного.
+echo "==> Гейт карты шагов"
+__step_checks_rc=0
+python3 "$HERE/tools/step-checks.py" --gate "$HERE/tools/our-steps-off.txt" "$HERE/tools/our-step-checks.txt" || __step_checks_rc=$?
+case "$__step_checks_rc" in
+  0) ;;
+  3) echo "ГЕЙТ КАРТЫ ШАГОВ: прогон остановлен -- запись реестра без строки карты; шаг назван отказом гейта выше" >&2
+     exit 3 ;;
+  *) echo "ГЕЙТ КАРТЫ ШАГОВ: прибор не может мерить (rc=$__step_checks_rc)" >&2
+     exit 2 ;;
+esac
 STEPS_OFF_SRC="$HERE/tools/our-steps-off.txt"
 OUR_PATCH_RUN="$OUR_PATCH"
 if [[ -s "$STEPS_OFF_SRC" ]]; then
@@ -6882,7 +6908,7 @@ fi
 # --- 5. verify ---------------------------------------------------------------
 echo "==> Verifying"
 python3 - "$BIN" "$OUR_PATCH" <<'PY'
-import json, os, re, sys
+import importlib.util, json, os, re, sys
 d = open(sys.argv[1], 'rb').read()
 src = open(sys.argv[2], encoding='utf-8').read()
 ID = rb'[A-Za-z_$][\w$]*'
@@ -8310,11 +8336,46 @@ def _cancellation_rule_is_whole(d):
 # ТОЛЬКО ручки, объявленные ДЛЯ ЭТОЙ площадки (ключ «площадка × ручка»);
 # не сошлась ручка без записи -- остаётся fail-carrier, и текст отказа
 # называет именно необъявленные ручки.
-# КАРТА «шаг -> проверки» ПОИМЁННАЯ и ведётся руками: у каждого шага свои
-# проверки, и новая запись реестра обязана в той же волне провести сюда свои
-# имена -- родовой предикат по имени шага мерил бы чужое.
-_STEP26_NAME = '26 dispatch-cancellation rule in the system prompt'
-_STEP26_CHECK = 'dispatch-cancellation rule reaches the main loop'
+# КАРТА «шаг -> проверки» -- ОБЪЯВЛЕННЫЕ ДАННЫЕ tools/our-step-checks.txt;
+# разбор и отказы -- единственный дом tools/step-checks.py (строка с неизвестным
+# коду обработчиком и пустая карта -- отказы прибора, не молчание).
+# CONSTRAINT: значения имени и проверки шага 26 здесь НЕ объявляются
+# литералами -- они приходят из модуля; вторая копия значения расходилась бы с
+# картой молча.
+_step_checks_mod = os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
+                                'tools', 'step-checks.py')
+_step_checks_spec = importlib.util.spec_from_file_location('step_checks',
+                                                           _step_checks_mod)
+if _step_checks_spec is None or _step_checks_spec.loader is None:
+    print(f'ОТКАЗ ПРИБОРА: нет загрузчика модуля карты шагов '
+          f'{_step_checks_mod}', file=sys.stderr)
+    sys.exit(2)
+_step_checks = importlib.util.module_from_spec(_step_checks_spec)
+try:
+    _step_checks_spec.loader.exec_module(_step_checks)
+except Exception as _e:
+    print(f'ОТКАЗ ПРИБОРА: модуль карты шагов не исполняется: {_e}',
+          file=sys.stderr)
+    sys.exit(2)
+try:
+    _checks_map = _step_checks.read_step_checks(
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
+                     'tools', 'our-step-checks.txt'))
+except Exception as _e:
+    print(f'ОТКАЗ ПРИБОРА: карта «шаг -> проверки» не читается: {_e}',
+          file=sys.stderr)
+    sys.exit(2)
+# CONSTRAINT: обработчик s26 ведёт РОВНО одну строку карты с РОВНО одним
+# именем проверки; молчаливый выбор первого мерил бы чужую строку (две строки
+# на одно имя карте запрещены её разбором, две на один обработчик -- здесь).
+_s26_map_rows = [(n, v) for n, (h, v) in _checks_map.items() if h == 's26']
+if len(_s26_map_rows) != 1 or len(_s26_map_rows[0][1]) != 1:
+    print('ОТКАЗ ПРИБОРА: обработчик s26 обязан вести ровно одну строку карты '
+          f'с одним именем проверки, а ведёт {len(_s26_map_rows)}',
+          file=sys.stderr)
+    sys.exit(2)
+_STEP26_NAME = _s26_map_rows[0][0]
+_STEP26_CHECK = _s26_map_rows[0][1][0]
 
 
 def _version_tuple(text, what):

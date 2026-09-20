@@ -66,7 +66,8 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-EXPECTED_ENTRY_TEETH = 20
+# 27 = 20 (#403, волна A и раньше) + 7 зубов карты «шаг -> проверки» (#403B).
+EXPECTED_ENTRY_TEETH = 27
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -134,7 +135,9 @@ def _pipeline_check_names() -> frozenset[str]:
     tools/heredoc-anchor.py (загрузка importlib по образцу стадии сверки
     конвейера) -- местная копия правила уже расходилась с домом (волна 230).
     Ключи словаря читаются обходом ast.Dict; ключ-ast.Name резолвится
-    присваиванием строковой константы в ТОМ ЖЕ теле. Регуляркой ключи не
+    присваиванием строковой константы в ТОМ ЖЕ теле, а при её отсутствии
+    (с #403B литералы шага 26 удалены из тела) -- каналом карты
+    «шаг -> проверки» (см. _map_channel_check_name). Регуляркой ключи не
     достаются: комментарий у EXPECTED_CHECKS фиксирует два неверных
     пересчёта регуляркой, ломавшейся на экранированном апострофе внутри
     `current turn is the judge\'s alone`. Неразрешённый ключ -- отказ
@@ -186,6 +189,16 @@ def _pipeline_check_names() -> frozenset[str]:
                 and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)):
             consts[node.targets[0].id] = node.value.value
+    # Ключи-имена без константы в теле (#403B): значение шага 26 пришло из
+    # карты «шаг -> проверки» -- литерал в теле означал бы вторую копию
+    # значения. Больше ОДНОГО такого ключа -- отказ: резолвер обязан расти
+    # вместе с картой, а не молча ссыпать разные ключи в одно имя.
+    unconst = [key for key in dic.keys
+               if isinstance(key, ast.Name) and key.id not in consts]
+    if len(unconst) > 1:
+        raise Refusal(f"ключей checks без константы больше одного ({len(unconst)}) -- "
+                      f"резолвер канала карты объявлен на один")
+    map_name = _map_channel_check_name(tree) if unconst else None
     names: set[str] = set()
     for key in dic.keys:
         if key is None:
@@ -193,15 +206,90 @@ def _pipeline_check_names() -> frozenset[str]:
         if isinstance(key, ast.Constant) and isinstance(key.value, str):
             names.add(key.value)
         elif isinstance(key, ast.Name):
-            if key.id not in consts:
-                raise Refusal(f"ключ checks {key.id} не разрешается строковой константой "
-                              f"в том же теле: {ast.dump(key)}")
-            names.add(consts[key.id])
+            if key.id in consts:
+                names.add(consts[key.id])
+            else:
+                names.add(map_name)
         else:
             raise Refusal(f"ключ checks не строка и не имя: {ast.dump(key)}")
     if not names:
         raise Refusal("реестр checks конвейера извлечён пустым")
     return frozenset(names)
+
+
+def _map_channel_check_name(tree: ast.Module) -> str:
+    """Значение ключа checks из канала карты «шаг -> проверки» (#403B).
+
+    Признанная форма одна: переменная карты присвоена вызовом read_step_checks
+    (единственный дом разбора tools/step-checks.py), а строка-результат
+    выбирается генератором по <карта>.items() со сравнением обработчика
+    h == '<id>'. Значение читается ИЗ КАРТЫ тем же единственным домом -- не
+    из второй копии здесь. Иная форма или неоднозначность -- отказ прибора:
+    имя-призрак не имеет права проскакивать дверь молча.
+    """
+    map_vars: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "read_step_checks"):
+            map_vars.add(node.targets[0].id)
+    if not map_vars:
+        raise Refusal("канал карты не найден: тело не зовёт read_step_checks")
+    handlers: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ListComp):
+            continue
+        for gen in node.generators:
+            # iter -- ВЫЗОВ <карта>.items(): в генераторе доступ-с-вызовом
+            # парсится Call от Attribute, а не сам Attribute.
+            if not (isinstance(gen.iter, ast.Call)
+                    and isinstance(gen.iter.func, ast.Attribute)
+                    and gen.iter.func.attr == "items"
+                    and isinstance(gen.iter.func.value, ast.Name)
+                    and gen.iter.func.value.id in map_vars):
+                continue
+            if not (isinstance(gen.target, ast.Tuple) and len(gen.target.elts) == 2
+                    and isinstance(gen.target.elts[0], ast.Name)
+                    and isinstance(gen.target.elts[1], ast.Tuple)
+                    and len(gen.target.elts[1].elts) == 2
+                    and all(isinstance(e, ast.Name) for e in gen.target.elts[1].elts)):
+                continue
+            handler_var = gen.target.elts[1].elts[0].id
+            for cond in gen.ifs:
+                if (isinstance(cond, ast.Compare) and len(cond.ops) == 1
+                        and isinstance(cond.ops[0], ast.Eq)
+                        and isinstance(cond.left, ast.Name)
+                        and cond.left.id == handler_var
+                        and len(cond.comparators) == 1
+                        and isinstance(cond.comparators[0], ast.Constant)
+                        and isinstance(cond.comparators[0].value, str)):
+                    handlers.add(cond.comparators[0].value)
+    if not handlers:
+        raise Refusal("канал карты не назван обработчиком: нет сравнения "
+                      "обработчика со строкой по итерации карты")
+    tool = ROOT / "tools" / "step-checks.py"
+    spec = importlib.util.spec_from_file_location("checks_teeth_step_checks",
+                                                  str(tool))
+    if spec is None or spec.loader is None:
+        raise Refusal(f"модуль карты не загружается: {tool}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise Refusal(f"модуль карты не исполняется: {exc}") from exc
+    try:
+        rows = module.read_step_checks(ROOT / "tools" / "our-step-checks.txt")
+    except Exception as exc:
+        raise Refusal(f"карта шагов не читается: {exc}") from exc
+    values = sorted({check for handler, checks in rows.values()
+                     if handler in handlers for check in checks})
+    if len(values) != 1:
+        raise Refusal(f"канал карты разрешается {len(values)} именами проверок "
+                      f"для обработчиков {sorted(handlers)} -- ждали ровно одно: "
+                      f"{values!r}")
+    return values[0]
 
 
 def check_row_names(rows: list[dict[str, object]], registry: set[str]) -> None:
@@ -726,6 +814,15 @@ def _temp_kit(*, decl_text: str | None = None, script_repl=None, patch_repl=None
     steps_off_src = ROOT / "tools" / "our-steps-off.txt"
     if steps_off_src.is_file():
         shutil.copy2(steps_off_src, tools / "our-steps-off.txt")
+    # CONSTRAINT: карта «шаг -> проверки» и её единственный читатель ОБЯЗАНЫ
+    # ехать в снимок: верификатор берёт имя и проверку шага 26 ИЗ МОДУЛЯ по
+    # карте, и снимок без них отказал бы прибором, а не мерил. Отсутствие
+    # этих файлов в доме -- НЕ норма (в отличие от реестра выключений): их
+    # absence краснит гейт карты и верификатор; снимок наследует дом как есть.
+    for _fname in ("step-checks.py", "our-step-checks.txt"):
+        _src = ROOT / "tools" / _fname
+        if _src.is_file():
+            shutil.copy2(_src, tools / _fname)
     # CONSTRAINT: дом объявления отсутствия носителя ОБЯЗАН ехать в снимок
     # кита: гейт шага 26 ищет его рядом со скриптом, и снимок без дома молча
     # читал бы «ничего не объявлено» -- то же, что у our-steps-off.txt (#373).
@@ -1410,6 +1507,21 @@ _PREDATES_MARK = "собран до версии-пола"
 _STALE_MARK = "запись пережила причину"
 _STEP26_CHECK = "dispatch-cancellation rule reaches the main loop"
 _STEP26_ROW = "26 dispatch-cancellation rule in the system prompt"
+
+# --- зубы карты «шаг -> проверки» (#403B) -------------------------------------
+# Гейт карты обязан отличать отказ СВОЙ (код 3: запись без строки карты) от
+# отказа ПРИБОРА (код 2); маркеры ниже -- и «вне области отказа НЕТ».
+_STEP_CHECKS_TOOL = ROOT / "tools" / "step-checks.py"
+_STEP_CHECKS_MAP = ROOT / "tools" / "our-step-checks.txt"
+_STEP_GATE_REFUSAL_MARK = "запись реестра не проведена в карту"
+_STEP_GATE_SUMMARY_MARK = "все проведены"
+# Объявление литералом имени/проверки шага 26 в конвейере -- возвращение второй
+# копии значения (#403B, З5): значение обязано приходить из модуля карты.
+_STEP26_DECL_RE = re.compile(r"(?m)^_STEP26_(?:NAME|CHECK)\s*=\s*['\"]")
+# Вызывающий блок стенда шага 7: якорь строки вызова и рамки case-блока.
+_STEP7_CALLER_ANCHOR = 'bash "$(dirname "$0")/tools/step7-window-teeth.sh" 9>&- || {'
+_STEP7_OFF_MSG = ("step7-window-teeth: НЕ ИЗМЕРЕНО -- шаг выключен реестром "
+                  "our-steps-off.txt")
 
 # Якорь мутации зуба steps-off-floor-predates: сравнение версий в
 # _step26_verdict. Мутация гасит условие -- ветвь predates недостижима, образ
@@ -2780,6 +2892,413 @@ def _tooth_mutations_name_in_registry() -> str | None:
     return None
 
 
+# --- зубы карты «шаг -> проверки» и стены реестра стенда 7 (#403B) ------------
+
+
+def _run_step_gate(tool: Path, registry: Path, map_path: Path):
+    """Гейт карты шагов как предмет: CLI --gate, код возврата и вывод."""
+    return subprocess.run(
+        [sys.executable, str(tool), "--gate", str(registry), str(map_path)],
+        capture_output=True, text=True, errors="replace")
+
+
+def _tooth_step_checks_unmapped_step_refuses() -> str | None:
+    """З1 (#403B): запись реестра без строки карты -- код 3 с именем шага.
+
+    Дефект Д1: компоновка выключала шаг, а проверяющая сторона о нём не
+    знала -- его проверки падали «предмета нет» без объяснения, мимо
+    машинерии вердиктов реестра. Гейт обязан краснить ДО компоновки и
+    называть шаг по имени. Мутации однопеременные: погашенный код 3 и
+    инвертированное членство.
+    """
+    if not _STEP_CHECKS_TOOL.is_file():
+        return f"нет инструмента карты шагов: {_STEP_CHECKS_TOOL}"
+    if not _STEP_CHECKS_MAP.is_file():
+        return f"нет карты шагов: {_STEP_CHECKS_MAP}"
+    step = "З1 шаг вне карты"
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-z1.") as raw:
+        reg = Path(raw) / "our-steps-off.txt"
+        reg.write_text(f"{step}\t2.1.278\tзуб З1: шаг не проведён в карту\n",
+                       encoding="utf-8")
+        r = _run_step_gate(_STEP_CHECKS_TOOL, reg, _STEP_CHECKS_MAP)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 3:
+            return f"гейт не краснит кодом 3: rc={r.returncode} {out!r}"
+        if step not in out:
+            return f"отказ гейта не называет шаг по имени: {out!r}"
+        mut = Path(raw) / "step-checks-z1.py"
+        # Мутированная копия обязана стоять в окружении инструмента: без
+        # steps-off-registry.js рядом она умирает на чтении реестра ДО
+        # мутированного кода -- и мутация «проверялась» бы чужой причиной.
+        shutil.copy2(ROOT / "tools" / "steps-off-registry.js",
+                     Path(raw) / "steps-off-registry.js")
+        module_src = _STEP_CHECKS_TOOL.read_text(encoding="utf-8")
+        for name, old, new in (
+            ("погашенный код 3", "        return 3", "        return 0"),
+            ("инвертированное членство", "name not in checks_map",
+             "name in checks_map"),
+        ):
+            mut.write_text(_once_replace(module_src, old, new,
+                                         f"зуб З1: {name}"),
+                           encoding="utf-8")
+            m = _run_step_gate(mut, reg, _STEP_CHECKS_MAP)
+            mout = (m.stdout or "") + (m.stderr or "")
+            if m.returncode == 3 and step in mout:
+                return (f"мутация пережила зуб ({name}): отказ не отключился: "
+                        f"rc={m.returncode} {mout!r}")
+    return None
+
+
+def _tooth_step_checks_mapped_step_passes() -> str | None:
+    """З2 (#403B): проведённый шаг не краснит гейт; вне области отказа тихо.
+
+    Зуб «вне области отказа НЕТ»: реестр с ровно шагом 26 и карта, несущая
+    его, дают код 0 со сводкой, а текст отказа в зелёном исходе отсутствует.
+    Мутация: инвертированное членство краснит проведённый шаг.
+    """
+    if not _STEP_CHECKS_TOOL.is_file():
+        return f"нет инструмента карты шагов: {_STEP_CHECKS_TOOL}"
+    if not _STEP_CHECKS_MAP.is_file():
+        return f"нет карты шагов: {_STEP_CHECKS_MAP}"
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-z2.") as raw:
+        reg = Path(raw) / "our-steps-off.txt"
+        reg.write_text(_STEP26_ROW + "\t2.1.278\tзуб З2: проведённый шаг\n",
+                       encoding="utf-8")
+        r = _run_step_gate(_STEP_CHECKS_TOOL, reg, _STEP_CHECKS_MAP)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            return f"гейт краснит проведённый шаг: rc={r.returncode} {out!r}"
+        if _STEP_GATE_SUMMARY_MARK not in out:
+            return f"гейт не печатает сводку проведённости: {out!r}"
+        if _STEP_GATE_REFUSAL_MARK in out:
+            return f"вне области отказа не тихо: {out!r}"
+        mut = Path(raw) / "step-checks-z2.py"
+        # Окружение инструмента для мутированной копии -- см. зуб З1.
+        shutil.copy2(ROOT / "tools" / "steps-off-registry.js",
+                     Path(raw) / "steps-off-registry.js")
+        mut.write_text(_once_replace(
+            _STEP_CHECKS_TOOL.read_text(encoding="utf-8"),
+            "name not in checks_map", "name in checks_map",
+            "зуб З2: инвертированное членство"), encoding="utf-8")
+        m = _run_step_gate(mut, reg, _STEP_CHECKS_MAP)
+        mout = (m.stdout or "") + (m.stderr or "")
+        if m.returncode == 0:
+            return f"мутация пережила зуб: проведённый шаг не покраснел: {mout!r}"
+    return None
+
+
+def _tooth_step_checks_dash_is_declared_empty() -> str | None:
+    """З3 (#403B): поле '-' -- ОБЪЯВЛЕННОЕ отсутствие проверок, не поломка.
+
+    Дельта обязана быть объявляемой и отличимой от поломки: строка карты с
+    '-' в поле проверок не краснит гейт, а строка, ОТСУТСТВУЮЩАЯ в карте,
+    краснит. Тексты двух исходов попарно различны. Мутация: тире объявлено
+    неразборчивым -- зелёный исход падает отказом.
+    """
+    if not _STEP_CHECKS_TOOL.is_file():
+        return f"нет инструмента карты шагов: {_STEP_CHECKS_TOOL}"
+    dash_step = "З3 шаг с объявленным отсутствием проверок"
+    ghost_step = "З3 шаг без строки карты"
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-z3.") as raw:
+        map_path = Path(raw) / "our-step-checks.txt"
+        map_path.write_text(f"{dash_step} | s26 | -\n", encoding="utf-8")
+        reg_one = Path(raw) / "one.txt"
+        reg_one.write_text(f"{dash_step}\t2.1.278\tзуб З3: объявленное отсутствие\n",
+                           encoding="utf-8")
+        reg_two = Path(raw) / "two.txt"
+        reg_two.write_text(f"{dash_step}\t2.1.278\tзуб З3: объявленное отсутствие\n"
+                           f"{ghost_step}\t2.1.278\tзуб З3: строка не проведена\n",
+                           encoding="utf-8")
+        good = _run_step_gate(_STEP_CHECKS_TOOL, reg_one, map_path)
+        good_out = (good.stdout or "") + (good.stderr or "")
+        if good.returncode != 0:
+            return f"объявленное отсутствие краснит гейт: rc={good.returncode} {good_out!r}"
+        if _STEP_GATE_SUMMARY_MARK not in good_out:
+            return f"гейт не печатает сводку проведённости: {good_out!r}"
+        bad = _run_step_gate(_STEP_CHECKS_TOOL, reg_two, map_path)
+        bad_out = (bad.stdout or "") + (bad.stderr or "")
+        if bad.returncode != 3:
+            return f"отсутствующая строка не краснит кодом 3: rc={bad.returncode} {bad_out!r}"
+        if ghost_step not in bad_out:
+            return f"отказ не называет непроведённый шаг: {bad_out!r}"
+        good_line = next((ln for ln in good_out.splitlines()
+                          if _STEP_GATE_SUMMARY_MARK in ln), "")
+        bad_line = next((ln for ln in bad_out.splitlines()
+                         if _STEP_GATE_REFUSAL_MARK in ln), "")
+        if not good_line or not bad_line or good_line == bad_line:
+            return (f"тексты исходов не попарно различны: {good_line!r} / "
+                    f"{bad_line!r}")
+        mut = Path(raw) / "step-checks-z3.py"
+        # Окружение инструмента для мутированной копии -- см. зуб З1.
+        shutil.copy2(ROOT / "tools" / "steps-off-registry.js",
+                     Path(raw) / "steps-off-registry.js")
+        mut.write_text(_once_replace(
+            _STEP_CHECKS_TOOL.read_text(encoding="utf-8"),
+            "if checks_field == '-':\n            checks = []",
+            "if checks_field == '-':\n"
+            "            raise StepChecksError('мутация З3: тире объявлено "
+            "неразборчивым')",
+            "зуб З3: тире объявлено неразборчивым"), encoding="utf-8")
+        m = _run_step_gate(mut, reg_one, map_path)
+        if m.returncode == 0:
+            mout = (m.stdout or "") + (m.stderr or "")
+            return f"мутация пережила зуб: тире всё ещё разбирается: {mout!r}"
+    return None
+
+
+def _tooth_step_checks_missing_map_refuses_as_instrument() -> str | None:
+    """З4 (#403B): карты нет/пуста/из комментариев -- отказ прибора, код 2.
+
+    Карта -- свойство КИТА (в отличие от реестра выключений): её пустота --
+    потеря данных, а не решение оператора. Не код 3 и не молчание. Мутация:
+    снятый отказ пустоты уводит исход в чужой класс 3.
+    """
+    if not _STEP_CHECKS_TOOL.is_file():
+        return f"нет инструмента карты шагов: {_STEP_CHECKS_TOOL}"
+    if not _STEP_CHECKS_MAP.is_file():
+        return f"нет карты шагов: {_STEP_CHECKS_MAP}"
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-z4.") as raw:
+        reg = Path(raw) / "our-steps-off.txt"
+        reg.write_text(_STEP26_ROW + "\t2.1.278\tзуб З4: реестр при битой карте\n",
+                       encoding="utf-8")
+        cases = (
+            ("карты нет", None),
+            ("карта пуста", ""),
+            ("карта из комментариев", "# только шапка\n\n# данных нет\n"),
+        )
+        for label, content in cases:
+            map_path = Path(raw) / "our-step-checks.txt"
+            if content is None:
+                map_path.unlink(missing_ok=True)
+            else:
+                map_path.write_text(content, encoding="utf-8")
+            r = _run_step_gate(_STEP_CHECKS_TOOL, reg, map_path)
+            out = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 2:
+                return (f"{label}: ждали отказ прибора кодом 2, получили "
+                        f"rc={r.returncode} {out!r}")
+            if not out.strip():
+                return f"{label}: отказ прибора молчит"
+            if "ОТКАЗ ПРИБОРА" not in out:
+                return f"{label}: отказ не назван приборным текстом: {out!r}"
+        map_path = Path(raw) / "our-step-checks.txt"
+        map_path.write_text("# только шапка\n", encoding="utf-8")
+        mut = Path(raw) / "step-checks-z4.py"
+        # Окружение инструмента для мутированной копии -- см. зуб З1.
+        shutil.copy2(ROOT / "tools" / "steps-off-registry.js",
+                     Path(raw) / "steps-off-registry.js")
+        mut.write_text(_once_replace(
+            _STEP_CHECKS_TOOL.read_text(encoding="utf-8"),
+            "    if not rows:\n"
+            "        raise StepChecksError(\n"
+            "            f'карта шагов пуста или несёт только комментарии: {path} -- '\n"
+            "            f'карта есть свойство кита, её пустота -- потеря данных')\n",
+            "    if not rows:\n"
+            "        pass  # мутация З4: пустая карта молча читается как ноль строк\n",
+            "зуб З4: снятый отказ пустоты"), encoding="utf-8")
+        m = _run_step_gate(mut, reg, map_path)
+        if m.returncode == 2:
+            mout = (m.stdout or "") + (m.stderr or "")
+            return f"мутация пережила зуб: пустота всё ещё отказывает: {mout!r}"
+    return None
+
+
+def _tooth_step_checks_single_home() -> str | None:
+    """З5 (#403B): имя и проверка шага 26 не объявляются литералами в конвейере.
+
+    Значение приходит из модуля tools/step-checks.py по карте: вторая копия
+    значения расходилась бы с картой молча. Зуб краснеет, если объявление
+    вернулось; чувствительность детектора -- вживление объявления в копию
+    текста; канал модуля -- отказ снимка кита без модуля (и отсутствие этого
+    отказа, когда модуль на месте).
+    """
+    script = ROOT / "claude-patch-all.sh"
+    if not script.is_file():
+        return f"нет конвейера: {script}"
+    if not _STEP_CHECKS_TOOL.is_file():
+        return f"нет модуля карты: {_STEP_CHECKS_TOOL}"
+    if not _STEP_CHECKS_MAP.is_file():
+        return f"нет карты шагов: {_STEP_CHECKS_MAP}"
+    text = script.read_text(encoding="utf-8")
+    if _STEP26_DECL_RE.search(text):
+        return ("в claude-patch-all.sh объявлен литерал _STEP26_NAME/"
+                "_STEP26_CHECK -- значение обязано приходить из модуля карты")
+    loader_anchor = "'tools', 'step-checks.py')"
+    if loader_anchor not in text:
+        return ("в claude-patch-all.sh нет загрузки модуля карты "
+                "tools/step-checks.py -- значение не приходит из модуля")
+    for probe in ("_STEP26_NAME = '26 зонд З5'\n",
+                  "_STEP26_CHECK = 'зонд З5'\n"):
+        if not _STEP26_DECL_RE.search(text + "\n" + probe):
+            return f"детектор объявлений слеп к вживлению: {probe!r}"
+    td, snap_script, snap_patch = _temp_kit()
+    try:
+        (td / "tools" / "step-checks.py").unlink()
+        fake = td / "fake-image-z5.bin"
+        fake.write_bytes(b"// Version: 2.1.278\n")
+        r = _run_checks(snap_script, fake, snap_patch)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 2 or "step-checks.py" not in out:
+            return (f"снимок без модуля карты не отказал его именем кодом 2: "
+                    f"rc={r.returncode} {out!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    td, snap_script, snap_patch = _temp_kit()
+    try:
+        fake = td / "fake-image-z5.bin"
+        fake.write_bytes(b"// Version: 2.1.278\n")
+        r = _run_checks(snap_script, fake, snap_patch)
+        out = (r.stdout or "") + (r.stderr or "")
+        if "step-checks.py" in out:
+            return (f"модуль на месте, а отказ с его именем есть: {out!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_step7_teeth_off_by_registry_code5() -> str | None:
+    """З6 (#403B): выключенный реестром шаг 7 -- код 5 стенда, ДО любой работы.
+
+    Стенд шага 7 мерил СЫРОЙ патч и был слеп к реестру: выключив шаг 7,
+    оператор получал зелёный стенд на шаге, которого в продукте нет --
+    вакуумная зелень. Без записи реестра стенд кодом 5 НЕ выходит (идёт
+    дальше и останавливается отсутствием патча в снимке -- код 2). Мутации:
+    снятый выход кодом 5 и подменённый код.
+    """
+    stand_src = ROOT / "tools" / "step7-window-teeth.sh"
+    module_src = ROOT / "tools" / "steps-off-registry.js"
+    for path in (stand_src, module_src):
+        if not path.is_file():
+            return f"нет предмета зуба: {path}"
+    step7 = "7 session memory"
+
+    def _kit(registry_text: str) -> Path:
+        raw = Path(tempfile.mkdtemp(prefix="checks-teeth-z6."))
+        tools = raw / "tools"
+        tools.mkdir()
+        shutil.copy2(stand_src, tools / "step7-window-teeth.sh")
+        shutil.copy2(module_src, tools / "steps-off-registry.js")
+        (tools / "our-steps-off.txt").write_text(registry_text,
+                                                 encoding="utf-8")
+        return tools
+
+    def _run(tools: Path):
+        return subprocess.run(["bash", str(tools / "step7-window-teeth.sh")],
+                              capture_output=True, text=True, errors="replace")
+
+    off_text = f"{step7}\t2.1.278\tзуб З6: шаг выключен реестром\n"
+    quiet_text = "# зуб З6: выключенных записей нет\n"
+    tools = _kit(off_text)
+    try:
+        r = _run(tools)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 5 or _STEP7_OFF_MSG not in out:
+            return (f"запись реестра не дала код 5 с его текстом: "
+                    f"rc={r.returncode} {out!r}")
+    finally:
+        shutil.rmtree(tools.parent, ignore_errors=True)
+    tools = _kit(quiet_text)
+    try:
+        r = _run(tools)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 5 or _STEP7_OFF_MSG in out:
+            return (f"без записи реестра стенд вышел кодом 5: rc={r.returncode} "
+                    f"{out!r}")
+        if r.returncode != 2 or "tweakcc-patch.js" not in out:
+            return (f"без записи реестра стенд не пошёл обычным путём "
+                    f"(ждали отказ о патче, код 2): rc={r.returncode} {out!r}")
+    finally:
+        shutil.rmtree(tools.parent, ignore_errors=True)
+    module_stand = stand_src.read_text(encoding="utf-8")
+    for name, old, new in (
+        ("снятый выход", "exit 5 ;;", ": ;;"),
+        ("подменённый код", "exit 5 ;;", "exit 3 ;;"),
+    ):
+        tools = _kit(off_text)
+        try:
+            (tools / "step7-window-teeth.sh").write_text(
+                _once_replace(module_stand, old, new, f"зуб З6: {name}"),
+                encoding="utf-8")
+            m = _run(tools)
+            mout = (m.stdout or "") + (m.stderr or "")
+            if m.returncode == 5 and _STEP7_OFF_MSG in mout:
+                return f"мутация пережила зуб ({name}): {mout!r}"
+        finally:
+            shutil.rmtree(tools.parent, ignore_errors=True)
+    return None
+
+
+def _z7_caller_fragment(text: str) -> list:
+    """case-блок вызывающего стенда 7; [] -- блок не найден."""
+    lines = text.split("\n")
+    start = next((i for i, ln in enumerate(lines)
+                  if ln == _STEP7_CALLER_ANCHOR), -1)
+    if start < 0:
+        return []
+    case = next((i for i in range(start, len(lines))
+                 if lines[i] == "  case $__rc in"), -1)
+    if case < 0:
+        return []
+    end = next((i for i in range(case + 1, len(lines))
+                if lines[i] == "  esac"), -1)
+    if end < 0:
+        return []
+    return lines[case:end + 1]
+
+
+def _z7_run_fragment(fragment, rc_value: int):
+    script = "__rc=%d\n%s\n" % (rc_value, "\n".join(fragment))
+    return subprocess.run(["bash", "-c", script], capture_output=True,
+                          text=True, errors="replace")
+
+
+def _tooth_step7_caller_distinguishes_3_and_5() -> str | None:
+    """З7 (#403B): ветки 3) и 5) вызывающего различны и не останавливают прогон.
+
+    Код 3 -- дельта машины (окружение), код 5 -- решение реестра: владельцы
+    разные, и слитые в один код или один текст исходы неразличимы. Обе ветки
+    печатают и НЕ выходят. Мутации: снятая ветка 5) и слитый текст веток.
+    """
+    script = ROOT / "claude-patch-all.sh"
+    if not script.is_file():
+        return f"нет конвейера: {script}"
+    frag = _z7_caller_fragment(script.read_text(encoding="utf-8"))
+    if not frag:
+        return "вызывающий блок step7-window-teeth не найден в claude-patch-all.sh"
+    r3 = _z7_run_fragment(frag, 3)
+    r5 = _z7_run_fragment(frag, 5)
+    out3 = (r3.stdout or "") + (r3.stderr or "")
+    out5 = (r5.stdout or "") + (r5.stderr or "")
+    for label, proc, out in (("3", r3, out3), ("5", r5, out5)):
+        if proc.returncode != 0:
+            return (f"ветка {label}) останавливает прогон: "
+                    f"rc={proc.returncode} {out!r}")
+        if not out.strip():
+            return f"ветка {label}) ничего не печатает"
+    if out3 == out5:
+        return f"ветки 3) и 5) печатают один текст: {out3!r}"
+    if "предмета нет" not in out3 or "реестр" not in out5:
+        return ("владельцы исходов не названы текстом: 3) обязан звать дельту "
+                f"машины, 5) -- решение реестра: {out3!r} / {out5!r}")
+    no5 = "\n".join(ln for ln in frag if not ln.lstrip().startswith("5)"))
+    m = _z7_run_fragment(no5.split("\n"), 5)
+    if m.returncode == 0:
+        mout = (m.stdout or "") + (m.stderr or "")
+        return f"мутация пережила зуб: снятая ветка 5) не остановила прогон: {mout!r}"
+    merged = _once_replace("\n".join(frag),
+                           "шаг 7 выключен реестром our-steps-off.txt (rc=5)",
+                           "предмета нет на этой машине (rc=3)",
+                           "зуб З7: слитый текст веток")
+    a = _z7_run_fragment(merged.split("\n"), 3)
+    b = _z7_run_fragment(merged.split("\n"), 5)
+    a_out = (a.stdout or "") + (a.stderr or "")
+    b_out = (b.stdout or "") + (b.stderr or "")
+    if a_out != b_out:
+        return (f"мутация пережила зуб: слитый текст не выровнял ветки: "
+                f"{a_out!r} / {b_out!r}")
+    return None
+
+
 def self_check() -> int:
     """Герметичная самопроверка: без образа и замка.
 
@@ -2898,6 +3417,13 @@ def main() -> int:
         ("carrier-absent-parse-refuses", _tooth_carrier_absent_parse_refuses),
         ("carrier-absent-missing-file-is-norm", _tooth_carrier_absent_missing_file_is_norm),
         ("carrier-absent-texts-distinct", _tooth_carrier_absent_texts_distinct),
+        ("step-checks-unmapped-step-refuses", _tooth_step_checks_unmapped_step_refuses),
+        ("step-checks-mapped-step-passes", _tooth_step_checks_mapped_step_passes),
+        ("step-checks-dash-is-declared-empty", _tooth_step_checks_dash_is_declared_empty),
+        ("step-checks-missing-map-refuses-as-instrument", _tooth_step_checks_missing_map_refuses_as_instrument),
+        ("step-checks-single-home", _tooth_step_checks_single_home),
+        ("step7-teeth-off-by-registry-code5", _tooth_step7_teeth_off_by_registry_code5),
+        ("step7-caller-distinguishes-3-and-5", _tooth_step7_caller_distinguishes_3_and_5),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
