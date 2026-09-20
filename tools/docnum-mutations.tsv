@@ -21,13 +21,13 @@
 # Каждое правило грамматики имеет здесь СВОЙ вход: украшения разметки (D5),
 # ширина связки (D11), регистр имени (D9), общее слово вместо имени (D8),
 # явные пометки (D10, D12), граница прозы и кода (D13), неоднозначность (D6).
-D1	README.md	{OWNER:corpus-tools-bench:scenarios} scenarios on a toy corpus	120 scenarios on a toy corpus	объявлено «{OWNER:corpus-tools-bench:scenarios} scenarios» (владелец corpus-tools-bench)
-D2	README.md	corpus-tools-bench's {OWNER:corpus-tools-bench:mutations} recorded mutations	corpus-tools-bench's 136 recorded mutations	объявлено «{OWNER:corpus-tools-bench:mutations} mutations» (владелец corpus-tools-bench)
+D1	README.md	{OWNER:corpus-tools-bench:scenarios} scenarios on a toy corpus	{OWNER:corpus-tools-bench:scenarios:+1} scenarios on a toy corpus	объявлено «{OWNER:corpus-tools-bench:scenarios} scenarios» (владелец corpus-tools-bench)
+D2	README.md	corpus-tools-bench's {OWNER:corpus-tools-bench:mutations} recorded mutations	corpus-tools-bench's {OWNER:corpus-tools-bench:mutations:+1} recorded mutations	объявлено «{OWNER:corpus-tools-bench:mutations} mutations» (владелец corpus-tools-bench)
 D3	README.md	| `tools/corpus-tools-bench.sh` | corpus-tools-bench, for the corpus tools	| `tools/judge-tools-bench.sh` | judge-tools-bench, for the corpus tools	владелец judge-tools-bench
-D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = {OWNER:probe-bench:scenarios};	const EXPECTED_SCENARIOS = 133;	владелец probe-bench
+D4	tools/probe-bench.js	const EXPECTED_SCENARIOS = {OWNER:probe-bench:scenarios};	const EXPECTED_SCENARIOS = {OWNER:probe-bench:scenarios:+1};	владелец probe-bench
 D5	claude-patch-all.sh	            if prev_at < lo_s or prev in LEFT_STOP:	            if prev_at < lo_s or not prev.isalnum():	ячейки таблицы
 D6	tools/docnum-bench.py	EXPECTED_MUTATIONS = {OWNER:docnum-bench:mutations}	EXPECTED_MUTATION_COUNT = {OWNER:docnum-bench:mutations}	не объявляет свою величину
-D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS={OWNER:corpus-tools-bench:mutations}	EXPECTED_MUTATION_COUNT=258	не объявляет свою величину
+D7	tools/corpus-tools-bench.sh	EXPECTED_MUTATIONS={OWNER:corpus-tools-bench:mutations}	EXPECTED_MUTATION_COUNT={OWNER:corpus-tools-bench:mutations:+1}	не объявляет свою величину
 D8	claude-patch-all.sh	BENCH_WORDS = ('bench', 'benches',	BENCH_WORDS = ('nosuchword', 'benches',	общим словом
 D9	claude-patch-all.sh	    low = stream.casefold()	    low = stream	имя с заглавной буквы
 D10	claude-patch-all.sh	MARKERS = ('docnum:historical', 'docnum:subset', 'docnum:example',	MARKERS = ('subset', 'подмножеств', 'docnum:example',	отрицание не работает как разрешение
@@ -61,13 +61,13 @@ D32	claude-patch-all.sh	        return blocks(FENCE_LINE.sub(BREAK, text), BLOCK
 D33	claude-patch-all.sh	        if header and TABLE_ROW.match(line) and not TABLE_SEP.match(line):	        if False:	ячейка таблицы ловит расхождение по шапке
 D34	claude-patch-all.sh	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',	           'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят',	девяносто -- тоже счёт словом
 D35	claude-patch-all.sh	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',	           'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty',	ninety -- тоже счёт словом
-D36	README.md	probe-bench's {OWNER:probe-bench:mutations} recorded mutations	probe-bench's 12 recorded mutations	объявлено «{OWNER:probe-bench:mutations} mutations» (владелец probe-bench)
-D37	README.md	checks-teeth's {OWNER:checks-teeth:mutations} recorded mutations	checks-teeth's 32 recorded mutations	объявлено «{OWNER:checks-teeth:mutations} mutations» (владелец checks-teeth)
+D36	README.md	probe-bench's {OWNER:probe-bench:mutations} recorded mutations	probe-bench's {OWNER:probe-bench:mutations:+1} recorded mutations	объявлено «{OWNER:probe-bench:mutations} mutations» (владелец probe-bench)
+D37	README.md	checks-teeth's {OWNER:checks-teeth:mutations} recorded mutations	checks-teeth's {OWNER:checks-teeth:mutations:+1} recorded mutations	объявлено «{OWNER:checks-teeth:mutations} mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
 D40	claude-patch-all.sh	все {OWNER:pipeline:checks} проверок конвейера сошлись	все {OWNER:pipeline:checks} сошлись	опущенным существительным
 D41	claude-patch-all.sh	# docnum:synthetic-block -- этот блок ЕСТЬ сам гейт	# этот блок ЕСТЬ сам гейт	the pipeline runs 999 checks
 D42	claude-patch-all.sh	    """Все питоновские heredoc'и одного файла	    """corpus-tools-bench has 12 scenarios. Питоновские heredoc'и одного файла	объявлено «{OWNER:corpus-tools-bench:scenarios} scenarios» (владелец corpus-tools-bench)
-D43	README.md	build-path-probe has {OWNER:build-path-probe:scenarios} scenarios	build-path-probe has 92 scenarios	объявлено «{OWNER:build-path-probe:scenarios} scenarios» (владелец build-path-probe)
+D43	README.md	build-path-probe has {OWNER:build-path-probe:scenarios} scenarios	build-path-probe has {OWNER:build-path-probe:scenarios:+1} scenarios	объявлено «{OWNER:build-path-probe:scenarios} scenarios» (владелец build-path-probe)
 D44	README.md	{OWNER:build-path-probe:scenarios} scenarios and {OWNER:build-path-probe:mutations} mutations	{OWNER:build-path-probe:scenarios} scenarios and 108 mutations	объявлено «{OWNER:build-path-probe:mutations} mutations» (владелец build-path-probe)
-D45	tools/corpus-tools-bench.sh	EXPECTED_SCENARIOS={OWNER:corpus-tools-bench:scenarios}	EXPECTED_SCENARIO_COUNT=200	не объявляет свою величину
+D45	tools/corpus-tools-bench.sh	EXPECTED_SCENARIOS={OWNER:corpus-tools-bench:scenarios}	EXPECTED_SCENARIO_COUNT={OWNER:corpus-tools-bench:scenarios:+1}	не объявляет свою величину

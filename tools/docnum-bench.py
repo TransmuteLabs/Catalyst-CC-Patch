@@ -132,7 +132,7 @@ EXPECTED_MUTATIONS = 45
 # неотличим от «зубы не измеряли ничего». Ровно столько проверок обязана
 # прогнать teeth(); расхождение -- код 2 (прибор измерил не то, что объявил),
 # а не тихая зелень. Этот пин -- сверка самИх зубов, в ran не входит.
-EXPECTED_OWNER_TEETH = 15
+EXPECTED_OWNER_TEETH = 19
 
 # Счёт владельца в полях 3-5 таблицы пишется ТОКЕНОМ {OWNER:<id>:<величина>}
 # и живёт в одном доме -- у владельца: цифра -- второй дом числа (владелец
@@ -142,7 +142,12 @@ EXPECTED_OWNER_TEETH = 15
 # CONSTRAINT: форма токена -- ровно {OWNER:<id>:<величина>}; фигурные скобки
 # в якорях таблицы живут и в другом смысле (D18 `#{1,6}`, D22
 # `\d{4}-\d{2}-\d{2}`), и сканер обязан видеть только свою форму.
-OWNER_TOKEN = re.compile(r'\{OWNER:([A-Za-z0-9._-]+):([A-Za-z]+)\}')
+OWNER_TOKEN = re.compile(
+    r'\{OWNER:([A-Za-z0-9._-]+):([A-Za-z]+)(?::([+-]\d+))?\}')
+# CONSTRAINT: мутант, несущий ГОЛОЕ число вместо токена, -- мина: он
+# совпадёт со счётом владельца в тот день, когда владелец до него
+# дорастёт, и ряд перестанет что-либо менять. Форма со сдвигом
+# {OWNER:id:величина:+1} не может совпасть с владельцем по построению.
 OWNER_RESIDUE = '{OWNER:'
 
 
@@ -237,7 +242,7 @@ def owners_registry(source):
     return registry
 
 
-def owner_value(registry, root, oid, quantity, row):
+def owner_value(registry, root, oid, quantity, row, shift=None):
     """Живое значение величины владельца; ПУСТО НЕ НОЛЬ.
 
     Якорь, найденный ноль или два раза, значит «не знаю, какое число
@@ -265,7 +270,24 @@ def owner_value(registry, root, oid, quantity, row):
             'нужно ровно один (%s): %s'
             % (oid, quantity, len(found), counts[quantity].pattern, path))
         sys.exit(2)
-    return found[0]
+    if shift is None:
+        return found[0]
+    # CONSTRAINT: сдвиг 0 вернул бы значение владельца и дал бы ряд, который
+    # ничего не меняет -- ровно ту вакуумную зелень, ради которой сдвиг и
+    # заведён. Нечисловая величина со сдвигом -- отказ ПРИБОРА, а не тихое
+    # склеивание строки.
+    try:
+        base = int(found[0])
+    except ValueError:
+        say('ОТКАЗ -- ряд %s: величина «%s» владельца «%s» не число (%r), '
+            'сдвиг неприменим' % (row, quantity, oid, found[0]))
+        sys.exit(2)
+    step = int(shift)
+    if step == 0:
+        say('ОТКАЗ -- ряд %s: сдвиг +0 вернул бы значение владельца -- '
+            'мутация ничего не меняла бы' % row)
+        sys.exit(2)
+    return str(base + step)
 
 
 def substitute(rows, registry, root):
@@ -279,11 +301,24 @@ def substitute(rows, registry, root):
     """
     out = []
     for name, rel, old, new, want in rows:
+        # CONSTRAINT: ряд, чей ВХОД цитирует счёт владельца, а МУТАНТ несёт
+        # голое число, -- отложенная мина (класс «якорь заморозил чужой
+        # счётчик»): он молча перестанет мутировать, когда владелец дорастёт
+        # до этого числа. Мутант обязан либо сам быть токеном (в том числе со
+        # сдвигом), либо не содержать цифр вовсе.
+        if OWNER_TOKEN.search(old) and not OWNER_TOKEN.search(new) \
+                and any(ch.isdigit() for ch in new):
+            say('ОТКАЗ -- ряд %s: вход цитирует счёт владельца, а мутант '
+                'несёт голое число (%r) -- оно совпадёт со счётом, когда '
+                'владелец до него дорастёт; писать {OWNER:id:величина:+1}'
+                % (name, new))
+            sys.exit(2)
         fields = [old, new, want]
         for index, text in enumerate(fields):
             fields[index] = OWNER_TOKEN.sub(
                 lambda match: owner_value(registry, root, match.group(1),
-                                          match.group(2), name),
+                                          match.group(2), name,
+                                          match.group(3)),
                 text)
             if OWNER_RESIDUE in fields[index]:
                 say('ОТКАЗ -- ряд %s, поле %d: после подстановки остался '
@@ -450,6 +485,37 @@ def teeth():
                  ('K3', 'toy', 'nosuch'))]:
             failure = _refusal(caption, run, *needles)
             count(failure is None, failure)
+
+        # T6: форма СО СДВИГОМ даёт значение владельца плюс шаг и следует
+        # за ним -- мутант, выраженный сдвигом, не может совпасть со счётом.
+        row6 = ('K6', 'toy.txt', 'держит {OWNER:toy:items} предметов',
+                'держит {OWNER:toy:items:+1} предметов', 'след')
+        got = substitute([row6], registry, work)
+        count(got[0][2] == 'держит 9 предметов',
+              'T6: вход не разрешился значением владельца: %r' % (got[0][2],))
+        count(got[0][3] == 'держит 10 предметов',
+              'T6: сдвиг не применился: %r' % (got[0][3],))
+
+        # T7: сдвиг +0 вернул бы значение владельца -- отказ, а не молчание.
+        failure = _refusal('T7', lambda: substitute(
+            [('K7', 'toy.txt', 'A {OWNER:toy:items}',
+              'A {OWNER:toy:items:+0}', 'след')], registry, work), 'K7')
+        count(failure is None, failure)
+
+        # T8: сторож замороженного числа. Ряд, чей вход цитирует счёт
+        # владельца, а мутант несёт голое число, -- отложенная мина, и
+        # сторож обязан назвать ряд ДО подстановки.
+        # CONSTRAINT: число мутанта здесь ЗАВЕДОМО НЕ РАВНО счёту владельца
+        # (7 против 9), и зуб требует СОБСТВЕННЫХ слов сторожа. Иначе отказ
+        # «вход равен мутации» (T5), срабатывающий на равном числе уже ПОСЛЕ
+        # подстановки, выдавал бы себя за сторожа: замер показал зелёный зуб
+        # при обезоруженном стороже -- два отказа с одним именем ряда
+        # неразличимы, зуб обязан требовать ИМЯ отказа.
+        failure = _refusal('T8', lambda: substitute(
+            [('K8', 'toy.txt', 'держит {OWNER:toy:items} предметов',
+              'держит 7 предметов', 'след')], registry, work),
+            'K8', 'голое число')
+        count(failure is None, failure)
 
         # T4: нераспознанный остаток {OWNER: обязан назвать ряд и поле.
         for caption, run, needles in [
