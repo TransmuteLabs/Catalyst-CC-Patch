@@ -11,6 +11,11 @@
 //        отравы/мутации уехал, образец не уникален) -- измерение НЕ
 //        СОСТОЯЛОСЬ, и счёт ослеплений этому прогону веры не даёт (круг 28,
 //        F-9: прежде такой отказ ронялся в единицу «не ослепила»)
+//   3 -- предмета нет: tweakcc-patch.js не вставляет ни одного блока проб
+//        (сняты из патча либо выключены реестром our-steps-off.txt). Это не
+//        вердикт об образе и не поломка прибора: вырезать нечего -- нечего и
+//        сравнивать. В --self-check тот же код несут мутации, требующие
+//        предмета: они названы НЕ ИЗМЕРЕННЫМИ поимённо, а не зазеленевшими.
 //   4 -- объявленное число не сходится с фактическим (EXPECTED_SCENARIOS,
 //        EXPECTED_MUTATIONS): правка таблицы без правки числа
 'use strict';
@@ -19,6 +24,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+// Разбор реестра выключенных шагов и сравнение версии-пола -- ЕДИНСТВЕННЫЙ
+// общий дом tools/steps-off-registry.js (его зовёт и emit-check.js).
+// Самопроверочная копия стенда получает модуль РЯДОМ с собой (runSelfCheck),
+// поэтому require остаётся относительным.
+const { readStepsOff, versionTuple, tupleLeq } = require('./steps-off-registry.js');
 
 const START_MARKER = '/*__ccProbe0*/';
 const END_MARKER = '/*__ccProbe1*/';
@@ -58,47 +68,179 @@ function resolveCarrierHome() {
 }
 const CARRIER_HOME = resolveCarrierHome();
 
-function carrierKeysAtHome() {
-  if (CARRIER_HOME === null) return null;
-  let text;
-  try {
-    text = fs.readFileSync(CARRIER_HOME, 'utf8');
-  } catch (error) {
-    return null;
+// CONSTRAINT: реестр выключенных шагов резолвится тем же приёмом, что и дом
+// ручек (подъём от каталога стенда, для самопроверочной копии -- явный путь
+// из окружения). ОТСУТСТВУЮЩИЙ реестр -- НОРМА (все шаги включены), а не
+// отказ: его дом заводится первой выключенной записью.
+function resolveStepsOffHome() {
+  let d = __dirname;
+  for (let i = 0; i < 6; i += 1) {
+    const p = path.join(d, 'tools', 'our-steps-off.txt');
+    if (fs.existsSync(p)) return p;
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
   }
-  const found = new Set();
-  for (const m of text.matchAll(/process\.env\.(CLAUDE_[A-Z0-9_]*_CARRIER)/g)) {
-    found.add(m[1]);
-  }
-  return [...found].sort();
+  return process.env.PROBE_BENCH_STEPS_OFF || null;
+}
+const STEPS_OFF_HOME = resolveStepsOffHome();
+
+// CONSTRAINT: правило классификации блока пробы живёт ЗДЕСЬ, в одном месте:
+// его читают и ценз дома (computeSubject ниже), и сверка вырезанного из
+// образа (matchCarvedBlocks). Вторая копия правила разошлась бы молча.
+const WATCH_MARK = '[fleet-idle] ';
+const FORM_MARK = 'tag:"[Form]"';
+
+function classifyKind(block) {
+  if (block.includes(FORM_MARK)) return 'form';
+  if (block.includes(WATCH_MARK)) return 'watch';
+  return 'judge';
 }
 
-(function censusCarrierKeys() {
-  const home = carrierKeysAtHome();
-  if (home === null) {
+// Пары маркеров ищутся в ТЕКСТЕ ДОМА (исходнике патча), а не в образе:
+// предмет стенда -- проекция того, что патч вставляет сегодня.
+function probeBlocksInText(text) {
+  const blocks = [];
+  let scanFrom = 0;
+  for (;;) {
+    const start = text.indexOf(START_MARKER, scanFrom);
+    if (start < 0) break;
+    const end = text.indexOf(END_MARKER, start + START_MARKER.length);
+    if (end < 0) {
+      throw new Error(`маркер ${END_MARKER} не найден после ${START_MARKER}: незакрытый блок проб`);
+    }
+    blocks.push({ start, block: text.slice(start + START_MARKER.length, end) });
+    scanFrom = end + END_MARKER.length;
+  }
+  return blocks;
+}
+
+// CONSTRAINT: охватывающий шаг ищется СТРУКТУРНО -- ближайший предшествующий
+// литерал step('… перед смещением маркера, сканом назад по тексту.
+// Счётчиком скобок пользоваться нельзя: он меряет байты, а не грамматику, и
+// умирает на первой же вложенной скобке.
+function owningStep(text, offset) {
+  const at = text.lastIndexOf("step('", offset);
+  if (at < 0) return null;
+  const nameEnd = text.indexOf("'", at + 6);
+  if (nameEnd < 0) return null;
+  return text.slice(at + 6, nameEnd);
+}
+
+function imageVersionOf(source) {
+  const found = new Set(
+    [...source.matchAll(/\/\/ Version: ([0-9]+\.[0-9]+\.[0-9]+)/g)].map((m) => m[1]),
+  );
+  if (found.size !== 1) return null;
+  return [...found][0];
+}
+
+// Предмет стенда -- ПРОЕКЦИЯ исходника патча: какие блоки проб патч
+// вставляет СЕГОДНЯ, минус выключенные реестром. Ноль блоков -- честный
+// исход «предмета нет» (код 3), а не отказ прибора.
+function computeSubject(source) {
+  const homeText = CARRIER_HOME === null ? null : (() => {
+    try { return fs.readFileSync(CARRIER_HOME, 'utf8'); } catch { return null; }
+  })();
+  if (homeText === null) {
     console.error(`probe-bench: ОТКАЗ — нет дома ручек носителя (${CARRIER_HOME});`
       + ' сверить перечень не с чем');
     process.exit(2);
   }
-  // Пусто не ноль: дом без единой ручки — смена формы вставок, а не мир без
-  // носителей, и молчаливый пропуск сделал бы ценз декоративным.
-  if (home.length === 0) {
-    console.error(`probe-bench: ОТКАЗ — в ${CARRIER_HOME} не нашлось ни одной ручки`
-      + ' носителя: форма чтения в доме сменилась, перечень недействителен');
-    process.exit(2);
+  const stepsOff = readStepsOff(STEPS_OFF_HOME);
+  const kindCount = new Map();
+  const blocks = [];
+  for (const found of probeBlocksInText(homeText)) {
+    const step = owningStep(homeText, found.start);
+    if (step === null) {
+      console.error(`probe-bench: ОТКАЗ — блок проб вне шага: маркер на смещении ${found.start}`
+        + ' не имеет предшествующего step(\'…\'; реестр our-steps-off.txt не сможет его выключить');
+      process.exit(2);
+    }
+    const kind = classifyKind(found.block);
+    kindCount.set(kind, (kindCount.get(kind) ?? 0) + 1);
+    blocks.push({ kind, step, block: found.block });
   }
-  const mine = Object.values(CARRIER_KEY).slice().sort();
-  const missing = home.filter((key) => !mine.includes(key));
-  const extra = mine.filter((key) => !home.includes(key));
+  for (const [kind, count] of kindCount) {
+    if (count > 1) {
+      console.error(`probe-bench: ОТКАЗ — в доме пробы «${kind}» больше одной (${count}):`
+        + ' классификация неоднозначна, сверка не состоялась');
+      process.exit(2);
+    }
+  }
+  // CONSTRAINT: версия образа читается при ЛЮБЫХ непустых блоках, а не только
+  // когда реестр уже задел чей-то шаг: реестр живёт отдельным файлом, и
+  // вычитание не имеет права зависеть от того, успела ли в нём появиться
+  // запись, -- иначе инвариант «запись есть ⇒ версия прочитана» держался бы
+  // на совпадении двух чтений.
+  let imgTuple = null;
+  if (blocks.length > 0) {
+    const imgVer = imageVersionOf(source);
+    if (imgVer === null) {
+      console.error('probe-bench: ОТКАЗ — версия образа не читается однозначно,'
+        + ' а вычитание реестра our-steps-off.txt сравнивает версию-пол с версией образа');
+      process.exit(2);
+    }
+    imgTuple = versionTuple(imgVer, 'версия образа');
+  }
+  const expectedKinds = [];
+  const absent = new Map();
+  for (const b of blocks) {
+    const row = stepsOff.get(b.step);
+    if (row) {
+      const floor = versionTuple(row.floor, 'версия-пол реестра our-steps-off.txt');
+      if (tupleLeq(floor, imgTuple)) {
+        absent.set(b.kind, `выключена реестром our-steps-off.txt: ${b.step} (${row.reason})`);
+        continue;
+      }
+    }
+    expectedKinds.push(b.kind);
+  }
+  for (const kind of Object.keys(CARRIER_KEY)) {
+    if (!absent.has(kind) && !expectedKinds.includes(kind)) absent.set(kind, 'снята из патча');
+  }
+  return { blocks, expectedKinds, absent };
+}
+
+function announceNoSubject(subject) {
+  console.error('probe-bench: ПРЕДМЕТА НЕТ — патч не вставляет ни одного блока проб');
+  for (const kind of Object.keys(CARRIER_KEY)) {
+    console.error(`  ${kind}: ${subject.absent.get(kind)}`);
+  }
+}
+
+// Ценз сверяет СВЯЗКУ «проба → ручка» с ручками, читаемыми ВНУТРИ найденных
+// блоков проб, -- не со всем файлом патча: carrier-чтения чужих шагов
+// (например, правила шага 26) носителями проб не являются, и прежнее
+// население расходилось с перечнем даже в здоровом мире. Обе стороны
+// называют СВОЮ опасность: общего текста на две разные болезни не осталось.
+function censusCarrierKeys(subject) {
+  const homeKeys = new Set();
+  for (const b of subject.blocks) {
+    for (const m of b.block.matchAll(/process\.env\.(CLAUDE_[A-Z0-9_]*_CARRIER)/g)) {
+      homeKeys.add(m[1]);
+    }
+  }
+  const expectedKeys = subject.expectedKinds
+    .map((kind) => CARRIER_KEY[kind])
+    .filter((key) => typeof key === 'string');
+  const missing = [...homeKeys].filter((key) => !expectedKeys.includes(key));
+  const extra = expectedKeys.filter((key) => !homeKeys.has(key));
   if (missing.length || extra.length) {
-    console.error('probe-bench: ОТКАЗ — перечень ручек носителя разошёлся с домом'
-      + ` ${CARRIER_HOME}:`
-      + (missing.length ? ` в доме есть, у стенда нет: ${missing.join(', ')};` : '')
-      + (extra.length ? ` у стенда есть, в доме нет: ${extra.join(', ')};` : '')
-      + ' стенд не изолировал бы то, чем образ управляется');
+    if (missing.length) {
+      console.error('probe-bench: ОТКАЗ — в доме есть, у стенда нет: ' + missing.join(', ')
+        + '. Ручка читается блоком пробы, а CARRIER_KEY её не знает: имени нет в ENV_KEYS,'
+        + ' стенд не сотрёт её между сценариями и измерит мир машины, а не предмет');
+    }
+    if (extra.length) {
+      console.error('probe-bench: ОТКАЗ — у стенда есть, в доме нет: ' + extra.join(', ')
+        + '. Сценарии, намеренно ставящие эту ручку, мерили бы гейт, которого в собранном'
+        + ' этим патчем образе нет: молчание-от-отсутствия неотличимо от молчания-от-гейта'
+        + ' (вакуум)');
+    }
     process.exit(2);
   }
-})();
+}
 
 const ENV_KEYS = [
   'CLAUDE_PROBES_DIR',
@@ -271,27 +413,30 @@ function carveBlocks(source) {
     blocks.push(source.slice(start + START_MARKER.length, end));
     from = end + END_MARKER.length;
   }
-  if (blocks.length === 0) throw new Error(`marker not found: ${START_MARKER}`);
   return blocks;
 }
 
-const WATCH_MARK = '[fleet-idle] ';
-const FORM_MARK = 'tag:"[Form]"';
-
-function classifyBlocks(blocks) {
+// Сверка ВЫРЕЗАННОГО из образа с ОЖИДАЕМЫМ предметом (проекцией исходника
+// патча): каждый ожидаемый вид -- ровно один блок; любой другой исход --
+// громкий отказ с ОБЕИМИ сторонами (что ожидалось, что найдено), не
+// исключением и не молчанием. Классификацию читает classifyKind выше.
+function matchCarvedBlocks(blocks, expectedKinds) {
   const found = { judge: [], watch: [], form: [] };
-  for (const block of blocks) {
-    if (block.includes(FORM_MARK)) found.form.push(block);
-    else if (block.includes(WATCH_MARK)) found.watch.push(block);
-    else found.judge.push(block);
-  }
+  for (const block of blocks) found[classifyKind(block)].push(block);
+  let diverged = false;
   for (const kind of ['judge', 'watch', 'form']) {
-    if (found[kind].length !== 1) {
-      throw new Error(
-        `expected exactly one ${kind} block, found ${found[kind].length} ` +
-       `(carved ${blocks.length} in total)`,
-      );
-    }
+    const want = expectedKinds.includes(kind) ? 1 : 0;
+    if (found[kind].length !== want) diverged = true;
+  }
+  if (diverged) {
+    const wanted = expectedKinds.length > 0 ? expectedKinds.join(', ') : '—';
+    const got = ['judge', 'watch', 'form']
+      .filter((kind) => found[kind].length > 0)
+      .map((kind) => `${kind}×${found[kind].length}`);
+    console.error('probe-bench: ОТКАЗ — из образа вырезано не то, что объявлено'
+      + ` предметом (дом ${CARRIER_HOME}): ожидалось ${wanted}; найдено `
+      + (got.length > 0 ? got.join(', ') : 'ничего'));
+    process.exit(1);
   }
   return { judge: found.judge[0], watch: found.watch[0], form: found.form[0] };
 }
@@ -1568,7 +1713,7 @@ if (scenarios.length !== EXPECTED_SCENARIOS) {
 }
 // Режим --self-check сверяет длину таблицы мутаций с этим числом на каждом
 // своём запуске: правка таблицы без числа молча урезала бы перечень.
-const EXPECTED_MUTATIONS = 13;
+const EXPECTED_MUTATIONS = 22;
 // A scenario without `expected` used to run and be counted as conforming --
 // the comparator treated a missing specification as agreement (mismatchDetails
 // now returns one). The count above catches a hole in the ARRAY; this catches a
@@ -2668,6 +2813,43 @@ function printTable(results) {
   }
 }
 
+// Синтетические предметы для записей, которым нужны блоки проб в доме:
+// реальный tweakcc-patch.js их не несёт (шаги 21/22 сняты), а зубы ценза и
+// вычитания обязаны мериться уже сегодня. Текст -- минимальная грамматика
+// предмета: шаг-владелец, маркеры, ручка, метка классификации. Исполнять эти
+// строки никто не будет: предмет вычисляется сканером, а не рантаймом.
+const SYNTH_PATCH_3 = [
+  "step('91 bench synth judge', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_JUDGE_CARRIER??""); /*__ccProbe1*/ });',
+  "step('92 bench synth watch', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_IDLE_CARRIER??""); __n({value:"[fleet-idle] x"}); /*__ccProbe1*/ });',
+  "step('93 bench synth form', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_FORM_CARRIER??""); __f({tag:"[Form]"}); /*__ccProbe1*/ });',
+].join('\n');
+// Ручка ожидаемой пробы, которую блоки НЕ читают (extra-направление).
+const SYNTH_PATCH_NOKEY = [
+  "step('91 bench synth judge', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_JUDGE_CARRIER??""); /*__ccProbe1*/ });',
+  "step('92 bench synth watch', function(){",
+  '/*__ccProbe0*/ __n({value:"[fleet-idle] x"}); /*__ccProbe1*/ });',
+  "step('93 bench synth form', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_FORM_CARRIER??""); __f({tag:"[Form]"}); /*__ccProbe1*/ });',
+].join('\n');
+// Ручка НЕ ожидаемой пробы, читаемая чужим блоком (missing-направление).
+const SYNTH_PATCH_FOREIGN = [
+  "step('91 bench synth judge', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_JUDGE_CARRIER??""); /*__ccProbe1*/ });',
+  "step('92 bench synth watch', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_IDLE_CARRIER??""); let __g=String(process.env.CLAUDE_FORM_CARRIER??""); __n({value:"[fleet-idle] x"}); /*__ccProbe1*/ });',
+].join('\n');
+// Блок судьи внутри шага, записанного в реестр. Версия-пол 0.0.1 ниже любой
+// сборки, чтобы предмет не зависел от версии поданного образа.
+const SYNTH_PATCH_J26 = [
+  "step('26 dispatch-cancellation rule in the system prompt', function(){",
+  '/*__ccProbe0*/ let __c=String(process.env.CLAUDE_JUDGE_CARRIER??""); /*__ccProbe1*/ });',
+].join('\n');
+const SYNTH_OFF_26 = '26 dispatch-cancellation rule in the system prompt\t0.0.1\tмутационный предмет стенда: шаг объявлен выключенным';
+
 /* __selfCheckTableBegin__ */
 // Мутации ломают САМ стенд, поэтому покраснение доказывается обратным ходом:
 // мутация обязана СНЯТЬ красноту, которую стенд видит на отраве. Без
@@ -2675,9 +2857,16 @@ function printTable(results) {
 // зелёной копии «ослепляет» пустоту. Каждый образец записи обязан встречаться
 // в копии ровно один раз: два вхождения чинили бы неизвестный второй участок,
 // ноль — сгнивший якорь, и запись проверяла бы пустоту.
+//
+// requires: 'subject' -- запись измерима только при непустом ожидаемом наборе
+// (гнала сценарии по блокам образа); 'no-subject' -- только при пустом.
+// Несовпадение объявляется поимённо «НЕ ИЗМЕРЕНА», а не зазеленевает и не
+// выпадает из счёта. Записи с собственным subject несут предмет с собой
+// (файлы во временном каталоге + пути в окружении) и меримы всегда.
 const SELF_CHECK_MUTATIONS = [
   {
     name: 'mismatch-comparator',
+    requires: 'subject',
     // Сломай сравнивающий — и стенд зелёный навсегда: контроль ловит подмену
     // значения, мутация обязана её спрятать.
     poison: { from: 'requestMaxTokens: 8000', to: 'requestMaxTokens: 4242' },
@@ -2687,6 +2876,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'undefined-key-skip',
+    requires: 'subject',
     // Пропуск ключей со значением undefined: контроль ловит подмену значения,
     // мутация обязана выкинуть проверку целиком.
     poison: { from: 'requestMaxTokens: 8000', to: 'requestMaxTokens: 4242' },
@@ -2699,6 +2889,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'no-spec-is-mismatch',
+    requires: 'subject',
     // Отрава обязана убрать спецификацию НА ВХОДЕ сравнивающего: убрать её у
     // самого сценария нельзя — дверь `unspecified` проверяет то же условие тем
     // же предикатом и срабатывает на загрузке раньше, так что мутация внутри
@@ -2713,6 +2904,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'scenario-count-guard',
+    requires: 'subject',
     // Причина контроля — хвост сообщения двери, а не слово «ожидалось»:
     // оно же стоит в шапке таблицы каждого зелёного прогона, и мутация
     // никогда не сняла бы его из вывода.
@@ -2723,6 +2915,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'unknown-key-guard',
+    requires: 'subject',
     // Дверь «неизвестный ключ expected»: контроль — опечатка в ключе,
     // мутация обязана выключить саму дверь.
     poison: { from: 'requestMaxTokens: 8000', to: 'requestMaxTokns: 8000' },
@@ -2732,6 +2925,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'form-cls-comparator',
+    requires: 'subject',
     // Классы срабатываний — точный массив: контроль подменяет класс в
     // ожидании, мутация обязана ослепить компаратор целиком.
     poison: { from: "outcome: 'refuse', cls: ['A1'], nudges: 0, poolCalls: 0,\n                recordCount: 1 }",
@@ -2743,6 +2937,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'form-replay-summary',
+    requires: 'subject',
     // Сводка реплея — точная строка: контроль подменяет счётчик в ней,
     // мутация обязана ослепить компаратор.
     poison: { from: "replaySummary: 'files=3 briefs=2 reports=1 other=0 fired=2 refuse=2 warn=0'",
@@ -2754,6 +2949,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'tool-literal-two-sided',
+    requires: 'subject',
     // Слот `tool:` судьи -- ЛИТЕРАЛ с 2.1.269 (инструмент диспатча стал
     // фабрикой). Блок с литералом знает инструмент сам и поданный мешок на
     // слот не смотрит, поэтому отрава даёт сценариям судьи ДРУГОЙ инструмент:
@@ -2771,10 +2967,10 @@ const SELF_CHECK_MUTATIONS = [
     name: 'carrier-census-no-home',
     // Дверь «дома нет». Отрава отнимает у КОПИИ единственную дорогу к дому:
     // подъёмом от временного каталога кит не находится, дом приезжает только
-    // явным путём из окружения. Мутация гасит ценз целиком, потому что
-    // поточечно эту дверь ослепить нельзя честно: пропустив null дальше,
-    // прибор упал бы на чтении длины -- то есть краснел бы по-прежнему, но
-    // уже своей поломкой, а не измерением.
+    // явным путём из окружения. Мутация подменяет «дома нет» пустым текстом --
+    // это единственная честная однопеременная правка, и она ровно та
+    // деградация, которую дверь держит: мир без дома неотличим от мира без
+    // проб, и сломанная дверь объявила бы предмета нет, не читая ничего.
     poison: {
       from: 'const fromEnv = process.env.PROBE_BENCH_CARRIER_HOME;',
       to: "const fromEnv = '';",
@@ -2782,36 +2978,21 @@ const SELF_CHECK_MUTATIONS = [
     controlRc: 2,
     controlCause: 'нет дома ручек носителя',
     mutation: {
-      from: '(function censusCarrierKeys() {',
-      to: '(function censusCarrierKeys() { if (true) return;',
+      from: 'CARRIER_HOME === null ? null :',
+      to: "CARRIER_HOME === null ? '' :",
     },
+    afterRc: 3,
   },
   {
     name: 'carrier-census-empty-home',
-    // Дверь «ПУСТО ≠ НОЛЬ»: дом читается, но форма записи ручек в нём
-    // сменилась, и перечень стенда сверять не с чем. Отрава уводит образец
-    // мимо всех вхождений -- ровно то, чем выглядела бы смена формы.
+    // Дверь «ПУСТО ≠ НОЛЬ» на новом населении: блоки есть, а ручек в них
+    // форма чтения больше не находит -- перечень разошёлся в сторону extra.
+    // Отрава уводит образец мимо всех вхождений -- ровно то, чем выглядела бы
+    // смена формы записи.
+    subject: { patch: SYNTH_PATCH_3, stepsOff: '' },
     poison: {
       from: '/process\\.env\\.(CLAUDE_[A-Z0-9_]*_CARRIER)/g',
       to: '/process\\.env\\.(CLAUDE_[A-Z0-9_]*_CARRIERZZ)/g',
-    },
-    controlRc: 2,
-    controlCause: 'не нашлось ни одной ручки',
-    mutation: {
-      from: '(function censusCarrierKeys() {',
-      to: '(function censusCarrierKeys() { if (true) return;',
-    },
-  },
-  {
-    name: 'carrier-census-mismatch',
-    // Дверь расхождения. Отрава добавляет стенду ручку, которой в доме нет:
-    // именно так выглядит перечень, переживший свой дом. Ослепляется здесь
-    // сама сверка -- лишнее имя в списке стирания никто не ставит, поэтому
-    // прогон после мутации обязан стать зелёным, и краснота до неё доказана
-    // цензом, а не побочным вредом отравы.
-    poison: {
-      from: "  form: 'CLAUDE_FORM_CARRIER',",
-      to: "  form: 'CLAUDE_FORM_CARRIER',\n  ghost: 'CLAUDE_GHOST_CARRIER',",
     },
     controlRc: 2,
     controlCause: 'у стенда есть, в доме нет',
@@ -2819,9 +3000,167 @@ const SELF_CHECK_MUTATIONS = [
       from: 'if (missing.length || extra.length) {',
       to: 'if (false) {',
     },
+    afterRc: 1,
+  },
+  {
+    name: 'carrier-census-mismatch',
+    // extra-направление: ручка ожидаемой пробы, которую блоки не читают.
+    // Предмет сам несёт расхождение, поэтому контроль -- ЧИСТАЯ копия: она
+    // обязана отказаться, а мутация, гасящая extra-сторону, обязана привести
+    // копию к предметному расхождению с образом (код 1), а не к зелени.
+    subject: { patch: SYNTH_PATCH_NOKEY, stepsOff: '' },
+    breaks: {
+      from: 'if (missing.length || extra.length) {',
+      to: 'if (missing.length) {',
+    },
+    controlRc: 2,
+    controlCause: 'у стенда есть, в доме нет',
+    expectRc: 1,
+    expectCause: 'из образа вырезано не то',
+  },
+  {
+    name: 'carrier-census-key-removed',
+    // missing-направление (П2): отрава отнимает имя из CARRIER_KEY -- ручка
+    // читается блоком, а в списке стирания (ENV_KEYS) её нет, стенд измерил
+    // бы мир машины. Контроль краснеет «в доме есть, у стенда нет», мутация
+    // обязана ослепить именно missing-сторону.
+    subject: { patch: SYNTH_PATCH_3, stepsOff: '' },
+    poison: {
+      from: "  watch: 'CLAUDE_IDLE_CARRIER',\n",
+      to: '',
+    },
+    controlRc: 2,
+    controlCause: 'в доме есть, у стенда нет',
+    mutation: {
+      from: 'if (missing.length || extra.length) {',
+      to: 'if (extra.length) {',
+    },
+    afterRc: 1,
+  },
+  {
+    name: 'carrier-census-foreign-handle',
+    // Ручка НЕ ожидаемой пробы, подложенная в дом (З3): form снята с
+    // предмета, а её ручку читает watch-блок -- без обратной стороны
+    // протухшая декларация проходила бы молча. Контроль -- чистая копия.
+    subject: { patch: SYNTH_PATCH_FOREIGN, stepsOff: '' },
+    breaks: {
+      from: 'if (missing.length || extra.length) {',
+      to: 'if (extra.length) {',
+    },
+    controlRc: 2,
+    controlCause: 'в доме есть, у стенда нет',
+    expectRc: 1,
+    expectCause: 'из образа вырезано не то',
+  },
+  {
+    name: 'probe-blocks-at-home',
+    // Зуб на поиск пар маркеров в ДОМЕ: ослепление скана превращает
+    // непустой предмет в «предмета нет» -- код 3 там, где прибор обязан
+    // сверять три блока с образом.
+    subject: { patch: SYNTH_PATCH_3, stepsOff: '' },
+    breaks: {
+      from: 'let scanFrom = 0;',
+      to: 'let scanFrom = text.length;',
+    },
+    controlRc: 1,
+    controlCause: 'из образа вырезано не то',
+    expectRc: 3,
+    expectCause: 'ПРЕДМЕТА НЕТ',
+  },
+  {
+    name: 'probe-classification',
+    // Зуб на единое правило классификации: испорченная метка формы
+    // отправляет form-блок в judge, и дом отказывается разбираться (два
+    // judge) раньше любой сверки.
+    subject: { patch: SYNTH_PATCH_3, stepsOff: '' },
+    breaks: {
+      from: "const FORM_MARK = 'tag:\"[Form]\"';",
+      to: "const FORM_MARK = 'tag:\"[FormZ]\"';",
+    },
+    controlRc: 1,
+    controlCause: 'из образа вырезано не то',
+    expectRc: 2,
+    expectCause: 'больше одной',
+  },
+  {
+    name: 'owning-step-scan',
+    // Зуб на структурный скан шага-владельца: без шага реестр не может
+    // выключить блок, и прибор отказывается, а не догадывается.
+    subject: { patch: SYNTH_PATCH_3, stepsOff: '' },
+    breaks: {
+      from: 'text.lastIndexOf("step(\'", offset)',
+      to: 'text.lastIndexOf("stepZZ(\'", offset)',
+    },
+    controlRc: 1,
+    controlCause: 'из образа вырезано не то',
+    expectRc: 2,
+    expectCause: 'вне шага',
+  },
+  {
+    name: 'steps-off-subtracted',
+    // Сторона А зуба на вычитание реестром (З2): шаг, записанный в реестр с
+    // полем ниже версии образа, НЕ попадает в ожидаемый набор. Мутация
+    // читает реестр как пустой -- блок возвращается в набор, и расхождение
+    // с образом становится громким отказом.
+    subject: { patch: SYNTH_PATCH_J26, stepsOff: SYNTH_OFF_26 },
+    breaks: {
+      from: 'const stepsOff = readStepsOff(STEPS_OFF_HOME);',
+      to: 'const stepsOff = new Map();',
+    },
+    controlRc: 3,
+    controlCause: 'выключена реестром',
+    expectRc: 1,
+    expectCause: 'из образа вырезано не то',
+  },
+  {
+    name: 'steps-off-removed',
+    // Сторона Б зуба (З2): та же строка реестра удалена -- блок в наборе.
+    // Мутация возвращает вычитание безусловно, и предмет пустеет.
+    subject: { patch: SYNTH_PATCH_J26, stepsOff: '' },
+    breaks: {
+      from: 'const row = stepsOff.get(b.step);',
+      to: "const row = stepsOff.get(b.step) ?? { floor: '0.0.1', reason: 'мутация' };",
+    },
+    controlRc: 1,
+    controlCause: 'из образа вырезано не то',
+    expectRc: 3,
+    expectCause: 'ПРЕДМЕТА НЕТ',
+  },
+  {
+    name: 'steps-off-module-floor',
+    // Зуб ОБЩЕГО дома разбора (поправка C): правила реестра и сравнение
+    // версии-пола живут в tools/steps-off-registry.js, и правка правила там
+    // обязана доезжать до прибора. Мутация ломает сравнение пола --
+    // вычитание перестаёт срабатывать, и выключенный шаг возвращается
+    // в набор. Мутация правит ТОЛЬКО модуль, копия стенда чиста.
+    subject: { patch: SYNTH_PATCH_J26, stepsOff: SYNTH_OFF_26 },
+    moduleMutation: {
+      from: 'if (x !== y) return x < y;',
+      to: 'if (x !== y) return x > y;',
+    },
+    controlRc: 3,
+    controlCause: 'выключена реестром',
+    expectRc: 1,
+    expectCause: 'из образа вырезано не то',
+  },
+  {
+    name: 'no-subject-empty-code',
+    // Зуб на сам код «предмета нет» (З4): пустой набор обязан выходить
+    // кодом 3 с названной причиной. Мутация подменяет код на 0 -- копия
+    // зазеленевает на пустом предмете, что для прибора и есть краснота.
+    requires: 'no-subject',
+    breaks: {
+      from: '      announceNoSubject(subject);\n      process.exit(3);',
+      to: '      announceNoSubject(subject);\n      process.exit(0);',
+    },
+    controlRc: 3,
+    controlCause: 'ПРЕДМЕТА НЕТ',
+    expectRc: 0,
+    expectCause: 'ПРЕДМЕТА НЕТ',
   },
   {
     name: 'carrier-isolation',
+    requires: 'subject',
     // Прямой ход (`breaks`) — изоляция, и полярность тут не прихоть.
     // Соседи выше стерегут ДВЕРЬ: дверь доказывается ослеплением, потому что
     // сломанная дверь молчит. Здесь предмет -- ИЗОЛЯЦИЯ окружения, и сломанная
@@ -2849,6 +3188,7 @@ const SELF_CHECK_MUTATIONS = [
   },
   {
     name: 'door-isolation',
+    requires: 'subject',
     // Сестра carrier-isolation: дверца в том же списке стирания. Сломанная
     // изоляция красит, а не молчит — сценарии *-carrier-mod ставят дверцу в
     // process.env, и без имени в ENV_KEYS *-door-shut (и хвост) едут в мире
@@ -2894,7 +3234,9 @@ function replaceExactlyOnce(text, from, to, label) {
 // ВНИМАНИЕ) не должны смешиваться с строками самого self-check. Копии живёт
 // во временном каталоге и НЕ может найти probes.toml кита от своего
 // __dirname -- путь передаётся явно, тем же файлом, что читает оригинал.
-function runBenchCopy(scriptPath, binaryPath) {
+// subjectEnv (если запись несёт свой предмет) перекрывает дом и реестр
+// файлами самопроверки из её временного каталога.
+function runBenchCopy(scriptPath, binaryPath, subjectEnv) {
   const run = spawnSync('bun', [scriptPath, '--binary', binaryPath], {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
@@ -2905,7 +3247,8 @@ function runBenchCopy(scriptPath, binaryPath) {
       // что и probes.toml: копия живёт во временном каталоге и подъёмом кит не
       // находит. Без этой строки ценз ручек отказывает в каждой копии, и ни
       // один зуб стенда не меряет.
-      PROBE_BENCH_CARRIER_HOME: CARRIER_HOME ?? '',
+      PROBE_BENCH_CARRIER_HOME: subjectEnv?.PROBE_BENCH_CARRIER_HOME ?? (CARRIER_HOME ?? ''),
+      PROBE_BENCH_STEPS_OFF: subjectEnv?.PROBE_BENCH_STEPS_OFF ?? (STEPS_OFF_HOME ?? ''),
     },
   });
   return {
@@ -2914,7 +3257,7 @@ function runBenchCopy(scriptPath, binaryPath) {
   };
 }
 
-function runSelfCheck(options) {
+function runSelfCheck(options, subject) {
   if (SELF_CHECK_MUTATIONS.length !== EXPECTED_MUTATIONS) {
     console.error(`probe-bench: записей мутаций ${SELF_CHECK_MUTATIONS.length}, ожидалось `
       + `${EXPECTED_MUTATIONS} — таблица правлена без обновления числа`);
@@ -2927,24 +3270,53 @@ function runSelfCheck(options) {
   // обязано покрывать обе.
   let proven = 0;
   let broken = 0;
+  let unmeasured = 0;
+  const realSubjectEmpty = subject.expectedKinds.length === 0;
   for (const record of SELF_CHECK_MUTATIONS) {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-bench-self.'));
     let line;
     try {
+      // Запись, требующая предмета, при пустом реальном предмете обязана
+      // назвать себя НЕ ИЗМЕРЕННОЙ поимённо -- молчаливая зелень или выпадение
+      // из счёта выдали бы отсутствующий зуб за существующий.
+      if ((record.requires === 'subject' && realSubjectEmpty)
+        || (record.requires === 'no-subject' && !realSubjectEmpty)) {
+        unmeasured += 1;
+        line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ИЗМЕРЕНА — ${realSubjectEmpty ? 'предмета нет' : 'предмет есть'}`;
+      } else {
       const scriptPath = path.join(workDir, 'probe-bench.js');
+      // Копия стенда требует общий модуль разбора РЯДОМ с собой: require в
+      // копии относительный, а её каталог -- временный.
+      fs.copyFileSync(path.join(__dirname, 'steps-off-registry.js'),
+        path.join(workDir, 'steps-off-registry.js'));
+      let subjectEnv = null;
+      if (record.subject) {
+        const fakeHome = path.join(workDir, 'fake-tweakcc-patch.js');
+        const fakeOff = path.join(workDir, 'fake-our-steps-off.txt');
+        fs.writeFileSync(fakeHome, record.subject.patch);
+        fs.writeFileSync(fakeOff, record.subject.stepsOff);
+        subjectEnv = { PROBE_BENCH_CARRIER_HOME: fakeHome, PROBE_BENCH_STEPS_OFF: fakeOff };
+      }
       if (record.breaks) {
-        // Прямой ход. Контроль здесь -- ЧИСТАЯ копия: она обязана быть зелёной
-        // и не нести признака. Без него краснота после мутации ничего не
-        // доказывает -- копия могла быть красной с самого начала, и мы бы
-        // засчитали зуб чужой болезни.
+        // Прямой ход. Контроль здесь -- ЧИСТАЯ копия: она обязана дать свой
+        // нормальный исход (controlRc, по умолчанию 0 -- зелень; записи с
+        // собственным предметом могут звать нормой отказ) и нести -- или не
+        // нести -- контрольный признак. Без контроля краснота после мутации
+        // ничего не доказывает: копия могла быть красной с самого начала, и мы
+        // бы засчитали зуб чужой болезни.
         const clean = benchSourceWithoutMutationTable();
         fs.writeFileSync(scriptPath, clean);
-        const control = runBenchCopy(scriptPath, options.binary);
-        const preContaminated = control.output.includes(record.expectCause);
-        if (control.rc !== 0 || preContaminated) {
+        const control = runBenchCopy(scriptPath, options.binary, subjectEnv);
+        const controlOk = control.rc === (record.controlRc ?? 0)
+          && (record.controlCause
+            ? control.output.includes(record.controlCause)
+            : !control.output.includes(record.expectCause));
+        if (!controlOk) {
           line = `probe-bench: МУТАЦИЯ ${record.name}: КОНТРОЛЬ ЧИСТОТЫ не сработал `
-            + `(код=${control.rc}, нужен 0; признак «${record.expectCause}» `
-            + `${preContaminated ? 'найден ДО мутации' : 'отсутствует, как и должен'})`;
+            + `(код=${control.rc}, нужен ${record.controlRc ?? 0}`
+            + (record.controlCause
+              ? `; признак «${record.controlCause}» не найден`
+              : `; признак «${record.expectCause}» найден ДО мутации`) + ')';
         } else {
           fs.writeFileSync(scriptPath, replaceExactlyOnce(
             clean,
@@ -2952,7 +3324,37 @@ function runSelfCheck(options) {
             record.breaks.to,
             `${record.name}: мутация`,
           ));
-          const after = runBenchCopy(scriptPath, options.binary);
+          const after = runBenchCopy(scriptPath, options.binary, subjectEnv);
+          const firstLine = after.output.split(/\r?\n/).find((l) => l.trim()) ?? '';
+          if (after.rc === record.expectRc && after.output.includes(record.expectCause)) {
+            proven += 1;
+            line = `probe-bench: МУТАЦИЯ ${record.name}: RED`;
+          } else {
+            line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ПОКРАСНЕЛА код=${after.rc} `
+              + `(нужен ${record.expectRc}) вывод=${clipCell(firstLine)}`;
+          }
+        }
+      } else if (record.moduleMutation) {
+        // Мутация ОБЩЕГО дома (tools/steps-off-registry.js): контроль --
+        // чистые копии прибора и модуля; мутация правит ТОЛЬКО модуль.
+        // Правка правила в общем доме обязана доезжать до каждого прибора,
+        // который его зовёт, -- иначе общий дом разошёлся бы со вторым
+        // потребителем молча.
+        const clean = benchSourceWithoutMutationTable();
+        fs.writeFileSync(scriptPath, clean);
+        const control = runBenchCopy(scriptPath, options.binary, subjectEnv);
+        if (control.rc !== record.controlRc || !control.output.includes(record.controlCause)) {
+          line = `probe-bench: МУТАЦИЯ ${record.name}: КОНТРОЛЬ ЧИСТОТЫ не сработал `
+            + `(код=${control.rc}, нужен ${record.controlRc}, причина «${record.controlCause}» не найдена)`;
+        } else {
+          const modulePath = path.join(workDir, 'steps-off-registry.js');
+          fs.writeFileSync(modulePath, replaceExactlyOnce(
+            fs.readFileSync(modulePath, 'utf8'),
+            record.moduleMutation.from,
+            record.moduleMutation.to,
+            `${record.name}: мутация модуля`,
+          ));
+          const after = runBenchCopy(scriptPath, options.binary, subjectEnv);
           const firstLine = after.output.split(/\r?\n/).find((l) => l.trim()) ?? '';
           if (after.rc === record.expectRc && after.output.includes(record.expectCause)) {
             proven += 1;
@@ -2964,6 +3366,9 @@ function runSelfCheck(options) {
         }
       } else {
         // Обратный ход: отрава красит, мутация обязана красноту СНЯТЬ.
+        // afterRc (по умолчанию 0 -- зелень) называет исход снятия: запись с
+        // собственным предметом снимает красноту до предметного расхождения
+        // с образом, а не до зелени.
         let source = replaceExactlyOnce(
           benchSourceWithoutMutationTable(),
           record.poison.from,
@@ -2971,7 +3376,7 @@ function runSelfCheck(options) {
           `${record.name}: отрава`,
         );
         fs.writeFileSync(scriptPath, source);
-        const control = runBenchCopy(scriptPath, options.binary);
+        const control = runBenchCopy(scriptPath, options.binary, subjectEnv);
         if (control.rc !== record.controlRc || !control.output.includes(record.controlCause)) {
           line = `probe-bench: МУТАЦИЯ ${record.name}: КОНТРОЛЬ ОТРАВЫ не сработал `
             + `(код=${control.rc}, нужен ${record.controlRc}, причина «${record.controlCause}» не найдена)`;
@@ -2983,15 +3388,17 @@ function runSelfCheck(options) {
             `${record.name}: мутация`,
           );
           fs.writeFileSync(scriptPath, source);
-          const after = runBenchCopy(scriptPath, options.binary);
+          const after = runBenchCopy(scriptPath, options.binary, subjectEnv);
           const firstLine = after.output.split(/\r?\n/).find((l) => l.trim()) ?? '';
-          if (after.rc === 0 && !after.output.includes(record.controlCause)) {
+          if (after.rc === (record.afterRc ?? 0) && !after.output.includes(record.controlCause)) {
             proven += 1;
             line = `probe-bench: МУТАЦИЯ ${record.name}: RED`;
           } else {
-            line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ОСЛЕПИЛА код=${after.rc} вывод=${clipCell(firstLine)}`;
+            line = `probe-bench: МУТАЦИЯ ${record.name}: НЕ ОСЛЕПИЛА код=${after.rc} `
+              + `(нужен ${record.afterRc ?? 0}) вывод=${clipCell(firstLine)}`;
           }
         }
+      }
       }
     } catch (error) {
       // Круг 28, F-9: сорвавшееся применение -- измерение НЕ СОСТОЯЛОСЬ.
@@ -3006,11 +3413,23 @@ function runSelfCheck(options) {
     }
     console.log(line);
   }
-  console.log(`probe-bench: SELF-CHECK мутаций=${SELF_CHECK_MUTATIONS.length} доказали=${proven}`);
+  const measured = SELF_CHECK_MUTATIONS.length - unmeasured - broken;
+  console.log(`probe-bench: SELF-CHECK мутаций=${SELF_CHECK_MUTATIONS.length} доказали=${proven}`
+    + ` измерено=${measured}`);
   if (broken > 0) {
     console.error(`probe-bench: НЕ МЕРИЛ -- ${broken} мутаций не применились `
       + '(якорь уехал); счёт ослеплений не приговор');
     process.exitCode = 2;
+    return;
+  }
+  // Пустой предмет -- честный код 3 (docnum:other -- код выхода, не счётчик
+  // кита) и для самопроверки: мутации, требующие
+  // предмета, не измерялись (названы поимённо выше), и итоговая зелень
+  // выдавала бы их молчание за доказанные зубы.
+  if (unmeasured > 0) {
+    console.error(`probe-bench: SELF-CHECK мутаций измерено ${measured} — предмета нет: `
+      + `${unmeasured} мутаций требуют предмета (поимённо выше)`);
+    process.exitCode = 3;
     return;
   }
   if (proven !== SELF_CHECK_MUTATIONS.length) process.exitCode = 1;
@@ -3025,17 +3444,51 @@ async function main() {
     // остаться отказом контракта, а не утонуть в объявлении. Позже -- поздно:
     // все режимы ниже уже мерят.
     announceAmbientCarriers();
+    const source = readImage(options.binary);
+    const subject = computeSubject(source);
     if (options.selfCheck) {
-      runSelfCheck(options);
+      runSelfCheck(options, subject);
       return;
     }
+    // CONSTRAINT: пустой предмет -- исход кодом 3, но объявленное отсутствие
+    // обязано быть ОПРОВЕРЖИМЫМ: образ, НЕСУЩИЙ блоки проб, которых патч не
+    // вставляет, -- это расхождение образа с патчем (rc=1 с обеими
+    // сторонами), а не «предмета нет». Молчаливое rc=3 на таком образе
+    // сделало бы декларацию неопровержимой -- ровно тот дефект, который
+    // закрывает эта волна.
+    if (subject.expectedKinds.length === 0) {
+      const carvedNow = carveBlocks(source);
+      if (carvedNow.length > 0) {
+        const kindsNow = { judge: 0, watch: 0, form: 0 };
+        for (const block of carvedNow) kindsNow[classifyKind(block)] += 1;
+        const got = Object.entries(kindsNow)
+          .filter(([, n]) => n > 0)
+          .map(([kind, n]) => `${kind}×${n}`);
+        const why = Object.keys(CARRIER_KEY)
+          .map((kind) => `${kind} — ${subject.absent.get(kind)}`)
+          .join('; ');
+        console.error('probe-bench: ОТКАЗ — образ несёт блоки проб, которых'
+          + ' патч не вставляет: найдено в образе ' + got.join(', ')
+          + `; ожидалось по патчу (дом ${CARRIER_HOME}): ничего; причины отсутствия: ${why}`);
+        process.exit(1);
+      }
+      announceNoSubject(subject);
+      process.exit(3);
+    }
+    censusCarrierKeys(subject);
     // --form-replay: the pure evaluator from the IMAGE, rules from the KIT,
     // over corpus paths. No scenarios, no self-check -- this mode is a
     // measurement, its output goes to the report verbatim.
     if (options.formReplayPaths.length > 0) {
-      const source = readImage(options.binary);
+      // --form-replay меряет именно пробу формы: её отсутствие в предмете --
+      // нарушенный контракт вызова, а не пустой результат реплея.
+      if (!subject.expectedKinds.includes('form')) {
+        console.error('probe-bench: ОТКАЗ -- --form-replay требует пробу формы,'
+          + ` а она не в предмете (${subject.absent.get('form')})`);
+        process.exit(2);
+      }
       warnRuntimeSkew(source, benchVersion);
-      const carved = classifyBlocks(carveBlocks(source));
+      const carved = matchCarvedBlocks(carveBlocks(source), subject.expectedKinds);
       assertAttributionBasis(carved);
       const probes = {
         form: compileProbe(carved.form, locateNames(carved.form, 'form')),
@@ -3056,9 +3509,8 @@ async function main() {
     }
     const realHome = process.env.HOME || os.homedir();
     const homeBefore = homeSnapshot(realHome);
-    const source = readImage(options.binary);
     warnRuntimeSkew(source, benchVersion);
-    const carved = classifyBlocks(carveBlocks(source));
+    const carved = matchCarvedBlocks(carveBlocks(source), subject.expectedKinds);
     assertAttributionBasis(carved);
     // Every block is compiled up front, so a block that is broken on the image
     // fails setup even when no scenario happens to exercise it.

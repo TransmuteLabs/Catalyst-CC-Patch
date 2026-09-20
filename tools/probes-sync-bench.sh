@@ -24,9 +24,24 @@ BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
 # ПЕРЕНАЗНАЧАЕМ, как KIT для предмета: self_check мутирует копию харнесса в
 # своём дереве, а сценарии строят СВОИ свежие деревья -- источник обязан
 # указывать на жертву мутации, иначе зуб всегда мерит боевой файл.
-HARNESS_SRC="$REAL_KIT/../Catalyst-programs/run-harness/run-from-snapshot.sh"
+# Якорей ДВА, и порядок значим: под снимочным прогоном харнесс лежит копией
+# в КОРНЕ снимка (его кладёт snapshot-kit.sh и везёт доставка), а под
+# домашним -- в своём доме Catalyst-programs. Одного домашнего якоря мало:
+# соседнего дома нет ни в снимке, ни на usbox, и зуб проводки мерил бы
+# состав окружения вместо предмета.
+if [[ -f "$REAL_KIT/../run-from-snapshot.sh" ]]; then
+  HARNESS_SRC="$REAL_KIT/../run-from-snapshot.sh"
+else
+  HARNESS_SRC="$REAL_KIT/../Catalyst-programs/run-harness/run-from-snapshot.sh"
+fi
 EXPECTED_SCENARIOS=34
-EXPECTED_MUTATIONS=39
+EXPECTED_MUTATIONS=40
+# CONSTRAINT: мутации ОТСУТСТВИЯ убирают жертву целиком, а не правят её
+# текст. Набор объявлен поимённо, потому что страж разбора жертвы обязан
+# спросить у них ОБРАТНОЕ: удалённый файл не разбирается никогда, и без
+# объявления намеренное отсутствие было бы неотличимо от замены, сломавшей
+# разбор (класс «дельта дерева не есть поломка прибора»).
+MUT_ABSENT="40"
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -38,7 +53,7 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19 10 10 10 10 20 21 22 23 24 26 30 28 27 29 25 31 32 33 34)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19 10 10 10 10 20 21 22 23 24 26 30 28 27 29 25 31 32 33 34 32)
 # Улика, по которой признаётся СВОЯ причина покраснения: подстрока LAST_EVID
 # сценария. Дом перечня мутаций ОДИН -- EXPECTED_MUTATIONS; и обход
 # self_check, и эта таблица, и MUT_SCENARIO обязаны сойтись с ним длиной.
@@ -55,7 +70,7 @@ MUT_EVID=(x 'второй=0' 'diff_rc=0' 'B=3' 'НЕ_НАЗВАНА' 'rc=1' 'rc=
           'ОДНО_НАПРАВЛЕНИЕ_ПРИ_ЧАСТИ' 'СВИДЕТЕЛЬ_НЕ_ДОКАЗАЛ' 'НЕ_ИЗМЕРЕНО_НЕТ' \
           'LIMIT_НЕТ' 'БИТЫЙ_НЕ_ОТКАЗ' 'НЕЧИТАЕМ_НЕ_ОТКАЗ' 'ПОИМЁННОЕ_НЕ_НАЗВАНО' \
           'НЕ_ДОКАЗАНО_НЕ_НАЗВАН' 'ПОИМЁННОЕ_GIT_НЕ_НАЗВАНО' 'ЭКСПОРТ_ИСТОРИИ_СНЯТ' \
-          'ОПРОС_УПАЛ_НЕ_НАЗВАН' 'ДАЙДЖЕСТ_НЕ_НАЗВАН')
+          'ОПРОС_УПАЛ_НЕ_НАЗВАН' 'ДАЙДЖЕСТ_НЕ_НАЗВАН' 'ХАРНЕС_НЕ_НАЙДЕН')
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -109,10 +124,11 @@ mk_kit() {
   cp "$BENCH" "$dst/tools/probes-sync-bench.sh"
   # Зуб проводки свидетеля истории (AR-1) читает ФОРМУ харнесса прогона:
   # копия кладётся рядом с игрушечным китом из ПЕРЕНАЗНАЧАЕМОГО $HARNESS_SRC
-  # (run-from-snapshot.sh в кит не входит -- он житель Catalyst-programs, в
-  # снимок едет деревом Catalyst).
+  # (run-from-snapshot.sh в кит не входит -- он житель Catalyst-programs и
+  # едет в КОРЕНЬ снимка отдельным файлом, не деревом).
   local __hsrc="$HARNESS_SRC"
-  local __hdst="$(dirname "$dst")/run-from-snapshot.sh"
+  local __hdst
+  __hdst="$(dirname "$dst")/run-from-snapshot.sh" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен путь харнесса прогона\n' >&2; exit 2; }
   if [[ -f "$__hsrc" ]]; then
     cp "$__hsrc" "$__hdst"
   fi
@@ -1458,8 +1474,8 @@ scenario_30() {
   mk_kit "$root/kit"; make_env "$root"
   script="$root/kit/scripts/probes-sync.sh"
   out=$(bash "$script" --pairs 2>&1); rc=$?
-  first="$(printf '%s\n' "$out" | sed -n '1p')"
-  tail="$(printf '%s\n' "$out" | sed '1d')"
+  first="$(printf '%s\n' "$out" | sed -n '1p')" || { printf 'ПРИБОР НЕДОСТУПЕН: не выделена первая строка вывода --pairs\n' >&2; exit 2; }
+  tail="$(printf '%s\n' "$out" | sed '1d')" || { printf 'ПРИБОР НЕДОСТУПЕН: не выделен хвост вывода --pairs\n' >&2; exit 2; }
   list_out="$(bash "$script" --list 2>&1)"; list_rc=$?
   LAST_EVID="pairs_rc=$rc list_rc=$list_rc first=[$first] путей=$(printf '%s\n' "$tail" | grep -c .)"
   rm -rf "$root"
@@ -1738,7 +1754,7 @@ mutate() {
   # свидетеля истории (AR-1). Прочие -- копия предмета.
   case "$n" in
     7|8) file="$root/kit/tools/probes-sync-bench.sh" ;;
-    37) file="$root/run-from-snapshot.sh" ;;
+    37|40) file="$root/run-from-snapshot.sh" ;;
     *) file="$root/kit/scripts/probes-sync.sh" ;;
   esac
   local __pyrc=0
@@ -1973,6 +1989,15 @@ elif number == 39:
            '    return 2\n'
            '  fi\n'
            '  __home_d=$($__digest_tool "${PAIR_B[$1]}" 2>/dev/null) || return 1  # mutation: home digest failure silent\n')
+elif number == 40:
+    # Единственная мутация ОТСУТСТВИЯ: предмет сценария 32 (копия харнесса)
+    # убирается целиком. Ветка выбора якоря -- корень снимка, затем домашний
+    # дом -- иначе непроверяема: обе её ноги исполняются в бою (снимочный
+    # прогон берёт первый якорь, домашний -- второй), а путь «ни одного» до
+    # 2026-09-20 не краснел ни разу и лёг сразу на обеих площадках.
+    import os
+    os.remove(path)
+    raise SystemExit(0)
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)
@@ -1995,6 +2020,14 @@ PY
   # случайности (следи этой таблицы привязаны к коду возврата). Отдельный
   # класс от «якорь не найден» и с доминированием над счётом покраснений:
   # self_check ниже останавливается целиком.
+  case " $MUT_ABSENT " in
+    *" $n "*)
+      if [[ -e "$file" ]]; then
+        say "  мутация $n объявлена мутацией ОТСУТСТВИЯ, а жертва на месте: $file"
+        return 2
+      fi
+      return 0 ;;
+  esac
   if ! sh_victim_parses "$file"; then
     say "  мутация $n сломала РАЗБОР жертвы -- замена невалидна, прибор чинится до следующего вердикта"
     return 2
@@ -2019,7 +2052,7 @@ self_check() {
     local saved_kit="$KIT" saved_harness="$HARNESS_SRC"
     # Жертва мутации 37 -- копия харнесса в дереве self_check: сценарий 32
     # строит СВОЁ дерево, и источник копии обязан указывать на жертву.
-    if [[ "$n" -eq 37 ]]; then
+    if [[ "$n" -eq 37 || "$n" -eq 40 ]]; then
       HARNESS_SRC="$root/run-from-snapshot.sh"
     fi
     KIT="$root/kit"; before=$FAILED; LAST_EVID=''

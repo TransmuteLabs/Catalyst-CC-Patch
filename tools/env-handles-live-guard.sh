@@ -70,9 +70,12 @@ DEFAULT_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 DEFAULT_CONTROL = "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"
 # CONSTRAINT: контроль второй стороны, замер 19.09 по домам
 # tools/env-guard-ours.txt: 17 структурных мест в 8 файлах; в самом ките --
-# process.env.CLAUDE_JUDGE в tweakcc-patch.js (4) и tools/probe-bench.js (1).
-# Сломавшийся предикат нашего кода обязан ронять ПРИБОР (код 2), а не
-# объявлять все ручки без читателя.
+# process.env.CLAUDE_JUDGE в tweakcc-patch.js (1, перемер 20.09: снятие
+# шагов 21/22 унесло три чтения) и tools/probe-bench.js (1). Число в
+# комментарии НЕ сторожится прибором -- предикт проверяет «есть хоть один
+# читатель» (any), не счёт; перемер обязателен при каждой волне, меняющей
+# число чтений. Сломавшийся предикат нашего кода обязан ронять ПРИБОР
+# (код 2), а не объявлять все ручки без читателя.
 DEFAULT_CONTROL_OURS = "CLAUDE_JUDGE"
 
 

@@ -14,16 +14,18 @@
 может мерить», а не находка.
 
 Вызовом считается ЛЮБАЯ из измеренных форм -- ценз, ловивший только запуск
-интерпретатором, врал нулём на живом дереве, и обе подключательные формы были
-им пропущены:
+интерпретатором, врал нулём на живом дереве, и обе подключательные формы,
+как и потребление из node-кода, были им пропущены:
  tools/<имя>                          -- путь с домом;
  $(dirname "$0")/<имя> и $HERE/<имя>  -- сосед по каталогу БЕЗ дома в пути;
  . <путь>/<имя> и source <путь>/<имя> -- ПОДКЛЮЧЕНИЕ, а не запуск;
- bash|sh|python3|node <путь>/<имя>    -- запуск интерпретатором.
+ bash|sh|python3|node <путь>/<имя>    -- запуск интерпретатором;
+ require('…/<имя>') и import('…/<имя>') -- потребление из node-кода.
 Вхождение внутри самого инструмента и строки-комментарии вызовом не
-считаются. Проза ЭТОГО файла из поиска исполнителей исключена целиком:
-пример формы в докстринге иначе засчитался бы исполнителем настоящего
-сироты.
+считаются; комментарий распознаётся ПО ЯЗЫКУ файла (решётка у оболочки
+и питона, // и /* у node). Проза ЭТОГО файла из поиска исполнителей
+исключена целиком: пример формы в докстринге иначе засчитался бы
+исполнителем настоящего сироты.
 
 Ручные инструменты объявлены списком ниже, каждый с основанием одной строкой:
 объявление без основания -- отказ самого гейта, объявление на несуществующий
@@ -69,22 +71,45 @@ MANUAL = {
 }
 
 TOOL_EXTS = ('.sh', '.py', '.js')
-# CONSTRAINT: исполнителя ищут только оболочка и питон -- файлы данных и
-# разметки вызвать инструмент не могут.
-SEARCH_EXTS = ('.sh', '.py')
+# CONSTRAINT: исполнителя ищут оболочка, питон и node: .js-инструмент
+# потребляется require/import другого .js, и это вызов той же силы, что
+# запуск интерпретатором. Файлы данных и разметки искателями не являются --
+# вызвать инструмент они не могут.
+SEARCH_EXTS = ('.sh', '.py', '.js')
 SKIP_DIRS = {'.git', 'docs', '__pycache__'}
 FORM_LABELS = ('tools/<имя>', '$HERE либо $(dirname "$0")',
-               'подключение (. либо source)', 'интерпретатор')
+               'подключение (. либо source)', 'интерпретатор',
+               'require либо import (node)')
+
+
+def comment_prefixes(fname):
+    """Префиксы строки-комментария по ЯЗЫКУ осматриваемого файла.
+
+    CONSTRAINT: пропуск комментариев обязан знать язык: у .js комментарий
+    начинается с // или /*, и решёточный пропуск засчитал бы закомментированный
+    пример require потребителем.
+    """
+    if fname.endswith('.js'):
+        return ('//', '/*')
+    return ('#',)
+
+
+def js_module_pattern(name):
+    """Имя для require/import: расширение .js в аргументе опционально."""
+    base = name[:-3] if name.endswith('.js') else name
+    return re.escape(base) + r'(?:\.js)?'
 
 
 def form_regexes(name):
-    """Четыре формы вызова одного инструмента (порядок = порядок меток)."""
+    """Пять форм вызова одного инструмента (порядок = порядок меток)."""
     n = re.escape(name) + r'(?!\w)'
     return [
         re.compile(r'tools/' + n),
         re.compile(r'(\$HERE|\$\(dirname "\$0"\))/' + n),
         re.compile(r'(?:^|[\s;|&])(?:\.|source)\s+\S*' + n),
         re.compile(r'\b(?:bash|sh|python3|node)\b[^\n]*?/' + n),
+        re.compile(r'\b(?:require|import)\s*\(\s*["\'][^"\']*?'
+                   + js_module_pattern(name) + r'["\']\s*\)'),
     ]
 
 
@@ -196,8 +221,9 @@ def find_callers(kit, names, self_path):
             except OSError:
                 continue
             rel = os.path.relpath(path, kit)
+            prefixes = comment_prefixes(fname)
             for number, line in enumerate(lines, 1):
-                if line.lstrip().startswith('#'):
+                if line.lstrip().startswith(prefixes):
                     continue
                 for name in names:
                     # CONSTRAINT: вхождение внутри САМОГО инструмента -- не
@@ -340,6 +366,53 @@ def self_check():
                   % (green['code'], green['refusals'], green['orphans']))
             return 2
         print('ПРИБОР: контроль без мутации -- зелен')
+
+        # Зубы JS-формы потребления (node): require -- вызов, удаление
+        # единственного require рождает сироту, require в комментарии
+        # потребителем НЕ считается. Каждый зуб ставится на ЗЕЛЁНОМ дереве
+        # и снимается после замера.
+        js_lib = os.path.join(kit, 'tools', 'zz-js-lib.js')
+        js_user = os.path.join(kit, 'tools', 'called-two.js')
+        io.open(js_lib, 'w', encoding='utf-8').write(
+            "'use strict';\nmodule.exports = {};\n")
+        io.open(js_user, 'w', encoding='utf-8').write(
+            "#!/usr/bin/env node\nconst lib = require('./zz-js-lib.js');\n")
+        io.open(os.path.join(kit, 'run.sh'), 'a', encoding='utf-8').write(
+            'node tools/called-two.js\n')
+        io.open(readme, 'a', encoding='utf-8').write(
+            '`tools/zz-js-lib.js`\n`tools/called-two.js`\n')
+        js_green = measure(kit)
+        js_hits = js_green['callers'].get('zz-js-lib.js', [])
+        if (js_green['code'] != 0 or len(js_hits) != 1
+                or FORM_LABELS[4] not in js_hits[0][2]):
+            print('ОТКАЗ: require из описанного инструмента не засчитан '
+                  'потребителем своей формой: code=%d hits=%r'
+                  % (js_green['code'], js_hits))
+            return 2
+        print('ПРИБОР: контроль require-потребления -- зелен, форма названа')
+        io.open(js_user, 'w', encoding='utf-8').write(
+            "#!/usr/bin/env node\nconst lib = null;\n")
+        js_red = measure(kit)
+        if js_red['code'] != 1 or js_red['orphans'] != ['zz-js-lib.js']:
+            print('ОТКАЗ: удаление единственного require не назвало сироту: '
+                  'code=%d orphans=%r' % (js_red['code'], js_red['orphans']))
+            return 2
+        print('ПРИБОР: удаление единственного require -- сирота названа')
+        io.open(js_user, 'w', encoding='utf-8').write(
+            "#!/usr/bin/env node\n// const lib = require('./zz-js-lib.js');\n")
+        js_cmt = measure(kit)
+        if js_cmt['code'] != 1 or js_cmt['orphans'] != ['zz-js-lib.js']:
+            print('ОТКАЗ: закомментированный require засчитан потребителем: '
+                  'code=%d orphans=%r' % (js_cmt['code'], js_cmt['orphans']))
+            return 2
+        print('ПРИБОР: require в комментарии -- потребителем НЕ считается')
+        os.remove(js_lib)
+        os.remove(js_user)
+        io.open(os.path.join(kit, 'run.sh'), 'w', encoding='utf-8').write(
+            '#!/usr/bin/env bash\nbash tools/called-one.sh\n')
+        io.open(readme, 'w', encoding='utf-8').write(
+            'toy contents\n`tools/called-one.sh`\n'
+            + ''.join('`tools/%s`\n' % name for name in MANUAL))
 
         # Зубы ВТОРОЙ двери. Каждая мутация ставится на ЗЕЛЁНОМ дереве и
         # снимается после замера: краснота на уже красном не доказывала бы
