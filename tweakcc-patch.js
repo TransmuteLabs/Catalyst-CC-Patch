@@ -485,9 +485,42 @@ step('7 session memory', () => {
   if (anchorIdx === -1) fail('session-memory extraction anchor not found');
 
   // (a) the extraction gate, inside the entry point the anchor names.
-  const WIN = 8000;
+  // CONSTRAINT: the window is closed on the MODULE boundary, never on a fixed
+  // width. The bundle is entry-plus-chunks, minified names are chunk-local
+  // (see the scoping note above), and a fixed-width window measured from the
+  // anchor crosses into neighbouring chunks -- on 2.1.278 an `if(` from the
+  // next chunk then ends inside the window while its closing paren does not,
+  // and the balance scan below refuses on text that was never one construct.
   const gateRx = new RegExp(`if\\(!${ID}\\("tengu_[a-z0-9_]+",!1\\)\\)return;`, 'g');
-  const window = js.slice(anchorIdx, anchorIdx + WIN);
+  const moduleEnd = () => {
+    const boundary = /\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/g;
+    boundary.lastIndex = anchorIdx;
+    const m = boundary.exec(js);
+    // CONSTRAINT: "strictly after the anchor" is a predicate on the RESULT,
+    // not just on where the search starts. A boundary found at or before the
+    // anchor does not close this window -- slicing to it yields an empty
+    // window that verifies nothing while reading as a pass.
+    if (m !== null && m.index > anchorIdx) return m.index;
+    // CONSTRAINT: no boundary to close on is an instrument refusal, never a
+    // fallback to a wider window -- silently widening would reintroduce, and
+    // hide, exactly the cross-module defect the closure exists to remove. The
+    // two refusals must stay textually distinct: same-word failures cannot be
+    // told apart in a log.
+    const total = (js.match(/\/\*__tweakcc_module_boundary_\d+__\*\//g) || []).length;
+    if (total === 0) {
+      fail(
+        `session-memory extraction window cannot be closed on a module boundary: ` +
+          `the bundle carries no boundary markers (0) -- not the unpacked ` +
+          `module-split form`
+      );
+    }
+    fail(
+      `session-memory extraction window cannot be closed on a module boundary: ` +
+        `no marker after the anchor (anchorIdx ${anchorIdx}, ${total} boundaries ` +
+        `in total) -- the anchor sits in the last module`
+    );
+  };
+  const window = js.slice(anchorIdx, moduleEnd());
   const gates = window.match(gateRx) || [];
   if (gates.length > 1) {
     fail(`session-memory extraction gate is ambiguous (${gates.length} candidates)`);
@@ -498,10 +531,11 @@ step('7 session memory', () => {
     js = js.slice(0, gateAt) + js.slice(gateAt + gates[0].length);
   }
 
-  // Postcondition over the SAME text as before, not the same width: the slice
-  // shrank by whatever was cut, and re-reading 8000 characters would pull in
-  // trailing code that was never part of this entry point.
-  const after = js.slice(anchorIdx, anchorIdx + WIN - (gateDone ? gates[0].length : 0));
+  // Postcondition over the SAME MODULE, re-derived from the CURRENT js: the
+  // cut above shifted every offset past it, so an end computed before it
+  // names a foreign byte. The boundary is searched again, never nudged by
+  // the removed length.
+  const after = js.slice(anchorIdx, moduleEnd());
   // The wide flag-read detector: the postcondition's eyes. The locator above
   // stays narrow on purpose -- it cuts only the shape it understands -- so the
   // postcondition must NOT mirror it. A guard reshaped into a compound

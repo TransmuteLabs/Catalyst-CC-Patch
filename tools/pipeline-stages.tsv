@@ -26,6 +26,7 @@ env-handles-live-teeth	Зубы гварда живости ручек	Зубы 
 env-handles-live-tree	Гвард живости ручек на реальном дереве	env-handles-live-guard\[реальное дерево\]:|ГВАРД ЖИВОСТИ НА ДЕРЕВЕ:	exit	always
 builtin-option-pin-guard	Пины опций встроенных модов	Пины опций встроенных модов	exit	always
 builtin-option-pin-guard-teeth	Зубы гварда пинов опций	Зубы гварда пинов опций	exit	always
+step7-window-teeth	Зубы окна шага 7	Зубы окна шага 7	exit	always
 executors-census	Перепись исполнителей инструментов	Перепись исполнителей инструментов	exit	always
 stage-census	Перепись стадий конвейера	Перепись стадий конвейера	exit	always
 unpacker-fetch	Fetching the unpacker	Fetching the unpacker	exit	cond-silent
