@@ -65,7 +65,7 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-EXPECTED_ENTRY_TEETH = 7
+EXPECTED_ENTRY_TEETH = 13
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -113,10 +113,13 @@ def read_table() -> list[dict[str, object]]:
         if line.startswith("#") or not line.strip():
             continue
         parts = line.rstrip("\n").split("\t")
-        if len(parts) != 8:
-            raise Refusal(f"строка {ln} таблицы не из восьми полей: {parts[:2]}")
+        # CONSTRAINT (#353): девятое поле (шаг-владелец) обязательно как СЛОТ --
+        # ряд старой восьмиполевой формы отказывает с номером строки, а не
+        # молча получает пустое поле шага.
+        if len(parts) != 9:
+            raise Refusal(f"строка {ln} таблицы не из девяти полей: {parts[:2]}")
         row: dict[str, object] = dict(zip(("id", "check", "kind", "anchor", "repl",
-                                           "also", "expect", "note"), parts))
+                                           "also", "expect", "note", "step"), parts))
         row["lineno"] = ln
         rows.append(row)
     return rows
@@ -387,11 +390,17 @@ def edits_m2(base: bytes) -> list[tuple[int, bytes]]:
     заменяется именем ПРЕДЕЛА. Это и есть предмет: после снятия предела мод,
     не передавший maxTokens, просит не свои 256, а Infinity -- вред, которого
     на стоке нет и который создаёт именно шаг 30.
+
+    CONSTRAINT (#353): игла несёт РАСЩЕПЛЁННУЮ форму сторожа 2.1.276+ -- ту
+    же, что читают проверка кита (`_MOD_MAXTOKENS_REFUSAL`) и локатор патча
+    (tweakcc-patch.js, шаг 30); цельная форма `!Number.isInteger(...)||<1`
+    в этой сборке даёт 0 вхождений, и красность M2 была недоказуема.
     """
     site = re.search(
-        rb'if\((' + ID + rb')!==void 0&&\(!Number\.isInteger\(\1\)\|\|\1<1\|\|\1>(' + ID + rb')\)\)'
+        rb'if\((' + ID + rb')!==void 0&&\1>(' + ID + rb')\)'
         rb'throw new ' + ID + rb'\(`\$\{' + ID + rb'\}: \$\.model\.complete: '
-        rb'maxTokens must be an integer from 1 to \$\{\2\} \(got \$\{String\(\1\)\}\)`\)', base)
+        rb'maxTokens \$\{\1\} is past what \$\{' + ID + rb'\} '
+        rb'can produce in one reply \(\$\{\2\}\)`\)', base)
     if not site:
         raise Refusal("M2: отказ maxTokens мод-API не найден -- предел назвать нечем")
     arg, lim = site.group(1), site.group(2)
@@ -403,13 +412,17 @@ def edits_m2(base: bytes) -> list[tuple[int, bytes]]:
     default = use.group(1)
     if default == lim:
         raise Refusal("M2: умолчание УЖЕ равно пределу в исходном образе -- красить нечего")
-    if len(default) != len(lim):
-        # Разная длина сдвинула бы весь хвост образа, и покраснело бы всё
-        # подряд чужой причиной. Честный отказ прибора, а не тихая подгонка.
+    if len(lim) > len(default):
+        # Замена ДЛИННЕЕ якоря сдвинула бы весь хвост образа, и покраснело бы
+        # всё подряд чужой причиной. Честный отказ прибора, а не подгонка.
         raise Refusal(
             f"M2: имена разной длины (умолчание {len(default)}, предел {len(lim)}) -- "
             f"замена сдвинула бы хвост образа")
-    return [(tail_at + use.start(1), lim)]
+    # Канон literal-замен (edits_literal): замена КОРОЧЕ якоря добивается
+    # пробелами до его длины -- `(s??M  )` синтаксически валиден, и длина
+    # хвоста образа неизменна; проверка кита при этом теряет `(<arg>??<DEF>)`
+    # и обязана покраснеть.
+    return [(tail_at + use.start(1), lim.ljust(len(default)))]
 
 
 def edits_s1(base: bytes) -> list[tuple[int, bytes]]:
@@ -758,6 +771,129 @@ def _decl_with_273(text: str) -> str:
     return text + extra
 
 
+_KIT_FN_WANTED = ("_image_version", "_read_inapplicable")
+
+
+@functools.lru_cache(maxsize=1)
+def _kit_body_functions() -> dict[str, str]:
+    """Исходники функций правил из питоньего тела блока проверок кита.
+
+    CONSTRAINT (#353): правила «версия образа» и «разбор дома декларации»
+    живут в ките (`_image_version` и `_read_inapplicable` в
+    claude-patch-all.sh); местная копия расходилась бы с проверяющей стороной
+    молча. Тело достаётся ЕДИНСТВЕННЫМ домом правила heredoc
+    (tools/heredoc-anchor.py) -- тем же путём, что и реестр checks у
+    _pipeline_check_names; каждое имя обязано встретиться РОВНО один раз.
+    """
+    anchor_path = ROOT / "tools" / "heredoc-anchor.py"
+    spec = importlib.util.spec_from_file_location(
+        "checks_teeth_heredoc_anchor_kitfn", str(anchor_path))
+    if spec is None or spec.loader is None:
+        raise Refusal(f"дом правила heredoc не загружается: {anchor_path}")
+    anchor = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(anchor)
+    except Exception as exc:
+        raise Refusal(f"дом правила heredoc не исполняется: {exc}") from exc
+    victim = ROOT / "claude-patch-all.sh"
+    if not victim.is_file():
+        raise Refusal(f"нет конвейера для правил кита: {victim}")
+    hits: dict[str, list[str]] = {n: [] for n in _KIT_FN_WANTED}
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-kitfn.") as td:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = anchor.bodies(str(victim), td)
+        if rc != 0:
+            raise Refusal(f"тела heredoc конвейера не извлекаются: rc={rc}")
+        try:
+            count = int(buffer.getvalue().strip())
+        except ValueError as exc:
+            raise Refusal(f"дом правила не назвал число тел: {buffer.getvalue()!r}") from exc
+        for i in range(1, count + 1):
+            body_path = Path(td) / ("body.%d.py" % i)
+            try:
+                src = body_path.read_text(encoding="utf-8")
+            except FileNotFoundError as exc:
+                raise Refusal(f"тело heredoc №{i} не создано: {body_path}") from exc
+            try:
+                tree = ast.parse(src)
+            except SyntaxError as exc:
+                raise Refusal(f"тело heredoc №{i} не разбирается как Python: {exc}") from exc
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name in hits:
+                    seg = ast.get_source_segment(src, node)
+                    if seg is None:
+                        raise Refusal(f"исходник функции {node.name} не извлекается")
+                    hits[node.name].append(seg)
+    for name, segs in hits.items():
+        if len(segs) != 1:
+            raise Refusal(f"функция правила {name} встречена {len(segs)} раз "
+                          f"в телах конвейера -- ждём ровно одну")
+    return {name: segs[0] for name, segs in hits.items()}
+
+
+def _kit_image_version(base: bytes) -> str:
+    """Версия образа -- правилом кита `_image_version`, без местной копии (#353).
+
+    Отказ правила (неоднозначная или отсутствующая версия) выходит из кита
+    как SystemExit; здесь он становится Refusal, неся исходный текст отказа.
+    """
+    ns: dict[str, object] = {"re": re, "sys": sys}
+    exec(compile(_kit_body_functions()["_image_version"],
+                 "<kit:_image_version>", "exec"), ns)
+    fn = ns["_image_version"]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            return fn(base)
+    except SystemExit as exc:
+        raise Refusal(f"версия образа не читается правилом кита "
+                      f"(код {exc.code}): {buf.getvalue().strip()}")
+
+
+def _declared_pairs() -> dict[tuple[str, str], tuple[int, str]]:
+    """Пары «версия × шаг» дома декларации -- парсером САМОГО кита (#353).
+
+    CONSTRAINT: файл читает существующий _kit_decl_text(); разбор -- правило
+    кита `_read_inapplicable` (неразобранная строка и дубль пары -- отказ),
+    получающее текст через временный файл: домашняя сигнатура принимает путь.
+    Свой разбор разошёлся бы с проверяющей стороной молча.
+    """
+    text = _kit_decl_text()
+    ns: dict[str, object] = {"os": os, "sys": sys}
+    exec(compile(_kit_body_functions()["_read_inapplicable"],
+                 "<kit:_read_inapplicable>", "exec"), ns)
+    fn = ns["_read_inapplicable"]
+    fd, path = tempfile.mkstemp(prefix="checks-teeth-decl.", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(buf):
+                return fn(path)
+        except SystemExit as exc:
+            raise Refusal(f"дом декларации не разбирается правилом кита "
+                          f"(код {exc.code}): {buf.getvalue().strip()}")
+    finally:
+        os.unlink(path)
+
+
+@functools.lru_cache(maxsize=1)
+def _patch_step_numbers() -> frozenset[str]:
+    """Номера шагов, ОБЪЯВЛЕННЫЕ в tweakcc-patch.js строкой `step('NN ...`.
+
+    CONSTRAINT (#353): поле 9 таблицы называет шаг-владельца ряда; номер,
+    которого нет среди объявленных шагов патча, -- отказ прибора с номером,
+    а не тихий пропуск: неверный номер молча подарил бы ряду чужую судьбу.
+    """
+    src = (ROOT / "tweakcc-patch.js").read_text(encoding="utf-8")
+    nums = re.findall(r"step\('([0-9]+) ", src)
+    if not nums:
+        raise Refusal("в tweakcc-patch.js не найдено объявлений step('NN ...')")
+    return frozenset(nums)
+
+
 def run_inapplicable_tooth(row: dict[str, str]) -> str | None:
     """None -- зуб поймал свою мутацию. Строка -- прошла молча / прибор."""
     mid = row["id"]
@@ -1059,24 +1195,65 @@ def reds(image: Path) -> tuple[list[str], str]:
 
 
 def build_jobs(rows: list[dict[str, str]], picked: set[str] | None, image: Path,
-               base: bytes) -> tuple[list[tuple], list[dict[str, str]], list[tuple[str, str]]]:
+               base: bytes, *, ver: str | None = None,
+               decl_pairs: dict[tuple[str, str], tuple[int, str]] | None = None,
+               ) -> tuple[list[tuple], list[dict[str, str]], list[tuple[str, str, str, str]],
+                          list[tuple[str, str]]]:
     """Построение заданий; отказ строителя -- исход СТРОКИ, не прохода (#350).
 
     Прежний Refusal строителя завершал проход кодом 2 ДО построения остальных
     заданий: одна сместившаяся строка ослепляла прибор по всему реестру, а
     свип читал код 2 как «не измеряли». Отказ ловится на границе ЭТОЙ строки;
     остальные строки строятся и измеряются. Возвращает (jobs, inapp_rows,
-    refused), где refused -- пары (id, сырой текст отказа).
+    inapplicable_by_version, refused), где refused -- пары (id, сырой текст
+    отказа), а inapplicable_by_version -- четвёрки (id, версия, шаг,
+    основание).
+
+    Третий исход рядов образа (#353): пара «версия образа × шаг-владелец»
+    (поле 9), ОБЪЯВЛЕННАЯ неприменимой в доме декларации, уводит ряд из
+    мутаций И из отказов -- постоянные жильцы ведра отказов делали прибор
+    слепым к новому отказу того же ведра. Неприменимость даёт только
+    ОБЪЯВЛЕНИЕ: без строки в декларации ряд строится как обычно, и мёртвый
+    якорь остаётся отказом прибора. ver/decl_pairs -- точки внедрения зубов;
+    живой прогон оставляет их None и читает правила кита.
     """
     jobs: list[tuple] = []
     inapp_rows: list[dict[str, str]] = []
+    inapplicable_by_version: list[tuple[str, str, str, str]] = []
     refused: list[tuple[str, str]] = []
+    steps: frozenset[str] = frozenset()
+    setup_fail: str | None = None
+    if any(str(r.get("step", "")) for r in rows
+           if picked is None or r["id"] in picked):
+        try:
+            steps = _patch_step_numbers()
+            if ver is None:
+                ver = _kit_image_version(base)
+            if decl_pairs is None:
+                decl_pairs = _declared_pairs()
+        except Refusal as exc:
+            setup_fail = str(exc)
     for row in rows:
         if picked is not None and row["id"] not in picked:
             continue
         if row["kind"] == "inapplicable":
             inapp_rows.append(row)
             continue
+        # Инвариант: поле шага непусто => шаги/версия/декларация прочитаны
+        # (need_steps выше) либо их отказ уже записан в setup_fail.
+        step_owner = str(row.get("step", ""))
+        if step_owner:
+            if setup_fail is not None:
+                refused.append((row["id"], setup_fail))
+                continue
+            if step_owner not in steps:
+                refused.append((row["id"],
+                                f"поле 9: шаг {step_owner} не объявлен в tweakcc-patch.js"))
+                continue
+            hit = decl_pairs.get((ver, step_owner))
+            if hit is not None:
+                inapplicable_by_version.append((row["id"], ver, step_owner, hit[1]))
+                continue
         try:
             if row["kind"] == "derived":
                 edits = DERIVED[row["id"]](base)
@@ -1090,7 +1267,7 @@ def build_jobs(rows: list[dict[str, str]], picked: set[str] | None, image: Path,
         want = {row["check"]}
         want |= {x.strip() for x in row["also"].split(";") if x.strip()}
         jobs.append((row["id"], row["check"], str(image), edits, sorted(want)))
-    return jobs, inapp_rows, refused
+    return jobs, inapp_rows, inapplicable_by_version, refused
 
 
 def summary_line(measured: int, bad: int) -> str:
@@ -1101,6 +1278,22 @@ def summary_line(measured: int, bad: int) -> str:
 def refusal_line(refused: list[tuple[str, str]]) -> str:
     ids = ", ".join(rid for rid, _ in refused)
     return f"checks-teeth: ИТОГ отказов прибора={len(refused)} id: {ids}"
+
+
+def inapplicable_row_line(rid: str, ver: str, step: str, reason: str) -> str:
+    """Строка третьего исхода: называет ВЕРСИЮ, ШАГ и ОСНОВАНИЕ декларации.
+
+    CONSTRAINT (#353): два исхода одной строкой неразличимы -- текст обязан
+    отличаться от строки отказа прибора и нести основание из декларации.
+    """
+    return (f"checks-teeth: МУТАЦИЯ {rid}: НЕПРИМЕНИМО ПО ВЕРСИИ -- "
+            f"образ {ver}, шаг {step}: {reason}")
+
+
+def inapplicable_line(inapplicable_by_version: list[tuple[str, str, str, str]]) -> str:
+    ids = ", ".join(rid for rid, _ver, _step, _reason in inapplicable_by_version)
+    return (f"checks-teeth: ИТОГ неприменимых по версии="
+            f"{len(inapplicable_by_version)} id: {ids}")
 
 
 def exit_code(bad: int, refused: int) -> int:
@@ -1436,7 +1629,7 @@ def _tooth_builder_refusal_is_row_scoped() -> str | None:
         {"id": "O1", "check": "c", "kind": "literal", "anchor": "MARK",
          "repl": "MARX", "also": "", "expect": "2"},
     ]
-    jobs, _inapp, refused = build_jobs(rows, None, Path("/fixture-image"), B)
+    jobs, _inapp, _third, refused = build_jobs(rows, None, Path("/fixture-image"), B)
     if [j[0] for j in jobs] != ["O1"]:
         return f"валидная строка не построена: jobs={[j[0] for j in jobs]}"
     if [r[0] for r in refused] != ["R1"]:
@@ -1462,7 +1655,7 @@ def _tooth_refusal_is_not_green() -> str | None:
         {"id": "O1", "check": "c", "kind": "literal", "anchor": "MARK",
          "repl": "MARX", "also": "", "expect": "2"},
     ]
-    jobs, _inapp, refused = build_jobs(rows, None, Path("/fixture-image"), B)
+    jobs, _inapp, third, refused = build_jobs(rows, None, Path("/fixture-image"), B)
     line = summary_line(len(jobs), 0)
     if "мутаций=1" not in line or "R1" in line:
         return f"отказавшая строка попала в счётчик мутаций: {line}"
@@ -1471,6 +1664,9 @@ def _tooth_refusal_is_not_green() -> str | None:
     rline = refusal_line(refused)
     if "отказов прибора=1" not in rline or "R1" not in rline:
         return f"перечень отказов не назвал счётчик и строку: {rline}"
+    tline = inapplicable_line(third)
+    if "неприменимых по версии=0" not in tline:
+        return f"третий исход попал в чужие счётчики: {tline}"
     return None
 
 
@@ -1486,14 +1682,15 @@ def _tooth_no_refusal_same_outcome() -> str | None:
     row = {"id": "O1", "check": "c", "kind": "literal", "anchor": "MARK",
            "repl": "MARX", "also": "c2; c3", "expect": "2"}
     image = Path("/fixture-image")
-    jobs, inapp, refused = build_jobs([row], None, image, B)
+    jobs, inapp, third, refused = build_jobs([row], None, image, B)
     want = {"c"}
     want |= {x.strip() for x in "c2; c3".split(";") if x.strip()}
     expect_job = ("O1", "c", str(image), edits_literal(B, row), sorted(want))
     if jobs != [expect_job]:
         return f"исход строки изменился: {jobs!r}"
-    if inapp or refused:
-        return f"без отказа нет иных исходов: inapp={[r['id'] for r in inapp]} refused={refused}"
+    if inapp or third or refused:
+        return (f"без отказа нет иных исходов: inapp={[r['id'] for r in inapp]} "
+                f"third={third} refused={refused}")
     if exit_code(0, 0) != 0:
         return "нулевых bad/refused хватило на ненулевой код"
     return None
@@ -1509,6 +1706,297 @@ def _tooth_seven_is_upstream() -> str | None:
             if exit_code(bad_n, refused_n) == 7:
                 return (f"exit_code({bad_n}, {refused_n}) = 7 -- "
                         f"код занят ожиданием апстрима")
+    return None
+
+
+# --- зубы третьего исхода рядов образа (#353) ---------------------------
+#
+# Фикстуры: расщеплённая форма сторожа maxTokens 2.1.276+ (та же игла, что у
+# проверки кита и локатора патча) и ряд с мёртвым якорем -- без объявления
+# он обязан отказывать, как отказывал до появления поля шага.
+_M2_SPLIT_SITE = (
+    b"// Version: 9.9.9\n"
+    b"if(s!==void 0&&s>M)throw new Ne(`${g}: $.model.complete: "
+    b"maxTokens ${s} is past what ${w} can produce in one reply (${M})`);"
+    b"let U=Math.min((s??DEF)+B,M);\n"
+)
+_M2_LONGER_SITE = (
+    b"// Version: 9.9.8\n"
+    b"if(t!==void 0&&t>LIM)throw new Ne(`${g}: $.model.complete: "
+    b"maxTokens ${t} is past what ${w} can produce in one reply (${LIM})`);"
+    b"let U=Math.min((t??D)+B,LIM);\n"
+)
+
+_DECL_BRANCH_ANCHOR = (
+    "            hit = decl_pairs.get((ver, step_owner))\n"
+    "            if hit is not None:\n"
+)
+_DECL_BRANCH_REPL = (
+    "            hit = decl_pairs.get((ver, step_owner))\n"
+    "            if False:\n"
+)
+_DECL_LOOKUP_ANCHOR = "            hit = decl_pairs.get((ver, step_owner))\n"
+_DECL_LOOKUP_REPL = (
+    "            hit = (7, \"мутация: неприменимость без объявления\")\n"
+)
+_STEP_GATE_ANCHOR = "        if step_owner:\n"
+_STEP_GATE_REPL = "        if True:\n"
+_STEP_DOOR_ANCHOR = "            if step_owner not in steps:\n"
+_STEP_DOOR_REPL = "            if False:\n"
+_SETUP_DOOR_ANCHOR = "            if setup_fail is not None:\n"
+_SETUP_DOOR_REPL = "            if False:\n"
+_M2_PAD_ANCHOR = "    return [(tail_at + use.start(1), lim.ljust(len(default)))]\n"
+_M2_PAD_REPL = "    return [(tail_at + use.start(1), lim)]\n"
+
+
+def _version_row(rid: str, step: str) -> dict[str, str]:
+    """Строка образа с мёртвым якорем и полем шага-владельца (поле 9)."""
+    return {"id": rid, "check": "c", "kind": "literal", "anchor": "ZZZZ",
+            "repl": "ZZZ", "also": "", "expect": "1", "note": "", "step": step,
+            "lineno": 3}
+
+
+def _mutated_self(anchor: str, repl: str, what: str):
+    """Копия прибора с названной мутацией; ROOT возвращён домой."""
+    own = Path(__file__).read_text(encoding="utf-8")
+    mutated = _once_replace(own, anchor, repl, what)
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-third.") as raw:
+        mod = Path(raw) / "checks-teeth-mutated.py"
+        mod.write_text(mutated, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("checks_teeth_mutated_third", mod)
+        mut = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mut)
+        # Копия модуля лежит вне дома: её ROOT указывает в пустоту. Возвращаем
+        # реальный: предмет мутации -- ветка третьего исхода, а не пути копии.
+        mut.ROOT = ROOT
+        return mut
+
+
+def _tooth_declared_row_is_third_outcome() -> str | None:
+    """Объявленная неприменимость -- ТРЕТИЙ исход, не отказ прибора (#353).
+
+    Ведро отказов -- сигнал, и два постоянных жильца (B1/B2 на образах без
+    механизма бюджета мод-API) делали прибор слепым к новому отказу того же
+    ведра. Пара «версия образа × шаг-владелец», ОБЪЯВЛЕННАЯ в доме декларации,
+    уводит ряд в собственную корзину, строку ряда и итоговую строку. Мутация
+    гасит ветку объявления: ряд обязан вернуться в отказ -- исход даёт
+    ОБЪЯВЛЕНИЕ, а не ненахождение якоря.
+    """
+    row = _version_row("N1", "29")
+    decl = {("2.1.276", "29"): (4, "тест-основание неприменимости")}
+    jobs, _inapp, third, refused = build_jobs(
+        [row], None, Path("/fixture-image"), b"x MARK y MARK z",
+        ver="2.1.276", decl_pairs=decl)
+    if jobs or refused:
+        return f"объявленный ряд не в третьем исходе: jobs={jobs!r} refused={refused!r}"
+    if [t[0] for t in third] != ["N1"]:
+        return f"третий исход не назвал ряд: {third!r}"
+    rid, ver, step, reason = third[0]
+    if (ver, step, reason) != ("2.1.276", "29", "тест-основание неприменимости"):
+        return f"третий исход потерял версию/шаг/основание: {third[0]!r}"
+    rline = inapplicable_row_line(rid, ver, step, reason)
+    for part in ("2.1.276", "29", "тест-основание неприменимости"):
+        if part not in rline:
+            return f"строка ряда не назвала версию/шаг/основание: {rline!r}"
+    if "ОТКАЗ" in rline:
+        return f"строка ряда неотличима от отказа прибора: {rline!r}"
+    tline = inapplicable_line(third)
+    if "неприменимых по версии=1" not in tline or "N1" not in tline:
+        return f"итоговая строка не назвала счётчик и ряд: {tline!r}"
+    if tline == refusal_line([("N1", "x")]):
+        return "итоговая строка совпала со строкой отказов прибора"
+    if exit_code(0, len(refused)) != 0:
+        return "третий исход закодирован ненулевым кодом прохода"
+    mut = _mutated_self(_DECL_BRANCH_ANCHOR, _DECL_BRANCH_REPL,
+                        "зуб: ветка объявления")
+    mjobs, _mi, mthird, mrefused = mut.build_jobs(
+        [row], None, Path("/fixture-image"), b"x MARK y MARK z",
+        ver="2.1.276", decl_pairs=decl)
+    if mthird or not mrefused:
+        return (f"мутация не вернула объявленный ряд в отказ прибора: "
+                f"third={mthird!r} refused={mrefused!r}")
+    return None
+
+
+def _tooth_undeclared_pair_still_refuses() -> str | None:
+    """Ряд БЕЗ строки в декларации -- ОТКАЗ прибора (#353).
+
+    Неприменимость даёт только ОБЪЯВЛЕНИЕ: у пары «версия × шаг» без строки
+    в доме мёртвый якорь обязан отказывать, как отказывал до появления поля
+    шага. Мутация дарит третьей корзине ряд без объявления -- отказ исчезает
+    молчанием, и третий исход становится глушилкой; зуб краснеет.
+    """
+    row = _version_row("N2", "29")
+    decl = {("2.1.277", "29"): (2, "чужая пара -- не эта версия")}
+    jobs, _inapp, third, refused = build_jobs(
+        [row], None, Path("/fixture-image"), b"x MARK y MARK z",
+        ver="2.1.276", decl_pairs=decl)
+    if jobs or third:
+        return f"ряд без объявления ушёл из отказов: third={third!r} jobs={jobs!r}"
+    if [r[0] for r in refused] != ["N2"] or "не найден" not in refused[0][1]:
+        return f"отказ не привязан к строке с мёртвым якорем: {refused!r}"
+    if exit_code(0, len(refused)) != 9:
+        return "отказ строки перестал кодироваться девяткой"
+    mut = _mutated_self(_DECL_LOOKUP_ANCHOR, _DECL_LOOKUP_REPL,
+                        "зуб: честность поиска пары")
+    mjobs, _mi, mthird, mrefused = mut.build_jobs(
+        [row], None, Path("/fixture-image"), b"x MARK y MARK z",
+        ver="2.1.276", decl_pairs=decl)
+    if mrefused or not mthird:
+        return (f"мутация не подарила неприменимость ряду без объявления: "
+                f"third={mthird!r} refused={mrefused!r}")
+    return None
+
+
+def _tooth_empty_step_field_still_refuses() -> str | None:
+    """ПУСТОЕ поле шага + мёртвый якорь -- ОТКАЗ прибора (#353).
+
+    Поле 9 -- провенанс для проверяющей стороны, а не глушилка: без названного
+    шага-владельца ряд обязан строиться как раньше. Мутация гасит ТОЛЬКО
+    дверь самого поля (`if step_owner:`): пустота просачивается в машинерию
+    шага, и текст отказа уезжает со строителя на дверь реестра шагов --
+    зуб краснеет дрейфом текста. Двери подготовки и реестра шагов пинят
+    СВОИ зубы; пара декларации здесь -- sentinel: откройся обе двери,
+    пустота получила бы третий исход, и это ловит контроль.
+    """
+    row = _version_row("N3", "")
+    decl = {("2.1.276", ""): (5, "пара для пустого шага -- только мутации")}
+    jobs, _inapp, third, refused = build_jobs(
+        [row], None, Path("/fixture-image"), b"x MARK y MARK z",
+        ver="2.1.276", decl_pairs=decl)
+    if jobs or third:
+        return f"пустое поле шага получило третий исход: third={third!r}"
+    if [r[0] for r in refused] != ["N3"] or "не найден" not in refused[0][1]:
+        return f"отказ не привязан к строке с мёртвым якорем: {refused!r}"
+    mut = _mutated_self(_STEP_GATE_ANCHOR, _STEP_GATE_REPL,
+                        "зуб: обязательность поля шага")
+    mjobs, _mi, mthird, mrefused = mut.build_jobs(
+        [row], None, Path("/fixture-image"), b"x MARK y MARK z",
+        ver="2.1.276", decl_pairs=decl)
+    if mjobs or mthird:
+        return (f"пустое поле шага ушло в работу: third={mthird!r} "
+                f"jobs={mjobs!r}")
+    if not mrefused:
+        return "пустое поле шага перестало отказывать"
+    if "не найден" in mrefused[0][1]:
+        return ("мутация двери поля шага не изменила текст отказа -- "
+                "зуб не чувствует дверь")
+    return None
+
+
+def _tooth_undeclared_step_refuses() -> str | None:
+    """Шаг поля 9, НЕ ОБЪЯВЛЕННЫЙ в патче, -- ОТКАЗ прибора с номером (#353).
+
+    Дверь ловит опечатку в девятом поле: шаг, которого в tweakcc-patch.js
+    нет, не имеет права ни на третий исход, ни на тихое измерение обычной
+    мутацией -- неверный номер молча подарил бы ряду чужую судьбу. Ряд
+    контроля несёт ЖИВОЙ якорь: снятая дверь обязана построить его в
+    задания, и именно это краснит зуб.
+    """
+    row = {"id": "N4", "check": "c", "kind": "literal", "anchor": "MARK",
+           "repl": "MARX", "also": "", "expect": "2", "note": "",
+           "step": "99", "lineno": 3}
+    decl = {("2.1.276", "29"): (4, "живая пара -- не этот шаг")}
+    base = b"x MARK y MARK z"
+    jobs, _inapp, third, refused = build_jobs(
+        [row], None, Path("/fixture-image"), base,
+        ver="2.1.276", decl_pairs=decl)
+    if jobs or third:
+        return f"шаг-призрак прошёл в работу: jobs={jobs!r} third={third!r}"
+    if [r[0] for r in refused] != ["N4"]:
+        return f"отказ не привязан к строке: {refused!r}"
+    why = refused[0][1]
+    if "99" not in why or "не объявлен" not in why:
+        return f"отказ не назвал опечатанный шаг: {why!r}"
+    mut = _mutated_self(_STEP_DOOR_ANCHOR, _STEP_DOOR_REPL,
+                        "зуб: дверь реестра шагов")
+    mjobs, _mi, mthird, mrefused = mut.build_jobs(
+        [row], None, Path("/fixture-image"), base,
+        ver="2.1.276", decl_pairs=decl)
+    if mrefused or mthird or not mjobs:
+        return (f"мутация не пустила ряд с опечатанным шагом в задания: "
+                f"jobs={mjobs!r} third={mthird!r} refused={mrefused!r}")
+    if [j[0] for j in mjobs] != ["N4"]:
+        return f"мутация построила чужие задания: {mjobs!r}"
+    return None
+
+
+def _tooth_setup_failure_refuses() -> str | None:
+    """Неудавшаяся подготовка -- ОТКАЗ ряда, а не молчаливый проход (#353).
+
+    Дверь держит громкий отказ в области действия: сбой чтения правил
+    (версия образа) не имеет права молча пускать ряды с полем шага в
+    машинерию с недочитанным состоянием. Контроль ломает САМО чтение
+    версии (база без маркера) -- отказ обязан нести причину подготовки.
+    Мутация гасит ТОЛЬКО эту дверь: отказ проглатывается, и текст ряда
+    уезжает на строителя -- зуб краснеет дрейфом.
+    """
+    row = {"id": "N5", "check": "c", "kind": "literal", "anchor": "ZZZZ",
+           "repl": "ZZZ", "also": "", "expect": "1", "note": "",
+           "step": "29", "lineno": 3}
+    decl = {("2.1.276", "29"): (4, "пара недостижима: версия не читается")}
+    base = b"x MARK y MARK z"
+    jobs, _inapp, third, refused = build_jobs(
+        [row], None, Path("/fixture-image"), base, decl_pairs=decl)
+    if jobs or third:
+        return f"сбой подготовки не отказал: jobs={jobs!r} third={third!r}"
+    if [r[0] for r in refused] != ["N5"]:
+        return f"отказ не привязан к строке: {refused!r}"
+    if "версия образа" not in refused[0][1]:
+        return f"отказ не понёс причину подготовки: {refused[0][1]!r}"
+    mut = _mutated_self(_SETUP_DOOR_ANCHOR, _SETUP_DOOR_REPL,
+                        "зуб: дверь отказа подготовки")
+    mjobs, _mi, mthird, mrefused = mut.build_jobs(
+        [row], None, Path("/fixture-image"), base, decl_pairs=decl)
+    if mthird or mjobs:
+        return (f"снятая дверь пустила ряд дальше: jobs={mjobs!r} "
+                f"third={mthird!r}")
+    if not mrefused:
+        return "снятая дверь проглотила отказ молча"
+    if "версия образа" in mrefused[0][1]:
+        return "мутация не сняла дверь подготовки -- зуб не чувствует её"
+    return None
+
+
+def _tooth_m2_padding_keeps_tail() -> str | None:
+    """Мутация M2 не сдвигает хвост образа (#353).
+
+    Игла переведена на расщеплённую форму сторожа 2.1.276+ -- ту же, что
+    читают проверка кита и локатор патча; цельная форма в этой сборке даёт
+    0 вхождений, и красность M2 была недоказуема. Канон literal перенесён на
+    derived: предел КОРОЧЕ умолчания записывается с добивкой пробелами до
+    длины умолчания (`(s??M  )` -- валидный JS, длина хвоста неизменна),
+    ДЛИННЕЕ -- отказ прибора. Мутация снимает добивку -- замена
+    укорачивается, и хвост сдвинулся бы; зуб краснеет длиной.
+    """
+    base = _M2_SPLIT_SITE
+    try:
+        edits = edits_m2(base)
+    except Refusal as exc:
+        return f"расщеплённая форма сторожа не читается иглой: {exc}"
+    if len(edits) != 1:
+        return f"ждали одну правку, получили {len(edits)}"
+    off, repl = edits[0]
+    if base[off:off + len(repl)] != b"DEF":
+        return f"правка стоит не на имени умолчания: {base[off:off + 8]!r}"
+    if repl != b"M  ":
+        return f"замена не добита пробелами до длины умолчания: {repl!r}"
+    if len(base[:off] + repl + base[off + len(repl):]) != len(base):
+        return "длина образа изменилась после мутации"
+    try:
+        edits_m2(_M2_LONGER_SITE)
+    except Refusal as exc:
+        if "замена сдвинула бы хвост образа" not in str(exc):
+            return f"предел длиннее умолчания отказал чужим текстом: {exc}"
+    else:
+        return "предел длиннее умолчания не отказал -- хвост сдвинулся бы"
+    mut = _mutated_self(_M2_PAD_ANCHOR, _M2_PAD_REPL, "зуб: добивка M2")
+    try:
+        medits = mut.edits_m2(base)
+    except Refusal as exc:
+        return f"мутация добивки отказала вместо укорачивания: {exc}"
+    if not medits or medits[0][1] != b"M":
+        return f"мутация не укоротила замену: {medits!r}"
     return None
 
 
@@ -1760,6 +2248,12 @@ def main() -> int:
         ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
         ("steps-off-arity-both-sides", _tooth_steps_off_arity_both_sides),
         ("mutations-name-in-registry", _tooth_mutations_name_in_registry),
+        ("declared-row-third-outcome", _tooth_declared_row_is_third_outcome),
+        ("undeclared-pair-refuses", _tooth_undeclared_pair_still_refuses),
+        ("empty-step-refuses", _tooth_empty_step_field_still_refuses),
+        ("undeclared-step-refuses", _tooth_undeclared_step_refuses),
+        ("setup-failure-refuses", _tooth_setup_failure_refuses),
+        ("m2-padding-keeps-tail", _tooth_m2_padding_keeps_tail),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
@@ -1883,13 +2377,17 @@ def main() -> int:
         print("checks-teeth: КОНТРОЛЬ красноты пропущен -- в наборе нет строк, "
               "читающих активный образ", flush=True)
         base = b""
-    jobs, inapp_rows, refused = build_jobs(rows, picked, image, base)
+    jobs, inapp_rows, inapplicable_by_version, refused = build_jobs(rows, picked, image, base)
     del base
     # Построчный исход отказа печатается сразу с id и сырым текстом; счётчик
     # и перечень -- в итоговых строках, после измерения остальных строк.
     for rid, why in refused:
         print(f"checks-teeth: МУТАЦИЯ {rid}: ОТКАЗ ПРИБОРА -- {why}",
               file=sys.stderr, flush=True)
+    # Третий исход печатается СВОЕЙ строкой (версия/шаг/основание), в stdout
+    # рядом с RED-строками измеренных мутаций, а не в stderr отказов.
+    for rid, iver, istep, ireason in inapplicable_by_version:
+        print(inapplicable_row_line(rid, iver, istep, ireason), flush=True)
 
     bad = 0
     try:
@@ -1959,6 +2457,8 @@ def main() -> int:
                   "(шаг 29 NOTE/declared, готовой строки нет)", flush=True)
 
     print(summary_line(len(jobs) + measured_inapp, bad), flush=True)
+    if inapplicable_by_version:
+        print(inapplicable_line(inapplicable_by_version), flush=True)
     if refused:
         print(refusal_line(refused), flush=True)
     lock.close()                       # замок снимается ПОСЛЕ последнего замера
