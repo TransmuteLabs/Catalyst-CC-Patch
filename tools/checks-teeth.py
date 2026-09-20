@@ -66,11 +66,13 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-# 33 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
+# 35 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
 # проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B) + 6 зубов
 # проекции базы корпусного стенда (docnum:other -- «шаг -> проверки» есть ИМЯ
-# карты, не счёт проверок конвейера; #403C).
-EXPECTED_ENTRY_TEETH = 33
+# карты, не счёт проверок конвейера; #403C) + 2 зуба порядка фаз входа и
+# мутаций (docnum:other -- «фазы» здесь порядок этапов прибора, не счёт
+# шагов конвейера; #408).
+EXPECTED_ENTRY_TEETH = 35
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -1431,6 +1433,29 @@ def exit_code(bad: int, refused: int) -> int:
     if refused:
         return 9
     return 0
+
+
+def _unmeasured_line(reason: str) -> str:
+    """Итог фазы, которая не исполнилась.
+
+    CONSTRAINT (#408): текст обязан отличаться от summary_line -- «ноль
+    измеренных» и «не измерено» -- разные исходы, и одна строка на оба
+    делала ПУСТО неотличимым от НОЛЯ (тот же класс, что у итога входа).
+    """
+    return f"checks-teeth: ИТОГ мутаций=НЕ ИЗМЕРЕНО -- {reason}"
+
+
+def _phase_skipped(code: int, why: str, entry_bad: int) -> int:
+    """«Мутационной фазе мерить нечем»: причина в stderr, итог фазы -- всегда.
+
+    CONSTRAINT (#408): точка пропуска печатает причину прежним текстом и
+    уходит к финальному коду, а не в возврат посреди прохода; итог фазы
+    печатается и для неисполнившейся фазы. Найденный дефект входа
+    приоритетнее кода «не измерено»: красный вход без раннера даёт 1, а не 6.
+    """
+    print(f"checks-teeth: {why}", file=sys.stderr)
+    print(_unmeasured_line(why), flush=True)
+    return 1 if entry_bad else code
 
 
 def run_one(args) -> tuple[str, str, list[str], list[str]]:
@@ -3680,6 +3705,146 @@ def _tooth_single_registry_names_one_cause() -> str | None:
     return None
 
 
+# --- зубы порядка фаз входа и мутаций (#408) ---------------------------------
+#
+# Предмет -- порядок фаз в main(): красный вход не имеет права отменять
+# мутационную фазу, а «фаза не измерена» -- читаться как её нулевой итог.
+
+# Якорь цикла входа ДВУХСТРОЧНЫЙ: одиночная строка «reason = fn()» есть и в
+# self_check. Литерал якоря собирается конкатенацией: целиком в теле зуба он
+# дал бы второе вхождение в снимок, и _once_replace отказал бы на снимке,
+# а не на предмете зуба.
+_PHASES_ENTRY_CALL = ("    for name, fn in entry_teeth:\n"
+                      "        reason = " + "fn()")
+_PHASES_SUMMARY_PREFIX = "checks-teeth: ИТОГ мутаций="
+_PHASES_UNMEASURED_PREFIX = _PHASES_SUMMARY_PREFIX + "НЕ ИЗМЕРЕНО -- "
+_PHASES_RUNNER_WHY = "нет tools/checks-on-image.sh -- мерить нечем"
+
+
+def _phases_kit(entry_new: str,
+                extra: tuple[tuple[str, str, str], ...] = ()):
+    """Снимок кита для зубов порядка фаз: копия прибора в <td>/tools/.
+
+    Мутация цикла входа подменяет ВЫЗОВ зуба управляемым исходом: прогон
+    снимка не зависит от состояния машины (живой образ, пристин, реестры
+    дома). Раннера в снимок НЕ кладём -- мутационной фазе снимка мерить
+    нечем, и прогон обязан дойти до итога фазы, а не до мутаций. extra --
+    дополнительные точечные мутации снимка (тройки old/new/что).
+    """
+    td = Path(tempfile.mkdtemp(prefix="checks-teeth-phases408."))
+    tools = td / "tools"
+    tools.mkdir()
+    src = Path(__file__).read_text(encoding="utf-8")
+    src = _once_replace(src, _PHASES_ENTRY_CALL, entry_new,
+                        "зуб #408: исход цикла входа")
+    for old, new, what in extra:
+        src = _once_replace(src, old, new, what)
+    copy = tools / "checks-teeth.py"
+    copy.write_text(src, encoding="utf-8")
+    return td, copy
+
+
+def _phases_run(copy: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(copy)],
+                          capture_output=True, text=True, errors="replace")
+
+
+def _tooth_phases_entry_red_keeps_mutation_summary() -> str | None:
+    """Красный вход обязан оставить итогу мутационной фазы место (#408).
+
+    Ранний возврат по entry_bad отменял мутационную фазу ЦЕЛИКОМ: при живых
+    входных красных объявленные мутации не исполнялись ни разу, и ПУСТО в
+    логе было неотличимо от НОЛЯ. Снимок делает РОВНО ОДИН входной зуб
+    красным (мутация цикла входа снимка -- дом не трогается); прогон обязан
+    напечатать итог мутационной фазы и вернуть 1: дефект входа приоритетнее
+    «не измерено». Приманка возвращает ранний возврат -- итог фазы исчезает.
+    """
+    red_call = ("    for name, fn in entry_teeth:\n"
+                '        reason = ("мутация снимка: единственный красный вход"\n'
+                '                  if name == "single-registry-names-one-cause" '
+                "else None)")
+    td, copy = _phases_kit(red_call)
+    try:
+        r = _phases_run(copy)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 1:
+            return (f"красный вход обязан давать код 1 -- дефект выше «не "
+                    f"измерено»: rc={r.returncode} {out!r}")
+        if "ИТОГ вход=" not in out or "молча/неверно=1" not in out:
+            return f"входной итог не «ровно один красный»: {out!r}"
+        if _PHASES_SUMMARY_PREFIX not in out:
+            return f"итог мутационной фазы исчез при красном входе: {out!r}"
+        if _PHASES_UNMEASURED_PREFIX not in out:
+            return (f"фаза без раннера обязана зваться НЕ ИЗМЕРЕНО, а не "
+                    f"нулём измеренных: {out!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    bait_old = "    if not RUN" + "NER.is_file():"
+    bait_new = "    if entry_bad:\n        return 1\n" + bait_old
+    td, copy = _phases_kit(red_call, ((bait_old, bait_new,
+                                      "зуб #408: возвращённый ранний возврат"),))
+    try:
+        m = _phases_run(copy)
+        mout = (m.stdout or "") + (m.stderr or "")
+        if _PHASES_SUMMARY_PREFIX in mout:
+            return (f"мутация пережила зуб: ранний возврат не снял итог "
+                    f"фазы: {mout!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_phases_unmeasured_mutation_is_not_zero() -> str | None:
+    """«Не измерено» и «ноль измеренных» -- РАЗНЫЕ строки итога фазы (#408).
+
+    Фазе без раннера мерить нечем: её итог обязан печататься строкой
+    НЕ ИЗМЕРЕНО с той же причиной, что у отказа в stderr, и НЕ обязан
+    печатать нулевую форму измеренной фазы. Приманка сливает исходы в
+    нулевую форму -- зуб обязан это поймать.
+    """
+    green_call = ("    for name, fn in entry_teeth:\n"
+                  "        reason = " + "None")
+    td, copy = _phases_kit(green_call)
+    try:
+        r = _phases_run(copy)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 6:
+            return (f"зелёный вход без раннера обязан давать код 6: "
+                    f"rc={r.returncode} {out!r}")
+        if "ИТОГ вход=" not in out or "молча/неверно=0" not in out:
+            return f"входной итог не зелёный: {out!r}"
+        want = _PHASES_UNMEASURED_PREFIX + _PHASES_RUNNER_WHY
+        if want not in out:
+            return f"нет строки «{want}»: {out!r}"
+        if summary_line(0, 0) in out:
+            return (f"нулевая форма измеренной фазы напечатана без "
+                    f"измерения: {out!r}")
+        if want == summary_line(0, 0):
+            return "исходы «не измерено» и «ноль измеренных» текстуально слиты"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    collapse_old = ('    return f"checks-teeth: ИТОГ мутаций=НЕ ИЗМЕРЕ'
+                    'НО -- {reason}"')
+    collapse_new = ('    return "checks-teeth: ИТОГ мутаций=0 прошло '
+                    'молча/чужой дверью=0"')
+    td, copy = _phases_kit(
+        green_call, ((collapse_old, collapse_new,
+                      "зуб #408: слитые исходы фазы"),))
+    try:
+        m = _phases_run(copy)
+        mout = (m.stdout or "") + (m.stderr or "")
+        # Приманка обязана ПОСТРОИТЬ слитую форму: такой вывод ловится
+        # сценарием выше (нулевая форма без измерения), -- это и есть
+        # доказательство не-вакуумности. НЕ ИЗМЕРЕНО в выводе приманки --
+        # якорь приманки мёртв, зуб перестал мерить.
+        if _PHASES_UNMEASURED_PREFIX in mout or summary_line(0, 0) not in mout:
+            return (f"приманка не слила исходы -- якорь устарел, зуб мёртв: "
+                    f"{mout!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
 def self_check() -> int:
     """Герметичная самопроверка: без образа и замка.
 
@@ -3811,6 +3976,10 @@ def main() -> int:
         ("corpus-header-names-pipeline-subject", _tooth_corpus_header_names_pipeline_subject),
         ("both-registries-name-both-causes", _tooth_both_registries_name_both_causes),
         ("single-registry-names-one-cause", _tooth_single_registry_names_one_cause),
+        ("phases-entry-red-keeps-mutation-summary",
+         _tooth_phases_entry_red_keeps_mutation_summary),
+        ("phases-unmeasured-mutation-is-not-zero",
+         _tooth_phases_unmeasured_mutation_is_not_zero),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
@@ -3830,20 +3999,20 @@ def main() -> int:
     # видел ни в одном зелёном прогоне.
     print(f"checks-teeth: ИТОГ вход={len(entry_teeth)} молча/неверно={entry_bad}",
           flush=True)
-    if entry_bad:
-        return 1
-
+    # CONSTRAINT (#408): красный вход НЕ отменяет мутационную фазу. Ранний
+    # возврат по entry_bad оставлял объявленные мутации неисполненными, и
+    # ПУСТО в логе было неотличимо от НОЛЯ; дефект входа доживает до
+    # финального кода и приоритетнее «не измерено».
     if not RUNNER.is_file():
-        print("checks-teeth: нет tools/checks-on-image.sh -- мерить нечем", file=sys.stderr)
-        return 6
+        return _phase_skipped(6, "нет tools/checks-on-image.sh -- мерить нечем",
+                              entry_bad)
     if shutil.which("bash") is None:
-        print("checks-teeth: нет bash", file=sys.stderr)
-        return 6
+        return _phase_skipped(6, "нет bash", entry_bad)
 
     image = Path(opts.image) if opts.image else default_image()
     if image is None or not image.is_file():
-        print("checks-teeth: собранного образа на этой машине нет -- пропуск", file=sys.stderr)
-        return 5
+        return _phase_skipped(5, "собранного образа на этой машине нет -- пропуск",
+                              entry_bad)
 
     # Замок берётся ДО первого чтения образа и держится до конца замера.
     # Круг 28, F-1: занятость (3) и поломку машинерии (6) нельзя отвечать
@@ -3851,14 +4020,14 @@ def main() -> int:
     try:
         lock = hold_read_lock()
     except LockMachineryBroken as exc:
-        print("checks-teeth: НЕ МЕРИЛИ -- машинерия замка сломана, повтор НЕ поможет "
-              f"({exc})", file=sys.stderr)
-        return 6
+        return _phase_skipped(
+            6, "НЕ МЕРИЛИ -- машинерия замка сломана, повтор НЕ поможет "
+            f"({exc})", entry_bad)
     if lock is None:
-        print("checks-teeth: НЕ МЕРИЛИ -- замок конвейера держит живая сборка "
-              f"({pipeline_lock_path()}); образ меняется под руками, повтор поможет",
-              file=sys.stderr)
-        return 3
+        return _phase_skipped(
+            3, "НЕ МЕРИЛИ -- замок конвейера держит живая сборка "
+            f"({pipeline_lock_path()}); образ меняется под руками, повтор поможет",
+            entry_bad)
     freed = weed_worker_leftovers()
     if freed:
         print(f"checks-teeth: убрано копий образа от убитых воркеров: {freed}", flush=True)
@@ -3866,8 +4035,7 @@ def main() -> int:
     try:
         rows = read_table()
     except Refusal as exc:
-        print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-        return 2
+        return _phase_skipped(2, f"ОТКАЗ ПРИБОРА -- {exc}", entry_bad)
     try:
         picked = pick_ids(opts.id, {r["id"] for r in rows})
     except Refusal as exc:
@@ -4024,7 +4192,11 @@ def main() -> int:
     if refused:
         print(refusal_line(refused), flush=True)
     lock.close()                       # замок снимается ПОСЛЕ последнего замера
-    return exit_code(bad, len(refused))
+    # CONSTRAINT (#408): дефект входной фазы стоит в приоритете дефектов
+    # мутаций -- зелёная мутационная фаза не имеет права затереть красный
+    # вход (1 > 9 > 0); «не измерено» сюда не доходит -- оно вернулось выше
+    # своим кодом.
+    return exit_code(bad or entry_bad, len(refused))
 
 
 if __name__ == "__main__":
