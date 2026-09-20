@@ -6757,9 +6757,10 @@ with open(registry, encoding='utf-8') as fh:
         if not raw.strip() or raw.lstrip().startswith('#'):
             continue
         parts = raw.split('\t')
-        if len(parts) != 2 or not all(parts):
+        if len(parts) != 3 or not all(parts):
             print(f'ОТКАЗ ПРИБОРА: неразобранная строка {n} в {registry} '
-                  f'(нужны два поля: имя шага TAB причина)', file=sys.stderr)
+                  f'(сторона компоновки: нужны три поля -- имя шага TAB '
+                  f'версия-пол TAB причина)', file=sys.stderr)
             sys.exit(2)
         if parts[0] in rows:
             print(f'ОТКАЗ ПРИБОРА: две строки на шаг {parts[0]!r} в {registry} '
@@ -7793,7 +7794,8 @@ def _read_steps_off(path):
     значило бы отказывать сборкам без единого выключенного шага. Неразобранная
     строка и дубль имени -- отказ прибора: тихий пропуск снял бы защиту с
     состава, а молчаливый дубль позволил бы править не ту строку, что читает
-    раннер.
+    раннер. Третье поле -- причина, второе версия-пол: ключ записи -- только
+    имя, версия -- атрибут провенанса для вердикта stale/predates.
     """
     if not os.path.isfile(path):
         return {}
@@ -7804,15 +7806,16 @@ def _read_steps_off(path):
             if not raw.strip() or raw.lstrip().startswith('#'):
                 continue
             parts = raw.split('\t')
-            if len(parts) != 2 or not all(parts):
+            if len(parts) != 3 or not all(parts):
                 print(f'ОТКАЗ ПРИБОРА: неразобранная строка {n} в {path} '
-                      f'(нужны два поля: имя шага TAB причина)', file=sys.stderr)
+                      f'(проверяющая сторона: нужны три поля -- имя шага TAB '
+                      f'версия-пол TAB причина)', file=sys.stderr)
                 sys.exit(2)
             if parts[0] in rows:
                 print(f'ОТКАЗ ПРИБОРА: две строки на шаг {parts[0]!r} в {path} '
-                      f'(строки {rows[parts[0]]} и {n})', file=sys.stderr)
+                      f'(строки {rows[parts[0]][0]} и {n})', file=sys.stderr)
                 sys.exit(2)
-            rows[parts[0]] = (n, parts[1])
+            rows[parts[0]] = (n, parts[1], parts[2])
     return rows
 
 
@@ -7904,6 +7907,11 @@ _NOTE_FMT = "  [NOTE] {name}: {ver} step 29: {reason}"
 # NOTE выключенного шага: субъект -- OUR decision (реестр), не версия образа,
 # поэтому полей «ver/step» у него нет -- причина одна и приезжает из реестра.
 _NOTE_OFF_FMT = "  [NOTE] {name}: шаг выключен реестром our-steps-off.txt: {reason}"
+# NOTE провенанса: субъект -- возраст ОБРАЗА против версии-пола записи, обе
+# версии названы числами; текст не переиспользует формулировку выключения --
+# два исхода одной строкой неразличимы.
+_NOTE_OFF_PREDATES_FMT = ("  [NOTE] {name}: образ {img_ver} собран до версии-пола "
+                          "{floor_ver} записи -- правило в образе по праву: {reason}")
 
 
 def _step29_verdict(d, src):
@@ -8163,17 +8171,20 @@ def _cancellation_rule_is_whole(d):
 
 
 # Шаг 26 -- первый шаг с ВЫКЛЮЧАТЕЛЕМ, и его таблица исходов зеркальна шагу 29
-# плюс третий, КРАСНЫЙ исход носителя: note (реестр объявил шаг выключенным,
-# следа в образе нет, И мод-дорога несёт правило в этой конфигурации --
-# объявленное состояние, не непрошедшая правка), fail-stale (реестр объявил
-# выключенным, а правило в образе ЕСТЬ -- запись пережила свою причину),
-# fail-carrier (реестр объявил выключенным, а мод-дорога в текущей конфигурации
-# пропускается -- правило не несёт НИКТО: снятие носителя обязано быть слышным,
-# класс той самой двери, что гасит точечно, а отказывает в обслуживании),
-# proceed (шаг не выключен -- проверка идёт как всегда, состояние носителя её
-# не касается). ГРАНИЦА fail-carrier: стреляет ТОЛЬКО на записи реестра с
-# неработающим носителем; активный носитель и отсутствие записи не краснят
-# ничего.
+# плюс два КРАСНЫХ исхода: note-off (реестр объявил шаг выключенным, следа в
+# образе нет, И мод-дорога несёт правило в этой конфигурации -- объявленное
+# состояние, не непрошедшая правка), note-predates (правило в образе ЦЕЛОЕ, но
+# образ собран до версии-пола записи -- правило в образе по праву, реестр не
+# отставал), fail-stale (правило целое И версия образа НЕ НИЖЕ версии-пола --
+# запись пережила свою причину), fail-carrier (следа в образе нет, а мод-дорога
+# в текущей конфигурации пропускается -- правило не несёт НИКТО: снятие
+# носителя обязано быть слышным, класс той самой двери, что гасит точечно, а
+# отказывает в обслуживании), proceed (шаг не выключен -- проверка идёт как
+# всегда, состояние носителя её не касается). ГРАНИЦА fail-stale: стреляет
+# ТОЛЬКО когда версия-пол записи не выше версии образа; образ-предок пола
+# уходит в note-predates. ГРАНИЦА fail-carrier: стреляет ТОЛЬКО на записи
+# реестра с неработающим носителем; активный носитель и отсутствие записи не
+# краснят ничего.
 # КАРТА «шаг -> проверки» ПОИМЁННАЯ и ведётся руками: у каждого шага свои
 # проверки, и новая запись реестра обязана в той же волне провести сюда свои
 # имена -- родовой предикат по имени шага мерил бы чужое.
@@ -8181,20 +8192,37 @@ _STEP26_NAME = '26 dispatch-cancellation rule in the system prompt'
 _STEP26_CHECK = 'dispatch-cancellation rule reaches the main loop'
 
 
+def _version_tuple(text, what):
+    """Версия сравнивается кортежем целых: строки ставят «2.1.9» выше «2.1.10»."""
+    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)*', text):
+        print(f'ОТКАЗ ПРИБОРА: версия не разбирается в кортеж целых -- '
+              f'{what}: {text!r}', file=sys.stderr)
+        sys.exit(2)
+    return tuple(int(p) for p in text.split('.'))
+
+
 def _step26_verdict(d):
     off = _read_steps_off(
         os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])),
                      'tools', 'our-steps-off.txt'))
-    reason = off.get(_STEP26_NAME)
-    if reason is None:
+    row = off.get(_STEP26_NAME)
+    if row is None:
         return {'status': 'proceed'}
+    _n, floor_raw, reason = row
     if _cancellation_rule_is_whole(d):
-        return {'status': 'fail', 'fail_kind': 'stale', 'reason': reason[1]}
+        img_raw = _image_version(d)
+        img = _version_tuple(img_raw, 'версия образа')
+        floor = _version_tuple(floor_raw,
+                               'версия-пол реестра our-steps-off.txt')
+        if img < floor:
+            return {'status': 'note', 'note_kind': 'predates',
+                    'img_ver': img_raw, 'floor_ver': floor_raw, 'reason': reason}
+        return {'status': 'fail', 'fail_kind': 'stale', 'reason': reason}
     carries, unmet = _step26_mod_road(_mod_carrier_pins())
     if carries:
-        return {'status': 'note', 'reason': reason[1]}
+        return {'status': 'note', 'note_kind': 'off', 'reason': reason}
     return {'status': 'fail', 'fail_kind': 'carrier',
-            'reason': reason[1], 'unmet': unmet}
+            'reason': reason, 'unmet': unmet}
 
 
 def _statusline_throttle_raised(d):
@@ -8564,7 +8592,13 @@ if len(checks) != EXPECTED_CHECKS:
     sys.exit(1)
 for name, ok in checks.items():
     if ok == 'note' and _S26['status'] == 'note' and name == _STEP26_CHECK:
-        print(_NOTE_OFF_FMT.format(name=name, reason=_S26['reason']))
+        # Ветвление по ВИДУ NOTE: провенанс и выключение -- разные исходы.
+        if _S26.get('note_kind') == 'predates':
+            print(_NOTE_OFF_PREDATES_FMT.format(
+                name=name, img_ver=_S26['img_ver'], floor_ver=_S26['floor_ver'],
+                reason=_S26['reason']))
+        else:
+            print(_NOTE_OFF_FMT.format(name=name, reason=_S26['reason']))
     elif ok == 'note':
         print(_NOTE_FMT.format(name=name, ver=_S29['ver'], reason=_S29['reason']))
     else:

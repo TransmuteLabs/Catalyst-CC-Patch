@@ -62,7 +62,7 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 32
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-EXPECTED_ENTRY_TEETH = 3
+EXPECTED_ENTRY_TEETH = 6
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -1072,14 +1072,44 @@ KIT_STEPS_OFF_REPL = (
 )
 
 
+# Маркеры текстов вердикта реестра выключенных шагов (#373): NOTE провенанса и
+# отказ stale обязаны быть РАЗНЫМИ строками -- исходы с одним текстом
+# неразличимы ни для оператора, ни для зуба.
+_PREDATES_MARK = "собран до версии-пола"
+_STALE_MARK = "запись пережила причину"
+_STEP26_CHECK = "dispatch-cancellation rule reaches the main loop"
+_STEP26_ROW = "26 dispatch-cancellation rule in the system prompt"
+
+# Якорь мутации зуба steps-off-floor-predates: сравнение версий в
+# _step26_verdict. Мутация гасит условие -- ветвь predates недостижима, образ
+# обязан покраснеть отказом stale.
+FLOOR_PREDATES_ANCHOR = (
+    "        if img < floor:\n"
+    "            return {'status': 'note', 'note_kind': 'predates',\n"
+)
+FLOOR_PREDATES_REPL = (
+    "        if False:\n"
+    "            return {'status': 'note', 'note_kind': 'predates',\n"
+)
+
+# Двухполевая фикстура реестра: ряд шага 26 без версии-пола, ВТОРОЙ строкой
+# файла -- номер строки входит в контракт отказа обоих парсеров.
+_TWO_FIELD_REGISTRY = (
+    "# fixture: старый двухполевой формат, версия-пол отсутствует\n"
+    + _STEP26_ROW + "\tправило несёт мод catalyst-probes\n"
+)
+_TWO_FIELD_ROW_N = 2
+
+
 def _step26_registry_dispositioned(out: str) -> bool:
     """Вердикт реестра our-steps-off.txt по шагу 26 есть в выводе блока.
 
-    Все три исхода записи (NOTE/stale/carrier) несут свой текст про
-    «шаг выключен»; путь БЕЗ реестра (proceed) не печатает ничего про него --
+    Каждый исход записи несёт СВОЙ текст: NOTE выключения и NOTE провенанса
+    (образ старше версии-пола) различаются формулировкой, отказы stale/carrier
+    -- именем отказа. Путь БЕЗ реестра (proceed) не печатает ничего про него --
     его проверка выходит голым тегом включённого шага (#373).
     """
-    return "шаг выключен" in out
+    return "шаг выключен" in out or _PREDATES_MARK in out
 
 
 def _tooth_kit_steps_off_src() -> str | None:
@@ -1131,6 +1161,149 @@ def _tooth_kit_steps_off_src() -> str | None:
                         "предикат зуба слеп")
         finally:
             shutil.rmtree(mtd, ignore_errors=True)
+    return None
+
+
+def _tooth_steps_off_floor_predates() -> str | None:
+    """Ветвь predates жива на активном образе (#373). None -- зуб зелёный.
+
+    Активный образ собран ДО решения выключить шаг (правило в нём целое по
+    праву), и вердикт обязан быть NOTE провенанса, а не отказ stale. Мутация
+    гасит сравнение версий -- ветвь недостижима, прогон обязан покраснеть;
+    мутация не покраснела -- зуб отдаёт причину.
+    """
+    image = default_image()
+    if image is None or not image.is_file():
+        return "нет активного образа -- плечу predates нечего мерить"
+    td, script, patch = _temp_kit()
+    try:
+        r = _run_checks(script, image, patch)
+        out = (r.stdout or "") + (r.stderr or "")
+        if _PREDATES_MARK not in out:
+            return f"на живом образе нет NOTE провенанса «{_PREDATES_MARK}»"
+        if f"[FAIL] {_STEP26_CHECK}" in out:
+            return "NOTE провенанса напечатан ВМЕСТЕ с [FAIL] проверки шага 26"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    mtd, mscript, mpatch = _temp_kit(
+        script_repl=(FLOOR_PREDATES_ANCHOR, FLOOR_PREDATES_REPL))
+    try:
+        mr = _run_checks(mscript, image, mpatch)
+        mout = (mr.stdout or "") + (mr.stderr or "")
+        if f"[FAIL] {_STEP26_CHECK}" not in mout:
+            return "мутация не сняла сравнение версий: [FAIL] шага 26 не вернулся"
+        if _STALE_MARK not in mout:
+            return "мутация покраснела, а текст не stale"
+    finally:
+        shutil.rmtree(mtd, ignore_errors=True)
+    return None
+
+
+def _kit_registry_refloor(td: Path, floor: str) -> None:
+    """Переписать версию-пол шага 26 в реестре СНИМКА кита; дом не трогается."""
+    p = td / "tools" / "our-steps-off.txt"
+    text = p.read_text(encoding="utf-8")
+    m = re.search(r"(?m)^" + re.escape(_STEP26_ROW) + r"\t([0-9][0-9.]*)\t", text)
+    if not m:
+        raise Refusal("строка шага 26 в реестре снимка не несёт версию-пол "
+                      "вторым полем")
+    p.write_text(text[:m.start(1)] + floor + text[m.end(1):], encoding="utf-8")
+
+
+def _tooth_steps_off_floor_from_registry() -> str | None:
+    """Версия-пол читается ИЗ РЕЕСТРА, а не зашита литералом в коде (#373).
+
+    Класс «якорь, заморозивший чужое число»: зашитый в коде пол не видел бы
+    правки реестра. Низкий пол обязан покраснить прогон (пол больше не
+    оправдывает образ), высокий -- вернуть NOTE провенанса; оба плеча схожи
+    при зашитом поле -- зуб отдаёт причину.
+    """
+    home = ROOT / "tools" / "our-steps-off.txt"
+    if not re.search(r"(?m)^" + re.escape(_STEP26_ROW) + r"\t[0-9][0-9.]*\t",
+                     home.read_text(encoding="utf-8")):
+        return "дом реестра не несёт версию-пол вторым полем строки шага 26"
+    image = default_image()
+    if image is None or not image.is_file():
+        return "нет активного образа -- плечам пола нечего мерить"
+    for floor, want_fail in (("2.1.200", True), ("2.1.999", False)):
+        td, script, patch = _temp_kit()
+        try:
+            _kit_registry_refloor(td, floor)
+            r = _run_checks(script, image, patch)
+            out = (r.stdout or "") + (r.stderr or "")
+            failed = f"[FAIL] {_STEP26_CHECK}" in out
+            if want_fail:
+                if not failed:
+                    return (f"пол {floor} в реестре не покраснил прогон -- "
+                            f"пол не читается из реестра")
+                if _STALE_MARK not in out:
+                    return f"пол {floor}: [FAIL] есть, а текст не stale"
+            else:
+                if failed:
+                    return f"пол {floor} в реестре не вернул NOTE провенанса"
+                if _PREDATES_MARK not in out:
+                    return f"пол {floor}: красного нет, а NOTE провенанса тоже нет"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_steps_off_arity_both_sides() -> str | None:
+    """Оба парсера реестра требуют ТРИ поля, и отказы различимы (#373).
+
+    Один и тот же двухполевой реестр обязан отказать ОБЕИМ сторонам --
+    проверяющей (блок проверок) и компоновке (heredoc STEPSCOMP, исполняемый
+    напрямую по его якорю) -- с номером строки и именем СВОЕЙ стороны;
+    совпавшие дословно отказы неразличимы -- это находка зуба.
+    """
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина для плеча проверяющей стороны: {PRISTINE_LATEST}"
+    td, script, patch = _temp_kit()
+    try:
+        reg = td / "tools" / "our-steps-off.txt"
+        reg.write_text(_TWO_FIELD_REGISTRY, encoding="utf-8")
+        r = _run_checks(script, PRISTINE_LATEST, patch)
+        combined = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0:
+            return "проверяющая сторона приняла двухполевой реестр"
+        ref_line = next((l for l in combined.splitlines()
+                         if "неразобранная строка" in l), "")
+        if f"строка {_TWO_FIELD_ROW_N}" not in ref_line:
+            return f"отказ проверяющей стороны не назвал номер строки: {ref_line!r}"
+        if "проверяющая сторона" not in ref_line:
+            return f"отказ проверяющей стороны не назвал свою сторону: {ref_line!r}"
+        if "три поля" not in ref_line:
+            return f"отказ проверяющей стороны не требует три поля: {ref_line!r}"
+        lines = script.read_text(encoding="utf-8").split("\n")
+        marker = 'python3 - "$OUR_PATCH" "$STEPS_OFF_SRC" "$STEPS_OFF_TMP" <<'
+        start = next((i for i, l in enumerate(lines)
+                      if l.lstrip().startswith(marker)), -1)
+        if start < 0:
+            return "блок компоновки STEPSCOMP не найден в claude-patch-all.sh"
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i] == "STEPSCOMP"), -1)
+        if end < 0:
+            return "блок компоновки STEPSCOMP не закрыт"
+        comp_src = td / "stepscomp-extracted.py"
+        comp_src.write_text("\n".join(lines[start + 1:end]), encoding="utf-8")
+        c = subprocess.run(
+            [sys.executable, str(comp_src), str(patch), str(reg), str(td / "out.js")],
+            capture_output=True, text=True, errors="replace")
+        ccombined = (c.stdout or "") + (c.stderr or "")
+        if c.returncode == 0:
+            return "компоновка приняла двухполевой реестр"
+        comp_line = next((l for l in ccombined.splitlines()
+                          if "неразобранная строка" in l), "")
+        if f"строка {_TWO_FIELD_ROW_N}" not in comp_line:
+            return f"отказ компоновки не назвал номер строки: {comp_line!r}"
+        if "сторона компоновки" not in comp_line:
+            return f"отказ компоновки не назвал свою сторону: {comp_line!r}"
+        if "три поля" not in comp_line:
+            return f"отказ компоновки не требует три поля: {comp_line!r}"
+        if comp_line == ref_line:
+            return "отказы двух сторон совпали дословно -- стороны неразличимы"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
     return None
 
 
@@ -1381,6 +1554,9 @@ def main() -> int:
         ("wrong-patch-src", _tooth_wrong_patch_src),
         ("real-patch-src", _tooth_real_patch_src),
         ("kit-steps-off-src", _tooth_kit_steps_off_src),
+        ("steps-off-floor-predates", _tooth_steps_off_floor_predates),
+        ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
+        ("steps-off-arity-both-sides", _tooth_steps_off_arity_both_sides),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
