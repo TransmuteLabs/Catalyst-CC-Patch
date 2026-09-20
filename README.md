@@ -533,23 +533,44 @@ home is indistinguishable from a home without readers, which is exactly how a
 live handle once got reported БЕСХОЗНАЯ. Exit 5 is zero declared handles
 (ПУСТО ≠ НОЛЬ). Exit 7 is ЛИШНЯЯ ДЕКЛАРАЦИЯ: a name the registry declares
 external that is no longer in the settings at all -- the registry must not be
-able to rot silently. It is checked LAST, after 6 and 3, deliberately: a stale
-row reclassifies no handle, so a refusal placed earlier would have hidden the
-real findings behind it.
+able to rot silently. Exit 7 stands in TWO places, both required. Inside the
+tree-delta branch it comes before the refuse(4) call: a stale row depends on
+no tree at all and would have been lost silently behind НЕ ИЗМЕРЕНО. At a
+zero delta it comes LAST, after 6 and 3: a stale row reclassifies no handle,
+and a refusal placed earlier there would have hidden the real findings behind
+it. Teeth 50 and 51 pin both halves: at a zero delta a stale row plus a dead
+handle yields 3, plus a build-only handle yields 6, the stale row still
+printed as a line in both.
 
 The image is read with python latin-1 only because the subject is a BYTE
 image, not text: grep returns zero on it where python finds eleven. The
 rule does not generalize to anything merely containing NUL -- on UTF-8 text
 a latin-1 decode mangles non-ASCII and yields a false empty result that is
 indistinguishable from a measurement. Teeth:
-`tools/env-handles-live-guard-teeth.sh` (43, count pinned). The guard is
+`tools/env-handles-live-guard-teeth.sh` (52, count pinned). The guard is
 also called on the REAL tree by `claude-patch-all.sh` right after its teeth,
 via `--homes tools/env-guard-ours.txt`: an EXHAUSTIVE split of the family
 root's visible child directories into `[ours]` (scanned) and `[foreign]`
 (reference homes, NOT scanned -- someone else's code must not legalize our
-handle). A child in neither section, a name absent from the tree, a name in
-both, or a missing/empty `[ours]` each drop the instrument (exit 2, with the
-offending names); a `[ours]` child that yields no code file is a fact of the
+handle).
+
+HOME-SUBJECT BOUNDARY (four delta outcomes). A split/tree delta is NOT an
+instrument failure: an instrument that demands the machine reshape its
+directory layout to fit our split measures the machine, not the code. A
+declared `[ours]` home absent from disk, and an on-disk child declared in
+neither section, both make the reader population incomplete -- exit 4,
+НЕ ИЗМЕРЕНО, printed LOUDLY (one line per name, and a delta tail in the
+counters line even at zero, because silence at zero is indistinguishable
+from "delta was never counted"); the pipeline stage prints the names and
+CONTINUES the build. Under exit 4 the finding-shaped buckets
+(build_only, declared_unread) are printed as КАНДИДАТ, not as findings: at an
+incomplete reader population a "handle without a reader" verdict would be an
+unfounded claim. A declared `[foreign]` home absent from disk is a note on
+any verdict, exit code unchanged: there was nothing to exclude, so no OUR
+reader could have been hidden. A name in both sections, a line outside any
+section, a name with a path separator, a missing `root` line, an empty
+`[ours]` and a non-directory `root` still drop the instrument (exit 2, with
+the offending names). A `[ours]` child that yields no code file is a fact of the
 tree (the name was verified against it), not a failure, unlike the strict
 `--ours` mode.
 

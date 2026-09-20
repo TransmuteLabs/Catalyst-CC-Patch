@@ -13,7 +13,7 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GUARD="${GUARD:-$KIT/tools/env-handles-live-guard.sh}"
-EXPECTED_TEETH=43
+EXPECTED_TEETH=52
 
 PASSED=0; FAILED=0; RAN=0; WORKDIR=''
 # CONSTRAINT: конец объявляет себя САМ (__DONE=1). Голый EXIT-трап съедает
@@ -566,8 +566,10 @@ mk_homes_file() {   # $1 -- содержимое секций после root
   printf 'root %s\n%s\n' "$WORKDIR/fakeroot" "$1" > "$WORKDIR/homes.txt"
 }
 
-# 37. каталог-ребёнок корня вне обоих списков -> 2 с ИМЕНЕМ каталога:
-#     дрейф дерева ломает ПРИБОР, а не предмет (fail-closed)
+# 37. каталог-ребёнок корня вне обоих списков -> НЕ ИЗМЕРЕНО (код 4) с ИМЕНЕМ
+#     каталога: неосмотренный дом может держать читателя, которого гвард не
+#     увидел; требовать от машины подогнать раскладку под разделение -- мерить
+#     окружение, а не код
 tooth_37() {
   RAN=$((RAN + 1))
   mk_image ''
@@ -581,9 +583,10 @@ forB'
   GUARD_RC=0
   GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
                 --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t37) || GUARD_RC=$?
-  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"ПРИБОР НЕДОСТУПЕН"* && "$GUARD_OUT" == *"unC"* && "$GUARD_OUT" != *"ВЕРДИКТ"* ]]; then
-    ok '37 каталог вне [ours]/[foreign] -> 2 с именем unC'
-  else bad "37 ждали rc=2 ПРИБОР НЕДОСТУПЕН с unC без ВЕРДИКТ, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  if [[ $GUARD_RC -eq 4 && "$GUARD_OUT" == *"ДОМ ЕСТЬ, НО НЕ ОБЪЯВЛЕН"*"unC"* \
+        && "$GUARD_OUT" != *"ВЕРДИКТ ВСЕ НАШИ РУЧКИ ЖИВЫ"* ]]; then
+    ok '37 каталог вне [ours]/[foreign] -> 4 НЕ ИЗМЕРЕНО с именем unC'
+  else bad "37 ждали rc=4 ДОМ ЕСТЬ НО НЕ ОБЪЯВЛЕН unC без зелёного вердикта, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
   rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
 }
 
@@ -694,6 +697,196 @@ tooth_43() {
   else bad "43 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ GO_LIST_49, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
+# 44. объявленный НАШ дом отсутствует на диске -> НЕ ИЗМЕРЕНО (код 4) с
+#     именем: население читателей неполно, вердикт «все живы» не выносится
+tooth_44() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA" "$WORKDIR/fakeroot/forB"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  mk_homes_file '[ours]
+ourA
+ghostX
+[foreign]
+forB'
+  mk_settings '{"ANY_44":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t44) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 4 && "$GUARD_OUT" == *"ДОМ ОБЪЯВЛЕН, НО ОТСУТСТВУЕТ"*"ghostX"* \
+        && "$GUARD_OUT" == *"домов-дельта 1 (наших нет 1, чужих нет 0, не объявлено 0)"* \
+        && "$GUARD_OUT" != *"ВЕРДИКТ ВСЕ НАШИ РУЧКИ ЖИВЫ"* ]]; then
+    ok '44 наш дом объявлен, но отсутствует -> 4 НЕ ИЗМЕРЕНО с именем'
+  else bad "44 ждали rc=4 ДОМ ОБЪЯВЛЕН НО ОТСУТСТВУЕТ ghostX и дельту 1/1/0/0 без зелёного, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 45. объявленный ЧУЖОЙ дом отсутствует, всё прочее здорово -> 0: исключать
+#     нечего, отсутствующий [foreign] не может спрятать НАШЕГО читателя
+tooth_45() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  mk_homes_file '[ours]
+ourA
+[foreign]
+ghostFor'
+  mk_settings '{"ANY_45":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t45) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"ДОМ ОБЪЯВЛЕН ЧУЖИМ И ОТСУТСТВУЕТ"*"ghostFor"* \
+        && "$GUARD_OUT" == *"ВЕРДИКТ ВСЕ НАШИ РУЧКИ ЖИВЫ"* \
+        && "$GUARD_OUT" == *"домов-дельта 1 (наших нет 0, чужих нет 1, не объявлено 0)"* ]]; then
+    ok '45 чужой дом отсутствует -> справка + зелёный, дельта названа'
+  else bad "45 ждали rc=0 ДОМ ОБЪЯВЛЕН ЧУЖИМ И ОТСУТСТВУЕТ ghostFor с дельтой 0/1/0, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 46. ребёнок на диске вне обеих секций -> 4 НЕ ИЗМЕРЕНО: неосмотренный дом
+#     может держать читателя, которого гвард не увидел
+tooth_46() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA" "$WORKDIR/fakeroot/forB" "$WORKDIR/fakeroot/orphanC"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  mk_homes_file '[ours]
+ourA
+[foreign]
+forB'
+  mk_settings '{"ANY_46":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t46) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 4 && "$GUARD_OUT" == *"ДОМ ЕСТЬ, НО НЕ ОБЪЯВЛЕН"*"orphanC"* \
+        && "$GUARD_OUT" != *"ВЕРДИКТ ВСЕ НАШИ РУЧКИ ЖИВЫ"* ]]; then
+    ok '46 ребёнок вне обеих секций -> 4 НЕ ИЗМЕРЕНО с именем'
+  else bad "46 ждали rc=4 ДОМ ЕСТЬ НО НЕ ОБЪЯВЛЕН orphanC без зелёного вердикта, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 47. root разделения -- не каталог -> 2 ПРИБОР НЕДОСТУПЕН: прибор наведён
+#     в пустоту, это отказ прибора, а не дельта дерева (пин неизменности)
+tooth_47() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mk_settings '{"ANY_47":"x"}'
+  printf 'root %s\n[ours]\nourA\n' "$WORKDIR/no-such-root-47" > "$WORKDIR/homes.txt"
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t47) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"ПРИБОР НЕДОСТУПЕН"* && "$GUARD_OUT" != *"ВЕРДИКТ"* ]]; then
+    ok '47 root не каталог -> 2 без вердикта'
+  else bad "47 ждали rc=2 ПРИБОР НЕДОСТУПЕН без ВЕРДИКТ, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -f "$WORKDIR/homes.txt"
+}
+
+# 48. ПРИОРИТЕТ: дельта [ours] + живая мёртвая ручка -> 4, мёртвая названа
+#     КАНДИДАТОМ; находка при неполном населении -- неосновательное
+#     утверждение, вердикт «есть ручка без читателя» не выносится
+tooth_48() {
+  RAN=$((RAN + 1))
+  mk_image 'var names=["DEAD_48"];'
+  mkdir -p "$WORKDIR/fakeroot/ourA"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  mk_homes_file '[ours]
+ourA
+ghostOur
+[foreign]'
+  mk_settings '{"DEAD_48":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t48) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 4 && "$GUARD_OUT" == *"КАНДИДАТ (вердикт НЕ ИЗМЕРЕН)"*"МЁРТВАЯ"*"DEAD_48"* \
+        && "$GUARD_OUT" != *"ВЕРДИКТ ЕСТЬ РУЧКА БЕЗ ЧИТАТЕЛЯ"* ]]; then
+    ok '48 дельта + мёртвая ручка -> 4, мёртвая КАНДИДАТ, без вердикта 3'
+  else bad "48 ждали rc=4 КАНДИДАТ МЁРТВАЯ DEAD_48 без «ВЕРДИКТ ЕСТЬ РУЧКА БЕЗ ЧИТАТЕЛЯ», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 49. лишняя декларация ПЕРЕЖИВАЕТ НЕ ИЗМЕРЕНО: имя объявлено внешним, а в
+#     настройках его нет -- это не зависит от дерева, отказ 7 выше кода 4
+tooth_49() {
+  RAN=$((RAN + 1))
+  mk_image 'let q=cfg.LIVE_49;'
+  mkdir -p "$WORKDIR/fakeroot/ourA"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  mk_homes_file '[ours]
+ourA
+ghostOur
+[foreign]'
+  mk_settings '{"LIVE_49":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" \
+                --external GONE_49 --label t49) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 7 && "$GUARD_OUT" == *"ЛИШНЯЯ ДЕКЛАРАЦИЯ"*"GONE_49"* \
+        && "$GUARD_OUT" == *"ДОМ ОБЪЯВЛЕН, НО ОТСУТСТВУЕТ"*"ghostOur"* ]]; then
+    ok '49 дельта + лишняя декларация -> 7, декларация выше НЕ ИЗМЕРЕНО'
+  else bad "49 ждали rc=7 ЛИШНЯЯ ДЕКЛАРАЦИЯ GONE_49 и дельту ghostOur, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
+# 50. ПРИОРИТЕТ при НУЛЕВОЙ дельте: лишняя декларация НЕ прячет мёртвую
+#      ручку -- вердикт 3, декларация напечатана строкой, вердикта 7 нет
+#      (нулевая дельта -- режим --ours: дельта домов нулевая по построению)
+tooth_50() {
+  RAN=$((RAN + 1))
+  mk_image 'var names=["DEAD_50"];'
+  mk_settings '{"DEAD_50":"x"}'
+  run_guard --label t50 --external GONE_50
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"ВЕРДИКТ ЕСТЬ РУЧКА БЕЗ ЧИТАТЕЛЯ"* \
+        && "$GUARD_OUT" == *"МЁРТВАЯ"*"DEAD_50"* \
+        && "$GUARD_OUT" == *"ЛИШНЯЯ ДЕКЛАРАЦИЯ"*"GONE_50"* \
+        && "$GUARD_OUT" != *"ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ"* ]]; then
+    ok '50 нулевая дельта: декларация + мёртвая -> 3, декларация строкой'
+  else bad "50 ждали rc=3 с МЁРТВАЯ DEAD_50 и строкой ЛИШНЯЯ ДЕКЛАРАЦИЯ GONE_50 без вердикта 7, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 51. ПРИОРИТЕТ при НУЛЕВОЙ дельте: лишняя декларация НЕ прячет и
+#      ТОЛЬКО-СБОРКУ -- вердикт 6, декларация напечатана строкой, вердикта 7 нет
+tooth_51() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/ours/dist"
+  printf 'const v = process.env.DIST_51;\n' > "$WORKDIR/ours/dist/reader.ts"
+  mk_settings '{"DIST_51":"x"}'
+  run_guard --label t51 --external GONE_51
+  rm -rf "$WORKDIR/ours/dist"
+  if [[ $GUARD_RC -eq 6 && "$GUARD_OUT" == *"ВЕРДИКТ ЧИТАТЕЛЬ ТОЛЬКО В СБОРКЕ"* \
+        && "$GUARD_OUT" == *"ТОЛЬКО-СБОРКА"*"DIST_51"* \
+        && "$GUARD_OUT" == *"ЛИШНЯЯ ДЕКЛАРАЦИЯ"*"GONE_51"* \
+        && "$GUARD_OUT" != *"ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ"* ]]; then
+    ok '51 нулевая дельта: декларация + сборка -> 6, декларация строкой'
+  else bad "51 ждали rc=6 с ТОЛЬКО-СБОРКА DIST_51 и строкой ЛИШНЯЯ ДЕКЛАРАЦИЯ GONE_51 без вердикта 7, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+}
+
+# 52. #383: в режиме --homes имя, чей ЕДИНСТВЕННЫЙ читатель лежит в dist
+#      нашего дома (в исходнике дома читателя нет) -> 6 ТОЛЬКО-СБОРКА:
+#      второй проход обязан ходить по тем же корням, что и первый
+tooth_52() {
+  RAN=$((RAN + 1))
+  mk_image ''
+  mkdir -p "$WORKDIR/fakeroot/ourA/dist" "$WORKDIR/fakeroot/forB"
+  printf 'const v = process.env.%s;\n' "$OURS_CTRL" > "$WORKDIR/fakeroot/ourA/placeholder.ts"
+  printf 'const v = process.env.DIST_FIFTYTWO;\n' > "$WORKDIR/fakeroot/ourA/dist/reader.ts"
+  mk_homes_file '[ours]
+ourA
+[foreign]
+forB'
+  mk_settings '{"DIST_FIFTYTWO":"x"}'
+  GUARD_RC=0
+  GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
+                --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t52) || GUARD_RC=$?
+  if [[ $GUARD_RC -eq 6 && "$GUARD_OUT" == *"ВЕРДИКТ ЧИТАТЕЛЬ ТОЛЬКО В СБОРКЕ"* \
+        && "$GUARD_OUT" == *"ТОЛЬКО-СБОРКА"*"DIST_FIFTYTWO"* \
+        && "$GUARD_OUT" == *"только-сборка 1"* ]]; then
+    ok '52 dist-читатель в режиме --homes -> 6 ТОЛЬКО-СБОРКА'
+  else bad "52 ждали rc=6 ТОЛЬКО-СБОРКА DIST_FIFTYTWO (второй проход по корням --homes), получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
+}
+
 tooth_1; tooth_2; tooth_3; tooth_4; tooth_5; tooth_6; tooth_7
 tooth_8; tooth_9; tooth_10; tooth_11; tooth_12; tooth_13
 tooth_14; tooth_15
@@ -702,6 +895,8 @@ tooth_22; tooth_23; tooth_24; tooth_25; tooth_26; tooth_27
 tooth_28; tooth_29; tooth_30; tooth_31; tooth_32; tooth_33
 tooth_34; tooth_35; tooth_36; tooth_37; tooth_38; tooth_39
 tooth_40; tooth_41; tooth_42; tooth_43
+tooth_44; tooth_45; tooth_46; tooth_47; tooth_48; tooth_49
+tooth_50; tooth_51; tooth_52
 
 printf '%s прошло, %s провалов, ожидалось %s\n' "$PASSED" "$FAILED" "$EXPECTED_TEETH"
 if [[ $RAN -ne $EXPECTED_TEETH ]]; then

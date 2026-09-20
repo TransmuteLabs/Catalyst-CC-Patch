@@ -83,6 +83,9 @@ def die_usage(extra=""):
         "env-handles-live-guard: вызов: [--settings <файл>] [--image <файл>] "
         "[--ours <каталог> ...] [--homes <файл>] [--external <ИМЯ> ...] "
         "[--control <ИМЯ>] [--control-ours <ИМЯ>] [--label <строка>]\n"
+        "env-handles-live-guard: коды выхода: 0 все живы; 2 прибор недоступен; "
+        "3 ручка без читателя; 4 не измерен -- дерево разошлось с разделением "
+        "домов; 5 ноль ручек; 6 читатель только в сборке; 7 лишняя декларация\n"
     )
     sys.exit(2)
 
@@ -269,10 +272,14 @@ def load_and_verify_homes(path, tag):
     # CONSTRAINT: разделение ИСЧЕРПЫВАЮЩЕЕ: каждый ВИДИМЫЙ каталог-ребёнок
     # корня семьи обязан состоять ровно в одной секции -- [ours] (осматривается)
     # или [foreign] (НЕ осматривается: чужой код не легализует нашу ручку).
-    # Каталог вне обоих списков -- дрейф дерева, и ломать обязан ПРИБОР, а не
-    # предмет; направление fail-closed: забытый НАШ дом даёт громкую красноту,
-    # забытый ЧУЖОЙ давал бы тихую зелень. Корень семьи сам по себе домом не
-    # является; скрытые (.имя) дети не дома и не сверяются.
+    # CONSTRAINT: дельта дерева -- НЕ отказ прибора: гвард не вправе требовать
+    # от машины подогнать раскладку каталогов под разделение (класс #285 --
+    # прибор мерит окружение машины). Отсутствующий НАШ дом и необъявленный
+    # ребёнок делают население читателей неполным -- код 4, НЕ ИЗМЕРЕНО;
+    # отсутствующий ЧУЖОЙ -- справка при любом вердикте: он и так не
+    # осматривался. Отказом прибора (код 2) остаются битый файл разделения и
+    # root не каталог. Корень семьи сам по себе домом не является; скрытые
+    # (.имя) дети не дома и не сверяются.
     if not os.path.isfile(path):
         sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: файл разделения не прочитан: %s\n" % (tag, path))
         sys.exit(2)
@@ -319,16 +326,15 @@ def load_and_verify_homes(path, tag):
                          % (tag, " ".join(both)))
         sys.exit(2)
     ghost = sorted(declared - set(children))
-    if ghost:
-        sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: в разделении названы несуществующие каталоги: %s\n"
-                         % (tag, " ".join(ghost)))
-        sys.exit(2)
-    unlisted = [c for c in children if c not in declared]
-    if unlisted:
-        sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: каталоги-детей %s вне разделения [ours]/[foreign]: %s\n"
-                         % (tag, root, " ".join(unlisted)))
-        sys.exit(2)
-    return [os.path.join(root, x) for x in ours]
+    delta = {
+        "ghost_ours": sorted(x for x in ghost if x in set(ours)),
+        "ghost_foreign": sorted(x for x in ghost if x in set(foreign)),
+        "unlisted": [c for c in children if c not in declared],
+    }
+    # CONSTRAINT: несуществующий [ours]-дом в осмотр не входит: его отсутствие
+    # уже названо дельтой, а строка «дом без кодовых файлов» объявила бы имя
+    # сверенным с деревом, чем оно при ghost не является.
+    return ([os.path.join(root, x) for x in ours if x in set(children)], delta)
 
 
 def scan_dist_readers(dirs, wanted):
@@ -389,9 +395,13 @@ def main():
         sys.exit(2)
 
     if homes:
-        our_code = collect_our_code(load_and_verify_homes(homes, tag), strict_empty=False)
+        home_paths, homes_delta = load_and_verify_homes(homes, tag)
+        scan_roots = home_paths
+        our_code = collect_our_code(scan_roots, strict_empty=False)
     else:
-        our_code = collect_our_code(ours)
+        scan_roots = ours
+        our_code = collect_our_code(scan_roots)
+        homes_delta = {"ghost_ours": [], "ghost_foreign": [], "unlisted": []}
     # Положительный контроль второй стороны: предикат нашего кода, не
     # нашедший заведомо живого читателя, не имеет права выносить вердикт.
     if not any(reader_in_our_code(t, control_ours, e) for e, t in our_code):
@@ -430,30 +440,50 @@ def main():
     extra_ext = [n for n in external if n not in names]
 
     # Второй проход по dist -- только для имён без читателя в исходнике.
+    # CONSTRAINT: оба прохода обязаны ходить по ОДНОМУ множеству домов
+    # (scan_roots): при расхождении корней вердикт второго прохода мёртв
+    # именно в том режиме, где первый проход жив (#383).
     candidates = set(declared_unread) | set(unknown) | set(ours_mention_only)
-    build_only = scan_dist_readers(ours, candidates)
+    build_only = scan_dist_readers(scan_roots, candidates)
     if build_only:
         declared_unread = [n for n in declared_unread if n not in build_only]
         unknown = [n for n in unknown if n not in build_only]
         ours_mention_only = [n for n in ours_mention_only if n not in build_only]
     build_only = sorted(build_only)
 
+    # CONSTRAINT: хвост дельты печатается ВСЕГДА, включая ноль: молчание при
+    # нуле неотличимо от «дельту не считали».
     counts = (
         "ручек %d: читает хост %d, читает наш код %d, подстановка в настройках %d, "
         "объявлено-внешним %d%s, объявлено-но-не-читается %d, "
         "упомянута-но-не-читается %d, только-сборка %d, не знает никто %d; "
-        "лишних деклараций %d (контроль %s, контроль-наш %s)"
+        "лишних деклараций %d (контроль %s, контроль-наш %s); "
+        "домов-дельта %d (наших нет %d, чужих нет %d, не объявлено %d)"
         % (len(names), len(host), len(mine), len(subst), len(ext),
            (" (%s)" % " ".join(ext)) if ext else "",
            len(declared_unread), len(ours_mention_only), len(build_only),
-           len(unknown), len(extra_ext), control, control_ours)
+           len(unknown), len(extra_ext), control, control_ours,
+           len(homes_delta["ghost_ours"]) + len(homes_delta["ghost_foreign"])
+           + len(homes_delta["unlisted"]),
+           len(homes_delta["ghost_ours"]), len(homes_delta["ghost_foreign"]),
+           len(homes_delta["unlisted"]))
     )
+    for n in homes_delta["ghost_ours"]:
+        sys.stdout.write("ДОМ ОБЪЯВЛЕН, НО ОТСУТСТВУЕТ (наш -- население читателей неполно): %s\n" % n)
+    for n in homes_delta["ghost_foreign"]:
+        sys.stdout.write("ДОМ ОБЪЯВЛЕН ЧУЖИМ И ОТСУТСТВУЕТ (исключать нечего, вердикт не затронут): %s\n" % n)
+    for n in homes_delta["unlisted"]:
+        sys.stdout.write("ДОМ ЕСТЬ, НО НЕ ОБЪЯВЛЕН (не осмотрен -- может держать читателя): %s\n" % n)
 
     def refuse(code, verdict):
+        # CONSTRAINT: при коде 4 население читателей неполно -- назвать
+        # build_only/declared_unread находкой значит выдать неосновательное
+        # утверждение за измеренное; они печатаются КАНДИДАТАМИ.
+        cand = "КАНДИДАТ (вердикт НЕ ИЗМЕРЕН): " if code == 4 else ""
         for n in build_only:
-            sys.stdout.write("ТОЛЬКО-СБОРКА (читатель есть в продукте сборки, в исходнике нет): %s\n" % n)
+            sys.stdout.write("%sТОЛЬКО-СБОРКА (читатель есть в продукте сборки, в исходнике нет): %s\n" % (cand, n))
         for n in declared_unread:
-            sys.stdout.write("МЁРТВАЯ (образ знает имя, значения не читает): %s\n" % n)
+            sys.stdout.write("%sМЁРТВАЯ (образ знает имя, значения не читает): %s\n" % (cand, n))
         for n in ours_mention_only:
             sys.stdout.write("СПРАВКА, НЕ ДЕКЛАРАЦИЯ (наш код упоминает имя -- "
                              "обнуление, комментарий или литерал -- но не читает "
@@ -471,6 +501,21 @@ def main():
     if len(names) == 0:
         sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: в настройках ноль ручек env\n" % tag)
         sys.exit(5)
+    # CONSTRAINT: код 7 стоит в ДВУХ местах, и оба обязательны. Внутри дельты
+    # -- выше refuse(4): лишняя декларация не зависит от дерева вовсе (имя
+    # объявлено внешним, а в настройках его нет), и под НЕ ИЗМЕРЕНО она
+    # потерялась бы молча. При нулевой дельте -- ПОСЛЕДНИМ: лишнее имя ни одну
+    # ручку не переклассифицирует, и отказ, поставленный раньше 6 и 3, спрятал
+    # бы настоящие находки за ним. Одна позиция без другой либо топит
+    # декларацию в НЕ ИЗМЕРЕНО, либо маскирует 6 и 3.
+    # CONSTRAINT: молча считать лишнюю декларацию нельзя: реестр, чья причина
+    # исчезла, обязан звучать, иначе он гниёт вечно.
+    if homes_delta["ghost_ours"] or homes_delta["unlisted"]:
+        if extra_ext:
+            refuse(7, "ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ -- имя объявлено внешним, "
+                      "а в настройках его больше нет")
+        refuse(4, "ВЕРДИКТ НЕ ИЗМЕРЕН -- дерево разошлось с разделением, "
+                  "население читателей неполно")
     if build_only:
         refuse(6, "ВЕРДИКТ ЧИТАТЕЛЬ ТОЛЬКО В СБОРКЕ -- расхождение сборки и исходника")
     # CONSTRAINT: ГРАНИЦА ПРЕДМЕТА. Население ручек приходит из настроек
@@ -492,12 +537,6 @@ def main():
     # гварда: имя знает ОБРАЗ Claude Code, но значения не читает.
     if declared_unread:
         refuse(3, "ВЕРДИКТ ЕСТЬ РУЧКА БЕЗ ЧИТАТЕЛЯ")
-    # CONSTRAINT: код 7 стоит ПОСЛЕДНИМ намеренно. Протухшая запись реестра
-    # ничего не маскирует (лишнее имя ни одну ручку не переклассифицирует),
-    # а отказ, поставленный раньше, спрятал бы настоящие находки 6 и 3 --
-    # ровно тот случай, когда ранняя ветка отказа скрывает предмет.
-    # CONSTRAINT: молча считать лишнюю декларацию нельзя: реестр, чья причина
-    # исчезла, обязан звучать, иначе он гниёт вечно.
     if extra_ext:
         refuse(7, "ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ -- имя объявлено внешним, "
                   "а в настройках его больше нет")

@@ -23,6 +23,7 @@ docnum-anchor-census	Перепись якорей таблицы гейта ч�
 docnum-teeth	Зубы гейта чисел	Зубы гейта чисел	exit	cond-silent
 stand-env-guard-teeth	Зубы гварда герметичности стендов	Зубы гварда герметичности стендов	exit	always
 env-handles-live-teeth	Зубы гварда живости ручек	Зубы гварда живости ручек	exit	always
+env-handles-live-tree	Гвард живости ручек на реальном дереве	env-handles-live-guard\[реальное дерево\]:|ГВАРД ЖИВОСТИ НА ДЕРЕВЕ:	exit	always
 builtin-option-pin-guard	Пины опций встроенных модов	Пины опций встроенных модов	exit	always
 builtin-option-pin-guard-teeth	Зубы гварда пинов опций	Зубы гварда пинов опций	exit	always
 executors-census	Перепись исполнителей инструментов	Перепись исполнителей инструментов	exit	always
