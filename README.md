@@ -495,8 +495,8 @@ Rust, `os.Getenv("NAME")` / `os.LookupEnv("NAME")` in Go, `$NAME` /
 in shell -- a bare substring mention does not count: in a comment, a name
 list or a test fixture it would legalize a dead handle), a `${NAME}`
 substitution elsewhere in the same settings file (how an MCP server entry
-takes a key from `env`), or a declared consumer outside every inspected home
-(`--external NAME`, or the registry `--external-file`).
+takes a key from `env`), or an explicitly `--external` declared consumer
+outside every inspected home.
 
 `.go` is in CODE_EXT by measurement, not for list completeness: the `[ours]`
 homes hold 280 `.go` files and 16 live `os.Getenv("NAME")` calls, and without
@@ -504,21 +504,20 @@ it the guard printed a soft "home with no code files" for `llm-tldr-go` and
 `toon-go` and did not inspect them at all -- a whole declared-ours home fell
 out of the subject silently. Same class as the earlier `.rs` addition.
 
-The registry `tools/env-handles-external.txt` (`NAME<TAB>owner`) exists
-because the handle population comes from the USER's settings, where our
-handles and third-party program keys are mixed. The user's settings are the
-user's to edit, so the only honest move is to name the foreign ones HERE,
-each with the MEASUREMENT that justifies it -- a row without a reason is
-indistinguishable from a forgotten row a year later. Every parse failure
-(missing file, row without a reason, duplicate name, first field that is not
-a handle name, registry yielding no name at all) drops the instrument with
-its OWN named refusal: two refusals sharing one code and one string are
-indistinguishable.
+SUBJECT BOUNDARY. The handle population comes from the USER's settings, where
+our handles and the variables of the user's OWN applications are mixed. Only a
+name our subject knows may stop the build: the Claude Code image knows the name
+but never reads its value (a dead upstream handle -- the founding case). A name
+neither the image nor our code knows belongs to some other program of the
+user's; a name our code merely MENTIONS is not a declaration either --
+measurement 2026-09-20 found every such mention to be `NAME= ` blanking in a
+probe run script (defending the child from inheriting it -- the opposite of
+declaring), a comment, or a string literal in a frozen arena copy. Both are
+printed as СПРАВКА and exit 0. An instrument that demands the user reshape his
+own environment to fit our build measures the machine, not the code.
 
-A handle whose name the image knows but never reads is reported as МЁРТВАЯ; a
-handle no one anywhere reads is БЕСХОЗНАЯ; a handle our code mentions as a
-substring but never accesses structurally is УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ -- all
-three are exit 3: a handle without a reader stays a handle without a reader.
+A handle whose name the image knows but never reads is reported as МЁРТВАЯ and
+is exit 3: a handle without a reader stays a handle without a reader.
 Exit 6 is its own state, ТОЛЬКО-СБОРКА: a handle whose only structural reader
 lives in a `dist` build product while the source has none -- that is a
 build/source divergence, not a dead handle, and conflating the two would hide
@@ -543,7 +542,7 @@ image, not text: grep returns zero on it where python finds eleven. The
 rule does not generalize to anything merely containing NUL -- on UTF-8 text
 a latin-1 decode mangles non-ASCII and yields a false empty result that is
 indistinguishable from a measurement. Teeth:
-`tools/env-handles-live-guard-teeth.sh` (49, count pinned). The guard is
+`tools/env-handles-live-guard-teeth.sh` (43, count pinned). The guard is
 also called on the REAL tree by `claude-patch-all.sh` right after its teeth,
 via `--homes tools/env-guard-ours.txt`: an EXHAUSTIVE split of the family
 root's visible child directories into `[ours]` (scanned) and `[foreign]`

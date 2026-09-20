@@ -13,7 +13,7 @@ set -u
 
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GUARD="${GUARD:-$KIT/tools/env-handles-live-guard.sh}"
-EXPECTED_TEETH=49
+EXPECTED_TEETH=43
 
 PASSED=0; FAILED=0; RAN=0; WORKDIR=''
 # CONSTRAINT: конец объявляет себя САМ (__DONE=1). Голый EXIT-трап съедает
@@ -89,7 +89,7 @@ tooth_1() {
   mk_image 'let q=cfg.LIVE_ONE;'
   mk_settings '{"LIVE_ONE":"x"}'
   run_guard --label t1
-  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"ВЕРДИКТ ВСЕ РУЧКИ ЖИВЫ"* && "$GUARD_OUT" == *"читает хост 1"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"ВЕРДИКТ ВСЕ НАШИ РУЧКИ ЖИВЫ"* && "$GUARD_OUT" == *"читает хост 1"* ]]; then
     ok '1 читатель-член в образе -> 0'
   else bad "1 ждали rc=0 и «читает хост 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
@@ -118,15 +118,19 @@ tooth_3() {
   else bad "3 ждали rc=0 и «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
-# 4. читателя нет нигде -> 3, названа БЕСХОЗНОЙ
+# 4. имени не знает ни образ, ни наш код -> НЕ НАШ ПРЕДМЕТ: 0 + справка
+#    CONSTRAINT: это граница предмета. Переменная стороннего приложения юзера
+#    не вправе останавливать нашу сборку -- прибор, требующий подогнать чужое
+#    окружение, мерит машину, а не код.
 tooth_4() {
   RAN=$((RAN + 1))
   mk_image ''
   mk_settings '{"ORPHAN_FOUR":"k"}'
   run_guard --label t4
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"БЕСХОЗНАЯ"*"ORPHAN_FOUR"* ]]; then
-    ok '4 читателя нет нигде -> 3 БЕСХОЗНАЯ'
-  else bad "4 ждали rc=3 и БЕСХОЗНАЯ ORPHAN_FOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ НАШ ПРЕДМЕТ"*"ORPHAN_FOUR"* \
+        && "$GUARD_OUT" == *"ВЕРДИКТ ВСЕ НАШИ РУЧКИ ЖИВЫ"* ]]; then
+    ok '4 чужая переменная -> 0 + справка, сборку не держит'
+  else bad "4 ждали rc=0 и справку ORPHAN_FOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 5. потребитель -- подстановка ${ИМЯ} в тех же настройках -> 0
@@ -199,9 +203,9 @@ tooth_10() {
   mk_settings '{"DOC_TEN":"x"}'
   run_guard --label t10
   rm -f "$WORKDIR/ours/notes.md"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"БЕСХОЗНАЯ"*"DOC_TEN"* ]]; then
-    ok '10 упоминание в доке не читатель -> 3'
-  else bad "10 ждали rc=3 БЕСХОЗНАЯ DOC_TEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ НАШ ПРЕДМЕТ"*"DOC_TEN"* ]]; then
+    ok '10 упоминание в .md не делает имя нашим -> 0 + справка'
+  else bad "10 ждали rc=0 и справку DOC_TEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 11. тишина на зелёном: ровно одна строка
@@ -230,9 +234,10 @@ tooth_12() {
   mk_image 'let a=cfg.LOUD_LIVE; var names=["LOUD_DEAD"];'
   mk_settings '{"LOUD_LIVE":"1","LOUD_DEAD":"2","LOUD_ORPHAN":"3"}'
   run_guard --label t12
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"МЁРТВАЯ"*"LOUD_DEAD"* && "$GUARD_OUT" == *"БЕСХОЗНАЯ"*"LOUD_ORPHAN"* ]]; then
-    ok '12 отказ печатает обе корзины поимённо'
-  else bad "12 ждали rc=3 с LOUD_DEAD и LOUD_ORPHAN поимённо, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"МЁРТВАЯ"*"LOUD_DEAD"* \
+        && "$GUARD_OUT" == *"НЕ НАШ ПРЕДМЕТ"*"LOUD_ORPHAN"* ]]; then
+    ok '12 отказ печатает и находку, и справку поимённо'
+  else bad "12 ждали rc=3 с LOUD_DEAD находкой и LOUD_ORPHAN справкой, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 13. ноль ручек env -> 5 (ПУСТО ≠ НОЛЬ)
@@ -285,9 +290,9 @@ tooth_16() {
   mk_settings '{"CMT_SH_SIXTEEN":"x"}'
   run_guard --label t16
   rm -f "$WORKDIR/ours/comment.sh"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_SH_SIXTEEN"* && "$GUARD_OUT" == *"упомянута-но-не-читается 1"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"CMT_SH_SIXTEEN"* && "$GUARD_OUT" == *"упомянута-но-не-читается 1"* ]]; then
     ok '16 упоминание в комментарии .sh -> 3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ'
-  else bad "16 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_SH_SIXTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "16 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ CMT_SH_SIXTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 17. упоминание имени в комментарии .py -- НЕ читатель
@@ -298,9 +303,9 @@ tooth_17() {
   mk_settings '{"CMT_PY_SEVENTEEN":"x"}'
   run_guard --label t17
   rm -f "$WORKDIR/ours/comment.py"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_PY_SEVENTEEN"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"CMT_PY_SEVENTEEN"* ]]; then
     ok '17 упоминание в комментарии .py -> 3'
-  else bad "17 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_PY_SEVENTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "17 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ CMT_PY_SEVENTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 18. упоминание имени в комментарии .ts -- НЕ читатель
@@ -311,9 +316,9 @@ tooth_18() {
   mk_settings '{"CMT_TS_EIGHTEEN":"x"}'
   run_guard --label t18
   rm -f "$WORKDIR/ours/comment.ts"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_TS_EIGHTEEN"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"CMT_TS_EIGHTEEN"* ]]; then
     ok '18 упоминание в комментарии .ts -> 3'
-  else bad "18 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_TS_EIGHTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "18 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ CMT_TS_EIGHTEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 19. упоминание имени в комментарии .rs -- НЕ читатель
@@ -324,9 +329,9 @@ tooth_19() {
   mk_settings '{"CMT_RS_NINETEEN":"x"}'
   run_guard --label t19
   rm -f "$WORKDIR/ours/comment.rs"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"CMT_RS_NINETEEN"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"CMT_RS_NINETEEN"* ]]; then
     ok '19 упоминание в комментарии .rs -> 3'
-  else bad "19 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ CMT_RS_NINETEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "19 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ CMT_RS_NINETEEN, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 20. py: os.environ["ИМЯ"] -- читатель
@@ -390,9 +395,9 @@ tooth_24() {
   mk_settings '{"PYCALL_TWENTYFOUR":"x"}'
   run_guard --label t24
   rm -f "$WORKDIR/ours/reader.py"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"PYCALL_TWENTYFOUR"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"PYCALL_TWENTYFOUR"* ]]; then
     ok '24 getenv("ИМЯ_ДРУГОЕ") не читатель для ИМЯ -> 3'
-  else bad "24 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ PYCALL_TWENTYFOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "24 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ PYCALL_TWENTYFOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 25. rs: env::var("ИМЯ") -- читатель
@@ -481,9 +486,9 @@ tooth_31() {
   mk_settings '{"BARE_THIRTYONE":"x"}'
   run_guard --label t31
   rm -f "$WORKDIR/ours/script.sh"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"BARE_THIRTYONE"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"BARE_THIRTYONE"* ]]; then
     ok '31 голое ИМЯ в .sh -> 3'
-  else bad "31 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ BARE_THIRTYONE, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "31 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ BARE_THIRTYONE, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 32. граница идентификатора: ИМЯ_СУФФИКС не читатель для ИМЯ во всех
@@ -498,9 +503,9 @@ tooth_32() {
   mk_settings '{"SUFFIX_THIRTYTWO":"x"}'
   run_guard --label t32
   rm -f "$WORKDIR/ours/s1.ts" "$WORKDIR/ours/s2.sh" "$WORKDIR/ours/s3.py" "$WORKDIR/ours/s4.rs"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"SUFFIX_THIRTYTWO"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"SUFFIX_THIRTYTWO"* ]]; then
     ok '32 ИМЯ_СУФФИКС не читатель для ИМЯ (4 языка) -> 3'
-  else bad "32 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ SUFFIX_THIRTYTWO, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "32 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ SUFFIX_THIRTYTWO, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 33. js: скобочный доступ cfg["ИМЯ"] с индексируемым перед [ -- читатель
@@ -525,9 +530,9 @@ tooth_34() {
   mk_settings '{"JS_ARR_THIRTYFOUR":"x"}'
   run_guard --label t34
   rm -f "$WORKDIR/ours/reader.ts"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"JS_ARR_THIRTYFOUR"* ]]; then
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"JS_ARR_THIRTYFOUR"* ]]; then
     ok '34 литерал массива ["ИМЯ"] в .ts -> 3'
-  else bad "34 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ JS_ARR_THIRTYFOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  else bad "34 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ JS_ARR_THIRTYFOUR, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 # 35. читатель есть ТОЛЬКО в каталоге dist (SKIP_DIR первого прохода) --
@@ -598,9 +603,9 @@ forB'
   GUARD_RC=0
   GUARD_OUT=$(bash "$GUARD" --settings "$WORKDIR/settings.json" --image "$WORKDIR/image.js" \
                 --control "$CTRL" --control-ours "$OURS_CTRL" --homes "$WORKDIR/homes.txt" --label t38) || GUARD_RC=$?
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"БЕСХОЗНАЯ"*"FOREIGN_ONLY_38"* ]]; then
-    ok '38 читатель только в чужом доме -> 3 БЕСХОЗНАЯ'
-  else bad "38 ждали rc=3 БЕСХОЗНАЯ FOREIGN_ONLY_38, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ НАШ ПРЕДМЕТ"*"FOREIGN_ONLY_38"* ]]; then
+    ok '38 читатель только в чужом доме -> не наш предмет, 0 + справка'
+  else bad "38 ждали rc=0 и справку FOREIGN_ONLY_38, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
   rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
 }
 
@@ -648,131 +653,45 @@ forB'
   rm -rf "$WORKDIR/fakeroot" "$WORKDIR/homes.txt"
 }
 
-# --- реестр внешних ручек (--external-file) и предикат Go -------------------
-# CONSTRAINT: реестр -- ФАЙЛ, а не набор флагов: каждый отказ его разбора
-# обязан иметь СВОЙ зуб. Два отказа с одним кодом и одной строкой
-# неразличимы, поэтому зубы 42--46 требуют ИМЯ отказа, а не только код 2.
-mk_ext_file() {   # $1 -- содержимое реестра
-  printf '%s\n' "$1" > "$WORKDIR/external.txt"
-}
-
-# 41. --external-file на бесхозную -> 0, имя названо (файл РАЗОБРАН, не проглочен)
-tooth_41() {
-  RAN=$((RAN + 1))
-  mk_image ''
-  mk_settings '{"EXT_FILE_41":"k"}'
-  mk_ext_file "$(printf '# шапка\n\nEXT_FILE_41\tсторонняя программа, замер такой-то')"
-  run_guard --label t41 --external-file "$WORKDIR/external.txt"
-  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"объявлено-внешним 1 (EXT_FILE_41)"* ]]; then
-    ok '41 реестр разобран -> 0, имя названо'
-  else bad "41 ждали rc=0 и «объявлено-внешним 1 (EXT_FILE_41)», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
-  rm -f "$WORKDIR/external.txt"
-}
-
-# 42. реестр НАЗВАН, но отсутствует -> 2 со СВОИМ именем отказа
-tooth_42() {
-  RAN=$((RAN + 1))
-  mk_image ''
-  mk_settings '{"EXT_FILE_42":"k"}'
-  rm -f "$WORKDIR/external.txt"
-  run_guard --label t42 --external-file "$WORKDIR/external.txt"
-  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"реестр внешних ручек не прочитан"* ]]; then
-    ok '42 реестр отсутствует -> 2 со своим именем'
-  else bad "42 ждали rc=2 «реестр внешних ручек не прочитан», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
-}
-
-# 43. строка без основания -> 2 со СВОИМ именем (запись без причины = забытая)
-tooth_43() {
-  RAN=$((RAN + 1))
-  mk_image ''
-  mk_settings '{"EXT_FILE_43":"k"}'
-  mk_ext_file 'EXT_FILE_43'
-  run_guard --label t43 --external-file "$WORKDIR/external.txt"
-  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"EXT_FILE_43"*"нет основания"* ]]; then
-    ok '43 имя без основания -> 2 со своим именем'
-  else bad "43 ждали rc=2 «нет основания» EXT_FILE_43, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
-  rm -f "$WORKDIR/external.txt"
-}
-
-# 44. имя объявлено ДВАЖДЫ -> 2 со СВОИМ именем и обеими строками
-tooth_44() {
-  RAN=$((RAN + 1))
-  mk_image ''
-  mk_settings '{"EXT_FILE_44":"k"}'
-  mk_ext_file "$(printf 'EXT_FILE_44\tпервое основание\nEXT_FILE_44\tвторое основание')"
-  run_guard --label t44 --external-file "$WORKDIR/external.txt"
-  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"EXT_FILE_44"*"объявлено дважды"* ]]; then
-    ok '44 дубль имени в реестре -> 2 со своим именем'
-  else bad "44 ждали rc=2 «объявлено дважды» EXT_FILE_44, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
-  rm -f "$WORKDIR/external.txt"
-}
-
-# 45. первое поле -- не имя ручки -> 2 со СВОИМ именем (защита от сдвига полей)
-tooth_45() {
-  RAN=$((RAN + 1))
-  mk_image ''
-  mk_settings '{"EXT_FILE_45":"k"}'
-  mk_ext_file "$(printf 'не имя ручки\tоснование')"
-  run_guard --label t45 --external-file "$WORKDIR/external.txt"
-  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"не похоже"* ]]; then
-    ok '45 первое поле не имя ручки -> 2 со своим именем'
-  else bad "45 ждали rc=2 «не похоже на ручку», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
-  rm -f "$WORKDIR/external.txt"
-}
-
-# 46. реестр из одних комментариев -> 2 (пустой реестр неотличим от забытого)
-tooth_46() {
-  RAN=$((RAN + 1))
-  mk_image ''
-  mk_settings '{"EXT_FILE_46":"k"}'
-  mk_ext_file "$(printf '# только комментарий\n\n# и ещё один')"
-  run_guard --label t46 --external-file "$WORKDIR/external.txt"
-  if [[ $GUARD_RC -eq 2 && "$GUARD_OUT" == *"не дал ни одного имени"* ]]; then
-    ok '46 реестр без единого имени -> 2 со своим именем'
-  else bad "46 ждали rc=2 «не дал ни одного имени», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
-  rm -f "$WORKDIR/external.txt"
-}
-
-# 47. имя в реестре исчезло из настроек -> 7 ЛИШНЯЯ ДЕКЛАРАЦИЯ
+# --- граница предмета и предикат Go -----------------------------------------
+# 41. имя объявлено --external, но исчезло из настроек -> 7 ЛИШНЯЯ ДЕКЛАРАЦИЯ
 #     CONSTRAINT: прочие корзины в этой фикстуре ПУСТЫ намеренно -- иначе
 #     зуб мерил бы приоритет кодов, а не сам отказ 7.
-tooth_47() {
+tooth_41() {
   RAN=$((RAN + 1))
   mk_image 'let q=cfg.LIVE_47;'
   mk_settings '{"LIVE_47":"x"}'
-  mk_ext_file "$(printf 'GONE_47\tоснование было, ручка из настроек ушла')"
-  run_guard --label t47 --external-file "$WORKDIR/external.txt"
+  run_guard --label t41 --external GONE_47
   if [[ $GUARD_RC -eq 7 && "$GUARD_OUT" == *"ЛИШНЯЯ ДЕКЛАРАЦИЯ"*"GONE_47"* \
         && "$GUARD_OUT" == *"ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ"* ]]; then
-    ok '47 протухшая запись реестра -> 7, имя названо'
-  else bad "47 ждали rc=7 ЛИШНЯЯ ДЕКЛАРАЦИЯ GONE_47, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
-  rm -f "$WORKDIR/external.txt"
+    ok '41 протухшая декларация --external -> 7, имя названо'
+  else bad "41 ждали rc=7 ЛИШНЯЯ ДЕКЛАРАЦИЯ GONE_47, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
-# 48. Go: os.Getenv("ИМЯ") -- читатель
-tooth_48() {
+# 42. Go: os.Getenv("ИМЯ") -- читатель
+tooth_42() {
   RAN=$((RAN + 1))
   mk_image ''
   printf 'package main\nimport "os"\nfunc f() string { return os.Getenv("GO_READ_48") }\n' > "$WORKDIR/ours/reader.go"
   mk_settings '{"GO_READ_48":"1"}'
-  run_guard --label t48
+  run_guard --label t42
   rm -f "$WORKDIR/ours/reader.go"
   if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"читает наш код 1"* ]]; then
-    ok '48 Go os.Getenv -> читатель, 0'
-  else bad "48 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+    ok '42 Go os.Getenv -> читатель, 0'
+  else bad "42 ждали rc=0 «читает наш код 1», получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
-# 49. Go: имя в литерале []string{"ИМЯ"} -- НЕ читатель (зеркало зуба 34)
-tooth_49() {
+# 43. Go: имя в литерале []string{"ИМЯ"} -- НЕ читатель (зеркало зуба 34)
+tooth_43() {
   RAN=$((RAN + 1))
   mk_image ''
   printf 'package main\nvar names = []string{"GO_LIST_49", "OTHER"}\n' > "$WORKDIR/ours/list.go"
   mk_settings '{"GO_LIST_49":"1"}'
-  run_guard --label t49
+  run_guard --label t43
   rm -f "$WORKDIR/ours/list.go"
-  if [[ $GUARD_RC -eq 3 && "$GUARD_OUT" == *"УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ"*"GO_LIST_49"* ]]; then
-    ok '49 Go литерал перечня -> не читатель, 3'
-  else bad "49 ждали rc=3 УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ GO_LIST_49, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
+  if [[ $GUARD_RC -eq 0 && "$GUARD_OUT" == *"НЕ ДЕКЛАРАЦИЯ"*"GO_LIST_49"* ]]; then
+    ok '43 Go литерал перечня -> не читатель, 3'
+  else bad "43 ждали rc=0 НЕ ДЕКЛАРАЦИЯ-НО-НЕ-ЧИТАЕТСЯ GO_LIST_49, получили rc=$GUARD_RC :: $GUARD_OUT"; fi
 }
 
 tooth_1; tooth_2; tooth_3; tooth_4; tooth_5; tooth_6; tooth_7
@@ -782,8 +701,7 @@ tooth_16; tooth_17; tooth_18; tooth_19; tooth_20; tooth_21
 tooth_22; tooth_23; tooth_24; tooth_25; tooth_26; tooth_27
 tooth_28; tooth_29; tooth_30; tooth_31; tooth_32; tooth_33
 tooth_34; tooth_35; tooth_36; tooth_37; tooth_38; tooth_39
-tooth_40; tooth_41; tooth_42; tooth_43; tooth_44; tooth_45
-tooth_46; tooth_47; tooth_48; tooth_49
+tooth_40; tooth_41; tooth_42; tooth_43
 
 printf '%s прошло, %s провалов, ожидалось %s\n' "$PASSED" "$FAILED" "$EXPECTED_TEETH"
 if [[ $RAN -ne $EXPECTED_TEETH ]]; then

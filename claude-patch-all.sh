@@ -5812,12 +5812,7 @@ if [[ ! -f "$__env_guard_homes" ]]; then
   echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: НЕ ИЗМЕРЯЛИ -- файл разделения домов отсутствует (rc=2)" >&2
   exit 2
 fi
-__env_guard_ext="$(dirname "$0")/tools/env-handles-external.txt" || { printf 'ПРИБОР НЕДОСТУПЕН: не получен каталог дерева для реестра внешних ручек\n' >&2; exit 2; }
-if [[ ! -f "$__env_guard_ext" ]]; then
-  echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: НЕ ИЗМЕРЯЛИ -- реестр внешних ручек отсутствует (rc=2)" >&2
-  exit 2
-fi
-bash "$(dirname "$0")/tools/env-handles-live-guard.sh" --label "реальное дерево" --homes "$__env_guard_homes" --external-file "$__env_guard_ext" 9>&- || {
+bash "$(dirname "$0")/tools/env-handles-live-guard.sh" --label "реальное дерево" --homes "$__env_guard_homes" 9>&- || {
   __rc=$?
   case $__rc in
     2) echo "ГВАРД ЖИВОСТИ НА ДЕРЕВЕ: НЕ ИЗМЕРЯЛИ -- прибор отказал (rc=2)" >&2

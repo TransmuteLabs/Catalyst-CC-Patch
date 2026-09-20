@@ -82,7 +82,6 @@ def die_usage(extra=""):
     sys.stderr.write(
         "env-handles-live-guard: вызов: [--settings <файл>] [--image <файл>] "
         "[--ours <каталог> ...] [--homes <файл>] [--external <ИМЯ> ...] "
-        "[--external-file <файл>] "
         "[--control <ИМЯ>] [--control-ours <ИМЯ>] [--label <строка>]\n"
     )
     sys.exit(2)
@@ -91,12 +90,12 @@ def die_usage(extra=""):
 def parse_args(argv):
     settings, image, ours, control, label = DEFAULT_SETTINGS, DEFAULT_IMAGE, [], DEFAULT_CONTROL, ""
     control_ours, homes = DEFAULT_CONTROL_OURS, None
-    external, external_file = [], None
+    external = []
     i = 1
     while i < len(argv):
         a = argv[i]
         if a in ("--settings", "--image", "--control", "--control-ours", "--label",
-                 "--homes", "--external-file"):
+                 "--homes"):
             if i + 1 >= len(argv):
                 die_usage()
             v = argv[i + 1]; i += 2
@@ -105,7 +104,6 @@ def parse_args(argv):
             elif a == "--control": control = v
             elif a == "--control-ours": control_ours = v
             elif a == "--homes": homes = v
-            elif a == "--external-file": external_file = v
             else: label = v
         elif a == "--ours":
             if i + 1 >= len(argv):
@@ -119,8 +117,7 @@ def parse_args(argv):
             die_usage("неизвестный аргумент: %s" % a)
     if homes and ours:
         die_usage("--homes и --ours взаимно исключают друг друга")
-    return (settings, image, ours, homes, control, control_ours, label,
-            external, external_file)
+    return settings, image, ours, homes, control, control_ours, label, external
 
 
 def read_image(path):
@@ -268,54 +265,6 @@ def collect_our_code(dirs, strict_empty=True):
     return out
 
 
-EXT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def load_external_registry(path, label):
-    # CONSTRAINT: реестр объявляет ручки, потребитель которых живёт ВНЕ
-    # дерева семьи (сторонние программы юзера). Настройки юзера правит
-    # только он сам, поэтому единственный честный ход прибора -- назвать
-    # чужое чужим у себя, с ИМЕНЕМ ВЛАДЕЛЬЦА в той же строке: запись без
-    # основания через год неотличима от забытой.
-    # CONSTRAINT: каждый отказ разбора -- отказ ПРИБОРА (код 2) со своим
-    # текстом. Направление fail-closed: нечитаемый реестр обязан ломать
-    # прибор, а не молча давать пустой список и красить предмет.
-    tag = "env-handles-live-guard[%s]:" % label
-    if not os.path.isfile(path):
-        sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр внешних ручек не прочитан: %s\n"
-                         % (tag, path))
-        sys.exit(2)
-    names, seen = [], {}
-    for lineno, raw in enumerate(
-            open(path, "r", encoding="utf-8").read().splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = raw.split("\t", 1)
-        name = parts[0].strip()
-        reason = parts[1].strip() if len(parts) > 1 else ""
-        if not EXT_NAME_RE.match(name):
-            sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр %s строка %d: имя не похоже "
-                             "на ручку окружения: %r\n" % (tag, path, lineno, name))
-            sys.exit(2)
-        if not reason:
-            sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр %s строка %d: у имени %s нет "
-                             "основания (нужен формат ИМЯ<TAB>владелец)\n"
-                             % (tag, path, lineno, name))
-            sys.exit(2)
-        if name in seen:
-            sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр %s: имя %s объявлено дважды "
-                             "(строки %d и %d)\n" % (tag, path, name, seen[name], lineno))
-            sys.exit(2)
-        seen[name] = lineno
-        names.append(name)
-    if not names:
-        sys.stdout.write("%s ПРИБОР НЕДОСТУПЕН: реестр внешних ручек %s не дал ни одного "
-                         "имени\n" % (tag, path))
-        sys.exit(2)
-    return names
-
-
 def load_and_verify_homes(path, tag):
     # CONSTRAINT: разделение ИСЧЕРПЫВАЮЩЕЕ: каждый ВИДИМЫЙ каталог-ребёнок
     # корня семьи обязан состоять ровно в одной секции -- [ours] (осматривается)
@@ -418,10 +367,7 @@ def scan_dist_readers(dirs, wanted):
 
 
 def main():
-    (settings_p, image_p, ours, homes, control, control_ours, label,
-     external, external_file) = parse_args(sys.argv)
-    if external_file:
-        external = external + load_external_registry(external_file, label)
+    settings_p, image_p, ours, homes, control, control_ours, label, external = parse_args(sys.argv)
     try:
         cfg = json.load(open(settings_p, "r", encoding="utf-8"))
     except (OSError, ValueError) as x:
@@ -509,9 +455,12 @@ def main():
         for n in declared_unread:
             sys.stdout.write("МЁРТВАЯ (образ знает имя, значения не читает): %s\n" % n)
         for n in ours_mention_only:
-            sys.stdout.write("УПОМЯНУТА-НО-НЕ-ЧИТАЕТСЯ (наш код знает имя, доступа нет): %s\n" % n)
+            sys.stdout.write("СПРАВКА, НЕ ДЕКЛАРАЦИЯ (наш код упоминает имя -- "
+                             "обнуление, комментарий или литерал -- но не читает "
+                             "и не задаёт значения): %s\n" % n)
         for n in unknown:
-            sys.stdout.write("БЕСХОЗНАЯ (читателя нет ни в образе, ни в нашем коде): %s\n" % n)
+            sys.stdout.write("СПРАВКА, НЕ НАШ ПРЕДМЕТ (переменная стороннего "
+                             "приложения): %s\n" % n)
         for n in extra_ext:
             sys.stdout.write("ЛИШНЯЯ ДЕКЛАРАЦИЯ (объявлена внешней, а в настройках "
                              "её нет): %s\n" % n)
@@ -524,7 +473,24 @@ def main():
         sys.exit(5)
     if build_only:
         refuse(6, "ВЕРДИКТ ЧИТАТЕЛЬ ТОЛЬКО В СБОРКЕ -- расхождение сборки и исходника")
-    if declared_unread or unknown or ours_mention_only:
+    # CONSTRAINT: ГРАНИЦА ПРЕДМЕТА. Население ручек приходит из настроек
+    # ЮЗЕРА, где вперемешку наши ручки и переменные ЕГО собственных программ.
+    # Останавливать сборку вправе только имя, которое знает НАШ предмет:
+    # образ Claude Code знает имя, но не читает (мёртвая ручка апстрима --
+    # случай, ради которого гвард и написан), либо наш код упоминает имя,
+    # но структурного доступа не имеет. Имя, которого не знает ни образ, ни
+    # наш код, принадлежит стороннему приложению юзера: гвард печатает его
+    # СПРАВКОЙ и молчит. Прибор, требующий от юзера подогнать своё окружение
+    # под нашу сборку, мерит машину, а не код (класс #285).
+    # CONSTRAINT: УПОМИНАНИЕ ТОЖЕ НЕ ДЕЛАЕТ ИМЯ НАШИМ. Замер 2026-09-20: все
+    # упоминания четырёх имён в нашем дереве -- это либо ОБНУЛЕНИЕ `ИМЯ= `
+    # в env-префиксе прогонных скриптов (защита потомка от наследования --
+    # прямая противоположность декларации), либо комментарий, либо строковый
+    # литерал в замороженной копии арены. Декларацией считается только
+    # присваивание ЗНАЧЕНИЯ или структурное чтение; первое даёт читателя,
+    # второе -- корзину «читает наш код». Остаётся ровно founding-случай
+    # гварда: имя знает ОБРАЗ Claude Code, но значения не читает.
+    if declared_unread:
         refuse(3, "ВЕРДИКТ ЕСТЬ РУЧКА БЕЗ ЧИТАТЕЛЯ")
     # CONSTRAINT: код 7 стоит ПОСЛЕДНИМ намеренно. Протухшая запись реестра
     # ничего не маскирует (лишнее имя ни одну ручку не переклассифицирует),
@@ -535,7 +501,14 @@ def main():
     if extra_ext:
         refuse(7, "ВЕРДИКТ ЛИШНЯЯ ДЕКЛАРАЦИЯ -- имя объявлено внешним, "
                   "а в настройках его больше нет")
-    sys.stdout.write("%s ВЕРДИКТ ВСЕ РУЧКИ ЖИВЫ -- %s\n" % (tag, counts))
+    for n in ours_mention_only:
+        sys.stdout.write("СПРАВКА, НЕ ДЕКЛАРАЦИЯ (наш код упоминает имя -- обнуление, "
+                         "комментарий или литерал -- но не читает и не задаёт "
+                         "значения): %s\n" % n)
+    for n in unknown:
+        sys.stdout.write("СПРАВКА, НЕ НАШ ПРЕДМЕТ (нет ни в образе, ни в нашем "
+                         "коде -- переменная стороннего приложения): %s\n" % n)
+    sys.stdout.write("%s ВЕРДИКТ ВСЕ НАШИ РУЧКИ ЖИВЫ -- %s\n" % (tag, counts))
     sys.exit(0)
 
 
