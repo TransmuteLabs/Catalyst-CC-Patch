@@ -7,6 +7,9 @@
 #   --from-home  home  -> canon (pick up an edit made in place)
 #   --diff       show divergences, touching nothing (default)
 #   --list       name the SET, one canon-relative path per line, touch nothing
+#   --pairs      LIMIT= + the SET (canon-relative paths), one per line, touch
+#                nothing; the single home of the pair list AND of the history
+#                depth for snapshot history witnesses (#388)
 #
 # --list exists so that no consumer has to keep its own copy of the set. The
 # judge-tools bench used to carry one (a hard-coded list of seven names plus
@@ -97,7 +100,7 @@ PLIST_HOME="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 SCHEDULE_PROBES="judge failover"
 
 MODE="${1:---diff}"
-case "$MODE" in --to-home|--from-home|--diff|--list) ;; *) echo "не понял режим: $MODE" >&2; __DONE=1; exit 2 ;; esac
+case "$MODE" in --to-home|--from-home|--diff|--list|--pairs) ;; *) echo "не понял режим: $MODE" >&2; __DONE=1; exit 2 ;; esac
 
 # Отсутствие исходной стороны -- НАЗВАННЫЙ отказ, а не тихий пропуск.
 #
@@ -142,18 +145,37 @@ DIRECTION_HISTORY_LIMIT=200
 # Доказательство направления для одной РАСХОДИВШЕЙСЯ пары -- ВЫЧИСЛИМОЕ
 # подмножество неразрешимого общего случая: байты дома, побайтово равные
 # ПРЕДКУ файла в истории канона, доказывают, что дом есть ПРОШЛОЕ канона, и
-# правок в доме нет ПО ПОСТРОЕНИЮ. Отказы опросов истории (нет коммита, нет
-# пути, битый репозиторий) -- НЕ событие для читателя: незачёт молча.
+# правок в доме нет ПО ПОСТРОЕНИЮ. Отсутствие истории ВОВСЕ -- названный
+# исход «НЕ ИЗМЕРЕНО» в итоговой ветке (#388), а не молчание: «неразрешимо»
+# и «не мерили» -- разные ответы, и читатель обязан их различать.
 # CONSTRAINT: дайджест обеих сторон считает ОДИН инструмент прогона
 # ($__digest_tool, выбирается в ветке итога до первого вызова); сравнение
 # дайджестов, а не размеров -- файлы одного объёма не равны побайтово.
-prove_direction_one() {  # $1 индекс пары; 0 -- направление доказано и названо
-  local __a __rel __log __home_d __sha __blob_d __iso
+# CONSTRAINT: возврат -- ПЯТЬ исходов, и ужимать их в один код нельзя:
+# 0 -- доказано и названо; 1 -- история опрошена, равенства нет;
+# 2 -- путь вне истории канона; 3 -- опрос истории упал (git log, код N);
+# 4 -- дайджест ДОМА не посчитался (код N). «Спросили, и нет», «спросить не
+# вышло» и «не смогли взвесить» -- три разных мира; один код на них снова
+# сливал бы отказ прибора с отрицательным ответом (ловушка «два отказа с
+# одним текстом»).
+prove_direction_one() {  # $1 индекс пары
+  local __a __rel __log __home_d __sha __blob_d __iso __glrc=0 __hdrc=0
   __a="${PAIR_A[$1]}"
   __rel="${__a#"$ROOT"/}"
-  __log=$(git -C "$ROOT" log -n "$DIRECTION_HISTORY_LIMIT" --format=%H -- "$__rel" 2>/dev/null) || __log=''
-  [[ -n "$__log" ]] || return 1
-  __home_d=$($__digest_tool "${PAIR_B[$1]}" 2>/dev/null) || return 1
+  __log=$(git -C "$ROOT" log -n "$DIRECTION_HISTORY_LIMIT" --format=%H -- "$__rel" 2>/dev/null) || __glrc=$?
+  if [[ "$__glrc" -ne 0 ]]; then
+    printf 'направление НЕ ИЗМЕРЕНО для %s: опрос истории канона упал (git log код %s)\n' "${PAIR_N[$1]}" "$__glrc"
+    return 3
+  fi
+  if [[ -z "$__log" ]]; then
+    printf 'направление НЕ ИЗМЕРЕНО для %s: путь не найден в истории канона\n' "${PAIR_N[$1]}"
+    return 2
+  fi
+  __home_d=$($__digest_tool "${PAIR_B[$1]}" 2>/dev/null) || __hdrc=$?
+  if [[ "$__hdrc" -ne 0 ]]; then
+    printf 'направление НЕ ИЗМЕРЕНО для %s: дайджест дома не посчитался (код %s)\n' "${PAIR_N[$1]}" "$__hdrc"
+    return 4
+  fi
   __home_d="${__home_d%% *}"
   while IFS= read -r __sha; do
     [[ -n "$__sha" ]] || continue
@@ -166,6 +188,50 @@ prove_direction_one() {  # $1 индекс пары; 0 -- направление
       return 0
     fi
   done <<<"$__log"
+  return 1
+}
+
+# Доказательство направления по ЗАКАЗАННОМУ СВИДЕТЕЛЮ истории (снимочный
+# прогон #388: .git в снимке нет по построению). CONSTRAINT: порядок строк
+# тела -- от новейшего предка к старейшему, как отдал git log на оригинале:
+# печатается ПЕРВЫЙ совпавший предок, и переупорядочение здесь выдало бы
+# старшее совпадение за новейшее. CONSTRAINT: исходы симметричны git-ноге:
+# 0 -- доказано и названо; 1 -- путь покрыт, равенства нет; 2 -- путь вне
+# свидетеля (поимённое НЕ ИЗМЕРЕНО: свидетель, снятый на одной машине, может
+# не знать пару, живую на другой); 4 -- дайджест ДОМА не посчитался. Мира
+# «опрос упал» здесь НЕТ: тело свидетеля прочитано и провалидировано ДО
+# цикла (нечитаем/битый -- ПРИБОР НЕДОСТУПЕН, exit 2), внутри функции
+# спрашивать больше нечего.
+prove_direction_witness() {  # $1 индекс пары; читает глобальное __hw_body
+  local __a __rel __home_d __line __w_path __w_rest __w_sha __w_dig __w_iso __hdrc=0 __covered=0
+  __a="${PAIR_A[$1]}"
+  __rel="${__a#"$ROOT"/}"
+  __home_d=$($__digest_tool "${PAIR_B[$1]}" 2>/dev/null) || __hdrc=$?
+  if [[ "$__hdrc" -ne 0 ]]; then
+    printf 'направление НЕ ИЗМЕРЕНО для %s: дайджест дома не посчитался (код %s)\n' "${PAIR_N[$1]}" "$__hdrc"
+    return 4
+  fi
+  __home_d="${__home_d%% *}"
+  while IFS= read -r __line; do
+    [[ -n "$__line" ]] || continue
+    __w_path="${__line%%$'\t'*}"
+    [[ "$__w_path" == "$__rel" ]] || continue
+    __covered=1
+    __w_rest="${__line#*$'\t'}"
+    __w_sha="${__w_rest%%$'\t'*}"
+    __w_rest="${__w_rest#*$'\t'}"
+    __w_dig="${__w_rest%%$'\t'*}"
+    __w_iso="${__w_rest#*$'\t'}"
+    if [[ "$__w_dig" == "$__home_d" ]]; then
+      printf 'направление ДОКАЗАНО: %s в доме равен канону на %s (%s) -- правок В ДОМЕ нет\n' \
+        "${PAIR_N[$1]}" "${__w_sha:0:12}" "${__w_iso:-дата не получена}"
+      return 0
+    fi
+  done <<<"$__hw_body"
+  if [[ "$__covered" -eq 0 ]]; then
+    printf 'направление НЕ ИЗМЕРЕНО для %s: свидетель истории не содержит этого пути\n' "${PAIR_N[$1]}"
+    return 2
+  fi
   return 1
 }
 
@@ -503,6 +569,22 @@ if [[ "$MODE" == "--list" ]]; then
   exit 0
 fi
 
+# CONSTRAINT: перечень пар и потолок истории -- ОДИН дом (этот скрипт) для
+# пишущей стороны свидетеля истории снимка: snapshot-kit.sh снимает историю по
+# этому режиму, и обходная копия перечня там разошлась бы с предметом в первый
+# же день пополнения набора (#193).
+if [[ "$MODE" == "--pairs" ]]; then
+  if [[ "$__pairs" -eq 0 ]]; then
+    echo "ОТКАЗ: набор пуст -- перечислять нечего" >&2
+    __DONE=1
+    exit 1
+  fi
+  printf 'LIMIT=%s\n' "$DIRECTION_HISTORY_LIMIT"
+  for __n in "${PAIR_N[@]}"; do printf '%s\n' "$__n"; done
+  __DONE=1
+  exit 0
+fi
+
 if [[ "$MODE" == "--diff" ]]; then
   report_sync_stages
   for ((__i=0; __i<__pairs; __i++)); do
@@ -811,19 +893,76 @@ if [[ "$MODE" == "--diff" ]]; then
     # ВЫЧИСЛИМОЕ подмножество направления (#277): констрейнт выше остаётся в
     # силе для общего случая, но если КАЖДЫЙ расходящийся файл дома побайтово
     # равен ПРЕДКУ канона, дом есть ПРОШЛОЕ канона -- направление доказано и
-    # совет один. Механизм -- ТОЛЬКО при живом .git и доступном git: кит без
-    # истории (#269) получает прежний текст без единой жалобы, отсутствие
-    # доказательства НИКОГДА не ухудшает поведение.
+    # совет один. История опрашивается из живого git ИЛИ из заказанного
+    # свидетеля истории (#388): под снимком .git нет по построению, и «истории
+    # нет вовсе» -- отдельный исход с названием причины, а не тот же текст,
+    # что у «опрошена, равенства нет». Отсутствие доказательства НИКОГДА не
+    # ухудшает поведение: оба исхода несут прежний двунаправленный совет.
     __proven=0
+    __hist_src=''
+    __uncovered=0
+    __pollfail=0
+    __digestfail=0
+    __digest_tool=''
+    if command -v shasum >/dev/null 2>&1; then __digest_tool='shasum -a 256'
+    elif command -v sha256sum >/dev/null 2>&1; then __digest_tool='sha256sum'
+    fi
     if [[ -e "$ROOT/.git" ]] && command -v git >/dev/null 2>&1; then
-      __digest_tool=''
-      if command -v shasum >/dev/null 2>&1; then __digest_tool='shasum -a 256'
-      elif command -v sha256sum >/dev/null 2>&1; then __digest_tool='sha256sum'
-      fi
+      __hist_src='git'
       if [[ -n "$__digest_tool" ]]; then
         for ((__p=0; __p<${#DIFF_IDX[@]}; __p++)); do
-          if prove_direction_one "${DIFF_IDX[$__p]}"; then
+          __grc=0
+          prove_direction_one "${DIFF_IDX[$__p]}" || __grc=$?
+          if [[ "$__grc" -eq 0 ]]; then
             __proven=$((__proven+1))
+          elif [[ "$__grc" -eq 2 ]]; then
+            __uncovered=$((__uncovered+1))
+          elif [[ "$__grc" -eq 3 ]]; then
+            __pollfail=$((__pollfail+1))
+          elif [[ "$__grc" -eq 4 ]]; then
+            __digestfail=$((__digestfail+1))
+          fi
+        done
+      fi
+    elif [[ -n "${CATALYST_HISTORY_WITNESS:-}" ]]; then
+      # Заказанный свидетель -- ПРИБОР, не опция: задан и нечитаем/битый --
+      # отказ (код 2), а не откат к «НЕ ИЗМЕРЕНО»: заказанный и битый прибор
+      # есть отказ, а не отсутствие.
+      __hwit="$CATALYST_HISTORY_WITNESS"
+      if [[ ! -r "$__hwit" ]]; then
+        printf 'ПРИБОР НЕДОСТУПЕН: свидетель истории нечитаем: %s\n' "$__hwit" >&2
+        __DONE=1; exit 2
+      fi
+      __hwt=0; __hwh=0; __hwc=0
+      __hw_count=''; __hw_nlines=0; __hw_body=''
+      while IFS= read -r __hwline || [[ -n "$__hwline" ]]; do
+        case "$__hwline" in
+          ''|'#'*) continue ;;
+          TREE=*) __hwt=1 ;;
+          HEAD=*) __hwh=1 ;;
+          COUNT=*) __hwc=1; __hw_count="${__hwline#COUNT=}" ;;
+          *) __hw_nlines=$((__hw_nlines+1)); __hw_body+="$__hwline"$'\n' ;;
+        esac
+      done < "$__hwit"
+      if [[ "$__hwt" -ne 1 || "$__hwh" -ne 1 || "$__hwc" -ne 1 ]]; then
+        printf 'ПРИБОР НЕДОСТУПЕН: свидетель истории битый (нет TREE=/HEAD=/COUNT=): %s\n' "$__hwit" >&2
+        __DONE=1; exit 2
+      fi
+      if [[ "$__hw_count" != "$__hw_nlines" ]]; then
+        printf 'ПРИБОР НЕДОСТУПЕН: свидетель истории битый (COUNT=%s, строк=%s): %s\n' "$__hw_count" "$__hw_nlines" "$__hwit" >&2
+        __DONE=1; exit 2
+      fi
+      __hist_src='свидетель'
+      if [[ -n "$__digest_tool" ]]; then
+        for ((__p=0; __p<${#DIFF_IDX[@]}; __p++)); do
+          __wrc=0
+          prove_direction_witness "${DIFF_IDX[$__p]}" || __wrc=$?
+          if [[ "$__wrc" -eq 0 ]]; then
+            __proven=$((__proven+1))
+          elif [[ "$__wrc" -eq 2 ]]; then
+            __uncovered=$((__uncovered+1))
+          elif [[ "$__wrc" -eq 4 ]]; then
+            __digestfail=$((__digestfail+1))
           fi
         done
       fi
@@ -840,6 +979,31 @@ if [[ "$MODE" == "--diff" ]]; then
     echo "    bash $0 --to-home     канон -> дом  (потеряет правки, сделанные В ДОМЕ)" >&2
     echo "    bash $0 --from-home   дом -> канон  (потеряет правки, сделанные В КАНОНЕ)" >&2
     echo "  Стороны: канон $ROOT, дом проб $PROBES_HOME, дом инструментов $TOOLS_HOME" >&2
+    # CONSTRAINT: исходы обязаны различаться НЕ только словом, но и ПРИЧИНОЙ:
+    # «история опрошена, равенства нет», «истории нет вовсе», «опрос упал» и
+    # «дайджест дома не посчитался» -- разные миры, и один текст на них --
+    # ловушка «два отказа с одним текстом». Исход 2 печатается ТОЛЬКО при
+    # недоказанных-обычных: на упавшем приборе он лгал бы.
+    if [[ -n "$__hist_src" ]]; then
+      if [[ $(( DIFFERS - __proven - __uncovered - __pollfail - __digestfail )) -gt 0 ]]; then
+        echo "  направление НЕ ДОКАЗАНО: история канона опрошена (источник: $__hist_src, глубина $DIRECTION_HISTORY_LIMIT), равенства предку нет" >&2
+      fi
+    else
+      echo "  направление НЕ ИЗМЕРЕНО: истории канона на этой площадке нет (git отсутствует, свидетель истории не передан)" >&2
+    fi
+    if [[ "$__uncovered" -ne 0 ]]; then
+      if [[ "$__hist_src" == 'git' ]]; then
+        echo "  направление НЕ ИЗМЕРЕНО: часть путей набора вне истории канона (пар вне истории: $__uncovered)" >&2
+      else
+        echo "  направление НЕ ИЗМЕРЕНО: свидетель истории покрывает не весь набор (пар вне свидетеля: $__uncovered)" >&2
+      fi
+    fi
+    if [[ "$__pollfail" -ne 0 ]]; then
+      echo "  направление НЕ ИЗМЕРЕНО: опрос истории канона упал (пар: $__pollfail)" >&2
+    fi
+    if [[ "$__digestfail" -ne 0 ]]; then
+      echo "  направление НЕ ИЗМЕРЕНО: дайджест дома не посчитался (пар: $__digestfail)" >&2
+    fi
     __DONE=1; exit 1
   fi
   if [[ "$PRESENT" -eq 0 && "$ABSENT" -ne 0 ]]; then

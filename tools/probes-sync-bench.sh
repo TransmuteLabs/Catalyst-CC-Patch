@@ -20,8 +20,13 @@ KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # прибора стала бы невидимой.
 REAL_KIT=$KIT
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=23
-EXPECTED_MUTATIONS=28
+# CONSTRAINT: источник копии харнесса для зуба проводки (сценарий 32)
+# ПЕРЕНАЗНАЧАЕМ, как KIT для предмета: self_check мутирует копию харнесса в
+# своём дереве, а сценарии строят СВОИ свежие деревья -- источник обязан
+# указывать на жертву мутации, иначе зуб всегда мерит боевой файл.
+HARNESS_SRC="$REAL_KIT/../Catalyst-programs/run-harness/run-from-snapshot.sh"
+EXPECTED_SCENARIOS=34
+EXPECTED_MUTATIONS=39
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -33,7 +38,7 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19 10 10 10 10 20 21 22 23)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19 10 10 10 10 20 21 22 23 24 26 30 28 27 29 25 31 32 33 34)
 # Улика, по которой признаётся СВОЯ причина покраснения: подстрока LAST_EVID
 # сценария. Дом перечня мутаций ОДИН -- EXPECTED_MUTATIONS; и обход
 # self_check, и эта таблица, и MUT_SCENARIO обязаны сойтись с ним длиной.
@@ -47,7 +52,10 @@ MUT_EVID=(x 'второй=0' 'diff_rc=0' 'B=3' 'НЕ_НАЗВАНА' 'rc=1' 'rc=
           'ВЛАДЕЛЕЦ_НЕ_УЗНАН' 'НЕПОКРЫТИЕ_НЕ_НАЗВАНО' 'НЕДОСТУПЕН_НЕ_НАЗВАН' \
           'ПЛАТФОРМА_НЕ_НАЗВАНА' 'нечитаем_назван=0' 'битый_назван=0' 'ПУСТОЙ_НЕ_НЕИЗМЕРЕНО' \
           'свидетель=0' 'ДОКАЗАНО_НЕТ' 'ДОКАЗАНО_ЕСТЬ' 'ЖАЛОБА_БЕЗ_ГИТ' \
-          'ОДНО_НАПРАВЛЕНИЕ_ПРИ_ЧАСТИ')
+          'ОДНО_НАПРАВЛЕНИЕ_ПРИ_ЧАСТИ' 'СВИДЕТЕЛЬ_НЕ_ДОКАЗАЛ' 'НЕ_ИЗМЕРЕНО_НЕТ' \
+          'LIMIT_НЕТ' 'БИТЫЙ_НЕ_ОТКАЗ' 'НЕЧИТАЕМ_НЕ_ОТКАЗ' 'ПОИМЁННОЕ_НЕ_НАЗВАНО' \
+          'НЕ_ДОКАЗАНО_НЕ_НАЗВАН' 'ПОИМЁННОЕ_GIT_НЕ_НАЗВАНО' 'ЭКСПОРТ_ИСТОРИИ_СНЯТ' \
+          'ОПРОС_УПАЛ_НЕ_НАЗВАН' 'ДАЙДЖЕСТ_НЕ_НАЗВАН')
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -99,6 +107,15 @@ mk_kit() {
   # отказа: мутация правит копию, а сценарий исполняет её, а не работающий файл.
   mkdir -p "$dst/tools"
   cp "$BENCH" "$dst/tools/probes-sync-bench.sh"
+  # Зуб проводки свидетеля истории (AR-1) читает ФОРМУ харнесса прогона:
+  # копия кладётся рядом с игрушечным китом из ПЕРЕНАЗНАЧАЕМОГО $HARNESS_SRC
+  # (run-from-snapshot.sh в кит не входит -- он житель Catalyst-programs, в
+  # снимок едет деревом Catalyst).
+  local __hsrc="$HARNESS_SRC"
+  local __hdst="$(dirname "$dst")/run-from-snapshot.sh"
+  if [[ -f "$__hsrc" ]]; then
+    cp "$__hsrc" "$__hdst"
+  fi
   # Образец plist кладётся ДО опроса набора: пара plist добавляется условно
   # (по наличию плейсхолдера), и на отсутствующем файле скрипт назвал бы её
   # частью набора -- игрушечный канон получил бы ЗАПОЛНЕННЫЙ plist и поехал
@@ -162,8 +179,9 @@ make_env() {
   # инструмент выводит сам (probes-sync.sh:54) и из окружения не читает.
   local __leaked=""
   [[ -n "${CATALYST_TRACKED_WITNESS:-}" ]] && __leaked="$__leaked CATALYST_TRACKED_WITNESS"
+  [[ -n "${CATALYST_HISTORY_WITNESS:-}" ]] && __leaked="$__leaked CATALYST_HISTORY_WITNESS"
   [[ -n "${CLAUDE_CRONTAB_CMD:-}" ]] && __leaked="$__leaked CLAUDE_CRONTAB_CMD"
-  unset CATALYST_TRACKED_WITNESS CLAUDE_CRONTAB_CMD
+  unset CATALYST_TRACKED_WITNESS CATALYST_HISTORY_WITNESS CLAUDE_CRONTAB_CMD
   if [[ -n "$__leaked" ]]; then
     say "  (стенд снял ручки окружения машины:$__leaked -- замер герметичен)"
   fi
@@ -1207,6 +1225,474 @@ scenario_23() {
   ok '23 направление частично: доказанный назван свидетелем, недоказанный держит оба направления'
 }
 
+# СВИДЕТЕЛЬ ИСТОРИИ (#388): под снимочным прогоном .git в снимке нет по
+# построению, и доказательство направления #277 обязано работать по
+# ЗАКАЗАННОМУ свидетелю. Дайджест фикстур считается python3: стенд ходит по
+# обеим площадкам, а имена дайджест-инструментов там разные (shasum/sha256sum)
+# -- стенд не имеет права зависеть от того, который из них стоит.
+bench_sha256() {   # файл -> sha256 hex
+  python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"
+}
+
+# Исход 1 по свидетелю: дом побайтово равен предку из свидетеля -- ДОКАЗАНО,
+# совет один. Тот же предмет, что сценарий 20, но источник -- свидетель, не git
+# (кит игрушечный, .git в нём нет).
+scenario_24() {
+  local root script wit out rc dg
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s24.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  wit="$root/HISTORY.txt"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '24 свидетель доказал: исходная раскатка отказала'; return; }
+  printf 'состояние предка judge/replay.py\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  dg=$(bench_sha256 "$CLAUDE_JUDGE_TOOLS_DIR/replay.py") || { LAST_EVID='ДАЙДЖЕСТ_ФИКСТУРЫ_НЕ_СОШЁЛСЯ'; rm -rf "$root"
+    bad '24 свидетель доказал: дайджест фикстуры не посчитан'; return; }
+  printf '# Свидетель истории дерева Catalyst-CC-Patch, снят с ОРИГИНАЛА при снятии снимка.\nTREE=Catalyst-CC-Patch\nHEAD=abcdef0123456789abcdef0123456789abcdef01\nCOUNT=1\njudge/replay.py\tabcdef0123456789abcdef0123456789abcdef01\t%s\t2026-09-19T10:00:00+03:00\n' "$dg" > "$wit"
+  out=$(CATALYST_HISTORY_WITNESS="$wit" bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc доказано=$(printf '%s' "$out" | grep -c 'направление ДОКАЗАНО') :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "24 свидетель доказал: дом-предок обязан быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление ДОКАЗАНО'* ]]; then
+    LAST_EVID="СВИДЕТЕЛЬ_НЕ_ДОКАЗАЛ :: $LAST_EVID"
+    bad '24 свидетель доказал: равенство предку из свидетеля не названо'; return
+  fi
+  if [[ "$out" != *'abcdef012345'* ]]; then
+    LAST_EVID="ПРЕДОК_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '24 свидетель доказал: sha предка из свидетеля не назван'; return
+  fi
+  if [[ "$out" == *'--from-home'* ]]; then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ_ЗА_ПОЛНОЕ :: $LAST_EVID"
+    bad '24 свидетель доказал: доказательство через свидетеля оставило выбор из двух направлений'; return
+  fi
+  ok '24 свидетель доказал: дом-предок доказан свидетелем истории, совет один -- to-home'
+}
+
+# Исход 2 по свидетелю: история опрошена, равенства предку нет -- вердикт
+# обязан НАЗВАТЬ источник, иначе «опрошена» неотличимо от молчания.
+scenario_25() {
+  local root script wit out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s25.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  wit="$root/HISTORY.txt"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '25 свидетель не доказал: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  printf '# Свидетель истории дерева Catalyst-CC-Patch, снят с ОРИГИНАЛА при снятии снимка.\nTREE=Catalyst-CC-Patch\nHEAD=abcdef0123456789abcdef0123456789abcdef01\nCOUNT=1\njudge/replay.py\tabcdef0123456789abcdef0123456789abcdef01\t0000000000000000000000000000000000000000000000000000000000000000\t2026-09-19T10:00:00+03:00\n' > "$wit"
+  out=$(CATALYST_HISTORY_WITNESS="$wit" bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from доказано=$(printf '%s' "$out" | grep -c 'направление ДОКАЗАНО') :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "25 свидетель не доказал: правка в доме обязана быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" == *'направление ДОКАЗАНО'* ]]; then
+    LAST_EVID="ДОКАЗАНО_ЕСТЬ :: $LAST_EVID"
+    bad '25 свидетель не доказал: чужому дайджесту приписано свидетельство'; return
+  fi
+  if [[ "$out" != *'направление НЕ ДОКАЗАНО: история канона опрошена (источник: свидетель, глубина '* \
+     || "$out" != *', равенства предку нет'* ]]; then
+    LAST_EVID="НЕ_ДОКАЗАНО_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '25 свидетель не доказал: исход НЕ ДОКАЗАНО не назвал источник-свидетель'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '25 свидетель не доказал: недоказуемость обязана держать оба направления'; return
+  fi
+  ok '25 свидетель не доказал: оба направления, источник назван -- свидетель'
+}
+
+# Исход 3: ни git, ни свидетеля. Зуб «вне области отказа НЕТ»: ПРИБОР
+# НЕДОСТУПЕН стреляет ТОЛЬКО на заданной-и-битой ручке; незаданная ручка --
+# честное НЕ ИЗМЕРЕНО с причиной, не отказ прибора.
+scenario_26() {
+  local root script out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s26.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '26 нет истории: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "26 нет истории: правка в доме обязана быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО: истории канона на этой площадке нет (git отсутствует, свидетель истории не передан)'* ]]; then
+    LAST_EVID="НЕ_ИЗМЕРЕНО_НЕТ :: $LAST_EVID"
+    bad '26 нет истории: исход НЕ ИЗМЕРЕНО не назвал причину дословно'; return
+  fi
+  if [[ "$out" == *'ПРИБОР НЕДОСТУПЕН'* ]]; then
+    LAST_EVID="ОТКАЗ_ВНЕ_ОБЛАСТИ :: $LAST_EVID"
+    bad '26 нет истории: незаданная ручка прочитана отказом прибора'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '26 нет истории: прежний текст обязан нести оба направления'; return
+  fi
+  ok '26 нет истории: НЕ ИЗМЕРЕНО с причиной, оба направления, отказа прибора нет'
+}
+
+# Заказанный и НЕ НАЙДЕННЫЙ свидетель -- отказ прибора (2), не откат к
+# НЕ ИЗМЕРЕНО.
+scenario_27() {
+  local root script out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s27.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '27 свидетель отсутствует: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  out=$(CATALYST_HISTORY_WITNESS="$root/NO-SUCH-HISTORY-WITNESS" bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 2 ]]; then
+    LAST_EVID="НЕЧИТАЕМ_НЕ_ОТКАЗ rc=$rc :: $LAST_EVID"
+    bad "27 свидетель отсутствует: заказанный и не найденный обязан быть ПРИБОР НЕДОСТУПЕН (2), получили $rc"; return
+  fi
+  if [[ "$out" != *'ПРИБОР НЕДОСТУПЕН: свидетель истории нечитаем'* ]]; then
+    LAST_EVID="НЕЧИТАЕМ_НЕ_ОТКАЗ :: $LAST_EVID"
+    bad '27 свидетель отсутствует: код 2 без ИМЕННОГО отказа «свидетель истории нечитаем»'; return
+  fi
+  ok '27 свидетель отсутствует: заказанный и не найденный -- ПРИБОР НЕДОСТУПЕН (2)'
+}
+
+# Заказанный и БИТЫЙ свидетель (COUNT не равен числу строк тела) -- отказ
+# прибора (2), не чтение обрезка как целого.
+scenario_28() {
+  local root script wit out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s28.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  wit="$root/HISTORY.txt"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '28 свидетель битый: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  printf '# Свидетель истории дерева Catalyst-CC-Patch, снят с ОРИГИНАЛА при снятии снимка.\nTREE=Catalyst-CC-Patch\nHEAD=abcdef0123456789abcdef0123456789abcdef01\nCOUNT=99\njudge/replay.py\tabcdef0123456789abcdef0123456789abcdef01\t0000000000000000000000000000000000000000000000000000000000000000\t2026-09-19T10:00:00+03:00\n' > "$wit"
+  out=$(CATALYST_HISTORY_WITNESS="$wit" bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 2 ]]; then
+    LAST_EVID="БИТЫЙ_НЕ_ОТКАЗ rc=$rc :: $LAST_EVID"
+    bad "28 свидетель битый: COUNT не равен строкам тела обязан быть ПРИБОР НЕДОСТУПЕН (2), получили $rc"; return
+  fi
+  if [[ "$out" != *'ПРИБОР НЕДОСТУПЕН: свидетель истории битый (COUNT='* ]]; then
+    LAST_EVID="БИТЫЙ_НЕ_ОТКАЗ :: $LAST_EVID"
+    bad '28 свидетель битый: код 2 без ИМЕННОГО отказа «свидетель истории битый (COUNT=…)»'; return
+  fi
+  ok '28 свидетель битый: COUNT расходится со строками тела -- ПРИБОР НЕДОСТУПЕН (2)'
+}
+
+# Частичное покрытие свидетеля: пара, которой в свидетеле нет, получает
+# поимённое НЕ ИЗМЕРЕНО, а не молчаливый незачёт (свидетель, снятый на маке,
+# может не знать пару, живую на usbox).
+scenario_29() {
+  local root script wit out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s29.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  wit="$root/HISTORY.txt"
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '29 свидетель частичен: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/compact.py"
+  printf '# Свидетель истории дерева Catalyst-CC-Patch, снят с ОРИГИНАЛА при снятии снимка.\nTREE=Catalyst-CC-Patch\nHEAD=abcdef0123456789abcdef0123456789abcdef01\nCOUNT=1\njudge/replay.py\tabcdef0123456789abcdef0123456789abcdef01\t0000000000000000000000000000000000000000000000000000000000000000\t2026-09-19T10:00:00+03:00\n' > "$wit"
+  out=$(CATALYST_HISTORY_WITNESS="$wit" bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "29 свидетель частичен: правки в доме обязаны быть расхождениями (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО для judge/compact.py: свидетель истории не содержит этого пути'* ]]; then
+    LAST_EVID="ПОИМЁННОЕ_НЕ_НАЗВАНО :: $LAST_EVID"
+    bad '29 свидетель частичен: непокрытая пара не названа поимённым НЕ ИЗМЕРЕНО'; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО: свидетель истории покрывает не весь набор'* ]]; then
+    LAST_EVID="ИТОГ_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '29 свидетель частичен: итог по набору не назвал непокрытые пары'; return
+  fi
+  if [[ "$out" != *'источник: свидетель'* ]]; then
+    LAST_EVID="НЕ_ДОКАЗАНО_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '29 свидетель частичен: источник для покрытой пары не назван'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '29 свидетель частичен: недоказанная пара обязана держать оба направления'; return
+  fi
+  ok '29 свидетель частичен: непокрытая пара названа поимённо, итог несёт оба исхода'
+}
+
+# Режим --pairs -- единственный дом перечня пар и потолка истории для пишущей
+# стороны снимка: LIMIT= обязан ехать первой строкой, перечень -- сводиться с
+# --list (один и тот же набор), иначе свидетель снятия молчит об глубине или
+# расходится с предметом.
+scenario_30() {
+  local root script out rc first tail list_out list_rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s30.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  out=$(bash "$script" --pairs 2>&1); rc=$?
+  first="$(printf '%s\n' "$out" | sed -n '1p')"
+  tail="$(printf '%s\n' "$out" | sed '1d')"
+  list_out="$(bash "$script" --list 2>&1)"; list_rc=$?
+  LAST_EVID="pairs_rc=$rc list_rc=$list_rc first=[$first] путей=$(printf '%s\n' "$tail" | grep -c .)"
+  rm -rf "$root"
+  if [[ $rc -ne 0 ]]; then
+    LAST_EVID="ПАРЫ_ОТКАЗАЛИ rc=$rc :: $LAST_EVID"
+    bad "30 --pairs: режим отказал (rc=$rc)"; return
+  fi
+  if [[ ! "$first" =~ ^LIMIT=[0-9]+$ ]]; then
+    LAST_EVID="LIMIT_НЕТ first=[$first] :: $LAST_EVID"
+    bad '30 --pairs: LIMIT= не первой строкой или не числом'; return
+  fi
+  if [[ -z "$tail" ]]; then
+    LAST_EVID="ПУСТОЙ_ПЕРЕЧЕНЬ :: $LAST_EVID"
+    bad '30 --pairs: перечень пар пуст'; return
+  fi
+  if [[ "$tail" != "$list_out" ]]; then
+    LAST_EVID="РАЗОШЛОСЬ_СО_СПИСКОМ :: $LAST_EVID"
+    bad '30 --pairs: перечень пар разошёлся с --list'; return
+  fi
+  ok '30 --pairs: LIMIT= числом первой строкой, перечень сводится с --list'
+}
+
+# СИММЕТРИЯ ИСТОЧНИКОВ (AR-2): при живом git путь пары, которого в истории
+# канона нет, -- ПОИМЁННОЕ «НЕ ИЗМЕРЕНО» с причиной «путь не найден в истории
+# канона», а не безликий исход 2. Фикстура -- индекс без коммитов: git живой,
+# ценз молчит (всё в индексе), а история пуста -- ровно расщепление миров.
+scenario_31() {
+  local root script out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s31.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  # CONSTRAINT: фикстура -- «история ЖИВА, пути в ней НЕТ»: один коммит без
+  # judge/, затем индекс всего набора БЕЗ второго коммита. Репо без единого
+  # коммита не годится: git log там отвечает fatal (rc 128), а это отказ
+  # опроса -- незачёт, а не пустая история; git add после коммита держит
+  # ценз молчащим (всё в индексе), не добавляя пути в историю.
+  (cd "$root/kit" && git init -q && git add probes \
+    && git -c user.name=bench -c user.email=bench@invalid commit -q -m anchor \
+    && git add -A) >/dev/null 2>&1 || {
+    LAST_EVID='ФИКСТУРА_ИСТОРИИ_НЕ_СОБРАНА'; rm -rf "$root"
+    bad '31 git симметрия: фикстура живой истории без пути не собралась'; return; }
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '31 git симметрия: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "31 git симметрия: правка в доме обязана быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО для judge/replay.py: путь не найден в истории канона'* ]]; then
+    LAST_EVID="ПОИМЁННОЕ_GIT_НЕ_НАЗВАНО :: $LAST_EVID"
+    bad '31 git симметрия: путь вне истории канона не назван поимённым НЕ ИЗМЕРЕНО'; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО: часть путей набора вне истории канона (пар вне истории: 1)'* ]]; then
+    LAST_EVID="ИТОГ_GIT_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '31 git симметрия: итог по набору не назвал пары вне истории'; return
+  fi
+  if [[ "$out" == *'направление НЕ ДОКАЗАНО: история канона опрошена'* ]]; then
+    LAST_EVID="ИСХОД_2_НА_ПУСТОЙ_ИСТОРИИ :: $LAST_EVID"
+    bad '31 git симметрия: «равенства предку нет» напечатано там, где история пуста'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '31 git симметрия: неизмеренность обязана держать оба направления'; return
+  fi
+  ok '31 git симметрия: путь вне истории назван поимённо, исход 2 не лжёт'
+}
+
+# ПРОВОДКА СВИДЕТЕЛЯ ИСТОРИИ (AR-1). CONSTRAINT: зуб меряет ФОРМУ
+# run-from-snapshot.sh, а НЕ исполнение -- прогон боевого claude-patch-all из
+# стенда недоступен (он пишет в дома машины). Форма: условный экспорт истории
+# на маке со СВОЕЙ строкой отсутствия (не копией индексной), условная доставка
+# HISTORY-$t.txt в rootfiles, независимое условное объявление обеих ручек в
+# witness_vars для строки запуска usbox.
+scenario_32() {
+  local root harness nidx nhist
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s32.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  harness="$root/run-from-snapshot.sh"
+  if [[ ! -f "$harness" ]]; then
+    LAST_EVID='ХАРНЕС_НЕ_НАЙДЕН'; rm -rf "$root"
+    bad '32 проводка: копия run-from-snapshot.sh не положена рядом с игрушечным китом'; return
+  fi
+  nidx=$(grep -c 'свидетеля индекса' "$harness") || true
+  nhist=$(grep -c 'свидетеля истории' "$harness") || true
+  LAST_EVID="строк_индекса=$nidx строк_истории=$nhist"
+  if ! bash -n "$harness" 2>/dev/null; then
+    LAST_EVID="СИНТАКСИС_ХАРНЕСА_СЛОМАН :: $LAST_EVID"
+    rm -rf "$root"
+    bad '32 проводка: run-from-snapshot.sh не разбирается'; return
+  fi
+  if ! grep -qF 'export CATALYST_HISTORY_WITNESS="$snap/HISTORY-Catalyst-CC-Patch.txt"' "$harness"; then
+    LAST_EVID="ЭКСПОРТ_ИСТОРИИ_СНЯТ :: $LAST_EVID"
+    rm -rf "$root"
+    bad '32 проводка: условный экспорт CATALYST_HISTORY_WITNESS на маке отсутствует'; return
+  fi
+  if ! grep -qF 'if [[ -f "$snap/HISTORY-Catalyst-CC-Patch.txt" ]]; then' "$harness"; then
+    LAST_EVID="УСЛОВИЕ_ЭКСПОРТА_НЕТ :: $LAST_EVID"
+    rm -rf "$root"
+    bad '32 проводка: экспорт истории не обложен условием наличия файла'; return
+  fi
+  if [[ "$nhist" -lt 2 ]]; then
+    LAST_EVID="СВОЯ_СТРОКА_ОТСУТСТВИЯ_НЕТ строк_истории=$nhist :: $LAST_EVID"
+    rm -rf "$root"
+    bad '32 проводка: у свидетеля истории нет своих строк отсутствия (мак и usbox)'; return
+  fi
+  if ! grep -qF 'доказательство направления будет НЕ ИЗМЕРЕНО' "$harness" \
+     || ! grep -qF 'доказательство направления на Linux будет НЕ ИЗМЕРЕНО' "$harness"; then
+    LAST_EVID="ОТСУТСТВИЕ_КОПИЯ_ИНДЕКСА :: $LAST_EVID"
+    rm -rf "$root"
+    bad '32 проводка: строки отсутствия истории не свои (мак/Linux)'; return
+  fi
+  if ! grep -qF '[[ -f "$snap/HISTORY-$t.txt" ]] && rootfiles+=("$snap/HISTORY-$t.txt")' "$harness"; then
+    LAST_EVID="ДОСТАВКА_ИСТОРИИ_НЕТ :: $LAST_EVID"
+    rm -rf "$root"
+    bad '32 проводка: HISTORY-$t.txt не входит в условную доставку rootfiles'; return
+  fi
+  if ! grep -qF 'witness_vars+=("CATALYST_TRACKED_WITNESS=' "$harness" \
+     || ! grep -qF 'witness_vars+=("CATALYST_HISTORY_WITNESS=' "$harness"; then
+    LAST_EVID="ОБЪЯВЛЕНИЯ_НЕ_НЕЗАВИСИМЫ :: $LAST_EVID"
+    rm -rf "$root"
+    bad '32 проводка: witness_vars не собирает обе ручки независимо'; return
+  fi
+  rm -rf "$root"
+  ok '32 проводка: обе ручки свидетелей объявлены условно и независимо, отсутствия читаются по-разному'
+}
+
+# МИР 3 (фаза 3, AR-2-доделка): опрос истории УПАЛ (git log rc!=0 -- битый
+# репозиторий, сломанный git) -- «спросить не вышло» печатается ПОИМЁННО со
+# своим текстом и кодом, а не уходит в «спросили, и нет». Заглушка git на
+# PATH отвечает кодом 3 всем подкомандам: физический .git остаётся, и ветка
+# направления входит -- падает именно опрос.
+scenario_33() {
+  local root script stub out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s33.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  (cd "$root/kit" && git init -q) >/dev/null 2>&1 || {
+    LAST_EVID='ФИКСТУРА_GIT_НЕ_СОБРАНА'; rm -rf "$root"
+    bad '33 опрос упал: физический .git не собрался'; return; }
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '33 опрос упал: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  stub="$root/stub"; mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\nexit 3\n' > "$stub/git"
+  chmod +x "$stub/git"
+  out=$(PATH="$stub:$PATH" bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "33 опрос упал: правка в доме обязана быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО для judge/replay.py: опрос истории канона упал (git log код 3)'* ]]; then
+    LAST_EVID="ОПРОС_УПАЛ_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '33 опрос упал: падение опроса истории не названо поимённо с кодом'; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО: опрос истории канона упал (пар: 1)'* ]]; then
+    LAST_EVID="ИТОГ_ОПРОСА_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '33 опрос упал: итог по набору не назвал упавший опрос'; return
+  fi
+  if [[ "$out" == *'направление НЕ ДОКАЗАНО: история канона опрошена'* ]]; then
+    LAST_EVID="ИСХОД_2_НА_УПАВШЕМ_ОПРОСЕ :: $LAST_EVID"
+    bad '33 опрос упал: «равенства предку нет» напечатано там, где спросить не вышло'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '33 опрос упал: неизмеренность обязана держать оба направления'; return
+  fi
+  ok '33 опрос упал: падение git log названо поимённо с кодом, исход 2 не лжёт'
+}
+
+# МИР 4 (фаза 3): дайджест ДОМА не посчитался (файл недоступен) -- «не смогли
+# взвесить» печатается ПОИМЁННО, своим текстом, отличным и от «путь не
+# найден», и от «опрос упал»: сторона события -- дом, а не история.
+# Фикстура -- двухкоммитная история (путь в ней есть: опрос и поиск пути
+# обязаны ПРОЙТИ), дом несёт байты предка, но закрыт на чтение.
+scenario_34() {
+  local root script victim out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s34.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  if ! direction_fixture "$root/kit"; then
+    LAST_EVID='ФИКСТУРА_НЕ_СОБРАНА'; rm -rf "$root"
+    bad '34 дайджест дома: фикстура истории канона не собралась'; return
+  fi
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '34 дайджест дома: исходная раскатка отказала'; return; }
+  victim="$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  printf 'состояние предка judge/replay.py\n' > "$victim"
+  chmod 000 "$victim"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  chmod 644 "$victim" 2>/dev/null || true
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "34 дайджест дома: закрытый файл обязан быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО для judge/replay.py: дайджест дома не посчитался'* ]]; then
+    LAST_EVID="ДАЙДЖЕСТ_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '34 дайджест дома: несосчитавшийся дайджест не назван поимённо'; return
+  fi
+  if [[ "$out" != *'направление НЕ ИЗМЕРЕНО: дайджест дома не посчитался (пар: 1)'* ]]; then
+    LAST_EVID="ИТОГ_ДАЙДЖЕСТА_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '34 дайджест дома: итог по набору не назвал несосчитавшийся дайджест'; return
+  fi
+  if [[ "$out" == *'направление НЕ ДОКАЗАНО: история канона опрошена'* ]]; then
+    LAST_EVID="ИСХОД_2_НА_УПАВШЕМ_ДАЙДЖЕСТЕ :: $LAST_EVID"
+    bad '34 дайджест дома: «равенства предку нет» напечатано там, где взвесить не вышло'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '34 дайджест дома: неизмеренность обязана держать оба направления'; return
+  fi
+  ok '34 дайджест дома: несосчитавшийся дайджест назван поимённо, исход 2 не лжёт'
+}
+
 # Правило открытия -- ЕДИНСТВЕННЫЙ дом tools/heredoc-anchor.py (у этой копии
 # никогда не было ни отсева стаба, ни якоря мутации); инструмент берётся из
 # НАСТОЯЩЕГО кита (REAL_KIT), а не из переназначаемого KIT. Отказ инструмента
@@ -1248,8 +1734,11 @@ mutate() {
   local root n file
   root="$1"; n="$2"
   # Жертва мутаций 7 и 8 -- САМ СТЕНД в копии кита: она меряет его путь отказа.
+  # Жертва мутации 37 -- копия ХАРНЕССА прогона: она меряет форму проводки
+  # свидетеля истории (AR-1). Прочие -- копия предмета.
   case "$n" in
     7|8) file="$root/kit/tools/probes-sync-bench.sh" ;;
+    37) file="$root/run-from-snapshot.sh" ;;
     *) file="$root/kit/scripts/probes-sync.sh" ;;
   esac
   local __pyrc=0
@@ -1408,6 +1897,82 @@ elif number == 28:
     # двух прячет --from-home, и совет уничтожает правку в доме.
     old, new = ('    if [[ "$__proven" -ne 0 && "$__proven" -eq "$DIFFERS" ]]; then\n',
                 '    if [[ "$__proven" -ne 0 ]]; then  # mutation: partial proof claims full\n')
+elif number == 29:
+    # Ветка свидетеля истории мертвеет: переданный свидетель игнорируется, и
+    # дом-предок снова «неразрешим» -- исход ДОКАЗАНО исчезает, снимочный
+    # прогон теряет доказательство направления.
+    old, new = ('    elif [[ -n "${CATALYST_HISTORY_WITNESS:-}" ]]; then\n',
+                '    elif false; then  # mutation: history witness ignored\n')
+elif number == 30:
+    # СЛИВАЮЩАЯ: текст исхода 3 подменяется текстом исхода 2 -- «истории нет
+    # вовсе» и «опрошена, равенства нет» снова один текст, и различение
+    # исходов не пинится ничем.
+    old = ('      echo "  направление НЕ ИЗМЕРЕНО: истории канона на этой площадке нет (git отсутствует, свидетель истории не передан)" >&2\n')
+    new = ('      echo "  направление НЕ ДОКАЗАНО: история канона опрошена (источник: $__hist_src, глубина $DIRECTION_HISTORY_LIMIT), равенства предку нет" >&2\n')
+elif number == 31:
+    # LIMIT= пропадает из --pairs: пишущая сторона снимка остаётся без
+    # глубины, и потолок истории живёт во втором доме.
+    old, new = ("  printf 'LIMIT=%s\\n' \"$DIRECTION_HISTORY_LIMIT\"\n",
+                '  :  # mutation: LIMIT line omitted\n')
+elif number == 32:
+    # Расхождение COUNT со строками тела игнорируется: битый свидетель
+    # читается как целый -- заказанный и битый прибор перестаёт быть отказом.
+    old, new = ('      if [[ "$__hw_count" != "$__hw_nlines" ]]; then\n',
+                '      if false; then  # mutation: witness COUNT mismatch ignored\n')
+elif number == 33:
+    # Нечитаемость свидетеля перестаёт быть отказом: заказанная и отсутствующая
+    # ручка проваливается в чтение пустоты вместо кода 2.
+    old = ('      if [[ ! -r "$__hwit" ]]; then\n'
+           '        printf \'ПРИБОР НЕДОСТУПЕН: свидетель истории нечитаем: %s\\n\' "$__hwit" >&2\n'
+           '        __DONE=1; exit 2\n'
+           '      fi\n')
+    new = ('      if false; then  # mutation: unreadable witness not refused\n'
+           '        :\n'
+           '      fi\n')
+elif number == 34:
+    # Непокрытая пара молчит: поимённое НЕ ИЗМЕРЕНО исчезает, и частичное
+    # покрытие свидетеля читается как полное.
+    old = ('    printf \'направление НЕ ИЗМЕРЕНО для %s: свидетель истории не содержит этого пути\\n\' "${PAIR_N[$1]}"\n'
+           '    return 2\n')
+    new = '    return 1  # mutation: uncovered pair silently unproven\n'
+elif number == 35:
+    # Текст исхода 2 снимается: при живой истории печатается текст исхода 3 --
+    # «опрошена» и «не измерено» сливаются с другой стороны.
+    old, new = ('    if [[ -n "$__hist_src" ]]; then\n',
+                '    if false; then  # mutation: unproven outcome text removed\n')
+elif number == 36:
+    # СЛИВАЮЩАЯ для git-стороны: путь вне истории канона снова молчит --
+    # поимённое НЕ ИЗМЕРЕНО исчезает, «путь не найден» и «равенства нет»
+    # снова один исход (AR-2).
+    old = ('    printf \'направление НЕ ИЗМЕРЕНО для %s: путь не найден в истории канона\\n\' "${PAIR_N[$1]}"\n'
+           '    return 2\n')
+    new = '    return 1  # mutation: git path outside history silently unproven\n'
+elif number == 37:
+    # Экспорт свидетеля истории снимается из мак-ноги прогона: свидетель
+    # снимается, но не доезжает до предмета -- механизм снова мёртв в бою.
+    old = ('      export CATALYST_HISTORY_WITNESS="$snap/HISTORY-Catalyst-CC-Patch.txt"\n')
+    new = '      :  # mutation: history witness export removed\n'
+elif number == 38:
+    # МИР 3 замолкает: падение опроса истории снова читается незачётом --
+    # «спросить не вышло» неотличимо от «спросили, и нет».
+    old = ('    printf \'направление НЕ ИЗМЕРЕНО для %s: опрос истории канона упал (git log код %s)\\n\' "${PAIR_N[$1]}" "$__glrc"\n'
+           '    return 3\n')
+    new = '    return 1  # mutation: history poll failure silent\n'
+elif number == 39:
+    # МИР 4 замолкает (git-сторона): несосчитавшийся дайджест дома снова
+    # читается незачётом -- «не смогли взвесить» неотличимо от «равенства нет».
+    old = ('    printf \'направление НЕ ИЗМЕРЕНО для %s: путь не найден в истории канона\\n\' "${PAIR_N[$1]}"\n'
+           '    return 2\n'
+           '  fi\n'
+           '  __home_d=$($__digest_tool "${PAIR_B[$1]}" 2>/dev/null) || __hdrc=$?\n'
+           '  if [[ "$__hdrc" -ne 0 ]]; then\n'
+           '    printf \'направление НЕ ИЗМЕРЕНО для %s: дайджест дома не посчитался (код %s)\\n\' "${PAIR_N[$1]}" "$__hdrc"\n'
+           '    return 4\n'
+           '  fi\n')
+    new = ('    printf \'направление НЕ ИЗМЕРЕНО для %s: путь не найден в истории канона\\n\' "${PAIR_N[$1]}"\n'
+           '    return 2\n'
+           '  fi\n'
+           '  __home_d=$($__digest_tool "${PAIR_B[$1]}" 2>/dev/null) || return 1  # mutation: home digest failure silent\n')
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)
@@ -1451,10 +2016,15 @@ self_check() {
     # Код 2 -- разбор жертвы сломан: замена невалидна, прибор чинится до
     # следующего вердикта.
     if (( mrc != 0 )); then rm -rf "$root"; return 2; fi
-    local saved_kit="$KIT"
+    local saved_kit="$KIT" saved_harness="$HARNESS_SRC"
+    # Жертва мутации 37 -- копия харнесса в дереве self_check: сценарий 32
+    # строит СВОЁ дерево, и источник копии обязан указывать на жертву.
+    if [[ "$n" -eq 37 ]]; then
+      HARNESS_SRC="$root/run-from-snapshot.sh"
+    fi
     KIT="$root/kit"; before=$FAILED; LAST_EVID=''
     run_scenario "${MUT_SCENARIO[$n]}" || { say "  ОТКАЗ ПРИБОРА: сценария ${MUT_SCENARIO[$n]} нет (мутация $n)"; rm -rf "$root"; return 2; }
-    KIT="$saved_kit"
+    KIT="$saved_kit"; HARNESS_SRC="$saved_harness"
     if (( FAILED > before )); then
       if [[ "$LAST_EVID" == *"${MUT_EVID[$n]}"* ]]; then
         reddened=$((reddened + 1))
