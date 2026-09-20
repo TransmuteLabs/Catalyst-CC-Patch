@@ -20,8 +20,8 @@ KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # прибора стала бы невидимой.
 REAL_KIT=$KIT
 BENCH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "$0")
-EXPECTED_SCENARIOS=19
-EXPECTED_MUTATIONS=24
+EXPECTED_SCENARIOS=23
+EXPECTED_MUTATIONS=28
 # Бюджеты ожиданий, в шагах по 0.05 с. Пять секунд мерили скорость МАШИНЫ, а
 # не свойство замка: под свипом первый писатель до `cp` за них не доходит, и
 # прибор объявлял отказ там, где дефекта нет.
@@ -33,7 +33,7 @@ WAIT_DEATH_STEPS=200      # 10 с -- смерть писателя после о
 # волны сверялись только длины, и дыра жила латентно, пока покрытие было
 # случайно полным. Исключения -- только поимённо в UNMUTATED_OK с написанной
 # причиной; сегодня их нет.
-MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19 10 10 10 10)
+MUT_SCENARIO=(x 1 2 3 4 5 6 7 7 8 9 10 11 12 13 14 15 16 17 18 19 10 10 10 10 20 21 22 23)
 # Улика, по которой признаётся СВОЯ причина покраснения: подстрока LAST_EVID
 # сценария. Дом перечня мутаций ОДИН -- EXPECTED_MUTATIONS; и обход
 # self_check, и эта таблица, и MUT_SCENARIO обязаны сойтись с ним длиной.
@@ -46,7 +46,8 @@ MUT_EVID=(x 'второй=0' 'diff_rc=0' 'B=3' 'НЕ_НАЗВАНА' 'rc=1' 'rc=
           'ПРИЧИНА_НЕ_НАЗВАНА' 'РАСХОЖДЕНИЕ_НЕ_НАЗВАНО' 'ПРЕДМЕТ_НЕ_НАЗВАН' \
           'ВЛАДЕЛЕЦ_НЕ_УЗНАН' 'НЕПОКРЫТИЕ_НЕ_НАЗВАНО' 'НЕДОСТУПЕН_НЕ_НАЗВАН' \
           'ПЛАТФОРМА_НЕ_НАЗВАНА' 'нечитаем_назван=0' 'битый_назван=0' 'ПУСТОЙ_НЕ_НЕИЗМЕРЕНО' \
-          'свидетель=0')
+          'свидетель=0' 'ДОКАЗАНО_НЕТ' 'ДОКАЗАНО_ЕСТЬ' 'ЖАЛОБА_БЕЗ_ГИТ' \
+          'ОДНО_НАПРАВЛЕНИЕ_ПРИ_ЧАСТИ')
 UNMUTATED_OK=''
 FAILED=0
 RUN=0
@@ -1034,6 +1035,178 @@ scenario_19() {
   ok '19 чужая платформа: незнакомая платформа названа и краснит (fail-closed)'
 }
 
+# Фикстура направления (#277): двухкоммитная история канона, где judge/replay.py
+# имеет ПРЕДКА с особым содержимым, а HEAD несёт канонические байты. Коммитится
+# ВЕСЬ кит: ценз репозитория в --diff ходит по дому, и файл набора, не попавший
+# в индекс, читался бы «вне репозитория» -- расхождение не по предмету сценария.
+# Строится во временном дереве; git-команда стенда меняет только эту фикстуру.
+direction_fixture() {  # $1 корень кита; 0 -- история собрана
+  local kit="$1"
+  (cd "$kit" && git init -q) >/dev/null 2>&1 || return 1
+  printf 'состояние предка judge/replay.py\n' > "$kit/judge/replay.py"
+  (cd "$kit" && git add -A \
+    && git -c user.name=bench -c user.email=bench@invalid commit -q -m ancestor) >/dev/null 2>&1 || return 1
+  printf 'canon judge/replay.py\n' > "$kit/judge/replay.py"
+  (cd "$kit" && git add -A \
+    && git -c user.name=bench -c user.email=bench@invalid commit -q -m head) >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# НАПРАВЛЕНИЕ СИНХРОНИЗАЦИИ (#277). Общий случай неразрешим, но есть ВЫЧИСЛИМОЕ
+# подмножество: байты дома, равные ПРЕДКУ файла в истории канона, доказывают,
+# что дом -- ПРОШЛОЕ канона, и правок в доме нет ПО ПОСТРОЕНИЮ. Сценарии 20-23
+# держат все четыре состояния: доказано (совет один -- to-home), не доказано
+# (оба направления), не измеримо (кит без .git, #269 -- прежний текст без
+# жалоб), доказано частично (недоказанный файл держит оба направления).
+scenario_20() {
+  local root script anc anc12 out rc
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s20.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  if ! direction_fixture "$root/kit"; then
+    LAST_EVID='ФИКСТУРА_НЕ_СОБРАНА'; rm -rf "$root"
+    bad '20 направление доказано: фикстура истории канона не собралась'; return
+  fi
+  anc=$(cd "$root/kit" && git rev-parse HEAD~1) || { LAST_EVID='ПРЕДОК_НЕ_ДОБЫТ'; rm -rf "$root"
+    bad '20 направление доказано: sha предка не добыт'; return; }
+  anc12=${anc:0:12}
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '20 направление доказано: исходная раскатка отказала'; return; }
+  printf 'состояние предка judge/replay.py\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  LAST_EVID="rc=$rc доказано=$(printf '%s' "$out" | grep -c 'направление ДОКАЗАНО') предок=$anc12 :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "20 направление доказано: дом-предок обязан быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление ДОКАЗАНО'* ]]; then
+    LAST_EVID="ДОКАЗАНО_НЕТ :: $LAST_EVID"
+    bad '20 направление доказано: равенство предку не названо свидетелем'; return
+  fi
+  if [[ "$out" != *"$anc12"* ]]; then
+    LAST_EVID="ПРЕДОК_НЕ_НАЗВАН :: $LAST_EVID"
+    bad '20 направление доказано: sha предка не назван в свидетельстве'; return
+  fi
+  if [[ "$out" == *'--from-home'* ]]; then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ_ЗА_ПОЛНОЕ :: $LAST_EVID"
+    bad '20 направление доказано: полное доказательство оставило выбор из двух направлений'; return
+  fi
+  ok '20 направление доказано: дом-предок назван свидетелем (sha), совет один -- to-home'
+}
+
+scenario_21() {
+  local root script out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s21.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  if ! direction_fixture "$root/kit"; then
+    LAST_EVID='ФИКСТУРА_НЕ_СОБРАНА'; rm -rf "$root"
+    bad '21 направление не доказано: фикстура истории канона не собралась'; return
+  fi
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '21 направление не доказано: исходная раскатка отказала'; return; }
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from доказано=$(printf '%s' "$out" | grep -c 'направление ДОКАЗАНО') :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "21 направление не доказано: правка в доме обязана быть расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" == *'направление ДОКАЗАНО'* ]]; then
+    LAST_EVID="ДОКАЗАНО_ЕСТЬ :: $LAST_EVID"
+    bad '21 направление не доказано: байтам, которых нет ни в одном предке, приписан свидетель'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '21 направление не доказано: недоказуемость обязана держать оба направления'; return
+  fi
+  ok '21 направление не доказано: оба направления, свидетеля нет'
+}
+
+scenario_22() {
+  local root script out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s22.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  if ! direction_fixture "$root/kit"; then
+    LAST_EVID='ФИКСТУРА_НЕ_СОБРАНА'; rm -rf "$root"
+    bad '22 направление без git: фикстура истории канона не собралась'; return
+  fi
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '22 направление без git: исходная раскатка отказала'; return; }
+  printf 'состояние предка judge/replay.py\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  # Кит на канонической linux-площадке едет копированием БЕЗ .git (#269):
+  # доказательства там нет и быть не может -- прежний текст без единой жалобы.
+  rm -rf "$root/kit/.git"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from доказано=$(printf '%s' "$out" | grep -c 'направление ДОКАЗАНО') :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "22 направление без git: расхождение обязано остаться расхождением (1), получили $rc"; return
+  fi
+  if [[ "$out" == *'направление ДОКАЗАНО'* ]]; then
+    LAST_EVID="ДОКАЗАНО_ЕСТЬ :: $LAST_EVID"
+    bad '22 направление без git: без истории канона доказано невозможное'; return
+  fi
+  if [[ "$out" == *'NOTE'* ]]; then
+    LAST_EVID="ЖАЛОБА_БЕЗ_ГИТ :: $LAST_EVID"
+    bad '22 направление без git: отсутствие истории канона читалось жалобой, а не молчанием'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '22 направление без git: прежний текст обязан нести оба направления'; return
+  fi
+  ok '22 направление без git: прежний текст, ни свидетеля, ни жалобы'
+}
+
+scenario_23() {
+  local root script out rc has_to has_from
+  root=$(mktemp -d "${TMPDIR:-/tmp}/probes-sync-s23.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный каталог\n' >&2; exit 2; }
+  [ -n "$root" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь временного каталога пуст\n' >&2; exit 2; }
+  mk_kit "$root/kit"; make_env "$root"
+  script="$root/kit/scripts/probes-sync.sh"
+  if ! direction_fixture "$root/kit"; then
+    LAST_EVID='ФИКСТУРА_НЕ_СОБРАНА'; rm -rf "$root"
+    bad '23 направление частично: фикстура истории канона не собралась'; return
+  fi
+  bash "$script" --to-home >/dev/null 2>&1 || {
+    LAST_EVID='ПОДГОТОВКА_ДОМА_НЕ_СОШЛАСЬ'; rm -rf "$root"
+    bad '23 направление частично: исходная раскатка отказала'; return; }
+  printf 'состояние предка judge/replay.py\n' > "$CLAUDE_JUDGE_TOOLS_DIR/replay.py"
+  printf 'правка, существующая только в доме\n' > "$CLAUDE_JUDGE_TOOLS_DIR/compact.py"
+  out=$(bash "$script" --diff 2>&1); rc=$?
+  [[ "$out" == *"--to-home"* ]] && has_to=1 || has_to=0
+  [[ "$out" == *"--from-home"* ]] && has_from=1 || has_from=0
+  LAST_EVID="rc=$rc to-home=$has_to from-home=$has_from доказано=$(printf '%s' "$out" | grep -c 'направление ДОКАЗАНО') :: $out"
+  rm -rf "$root"
+  if [[ $rc -ne 1 ]]; then
+    LAST_EVID="НЕ_РАСХОЖДЕНИЕ rc=$rc :: $LAST_EVID"
+    bad "23 направление частично: расхождения обязаны остаться расхождениями (1), получили $rc"; return
+  fi
+  if [[ "$out" != *'направление ДОКАЗАНО'* ]]; then
+    LAST_EVID="ДОКАЗАНО_НЕТ :: $LAST_EVID"
+    bad '23 направление частично: доказанный файл не назван свидетелем'; return
+  fi
+  if (( has_to != 1 || has_from != 1 )); then
+    LAST_EVID="ОДНО_НАПРАВЛЕНИЕ_ПРИ_ЧАСТИ to-home=$has_to from-home=$has_from :: $LAST_EVID"
+    bad '23 направление частично: недоказанный файл обязан держать оба направления'; return
+  fi
+  ok '23 направление частично: доказанный назван свидетелем, недоказанный держит оба направления'
+}
+
 # Правило открытия -- ЕДИНСТВЕННЫЙ дом tools/heredoc-anchor.py (у этой копии
 # никогда не было ни отсева стаба, ни якоря мутации); инструмент берётся из
 # НАСТОЯЩЕГО кита (REAL_KIT), а не из переназначаемого KIT. Отказ инструмента
@@ -1214,6 +1387,27 @@ elif number == 23:
 elif number == 24:
     old, new = ('        __git_ls=$(printf \'%s\\n\' "$__wit_paths" | grep -Fx "judge/$__rel") || true\n',
                 '        __git_ls="judge/$__rel"  # mutation: witness membership always tracked\n')
+elif number == 25:
+    # Доказательство направления выключается целиком: дом, равный предку
+    # канона, снова читается неразрешимым -- свидетель (sha предка) не назван.
+    old, new = ('    if [[ -e "$ROOT/.git" ]] && command -v git >/dev/null 2>&1; then\n',
+                '    if false; then  # mutation: direction proof disabled\n')
+elif number == 26:
+    # Сравнение дайджестов подменяется тождеством: первый же опрошенный предок
+    # «доказывает» направление файлу, которого в истории НЕТ, -- ложный
+    # свидетель на недоказуемом доме.
+    old, new = ('    if [[ "$__blob_d" == "$__home_d" ]]; then\n',
+                '    if true; then  # mutation: any ancestor proves direction\n')
+elif number == 27:
+    # Тихий пропуск при отсутствии истории канона превращается в жалобу: кит
+    # без .git (#269) обязан получать прежний текст, а не NOTE.
+    old, new = ('    if [[ -e "$ROOT/.git" ]] && command -v git >/dev/null 2>&1; then\n',
+                '    if true; then echo "NOTE: история канона недоступна -- доказательство пропущено" >&2  # mutation: no-git complains\n')
+elif number == 28:
+    # Частичное доказательство объявляет себя полным: один доказанный файл из
+    # двух прячет --from-home, и совет уничтожает правку в доме.
+    old, new = ('    if [[ "$__proven" -ne 0 && "$__proven" -eq "$DIFFERS" ]]; then\n',
+                '    if [[ "$__proven" -ne 0 ]]; then  # mutation: partial proof claims full\n')
 else:
     sys.stderr.write('unknown mutation %d\n' % number)
     raise SystemExit(2)
