@@ -7,3 +7,4 @@
 # означает отсутствия модуля.
 agents-md@builtin	projectInstructions	both	форма 2.1.276; дефолт claude = только CLAUDE.md (#303)
 agents-md@builtin	instructionFiles	claude-md-and-agents-md	форма 2.1.277; дефолт claude-md-or-agents-md = ЗАМЕНА (#303)
+agents-md@builtin	instructionFiles	claude-md-and-agents-md	форма 2.1.278 (ценз литералов: имя 48, значения 5/7); дефолт claude-md-or-agents-md = ЗАМЕНА (#303)

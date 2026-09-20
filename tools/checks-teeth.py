@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import glob
+import importlib.util
 import io
 import os
 import time
@@ -61,7 +62,7 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 32
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-EXPECTED_ENTRY_TEETH = 2
+EXPECTED_ENTRY_TEETH = 3
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -588,6 +589,14 @@ def _temp_kit(*, decl_text: str | None = None, script_repl=None, patch_repl=None
     runner_dst = tools / "checks-on-image.sh"
     shutil.copy2(ROOT / "tools" / "checks-on-image.sh", runner_dst)
     runner_dst.chmod(0o755)
+    # CONSTRAINT: реестр выключенных шагов ОБЯЗАН ехать в снимок кита.
+    # _step26_verdict ищет его рядом со скриптом; в ките без реестра
+    # выключенный шаг читается как включённый, его проверка даёт FAIL вместо
+    # NOTE, и контроль объявляет ОБРАЗ красным -- ложная причина (#373).
+    # Отсутствие файла в доме -- норма (все шаги включены), копия тогда не нужна.
+    steps_off_src = ROOT / "tools" / "our-steps-off.txt"
+    if steps_off_src.is_file():
+        shutil.copy2(steps_off_src, tools / "our-steps-off.txt")
     decl_path = tools / "our-patch-inapplicable.txt"
     if decl_text is None:
         src = ROOT / "tools" / "our-patch-inapplicable.txt"
@@ -816,9 +825,8 @@ def _tooth_anchor_real_278() -> str | None:
     Без якоря набор фикстур согласован сам с собой и ничего не доказывает о
     живом дереве: прибор обязан прочитать с реального образа версию и
     применить декларацию той же логикой, что и на фикстуре. Исход запинен:
-    свидетели шага 29 на 2.1.278 мертвы, декларации для 2.1.278 в доме нет
-    (#324 -- отдельная задача) -- значит FAIL/undeclared с готовой строкой;
-    обходить этот исход здесь нельзя.
+    декларация 2.1.278 внесена в дом (#324 закрыт этой волной) -- значит
+    NOTE/declared и БЕЗ готовой строки; обходить этот исход здесь нельзя.
     """
     if not PRISTINE_LATEST.is_file():
         raise Refusal(f"нет реального пристина 2.1.278: {PRISTINE_LATEST}")
@@ -827,12 +835,10 @@ def _tooth_anchor_real_278() -> str | None:
         r = _run_checks(script, PRISTINE_LATEST, patch)
         tags = _step29_tags(r.stdout or "")
         out = (r.stdout or "") + (r.stderr or "")
-        if any(tags[n] != "FAIL" for n in STEP29_BOTH):
-            return f"якорь: шаг 29 на реальном 2.1.278 не FAIL/undeclared {tags}"
-        if "объявить неприменимость:" not in out:
-            return "якорь: нет готовой строки «объявить неприменимость»"
-        if "2.1.278\t29\t" not in out:
-            return "якорь: готовая строка не для 2.1.278"
+        if any(tags[n] != "NOTE" for n in STEP29_BOTH):
+            return f"якорь: шаг 29 на реальном 2.1.278 не NOTE/declared {tags}"
+        if "объявить неприменимость:" in out:
+            return "якорь: готовая строка осталась при ОБЪЯВЛЕННОЙ декларации"
         return None
     finally:
         shutil.rmtree(td, ignore_errors=True)
@@ -1049,6 +1055,82 @@ def _tooth_real_patch_src() -> str | None:
     err = done.stderr or ""
     if "вызван неверно" in err or "в исходнике патча нет" in err:
         return "дверь отказала настоящему tweakcc-patch.js"
+    return None
+
+
+# Якорь мутации зуба kit-steps-off-src: несущие строки копирования реестра
+# выключенных шагов в _temp_kit. Мутация гасит условие -- копирование снимается.
+KIT_STEPS_OFF_ANCHOR = (
+    "    steps_off_src = ROOT / \"tools\" / \"our-steps-off.txt\"\n"
+    "    if steps_off_src.is_file():\n"
+    "        shutil.copy2(steps_off_src, tools / \"our-steps-off.txt\")\n"
+)
+KIT_STEPS_OFF_REPL = (
+    "    steps_off_src = ROOT / \"tools\" / \"our-steps-off.txt\"\n"
+    "    if False:\n"
+    "        shutil.copy2(steps_off_src, tools / \"our-steps-off.txt\")\n"
+)
+
+
+def _step26_registry_dispositioned(out: str) -> bool:
+    """Вердикт реестра our-steps-off.txt по шагу 26 есть в выводе блока.
+
+    Все три исхода записи (NOTE/stale/carrier) несут свой текст про
+    «шаг выключен»; путь БЕЗ реестра (proceed) не печатает ничего про него --
+    его проверка выходит голым тегом включённого шага (#373).
+    """
+    return "шаг выключен" in out
+
+
+def _tooth_kit_steps_off_src() -> str | None:
+    """Снимок кита несёт реестр выключенных шагов (#373). None -- зуб зелёный.
+
+    _step26_verdict ищет our-steps-off.txt рядом со скриптом; кит без реестра
+    читает выключенный шаг как включённый -- его проверка даёт FAIL вместо
+    вердикта реестра, и контроль краснит ОБРАЗ ложной причиной. Копирование
+    реестра пинится здесь: объявленный комментарием инвариант -- не инвариант.
+    """
+    src = ROOT / "tools" / "our-steps-off.txt"
+    if not src.is_file():
+        return "дома tools/our-steps-off.txt нет -- зубу нечего пинить"
+    if not PRISTINE_LATEST.is_file():
+        return f"нет пристина для семантического плеча зуба: {PRISTINE_LATEST}"
+    td, script, patch = _temp_kit()
+    try:
+        if not (td / "tools" / "our-steps-off.txt").is_file():
+            return "снимок кита не несёт tools/our-steps-off.txt"
+        r = _run_checks(script, PRISTINE_LATEST, patch)
+        out = (r.stdout or "") + (r.stderr or "")
+        if not _step26_registry_dispositioned(out):
+            return ("реестр в снимке, а вердикта реестра в выводе нет -- "
+                    "выключенный шаг читается как включённый")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    own = Path(__file__).read_text(encoding="utf-8")
+    mutated = _once_replace(own, KIT_STEPS_OFF_ANCHOR, KIT_STEPS_OFF_REPL,
+                            "зуб: копирование реестра в _temp_kit")
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-kitso.") as raw:
+        mod = Path(raw) / "checks-teeth-mutated.py"
+        mod.write_text(mutated, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("checks_teeth_mutated", mod)
+        mut = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mut)
+        # Копия модуля лежит вне дома: её ROOT/RUNNER указывают в пустоту.
+        # Возвращаем реальные: предмет мутации -- поведение _temp_kit,
+        # а не пути импорта копии.
+        mut.ROOT = ROOT
+        mut.RUNNER = RUNNER
+        mtd, mscript, mpatch = mut._temp_kit()
+        try:
+            if (mtd / "tools" / "our-steps-off.txt").is_file():
+                return "мутация не сняла копирование реестра в снимок"
+            mr = mut._run_checks(mscript, PRISTINE_LATEST, mpatch)
+            mout = (mr.stdout or "") + (mr.stderr or "")
+            if _step26_registry_dispositioned(mout):
+                return ("реестра в снимке нет, а вердикт реестра есть -- "
+                        "предикат зуба слеп")
+        finally:
+            shutil.rmtree(mtd, ignore_errors=True)
     return None
 
 
@@ -1298,6 +1380,7 @@ def main() -> int:
     entry_teeth = (
         ("wrong-patch-src", _tooth_wrong_patch_src),
         ("real-patch-src", _tooth_real_patch_src),
+        ("kit-steps-off-src", _tooth_kit_steps_off_src),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
@@ -1486,7 +1569,7 @@ def main() -> int:
             print(f"checks-teeth: ЯКОРЬ 2.1.278: ПРОШЛА МОЛЧА -- {reason}", flush=True)
         else:
             print("checks-teeth: ЯКОРЬ 2.1.278: ПОДТВЕРЖДЁН "
-                  "(шаг 29 FAIL/undeclared + готовая строка)", flush=True)
+                  "(шаг 29 NOTE/declared, готовой строки нет)", flush=True)
 
     print(summary_line(len(jobs) + measured_inapp, bad), flush=True)
     if refused:
