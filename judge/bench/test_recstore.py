@@ -29,6 +29,7 @@ def check(name, ok, detail=''):
 
 def main():
     tmp = tempfile.mkdtemp(prefix='recstore-tooth-')
+    fixtures = []
     try:
         body = {'kind': 'probe', 'n': 1}
         with open(os.path.join(tmp, 'X.json'), 'w', encoding='utf-8') as fh:
@@ -84,24 +85,99 @@ def main():
             print('отрицательный контроль НЕ сработал: наивная форма осталась зелёной')
         check('отрицательный контроль: наивная форма покраснела', naive_red)
 
-        journal = os.path.join(os.path.dirname(recstore.DEFAULT_RECORDS),
-                               'journal.jsonl')
-        if not os.path.isfile(journal):
-            check('census по живому журналу', False,
-                  f'ПРОПУЩЕНО (и это не зелено): живого журнала нет: {journal}')
-        else:
-            proc = subprocess.run(
-                [sys.executable, os.path.join(JUDGE_HOME, 'recstore.py'), '--census'],
-                capture_output=True, text=True)
-            line = (proc.stdout or '').strip().splitlines()
-            count_line = line[0] if line else ''
-            check('census по живому журналу: код 0', proc.returncode == 0,
-                  f'rc={proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r}')
-            check('census по живому журналу: строка счёта на месте',
-                  count_line.startswith('указателей '), count_line)
-            print('census: ' + count_line)
+        # CONSTRAINT: ценз идёт по СВОЕЙ фикстуре, а не по живому журналу
+        # машины. Наличие журнала -- свойство ПЛОЩАДКИ (на Linux-стороне
+        # судья не работает вовсе), и зуб, читающий его, меряет машину, а не
+        # код: на площадке без журнала он краснеет по построению и роняет
+        # гейт сборки.
+        # CONSTRAINT: дом улик подставляется через JUDGE_RECORDS_DIR, потому
+        # что main() зовёт census() БЕЗ аргумента -- лестница окружения
+        # (recstore._records_dir) есть единственный вход в фикстуру.
+        # CONSTRAINT: строка счёта сверяется ТОЧНЫМ равенством. Префикс
+        # «указателей » проходил бы при любом счёте, и зуб был бы вакуумным.
+        def census_of(fx_records):
+            return subprocess.run(
+                [sys.executable, os.path.join(JUDGE_HOME, 'recstore.py'),
+                 '--census'],
+                capture_output=True, text=True,
+                env=dict(os.environ, JUDGE_RECORDS_DIR=fx_records))
+
+        def census_fixture(pointers, files, shard=()):
+            fx = tempfile.mkdtemp(prefix='recstore-census-')
+            fixtures.append(fx)
+            recs = os.path.join(fx, 'records')
+            os.mkdir(recs)
+            for name in files:
+                path = os.path.join(recs, name)
+                if name.endswith('.gz'):
+                    with gzip.open(path, 'wt', encoding='utf-8') as fh:
+                        json.dump(body, fh)
+                else:
+                    with open(path, 'w', encoding='utf-8') as fh:
+                        json.dump(body, fh)
+            with open(os.path.join(fx, 'journal.jsonl'), 'w',
+                      encoding='utf-8') as fh:
+                for rec in pointers:
+                    fh.write(json.dumps({'rec': rec}) + '\n')
+            if shard:
+                with open(os.path.join(fx, 'journal.jsonl.shard.001'), 'w',
+                          encoding='utf-8') as fh:
+                    for rec in shard:
+                        fh.write(json.dumps({'rec': rec}) + '\n')
+            return recs
+
+        def census_lines(proc):
+            out = (proc.stdout or '').strip().splitlines()
+            return out, (out[0] if out else '')
+
+        def census_detail(proc):
+            return (f'rc={proc.returncode} stdout={proc.stdout!r} '
+                    f'stderr={proc.stderr!r}')
+
+        # Под-случай 1: всё разрешается. C.json объявлен ШАРДОМ -- без чтения
+        # шардов знаменатель стал бы 2, и это единственное место, где ветка
+        # шардов журнала попадает под замер.
+        recs = census_fixture(['A.json', 'B.json'],
+                              ['A.json', 'B.json.gz', 'C.json'],
+                              shard=['C.json'])
+        proc = census_of(recs)
+        _, count_line = census_lines(proc)
+        check('census/всё разрешается: код 0', proc.returncode == 0,
+              census_detail(proc))
+        check('census/всё разрешается: счёт дословно',
+              count_line == ('указателей 3, точным именем 2, '
+                             'суффиксом .gz 1, не разрешается 0'),
+              census_detail(proc))
+        print('census/всё разрешается: ' + count_line)
+
+        # Под-случай 2: неразрешимый указатель. Ветка обязана и посчитать
+        # его, и НАЗВАТЬ: молчаливая недостача неотличима от чистого дома.
+        recs = census_fixture(['A.json', 'MISSING.json'], ['A.json'])
+        proc = census_of(recs)
+        out, count_line = census_lines(proc)
+        check('census/недостача: код 1', proc.returncode == 1,
+              census_detail(proc))
+        check('census/недостача: счёт дословно',
+              count_line == ('указателей 2, точным именем 1, '
+                             'суффиксом .gz 0, не разрешается 1'),
+              census_detail(proc))
+        check('census/недостача: имя названо',
+              'не разрешается: MISSING.json' in out, census_detail(proc))
+
+        # Под-случай 3: пустой журнал -- отдельный код 2, а не «ноль ошибок».
+        recs = census_fixture([], [])
+        proc = census_of(recs)
+        _, count_line = census_lines(proc)
+        check('census/пустой журнал: код 2', proc.returncode == 2,
+              census_detail(proc))
+        check('census/пустой журнал: счёт дословно',
+              count_line == ('указателей 0, точным именем 0, '
+                             'суффиксом .gz 0, не разрешается 0'),
+              census_detail(proc))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        for fx in fixtures:
+            shutil.rmtree(fx, ignore_errors=True)
 
     failed = [name for name, ok in RESULTS if not ok]
     print(f'проверок: {len(RESULTS)}, провалено: {len(failed)}')

@@ -69,7 +69,7 @@ EXPECTED_SCENARIOS = 65
 # Круг 25, E-4: счётчик вырос вместе с новыми зубами -- до этой волны часть
 # сценариев не краснила ни одна мутация, и сверка покрытия ниже теперь
 # отказывает на любом новом пробеле, а не молчит.
-EXPECTED_MUTATIONS = 75
+EXPECTED_MUTATIONS = 76
 # CONSTRAINT (волна 227b): каждая итоговая строка compact.py несёт имя пробы
 # префиксом [<probe>] -- ВСЕГДА, включая одиночную пробу (урок #207: рядом с
 # числом стоит имя владельца; условный «префикс только при списке» делает разбор
@@ -3815,6 +3815,17 @@ def mutation_m75(root: Path) -> None:
     )
 
 
+def mutation_m76(root: Path) -> None:
+    # Знаменатель ценза перестаёт вбирать шарды журнала. Зуб 65 объявляет
+    # один указатель ШАРДОМ, поэтому счёт падает 3 -> 2 и краснеет только он.
+    replace_once(
+        root / "judge" / "recstore.py",
+        "    paths += sorted(glob.glob(os.path.join(parent, 'journal.jsonl.shard.*')))\n",
+        "    paths += []  # M76: шарды журнала выпадают из знаменателя\n",
+        "M76",
+    )
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M1", mutation_m1, 3, "счётчик done: ожидалось 1, получено 0"),
     ("M2", mutation_m2, 5, "dry-run healthy-neighbor: сжато=0, боевой=1"),
@@ -3895,6 +3906,7 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], int, str]] = [
     ("M73", mutation_m73, 63, "имя пробы не отвергнуто кодом 2"),
     ("M74", mutation_m74, 64, "проба form: REFUSE свёрнут по ДОМУ ФОРМЫ"),
     ("M75", mutation_m75, 65, "resolve: значение-путь сводится к basename"),
+    ("M76", mutation_m76, 65, "census/всё разрешается: счёт дословно"),
 ]
 
 # Круг 25, E-4: сценарий без своей мутации не доказывает ничего -- его можно
