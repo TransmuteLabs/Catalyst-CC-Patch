@@ -66,7 +66,7 @@ TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
 EXPECTED_MUTATIONS = 13
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
-EXPECTED_ENTRY_TEETH = 19
+EXPECTED_ENTRY_TEETH = 20
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -1431,6 +1431,49 @@ _TWO_FIELD_REGISTRY = (
 )
 _TWO_FIELD_ROW_N = 2
 
+# Реестр из одних комментариев (#403): ноль строк данных -- штатный остаток
+# обратного включения удалением строки, все три стороны обязаны считать его
+# нормой «выключенных нет».
+_COMMENT_ONLY_REGISTRY = (
+    "# fixture: обратное включение удалило строку данных\n"
+    "\n"
+    "# осталась одна шапка -- записей нет\n"
+)
+
+# Якорь нулевого исхода компоновки (#403): при нуле записей out НЕ пишется --
+# непустой tmp для обвязки означает «подстановка была».
+_ZERO_ROWS_ANCHOR = (
+    "if not names:\n"
+    "    # CONSTRAINT: ноль записей -- норма (обратное включение удаляет строку);\n"
+    "    # out НЕ пишется: пустой tmp для обвязки ниже -- сигнал «подстановки нет».\n"
+    "    print(f'Реестр выключенных шагов: {registry} не несёт ни одной '\n"
+    "          f'выключенной записи -- все шаги включены, раннеру уходит '\n"
+    "          f'файл как есть', file=sys.stderr)\n"
+    "    sys.exit(0)\n"
+)
+# М1: возврат отказа прибора на нуле записей.
+_ZERO_ROWS_EXIT2_REPL = (
+    "if not names:\n"
+    "    print(f'ОТКАЗ ПРИБОРА: реестр {registry} не пуст, а записей не найдено', file=sys.stderr)\n"
+    "    sys.exit(2)\n"
+)
+# М3: подстановка пустого списка вместо пропуска -- out пишется и обвязка
+# подставляет tmp, хотя менять было нечего.
+_ZERO_ROWS_EMPTYSUB_REPL = (
+    "if not names:\n"
+    "    open(out, 'w', encoding='utf-8').write(\n"
+    "        src.replace(ANCHOR, 'const STEPS_OFF = ' + json.dumps(names) + ';'))\n"
+    "    sys.exit(0)\n"
+)
+
+# М2: снятие проверки трёх полей в модуле steps-off-registry.js.
+_MODULE_ARITY_ANCHOR = (
+    "    if (parts.length !== 3 || parts.some((part) => !part)) {\n"
+)
+_MODULE_ARITY_REPL = (
+    "    if (false) {\n"
+)
+
 
 def _step26_registry_dispositioned(out: str) -> bool:
     """Вердикт реестра our-steps-off.txt по шагу 26 есть в выводе блока.
@@ -1580,19 +1623,37 @@ def _tooth_steps_off_floor_from_registry() -> str | None:
 
 
 def _tooth_steps_off_arity_both_sides() -> str | None:
-    """Оба парсера реестра требуют ТРИ поля, и отказы различимы (#373).
+    """Три разборщика реестра требуют ТРИ поля, и отказы различимы (#373, #403).
 
-    Один и тот же двухполевой реестр обязан отказать ОБЕИМ сторонам --
-    проверяющей (блок проверок) и компоновке (heredoc STEPSCOMP, исполняемый
-    напрямую по его якорю) -- с номером строки и именем СВОЕЙ стороны;
-    совпавшие дословно отказы неразличимы -- это находка зуба.
+    Один и тот же двухполевой реестр обязан отказать ВСЕМ ТРЁМ сторонам --
+    проверяющей (блок проверок), компоновке (heredoc STEPSCOMP, исполняемый
+    напрямую по его якорю) и модулю tools/steps-off-registry.js (его CLI) --
+    с номером строки и именем СВОЕЙ стороны; совпавшие дословно отказы
+    неразличимы -- это находка зуба.
     """
     if not PRISTINE_LATEST.is_file():
+        # CONSTRAINT: модульное плечо идёт РАНЬШЕ пристин-гейта -- оно не
+        # читает образ, и машина без пристина не имеет права пропускать его.
+        mod_src = ROOT / "tools" / "steps-off-registry.js"
+        if not mod_src.is_file():
+            return f"нет модуля реестра -- третьей стороне нечего мерить: {mod_src}"
+        td, script, patch = _temp_kit()
+        try:
+            reg = td / "tools" / "our-steps-off.txt"
+            reg.write_text(_TWO_FIELD_REGISTRY, encoding="utf-8")
+            reason, _mod_line = _module_arity_leg(mod_src, reg)
+            if reason:
+                return reason
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
         return f"нет пристина для плеча проверяющей стороны: {PRISTINE_LATEST}"
     td, script, patch = _temp_kit()
     try:
         reg = td / "tools" / "our-steps-off.txt"
         reg.write_text(_TWO_FIELD_REGISTRY, encoding="utf-8")
+        reason, mod_line = _module_arity_leg(ROOT / "tools" / "steps-off-registry.js", reg)
+        if reason:
+            return reason
         r = _run_checks(script, PRISTINE_LATEST, patch)
         combined = (r.stdout or "") + (r.stderr or "")
         if r.returncode == 0:
@@ -1633,8 +1694,186 @@ def _tooth_steps_off_arity_both_sides() -> str | None:
             return f"отказ компоновки не требует три поля: {comp_line!r}"
         if comp_line == ref_line:
             return "отказы двух сторон совпали дословно -- стороны неразличимы"
+        if mod_line in (ref_line, comp_line):
+            return "отказ модуля совпал дословно с другой стороной -- стороны неразличимы"
     finally:
         shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _module_arity_leg(mod_src: Path, reg: Path) -> tuple[str | None, str]:
+    """Сторона модуля на двухполевом реестре + её мутация М2.
+
+    Возвращает (причину или None, строку отказа модуля) -- сравнение с
+    отказами других сторон держит сам зуб: у него все три строки.
+    """
+    m = subprocess.run(["node", str(mod_src), str(reg)],
+                       capture_output=True, text=True, errors="replace")
+    mcomb = (m.stdout or "") + (m.stderr or "")
+    if m.returncode == 0:
+        return "модуль принял двухполевой реестр", ""
+    mod_line = next((l for l in mcomb.splitlines()
+                     if "неразобранная строка" in l), "")
+    if f"строка {_TWO_FIELD_ROW_N}" not in mod_line:
+        return f"отказ модуля не назвал номер строки: {mod_line!r}", mod_line
+    if "модуль" not in mod_line:
+        return f"отказ модуля не назвал свою сторону: {mod_line!r}", mod_line
+    if "три поля" not in mod_line:
+        return f"отказ модуля не требует три поля: {mod_line!r}", mod_line
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-so-mod.") as raw:
+        mut = Path(raw) / "steps-off-registry.js"
+        mut.write_text(_once_replace(mod_src.read_text(encoding="utf-8"),
+                                     _MODULE_ARITY_ANCHOR, _MODULE_ARITY_REPL,
+                                     "модуль"), encoding="utf-8")
+        mm = subprocess.run(["node", str(mut), str(reg)],
+                            capture_output=True, text=True, errors="replace")
+        if mm.returncode != 0:
+            # Мутант, всё ещё отказывающий, не ломает плечо -- зуб на нём
+            # остался бы зелёным, и проверка трёх полей не доказана.
+            return ("мутация не сняла проверку трёх полей: мутант всё ещё "
+                    "отказывает"), mod_line
+    return None, mod_line
+
+
+def _stepscomp_cut(script: Path, dst: Path) -> str | None:
+    """Вырезать heredoc STEPSCOMP из скрипта в dst; причина -- если не вышло."""
+    lines = script.read_text(encoding="utf-8").split("\n")
+    marker = 'python3 - "$OUR_PATCH" "$STEPS_OFF_SRC" "$STEPS_OFF_TMP" <<'
+    start = next((i for i, l in enumerate(lines)
+                  if l.lstrip().startswith(marker)), -1)
+    if start < 0:
+        return "блок компоновки STEPSCOMP не найден в claude-patch-all.sh"
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i] == "STEPSCOMP"), -1)
+    if end < 0:
+        return "блок компоновки STEPSCOMP не закрыт"
+    dst.write_text("\n".join(lines[start + 1:end]), encoding="utf-8")
+    return None
+
+
+def _compose_guard_run(script: Path, td: Path, patch: Path):
+    """Исполнить вырезанную обвязку компоновки (без стадии tweakcc).
+
+    Фрагмент -- от объявления STEPS_OFF_SRC до закрывающего fi: с HERE и
+    OUR_PATCH, указанными через окружение. Возвращает (rc, stdout, stderr).
+    """
+    lines = script.read_text(encoding="utf-8").split("\n")
+    start = next((i for i, l in enumerate(lines)
+                  if l.startswith('STEPS_OFF_SRC="$HERE')), -1)
+    if start < 0:
+        return None, "", "обвязка компоновки не найдена в claude-patch-all.sh"
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i] == "STEPSCOMP"), -1)
+    if end < 0:
+        return None, "", "блок компоновки STEPSCOMP не закрыт"
+    close = next((i for i in range(end + 1, len(lines))
+                  if lines[i] == "fi"), -1)
+    if close < 0:
+        return None, "", "обвязка компоновки не закрыта (нет fi)"
+    frag = "set -e;\n" + "\n".join(lines[start:close + 1]) + '\nprintf \'%s\\n\' "$OUR_PATCH_RUN"\n'
+    r = subprocess.run(["bash", "-c", frag], capture_output=True, text=True,
+                       errors="replace",
+                       env={**os.environ, "HERE": str(td), "OUR_PATCH": str(patch)})
+    return r.returncode, r.stdout or "", r.stderr or ""
+
+
+def _tooth_steps_off_zero_rows_all_sides() -> str | None:
+    """Ноль записей реестра -- норма всех ТРЁХ сторон, а не отказ (#403).
+
+    Реестр из одних комментариев -- штатный остаток обратного включения
+    удалением строки: компоновка обязана ответить кодом 0, назвав исход, и НЕ
+    писать выходной файл (раннеру уходит $OUR_PATCH -- подстановки нет);
+    проверяющая сторона и модуль дают ноль записей без отказа. Обвязка при
+    записи в реестре подстановку ВОЗВРАЩАЕТ -- guard не имеет права стать
+    вечным пропуском. Мутации: возврат sys.exit(2) на нуле (М1) и подстановка
+    пустого списка вместо пропуска (М3).
+    """
+    mod_src = ROOT / "tools" / "steps-off-registry.js"
+    if not mod_src.is_file():
+        return f"нет модуля реестра -- стороне модуля нечего мерить: {mod_src}"
+    image = default_image()
+    if image is None or not image.is_file():
+        return "нет активного образа -- проверяющей стороне нечего мерить"
+    td, script, patch = _temp_kit()
+    try:
+        reg = td / "tools" / "our-steps-off.txt"
+        reg.write_text(_COMMENT_ONLY_REGISTRY, encoding="utf-8")
+        r = _run_checks(script, image, patch)
+        combined = (r.stdout or "") + (r.stderr or "")
+        if "ОТКАЗ ПРИБОРА" in combined:
+            return "проверяющая сторона отказала на реестре из одних комментариев"
+        if _step26_registry_dispositioned(combined):
+            return ("проверяющая сторона дала вердикт реестра при нуле записей -- "
+                    "для неё реестра нет")
+        if not _parse_registry(combined):
+            return "проверяющая сторона не дошла до реестра проверок -- нечего сравнивать"
+        m = subprocess.run(["node", str(mod_src), str(reg)],
+                           capture_output=True, text=True, errors="replace")
+        mout = (m.stdout or "") + (m.stderr or "")
+        if m.returncode != 0 or "записей: 0" not in (m.stdout or ""):
+            return f"модуль не дал ноль записей без отказа: rc={m.returncode} {mout!r}"
+        reason = _zero_rows_comp_leg(td, script, patch, reg)
+        if reason:
+            return reason
+        rc, gout, gerr = _compose_guard_run(script, td, patch)
+        if rc != 0:
+            return f"обвязка компоновки упала на нуле записей: rc={rc} {gout + gerr!r}"
+        if gout.strip() != str(patch):
+            return (f"обвязка подставила tmp при нуле записей -- раннеру ушёл не "
+                    f"$OUR_PATCH: {gout.strip()!r}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    home_reg = ROOT / "tools" / "our-steps-off.txt"
+    if not re.search(r"(?m)^" + re.escape(_STEP26_ROW) + r"\t",
+                     home_reg.read_text(encoding="utf-8")):
+        return "дом реестра не несёт строку данных -- контролю подстановки нечего мерить"
+    td, script, patch = _temp_kit()
+    try:
+        rc, gout, gerr = _compose_guard_run(script, td, patch)
+        if rc != 0:
+            return f"обвязка компоновки упала на реестре с записью: rc={rc} {gout + gerr!r}"
+        if gout.strip() == str(patch):
+            return ("обвязка не подставила tmp при живой записи -- guard стал "
+                    "вечным пропуском подстановки")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    for name, repl in (("М1", _ZERO_ROWS_EXIT2_REPL), ("М3", _ZERO_ROWS_EMPTYSUB_REPL)):
+        td, script, patch = _temp_kit(
+            script_repl=(_ZERO_ROWS_ANCHOR, repl))
+        try:
+            reg = td / "tools" / "our-steps-off.txt"
+            reg.write_text(_COMMENT_ONLY_REGISTRY, encoding="utf-8")
+            reason = _zero_rows_comp_leg(td, script, patch, reg)
+            if reason is None:
+                return f"мутация {name} не покраснела стороной компоновки"
+            rc, gout, gerr = _compose_guard_run(script, td, patch)
+            if name == "М1" and rc == 0 and "ОТКАЗ ПРИБОРА" not in gout + gerr:
+                return f"мутация {name} не остановила обвязку"
+            if name == "М3" and rc == 0 and gout.strip() == str(patch):
+                return f"мутация {name} не прошла подстановку в обвязку"
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _zero_rows_comp_leg(td: Path, script: Path, patch: Path, reg: Path) -> str | None:
+    """Сторона компоновки на реестре из одних комментариев; None -- зелёное."""
+    comp_src = td / "stepscomp-zero.py"
+    reason = _stepscomp_cut(script, comp_src)
+    if reason:
+        return reason
+    out_path = td / "out-zero.js"
+    c = subprocess.run([sys.executable, str(comp_src), str(patch), str(reg),
+                        str(out_path)], capture_output=True, text=True,
+                       errors="replace")
+    combined = (c.stdout or "") + (c.stderr or "")
+    if out_path.exists():
+        return ("компоновка написала выходной файл при нуле записей -- подстановка "
+                "пустого списка вместо пропуска")
+    if c.returncode != 0:
+        return f"компоновка отказала на нуле записей: rc={c.returncode} {combined!r}"
+    if "все шаги включены" not in combined:
+        return f"компоновка не назвала исход нуля записей: {combined!r}"
     return None
 
 
@@ -2645,6 +2884,7 @@ def main() -> int:
         ("steps-off-floor-predates", _tooth_steps_off_floor_predates),
         ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
         ("steps-off-arity-both-sides", _tooth_steps_off_arity_both_sides),
+        ("steps-off-zero-rows-all-sides", _tooth_steps_off_zero_rows_all_sides),
         ("mutations-name-in-registry", _tooth_mutations_name_in_registry),
         ("declared-row-third-outcome", _tooth_declared_row_is_third_outcome),
         ("undeclared-pair-refuses", _tooth_undeclared_pair_still_refuses),

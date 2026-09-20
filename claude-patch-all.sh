@@ -6797,14 +6797,22 @@ with open(registry, encoding='utf-8') as fh:
         rows[parts[0]] = n
         names.append(parts[0])
 if not names:
-    print(f'ОТКАЗ ПРИБОРА: реестр {registry} не пуст, а записей не найдено', file=sys.stderr)
-    sys.exit(2)
+    # CONSTRAINT: ноль записей -- норма (обратное включение удаляет строку);
+    # out НЕ пишется: пустой tmp для обвязки ниже -- сигнал «подстановки нет».
+    print(f'Реестр выключенных шагов: {registry} не несёт ни одной '
+          f'выключенной записи -- все шаги включены, раннеру уходит '
+          f'файл как есть', file=sys.stderr)
+    sys.exit(0)
 open(out, 'w', encoding='utf-8').write(
     src.replace(ANCHOR, 'const STEPS_OFF = ' + json.dumps(names) + ';'))
 print(f'Реестр выключенных шагов: подставлено записей {len(names)} в раннер',
       file=sys.stderr)
 STEPSCOMP
-  OUR_PATCH_RUN="$STEPS_OFF_TMP"
+  # CONSTRAINT: подставляется только НАПИСАННЫЙ компоновкой tmp (при нуле
+  # записей out не пишется) -- раннеру уходит $OUR_PATCH с нетронутым якорем.
+  if [[ -s "$STEPS_OFF_TMP" ]]; then
+    OUR_PATCH_RUN="$STEPS_OFF_TMP"
+  fi
 fi
 "${TWEAKCC[@]}" adhoc-patch \
   --script "@$OUR_PATCH_RUN" \

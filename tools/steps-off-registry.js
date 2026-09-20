@@ -60,4 +60,17 @@ function readStepsOff(stepsPath) {
   return off;
 }
 
+// CLI-вход для приборов (зубы checks-teeth): печать и код возврата живут
+// здесь, семантика разбора -- только в readStepsOff выше.
+if (require.main === module) {
+  const stepsPath = process.argv[2] ?? null;
+  try {
+    const off = readStepsOff(stepsPath);
+    console.log(`записей: ${off.size}`);
+  } catch (error) {
+    console.error(`модуль steps-off-registry: ${error.message}`);
+    process.exitCode = 2;
+  }
+}
+
 module.exports = { readStepsOff, versionTuple, tupleLeq };
