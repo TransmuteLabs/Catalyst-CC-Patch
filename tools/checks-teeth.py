@@ -34,10 +34,15 @@ tweakcc восстанавливает свой бэкап поверх назв
   6  сломано окружение либо машинерия замка: нет bash, нет
      tools/checks-on-image.sh, замок не открыть или flock не работает --
      повтор НЕ поможет
-  9  проход СОСТОЯЛСЯ и измерил строки, но часть строк не построена (отказ
-     строителя/зуба -- третий исход строки). Это НЕ 2: код 2 свип читает как
-     «этап не измеряли», и проход, измеривший строки, не имеет права
-     читаться как «не мерили»; выставляется ПОСЛЕ измерения всех строк.
+  9  отказ ПРИБОРА -- сломан предмет или строитель, а не проверяемый код.
+     Производителей у девятки больше, чем потребитель способен перечислить
+     (отказ строки, отказ строителя фикстуры, пустая причина зуба фазы), и
+     сам код НЕ говорит, измерялись ли строки: отказ фазы фикстуры прохода
+     не останавливает (ранний выход в main стоит только на коде 4). Факт
+     измерения строк читается ПРЕДИКАТОМ -- наличием строки
+     «checks-teeth: ИТОГ мутаций=» на stdout, -- и никогда из того, кто дал
+     девятку. Это НЕ 2: код 2 свип читает как «этап не измеряли», а
+     сломанный предмет не имеет права читаться как «не мерили».
      НЕ 7: 7 занят апстрим-смыслом «не краснить, ждать» с противоположным
      действием -- канон таблицы в шапке claude-patch-all.sh
 """
@@ -77,13 +82,40 @@ EXPECTED_MUTATIONS = 13
 # шагов конвейера; #408) - 3 зуба, ушедшие в фазу фикстуры (#407: предмет
 # СТРОИТСЯ, а не предполагается), + 2 зуба границы свёртки выходов фаз
 # (docnum:other -- #407 и Р6 есть номер задачи и решение её брифа, не счёт
-# зубов).
-EXPECTED_ENTRY_TEETH = 34
+# зубов). Фикс-волна #407: + 2 = 36 -- зуб приоритета дефекта фикстуры над
+# ранними «НЕ ИЗМЕРЕНО» (Р1) и зуб строки фазы при раннем отказе строк (Р9)
+# (docnum:other -- Р1 и Р9 есть номера пунктов брифа fix-волны, не счёты
+# стенда).
+# Фикс-волна #407 раунд 2: + 1 = 37 -- зуб перечня ROOT-производных констант
+# копии прибора (docnum:other -- Ф2 есть номер пункта брифа fix-волны 2, не
+# счётчик стенда).
+# Фикс-волна #407 раунд 2: + 1 = 38 -- зуб сохранения напечатанной находки
+# при смерти воркера (docnum:other -- Ф1 есть номер пункта брифа fix-волны 2,
+# не счётчик стенда).
+# Фикс-волна #407 раунд 2: + 1 = 39 -- зуб строки «ФАЗА НЕ ЗАПУСКАЛАСЬ» у
+# ранних пропусков (docnum:other -- Ф6 есть номер пункта брифа fix-волны 2,
+# не счётчик стенда).
+# Фикс-волна #407 раунд 3: + 1 = 40 -- зуб итога фазы на пути пина набора
+# фикстур (docnum:other -- Х5 есть номер пункта брифа fix-волны 3, не
+# счётчик стенда); + 1 = 41 -- зуб покрытия реестра прополки каждым mkdtemp
+# (docnum:other -- Х6 есть номер пункта того же брифа, не счётчик стенда).
+EXPECTED_ENTRY_TEETH = 41
 # Зубы фазы фикстуры шага 26 (#407): идут ПОСЛЕ замка конвейера, предмет --
 # ПОСТРОЕННЫЙ образ «2.1.278 + шаг 26». 4 = 3 переведённых со входа (Р4)
 # + 1 зуб положительного контроля фикстуры (гейт #407); docnum:other --
 # Р4 и гейт #407 есть решения брифа задачи, не счётчики стенда.
-EXPECTED_FIXTURE_TEETH = 4
+# Фикс-волна #407: + 7 = 11 -- уборка фазы в finally (Р2), прополка каталога
+# фикстуры (Р2), ручка FORK одним домом (Р10), оба исхода строителя (Р6),
+# причина Refusal зуба в итоге (Р8), пустая причина как отказ прибора (Р12)
+# (docnum:other -- Р2/Р6/Р8/Р10/Р12 есть номера пунктов брифа fix-волны,
+# не счётчики стенда).
+# Фикс-волна #407 раунд 2: + 1 = 12 -- прополка каталога фикстуры требует
+# возраст И мёртвого владельца (docnum:other -- Ф4 есть номер пункта брифа
+# fix-волны 2, не счётчик стенда).
+# Фикс-волна #407 раунд 3: + 1 = 13 -- переиспользованный pid не держит
+# каталог вечно (docnum:other -- Х7 есть номер пункта брифа fix-волны 3, не
+# счётчик стенда).
+EXPECTED_FIXTURE_TEETH = 13
 # Зубы третьего исхода шага 29 (docnum:other -- номер шага патча, не счёт стенда).
 # Это мутации скрипта, декларации и патча, а не образа.
 # EXPECTED_MUTATIONS держит только kind literal/derived, иначе живой счёт
@@ -432,9 +464,10 @@ def edits_v4(base: bytes) -> list[tuple[int, bytes]]:
     """Опт-ин исключения верха линейки сломан в НАШЕЙ форме -- и только в ней.
 
     Литеральный зуб здесь невозможен: `()===void 0&&` встречается в собранном
-    образе 12 раз при потолке прибора 8, и байтовая мутация выбила бы 11
-    чужих сайтов вместе с нашим -- покраснело бы лишнее, а причина покраснения
-    стала бы неназываемой. Поэтому мутация идёт ТОЙ ЖЕ цепочкой, что и сама
+    образе 2.1.278 13 раз при потолке прибора 8, и байтовая мутация выбила бы
+    12 чужих сайтов вместе с нашим -- покраснело бы лишнее, а причина
+    покраснения стала бы неназываемой. Счёт версионно-зависим: при переезде
+    версии пересчитывать по активному образу. Поэтому мутация идёт ТОЙ ЖЕ цепочкой, что и сама
     проверка в claude-patch-all.sh (читатель-понижатель по поведению ->
     опт-ин форма исключения с <A> из читателя), и правит один байт внутри
     найденной формы. Сравнение `===void 0` становится всегда-ложным:
@@ -1276,6 +1309,66 @@ def hold_read_lock() -> "io.BufferedWriter | None":
 
 
 WORKER_TMP_HELD_SECONDS = 6 * 3600
+# CONSTRAINT (Ф4 fix-волны #407): файл владельца в каталоге фикстуры несёт pid
+# создателя; удаление каталога требует ОБА условия -- возраст И мёртвый
+# владелец. Возраст остаётся вторым условием именно из-за переиспользования
+# pid: живой номер не значит живого создателя.
+_FIXTURE_OWNER_NAME = ".owner.pid"
+# CONSTRAINT (Х6 fix-волны #407, раунд 3): реестр префиксов прополки ОДИН и
+# стоит рядом с ней. Прежде прополка знала ДВА имени из восьми живых, и всякий
+# новый mkdtemp молча оставался без владельца уборки (намерено во временном
+# доме: 84 каталога одного префикса, 23 другого, 11 третьего). Свой finally у
+# потребителя реестр НЕ отменяет: прополка -- сетка для ОБОРВАННЫХ прогонов
+# (SIGKILL/OOM/обрыв терминала), где finally не исполняется вовсе.
+_WEED_DIR_PREFIXES = (
+    "checks-teeth-inapp.",
+    "checks-teeth-fixture407.",
+    "checks-teeth-fxmut.",
+    "checks-teeth-fxbuild.",
+    "checks-teeth-fx2a.",
+    "checks-teeth-z6.",
+    "checks-teeth-crun.",
+    "checks-teeth-phases408.",
+)
+
+
+def _proc_start_stamp(pid: int) -> str | None:
+    """Метка старта процесса (на маке и Linux -- `ps -p <pid> -o lstart=`).
+
+    CONSTRAINT (Х7 fix-волны #407, раунд 3): pid переиспользуется, и голый
+    os.kill(pid, 0) на ЧУЖОМ живом номере объявляет владельца живым навсегда --
+    каталог не убирается НИКОГДА (воспроизведено на pid 1). Метка старта
+    отличает тот же НОМЕР от того же ПРОЦЕССА. Метка недоступна -- предикат
+    падает на прежнюю пару «возраст И живой номер»; второго порога возраста не
+    вводим: он был бы догадкой вместо признака.
+    """
+    try:
+        done = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="],
+                              capture_output=True, text=True, errors="replace")
+    except OSError:
+        return None
+    if done.returncode != 0:
+        return None
+    return (done.stdout or "").strip() or None
+
+
+def _owner_file_text(pid: int) -> str:
+    """Тело файла владельца: pid и метка старта его процесса (Х7)."""
+    return "%d\n%s\n" % (pid, _proc_start_stamp(pid) or "")
+
+
+@contextlib.contextmanager
+def _weed_env_tmpdir(root: Path):
+    """TMPDIR на временный дом прополки: glob читает os.environ["TMPDIR"]."""
+    saved = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"] = str(root)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = saved
 
 
 def weed_worker_leftovers() -> int:
@@ -1318,6 +1411,57 @@ def weed_worker_leftovers() -> int:
         except FileNotFoundError:
             continue
         removed += 1
+    # CONSTRAINT (Р2/Ф4 fix-волны #407): каталог фикстуры носит файл владельца
+    # с pid создателя; удаление требует ОБА условия -- возраст больше порога И
+    # мёртвый владелец. Каталог БЕЗ файла владельца -- остаток прежней формы:
+    # удаляется по возрасту, как и до владельцев. Возраст остаётся вторым
+    # условием из-за переиспользования pid: живой номер не значит живого
+    # создателя. Х6: условия одни и те же для ВСЕХ префиксов реестра.
+    for prefix in _WEED_DIR_PREFIXES:
+        for dpath in glob.glob(os.path.join(tmp, prefix + "*")):
+            try:
+                dstat = os.stat(dpath)
+            except FileNotFoundError:
+                continue
+            if (time.time() - dstat.st_mtime) < WORKER_TMP_HELD_SECONDS:
+                continue
+            pid = None
+            want = ""
+            try:
+                with open(os.path.join(dpath, _FIXTURE_OWNER_NAME), "rb") as fh:
+                    raw = fh.read(256).decode("utf-8", "replace").splitlines()
+                pid = int(raw[0].strip())
+                want = raw[1].strip() if len(raw) > 1 else ""
+            except (OSError, ValueError, IndexError):
+                pid = None
+            if pid is not None:
+                alive = True
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    alive = False
+                except (PermissionError, OverflowError, ValueError):
+                    alive = True
+                # CONSTRAINT (Х7): тот же НОМЕР -- не тот же процесс. Метка
+                # старта не совпала -- номер переиспользован, владелец мёртв.
+                if alive and want:
+                    got = _proc_start_stamp(pid)
+                    if got is not None and got != want:
+                        alive = False
+                if alive:
+                    continue
+            try:
+                dafter = os.stat(dpath)
+            except FileNotFoundError:
+                continue
+            if ((dafter.st_ino, dafter.st_mtime_ns)
+                    != (dstat.st_ino, dstat.st_mtime_ns)):
+                continue           # подменён между замером и снятием -- не наш
+            try:
+                shutil.rmtree(dpath)
+            except FileNotFoundError:
+                continue
+            removed += 1
     return removed
 
 
@@ -1466,15 +1610,21 @@ def _phase_skipped(code: int, why: str, entry_bad: int) -> int:
     """
     print(f"checks-teeth: {why}", file=sys.stderr)
     print(_unmeasured_line(why), flush=True)
-    # CONSTRAINT (#407): итог фазы фикстуры печатается ВСЕГДА -- фаза стоит
-    # ниже этих точек и не может исполниться, если проход ушёл здесь.
-    print(_fixture_unmeasured_line(why), flush=True)
+    # CONSTRAINT (Ф6 fix-волны #407): «ФАЗА НЕ ЗАПУСКАЛАСЬ», а не «НЕ
+    # ИЗМЕРЕНО»: здесь проход ушёл ДО фазы фикстуры, а «не измерено» --
+    # исход САМОЙ фазы, которая запускалась и не смогла; одна строка на оба
+    # делала «фазы не было» неотличимым от «фаза сломалась».
+    print(_fixture_not_started_line(why), flush=True)
     return _phase_exit(code, entry_bad)
 
 
-def _phase_exit(code: int, entry_bad: int) -> int:
+def _phase_exit(code: int, entry_bad: int, fx_code: int = 0) -> int:
     """Код точки выхода ПОСЛЕ итога входа: свёртка с объявленной границей (#407).
 
+    ЕДИНСТВЕННЫЙ дом приоритета исходов (Р1 fix-волны #407): код 4 (расхождение
+    набора с пином) доминирует; дальше найденный дефект (1) > отказ прибора (9)
+    > «НЕ ИЗМЕРЕНО» фазы фикстуры (2) > прочий код точки. fx_code -- вердикт
+    фазы фикстуры (0/1/2/4/9); пути ДО её запуска зовут функцию с умолчанием.
     CONSTRAINT (Р6 #407): коды «НЕ ИЗМЕРЕНО» (2, 3, 5, 6) при красном входе
     отдаются как 1 -- найденный дефект входа не имеет права уехать под код
     «не мерили» (тот же класс подмены, что чинила #408). CONSTRAINT: код 4
@@ -1482,10 +1632,21 @@ def _phase_exit(code: int, entry_bad: int) -> int:
     (недоверенная опись обесценивает счёты) и доминирует над красным входом;
     асимметрия объявлена ЗДЕСЬ, а не побочным голым выходом. Причину точки
     печатает вызывающий ПРЕЖНИМ текстом в обоих случаях.
+    CONSTRAINT (Ф12 fix-волны #407): дом покрывает пути, У КОТОРЫХ ЕСТЬ исход
+    фазы; три возврата main() мимо него -- --self-check (другой режим), --jobs
+    меньше 1 и расхождение пина зубов входа (уходят до вычисления entry_bad и
+    любых исходов фаз -- сворачивать нечего) -- решение контроллера, не
+    упущение.
     """
-    if code == 4:
+    if code == 4 or fx_code == 4:
         return 4
-    return 1 if entry_bad else code
+    if entry_bad or code == 1 or fx_code == 1:
+        return 1
+    if code == 9 or fx_code == 9:
+        return 9
+    if fx_code == 2:
+        return 2
+    return code
 
 
 def run_one(args) -> tuple[str, str, list[str], list[str]]:
@@ -1576,9 +1737,21 @@ _STEP26_ROW = "26 dispatch-cancellation rule in the system prompt"
 # 2.1.278 с конвейерной нейтрализацией и ПРИМЕНЁННЫМ шагом 26 -- строится
 # общим домом рецепта tools/fixture-build.sh (механизм K1 разбора #407).
 FIXTURE_BUILDER = ROOT / "tools" / "fixture-build.sh"
-FIXTURE_FORK = (Path.home() / "work" / "SIB" / "Transmutation" / "Nexus" /
-                "Catalyst" / "Catalyst-tweakcc" / "dist" / "index.mjs")
 _FIXTURE_STATE: dict[str, object] = {}
+
+
+def _fixture_fork_path() -> Path:
+    """Ручка форка -- ОДИН дом со строителем: fixture-build.sh читает ${FORK:-…}.
+
+    CONSTRAINT (Р10 fix-волны #407): предпроверка наличия форка обязана
+    смотреть туда же, куда пойдёт строитель, -- иначе заданный FORK доложен
+    бы «нет форка», не попробовав настроенный.
+    """
+    env = os.environ.get("FORK")
+    if env:
+        return Path(env)
+    return (Path.home() / "work" / "SIB" / "Transmutation" / "Nexus" /
+            "Catalyst" / "Catalyst-tweakcc" / "dist" / "index.mjs")
 
 
 def _fixture_unmeasured_line(reason: str) -> str:
@@ -1590,19 +1763,53 @@ def _fixture_unmeasured_line(reason: str) -> str:
     return f"checks-teeth: ИТОГ фикстур=НЕ ИЗМЕРЕНО -- {reason}"
 
 
+def _fixture_refusal_line(reason: str) -> str:
+    """Итог фазы фикстуры, сломавшейся прибором (Р6 fix-волны #407).
+
+    CONSTRAINT: отказ прибора -- отдельный исход, не сворачиваемый в
+    неизмеренность: сломанный предмет и площадка без предмета обязаны быть
+    различимы текстом итоговой строки.
+    """
+    return f"checks-teeth: ИТОГ фикстур=ОТКАЗ ПРИБОРА -- {reason}"
+
+
+def _fixture_not_started_line(reason: str) -> str:
+    """Итог фазы фикстуры, которая не запускалась (Р9 fix-волны #407).
+
+    CONSTRAINT: молчание фазы читалось бы как её зелёный ноль (класс #396) --
+    строка обязана присутствовать на КАЖДОМ пути main(), уходящем до фазы,
+    и называть причину.
+    """
+    return f"checks-teeth: ИТОГ фикстур=ФАЗА НЕ ЗАПУСКАЛАСЬ -- {reason}"
+
+
 def _fixture_missing_tool() -> str | None:
     """Инструментарий фазы до его запуска: отсутствие -- НЕ ИЗМЕРЕНО, не отказ."""
     if not FIXTURE_BUILDER.is_file():
         return f"нет общего дома рецепта: {FIXTURE_BUILDER}"
     if shutil.which("node") is None:
         return "нет node для сборки фикстуры"
-    if not FIXTURE_FORK.is_file():
-        return f"нет форка для сборки фикстуры: {FIXTURE_FORK}"
+    if not _fixture_fork_path().is_file():
+        return f"нет форка для сборки фикстуры: {_fixture_fork_path()}"
     if not PRISTINE_LATEST.is_file():
         return f"нет пристина для базы фикстуры: {PRISTINE_LATEST}"
     if not (ROOT / "tweakcc-patch.js").is_file():
         return f"нет патча для фикстуры: {ROOT / 'tweakcc-patch.js'}"
     return None
+
+
+def _builder_outcome(stage: str, r: subprocess.CompletedProcess) -> tuple[Path | None, str | None]:
+    """Исход строителя по его коду (Р6 fix-волны #407).
+
+    Код 3 -- «инструментария/предмета нет»: (None, причина) -- фаза уходит в
+    НЕ ИЗМЕРЕНО с причиной строителя. Любой иной ненулевой -- Refusal:
+    сломанный предмет не имеет права читаться как неизмеренность площадки.
+    """
+    tail = ((r.stderr or "") + (r.stdout or ""))[-400:]
+    if r.returncode == 3:
+        return None, f"нет инструментария/предмета ({stage}, rc=3): {tail}"
+    raise Refusal(f"строитель фикстуры отказал на {stage} "
+                  f"(rc={r.returncode}): {tail}")
 
 
 def _step26_fixture() -> tuple[Path | None, str | None]:
@@ -1620,6 +1827,11 @@ def _step26_fixture() -> tuple[Path | None, str | None]:
     if miss is not None:
         return None, miss
     td = Path(tempfile.mkdtemp(prefix="checks-teeth-fixture407."))
+    # CONSTRAINT (Ф4 fix-волны #407 + Х7 раунда 3): файл владельца несёт pid
+    # создателя И метку старта его процесса -- прополка удаляет каталог при
+    # возрасте И мёртвом владельце, а переиспользованный номер мёртв.
+    (td / _FIXTURE_OWNER_NAME).write_text(
+        _owner_file_text(os.getpid()), encoding="utf-8")
     subject = td / "subject"
     fixture = td / "fixture"
     _FIXTURE_STATE["dir"] = td
@@ -1627,15 +1839,13 @@ def _step26_fixture() -> tuple[Path | None, str | None]:
         ["bash", str(FIXTURE_BUILDER), "neutralize", str(PRISTINE_LATEST),
          str(subject)], capture_output=True, text=True, errors="replace")
     if r1.returncode != 0:
-        return None, ("нейтрализация не построена (rc=%d): %s" % (
-            r1.returncode, (r1.stderr or r1.stdout or "")[-400:]))
+        return _builder_outcome("нейтрализация", r1)
     r2 = subprocess.run(
         ["bash", str(FIXTURE_BUILDER), "apply", str(ROOT / "tweakcc-patch.js"),
          str(subject), str(fixture)],
         capture_output=True, text=True, errors="replace")
     if r2.returncode != 0:
-        return None, ("шаг 26 не применён к фикстуре (rc=%d): %s" % (
-            r2.returncode, (r2.stderr or r2.stdout or "")[-400:]))
+        return _builder_outcome("применение шага 26", r2)
     _FIXTURE_STATE["path"] = fixture
     return fixture, None
 
@@ -1680,57 +1890,199 @@ def _fixture_phase(entry_bad: int) -> int:
     CONSTRAINT (Р5 #407): фаза стоит ПОСЛЕ взятия замка конвейера -- она
     строит и читает образ, а контрактом входной фазы («не зависеть от образа
     и не занимать замок») это запрещено. Итог печатается ВСЕГДА, включая
-    «НЕ ИЗМЕРЕНО -- причина». Возврат: 1 -- найденный дефект; 4 -- разошёлся
-    пин набора (объявленная граница Р6: доминирует); 2 -- НЕ ИЗМЕРЕНО;
-    0 -- измерено и зелено.
+    «НЕ ИЗМЕРЕНО -- причина» и «ОТКАЗ ПРИБОРА -- причина» строителя.
+    Возврат: 1 -- найденный дефект; 4 -- разошёлся пин набора (объявленная
+    граница Р6: доминирует); 9 -- отказ прибора (строитель либо пустая
+    причина зуба); 2 -- НЕ ИЗМЕРЕНО; 0 -- измерено и зелено.
     """
-    fixture_teeth = (
-        ("steps-off-floor-predates", _tooth_steps_off_floor_predates),
-        ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
-        ("carrier-absent-texts-distinct", _tooth_carrier_absent_texts_distinct),
-        ("fixture-control-is-load-bearing", _tooth_fixture_control_is_load_bearing),
-    )
-    if len(fixture_teeth) != EXPECTED_FIXTURE_TEETH:
-        print(f"checks-teeth: ОТКАЗ -- зубов фикстуры {len(fixture_teeth)}, "
+    if len(_FIXTURE_TEETH) != EXPECTED_FIXTURE_TEETH:
+        print(f"checks-teeth: ОТКАЗ -- зубов фикстуры {len(_FIXTURE_TEETH)}, "
               f"объявлено {EXPECTED_FIXTURE_TEETH}", file=sys.stderr)
+        # CONSTRAINT (Х5 fix-волны #407, раунд 3): итог фазы печатается и
+        # здесь. Без него на stdout не остаётся НИ ОДНОЙ строки
+        # «ИТОГ фикстур=», и потребитель, грепающий итог фазы, читает
+        # молчание как её зелёный ноль (класс #396). Соседний путь -- пин
+        # зубов входа -- печатает её с раунда 2; асимметрия и была дефектом.
+        print(_fixture_not_started_line(
+            f"зубов фикстуры {len(_FIXTURE_TEETH)}, объявлено "
+            f"{EXPECTED_FIXTURE_TEETH}"), flush=True)
         return 4
-    fixture, why = _step26_fixture()
-    ctrl = None
-    if fixture is not None:
-        try:
-            ctrl = _step26_fixture_control(fixture)
-        except Refusal as exc:
-            ctrl = str(exc)
-        if ctrl is not None:
-            why = f"положительный контроль фикстуры: {ctrl}"
     bad = 0
     unmeasured = 0
-    for name, fn in fixture_teeth:
-        if fixture is None or ctrl is not None:
-            unmeasured += 1
-            print(f"checks-teeth: ФИКСТУРА {name}: НЕ ИЗМЕРЕНО -- {why}",
-                  flush=True)
-            continue
+    refusals = 0
+    try:
         try:
-            reason = fn(fixture)
+            fixture, why = _step26_fixture()
         except Refusal as exc:
-            unmeasured += 1
-            print(f"checks-teeth: ФИКСТУРА {name}: НЕ ИЗМЕРЕНО -- {exc}",
+            # CONSTRAINT (Р6 fix-волны #407): отказ строителя -- ОТКАЗ ПРИБОРА,
+            # отдельный исход, не сворачиваемый в неизмеренность: сломанный
+            # предмет и площадка без предмета неразличимы одним текстом.
+            print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr,
                   flush=True)
-            continue
-        if reason:
+            print(_fixture_refusal_line(str(exc)), flush=True)
+            return _phase_exit(0, entry_bad, 9)
+        ctrl = None
+        if fixture is not None:
+            try:
+                ctrl = _step26_fixture_control(fixture)
+            except Refusal as exc:
+                ctrl = str(exc)
+            if ctrl is not None:
+                why = f"положительный контроль фикстуры: {ctrl}"
+        for name, fn in _FIXTURE_TEETH:
+            if fixture is None or ctrl is not None:
+                unmeasured += 1
+                print(f"checks-teeth: ФИКСТУРА {name}: НЕ ИЗМЕРЕНО -- {why}",
+                      flush=True)
+                continue
+            try:
+                reason = fn(fixture)
+            except Refusal as exc:
+                unmeasured += 1
+                # CONSTRAINT (Р8 fix-волны #407): причина первого отказа зуба
+                # доживает до итоговой строки -- «-- None» в итоге читался бы
+                # как «причины нет».
+                if why is None:
+                    why = str(exc)
+                print(f"checks-teeth: ФИКСТУРА {name}: НЕ ИЗМЕРЕНО -- {exc}",
+                      flush=True)
+                continue
+            if reason is None:
+                print(f"checks-teeth: ФИКСТУРА {name}: OK", flush=True)
+                continue
+            if reason == "":
+                # CONSTRAINT (Р12 fix-волны #407): пустая причина -- отказ
+                # прибора, отдельный исход от «ПРОШЛА МОЛЧА»: проверка «if
+                # reason» пускала такой зуб в OK.
+                refusals += 1
+                print(f"checks-teeth: ФИКСТУРА {name}: ОТКАЗ ПРИБОРА -- "
+                      f"зуб вернул пустую причину", flush=True)
+                continue
             bad += 1
             print(f"checks-teeth: ФИКСТУРА {name}: ПРОШЛА МОЛЧА -- {reason}",
                   flush=True)
-        else:
-            print(f"checks-teeth: ФИКСТУРА {name}: OK", flush=True)
-    _fixture_cleanup()
-    if unmeasured and not bad:
+    finally:
+        # CONSTRAINT (Р2 fix-волны #407): уборка в finally -- исключение фазы
+        # (OSError/RuntimeError/KeyboardInterrupt) не имеет права уносить
+        # каталог копии образа; finally не глушит исключение.
+        _fixture_cleanup()
+    if bad:
+        print(f"checks-teeth: ИТОГ фикстур={len(_FIXTURE_TEETH)} "
+              f"молча/неверно={bad} не измерено={unmeasured}", flush=True)
+        return _phase_exit(1, entry_bad)
+    if refusals:
+        print(_fixture_refusal_line("зуб фазы вернул пустую причину"), flush=True)
+        return _phase_exit(0, entry_bad, 9)
+    if unmeasured:
         print(_fixture_unmeasured_line(why), flush=True)
-        return _phase_exit(2, entry_bad)
-    print(f"checks-teeth: ИТОГ фикстур={len(fixture_teeth)} "
+        return _phase_exit(0, entry_bad, 2)
+    print(f"checks-teeth: ИТОГ фикстур={len(_FIXTURE_TEETH)} "
           f"молча/неверно={bad} не измерено={unmeasured}", flush=True)
-    return 1 if bad else 0
+    return _phase_exit(0, entry_bad)
+
+
+# CONSTRAINT (Ф2 fix-волны #407): перечень ROOT-производных модульных констант
+# -- ЕДИНСТВЕННЫЙ дом перепривязки копий прибора; копия лежит вне дома кита,
+# и неперепривязанная константа указывает в каталог копии -- зуб, читающий
+# её, зеленеет по чужой причине (измерено на FIXTURE_BUILDER в зубе FORK).
+# Новая ROOT-производная обязана попасть сюда и в зуб перечня
+# (_tooth_mutant_rebinds_root_derived), иначе она уедет молча.
+_ROOT_DERIVED = ("TABLE", "RUNNER", "FIXTURE_BUILDER",
+                 "_STEP_CHECKS_TOOL", "_STEP_CHECKS_MAP", "_CORPUS_TOOL")
+
+
+def _rebind_copy_home(mod) -> None:
+    """Вернуть копии прибора ROOT и все ROOT-производные константы дома."""
+    mod.ROOT = ROOT
+    for name in _ROOT_DERIVED:
+        setattr(mod, name, globals()[name])
+
+
+def _fx_mutant(pairs: tuple[tuple[str, str, str], ...]):
+    """Копия прибора с названными заменами текста; константы возвращены дому.
+
+    Возвращает (модуль, каталог копии); каталог убирает вызывающий. Якоря
+    замен собираются конкатенацией в зубах -- цельный литерал якоря в теле
+    зуба дал бы второе вхождение, и замена отказала бы на самом зубе.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    for old, new, what in pairs:
+        src = _once_replace(src, old, new, what)
+    raw = Path(tempfile.mkdtemp(prefix="checks-teeth-fxmut."))
+    mod = raw / "checks-teeth-mutated.py"
+    mod.write_text(src, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("checks_teeth_fx_mutant", mod)
+    mut = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mut)
+    _rebind_copy_home(mut)
+    return mut, raw
+
+
+def _fixture_recursion_probe(mod) -> tuple[int, str]:
+    """Рекурсивный прогон фазы модуля на пристине; (код, перехваченный вывод)."""
+    saved = dict(mod._FIXTURE_STATE)
+    mod._FIXTURE_STATE.clear()
+    mod._FIXTURE_STATE["path"] = PRISTINE_LATEST
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            code = mod._fixture_phase(0)
+        return code, buf.getvalue()
+    finally:
+        mod._FIXTURE_STATE.clear()
+        mod._FIXTURE_STATE.update(saved)
+
+
+class _ModuleHome:
+    """Доступ к глобалям СВОЕГО или чужого модуля одной формой.
+
+    Зубам, гоняющим и живой прибор, и его копию, нужен одинаковый доступ к
+    FIXTURE_BUILDER/_FIXTURE_STATE; sys.modules[__name__] ломается при
+    загрузке прибора importlib-ом без регистрации в sys.modules.
+    """
+
+    def __init__(self, mod=None):
+        object.__setattr__(self, "_mod", mod)
+
+    def __getattr__(self, name):
+        mod = object.__getattribute__(self, "_mod")
+        if mod is None:
+            return globals()[name]
+        return getattr(mod, name)
+
+    def __setattr__(self, name, value):
+        mod = object.__getattribute__(self, "_mod")
+        if mod is None:
+            globals()[name] = value
+        else:
+            setattr(mod, name, value)
+
+
+def _fixture_recursion_verdict(code: int, out: str) -> str | None:
+    """Вердикт по рекурсивной неизмеренной фазе; None -- исход честный."""
+    if "ПРОШЛА МОЛЧА" in out:
+        return f"фаза с образом без правила измерила зубы: rc={code}: {out!r}"
+    # CONSTRAINT (Р3 fix-волны #407): рекурсия зовётся с entry_bad=0 --
+    # объявленный код неизмеренной фазы есть 2; иное = красный зуб с печатью
+    # полученного кода.
+    if code != 2:
+        return f"код неизмеренной фазы {code}, ждали 2: {out!r}"
+    for name, _fn in _FIXTURE_TEETH:
+        if f"ФИКСТУРА {name}: НЕ ИЗМЕРЕНО" not in out:
+            return f"зуб {name} не назван в исходе НЕ ИЗМЕРЕНО: {out!r}"
+    n_unmeasured = sum(1 for l in out.splitlines()
+                       if l.startswith("checks-teeth: ФИКСТУРА ")
+                       and ": НЕ ИЗМЕРЕНО -- " in l)
+    if n_unmeasured != len(_FIXTURE_TEETH):
+        return (f"строк НЕ ИЗМЕРЕНО {n_unmeasured}, ждали РОВНО "
+                f"{len(_FIXTURE_TEETH)} (= EXPECTED_FIXTURE_TEETH): {out!r}")
+    n_ok = sum(1 for l in out.splitlines()
+               if l.startswith("checks-teeth: ФИКСТУРА ") and l.endswith(": OK"))
+    if n_ok:
+        return f"в неизмеренной фазе есть зелёные строки зубов ({n_ok}): {out!r}"
+    if "положительный контроль фикстуры" not in out:
+        return f"причина НЕ ИЗМЕРЕНО не названа: {out!r}"
+    return None
 
 
 def _tooth_fixture_control_is_load_bearing(_fixture: Path) -> str | None:
@@ -1742,6 +2094,9 @@ def _tooth_fixture_control_is_load_bearing(_fixture: Path) -> str | None:
     с такой «сборкой» -- не мерить. Предмет фикстуры самому зубу не нужен:
     он мерит контроль, а не правило. Рекурсии нет: зуб фазы вызывается
     только после прошедшего контроля, а здесь контроль падает ДО зубов.
+    Зуб пинит и КОД рекурсивной фазы, и ПОЛНОТУ множества исходов, и
+    перечень имён из _FIXTURE_TEETH (Р3 fix-волны #407) -- проверка вхождения
+    четырёх строк пропускала лишний OK и подмену кода молча.
     """
     if not PRISTINE_LATEST.is_file():
         return f"нет пристина для плеча контроля: {PRISTINE_LATEST}"
@@ -1751,25 +2106,39 @@ def _tooth_fixture_control_is_load_bearing(_fixture: Path) -> str | None:
         return f"контроль на пристине отказал прибором: {exc}"
     if ctrl is None:
         return "контроль зелёнет на образе БЕЗ целого правила -- вакуумный"
-    saved = dict(_FIXTURE_STATE)
-    _FIXTURE_STATE.clear()
-    _FIXTURE_STATE["path"] = PRISTINE_LATEST
+    code, out = _fixture_recursion_probe(_ModuleHome())
+    reason = _fixture_recursion_verdict(code, out)
+    if reason:
+        return reason
+    # Мутационные плечи (Р3 fix-волны #407): каждая приманка обязана менять
+    # наблюдаемый исход -- иначе вердикт выше вакуумен.
+    unmeasured_tail = ("    if unmeasured:\n"
+                       "        print(_fixture_unmeasured_line(why), "
+                       "flush=True)\n")
+    mut_code0, raw1 = _fx_mutant(((
+        unmeasured_tail + "        return _phase_exit(0, entry_bad, 2)\n",
+        unmeasured_tail + "        return 0\n",
+        "зуб Р3: неизмеренная фаза отвечает нулём"),))
     try:
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            code = _fixture_phase(0)
-        out = buf.getvalue()
+        mcode, mout = _fixture_recursion_probe(mut_code0)
     finally:
-        _FIXTURE_STATE.clear()
-        _FIXTURE_STATE.update(saved)
-    if "ПРОШЛА МОЛЧА" in out:
-        return f"фаза с образом без правила измерила зубы: rc={code}: {out!r}"
-    for name in ("steps-off-floor-predates", "steps-off-floor-from-registry",
-                 "carrier-absent-texts-distinct", "fixture-control-is-load-bearing"):
-        if f"ФИКСТУРА {name}: НЕ ИЗМЕРЕНО" not in out:
-            return f"зуб {name} не назван в исходе НЕ ИЗМЕРЕНО: {out!r}"
-    if "положительный контроль фикстуры" not in out:
-        return f"причина НЕ ИЗМЕРЕНО не названа: {out!r}"
+        shutil.rmtree(raw1, ignore_errors=True)
+    if _fixture_recursion_verdict(mcode, mout) is None:
+        return (f"мутация «код 0» пережила зуб: вердикт зелён при коде "
+                f"{mcode}: {mout!r}")
+    mut_extrak, raw2 = _fx_mutant(((
+        unmeasured_tail,
+        '    if unmeasured:\n'
+        '        print("checks-teeth: ФИКСТУРА bait-ок: OK", flush=True)\n'
+        '        print(_fixture_unmeasured_line(why), flush=True)\n',
+        "зуб Р3: лишняя зелёная строка в неизмеренной фазе"),))
+    try:
+        mcode, mout = _fixture_recursion_probe(mut_extrak)
+    finally:
+        shutil.rmtree(raw2, ignore_errors=True)
+    if _fixture_recursion_verdict(mcode, mout) is None:
+        return (f"мутация «лишний OK» пережила зуб: вердикт зелён при коде "
+                f"{mcode}: {mout!r}")
     return None
 
 
@@ -1896,11 +2265,10 @@ def _tooth_kit_steps_off_src() -> str | None:
         spec = importlib.util.spec_from_file_location("checks_teeth_mutated", mod)
         mut = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mut)
-        # Копия модуля лежит вне дома: её ROOT/RUNNER указывают в пустоту.
-        # Возвращаем реальные: предмет мутации -- поведение _temp_kit,
-        # а не пути импорта копии.
-        mut.ROOT = ROOT
-        mut.RUNNER = RUNNER
+        # Копия модуля лежит вне дома: её константы указывают в пустоту.
+        # Возвращаем дому ЕДИНЫМ механизмом перепривязки (_rebind_copy_home):
+        # предмет мутации -- поведение _temp_kit, а не пути импорта копии.
+        _rebind_copy_home(mut)
         mtd, mscript, mpatch = mut._temp_kit()
         try:
             if (mtd / "tools" / "our-steps-off.txt").is_file():
@@ -2628,6 +2996,571 @@ def _tooth_carrier_absent_texts_distinct(fixture: Path) -> str | None:
     return f"мутация не напечатала NOTE шага 26: {note_mut!r}"
 
 
+# Подмена контроля фазы на управляемый исход -- фикстура зубов, мерящих цикл
+# фазы без построения предмета (собирается конкатенацией: цельный литерал
+# якоря в теле зуба дал бы второе вхождение при замене).
+_FX_CTRL_NONE_PAIR = (
+    "            ctrl = _step26_fixture_" + "control(fixture)\n",
+    "            ctrl = None  # зуб фазы: управляемый исход контроля\n",
+    "зуб фазы: контроль отключён")
+
+
+def _fx_mutant_src(src: str):
+    """Исполнить готовый текст копии прибора; (модуль, каталог копии)."""
+    raw = Path(tempfile.mkdtemp(prefix="checks-teeth-fxmut."))
+    mod = raw / "checks-teeth-mutated.py"
+    mod.write_text(src, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("checks_teeth_fx_mutant", mod)
+    mut = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mut)
+    _rebind_copy_home(mut)
+    return mut, raw
+
+
+def _fx_bait_teeth(src: str, bait_item: str) -> str:
+    """Заменить блок _FIXTURE_TEETH на bait-набор ТОЙ ЖЕ ДЛИНЫ (Р8/Р12).
+
+    Длина -- часть пина фазы: кортеж иного размера ронял бы фазу на проверке
+    EXPECTED_FIXTURE_TEETH ДО цикла, и зуб не мерил бы свой путь.
+    """
+    m = re.search(r"(?ms)^_FIXTURE_TEETH: tuple = \(\n.*?^\)\n", src)
+    if not m:
+        raise Refusal("блок _FIXTURE_TEETH не найден в собственном тексте")
+    n = len(re.findall(r"(?m)^    \(", m.group(0)))
+    if n != EXPECTED_FIXTURE_TEETH:
+        raise Refusal(f"блок _FIXTURE_TEETH несёт {n} зубов, объявлено "
+                      f"{EXPECTED_FIXTURE_TEETH}")
+    block = ("_FIXTURE_TEETH: tuple = (\n"
+             + "".join('    ("bait-fx-%d", %s),\n' % (i, bait_item)
+                       for i in range(n))
+             + ")\n")
+    return src.replace(m.group(0), block, 1)
+
+
+def _probe_fixture_builder(rc: int, marker: str, mod=None) -> tuple[int, str]:
+    """Фаза фикстуры на строителе-заглушке с названным кодом; (код, вывод).
+
+    Заглушка печатает СВОЮ причину в stderr и выходит названным кодом:
+    потребитель обязан различать код 3 (инструментария нет) и любой иной
+    (отказ построения) текстом и кодом (Р6 fix-волны #407).
+    """
+    own = _ModuleHome(mod)
+    stub_dir = tempfile.mkdtemp(prefix="checks-teeth-fxbuild.")
+    stub = Path(stub_dir) / "fixture-build.sh"
+    stub.write_text("#!/usr/bin/env bash\n"
+                    "echo 'fixture-build: %s' >&2\n"
+                    "exit %d\n" % (marker, rc), encoding="utf-8")
+    saved_builder = own.FIXTURE_BUILDER
+    saved_state = dict(own._FIXTURE_STATE)
+    own.FIXTURE_BUILDER = stub
+    own._FIXTURE_STATE.clear()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            code = own._fixture_phase(0)
+        return code, buf.getvalue()
+    finally:
+        own.FIXTURE_BUILDER = saved_builder
+        own._FIXTURE_STATE.clear()
+        own._FIXTURE_STATE.update(saved_state)
+        shutil.rmtree(stub_dir, ignore_errors=True)
+
+
+def _tooth_fixture_cleanup_on_exception(_fixture: Path) -> str | None:
+    """Уборка фазы живёт в finally: исключение не уносит каталог (Р2 #407).
+
+    Уборка после цикла ловила только штатный выход; OSError/RuntimeError/
+    KeyboardInterrupt уносили каталог копии образа (сотни мегабайт).
+    Управляемые исходы зуба: контроль погашен, первый зуб фазы падает
+    исключением. Приманка возвращает уборку из finally -- каталог обязан
+    пережить исключение, и зуб это ловит.
+    """
+    raiser = ("            try:\n"
+              "                reason = fn(fixture)\n",
+              "            try:\n"
+              "                raise RuntimeError(\"мутация Р2: зуб фазы упал "
+              "исключением\")\n"
+              "                reason = fn(fixture)\n",
+              "зуб Р2: зуб фазы падает исключением")
+    marker = Path(tempfile.mkdtemp(prefix="checks-teeth-fx2a."))
+    try:
+        (marker / "fixture").write_bytes(b"x")
+        mut, raw = _fx_mutant((_FX_CTRL_NONE_PAIR, raiser))
+        try:
+            mut._FIXTURE_STATE.clear()
+            mut._FIXTURE_STATE["dir"] = marker
+            mut._FIXTURE_STATE["path"] = marker / "fixture"
+            try:
+                mut._fixture_phase(0)
+            except RuntimeError:
+                pass
+            else:
+                return "подмена не подняла исключение в фазе -- зуб не мерил свой путь"
+            if marker.exists():
+                return "каталог фикстуры пережил исключение фазы -- уборка не в finally"
+        finally:
+            shutil.rmtree(raw, ignore_errors=True)
+    finally:
+        shutil.rmtree(marker, ignore_errors=True)
+    bait = ("        _fixture_" + "cleanup()\n",
+            "        pass  # мутация Р2: уборка выведена из finally\n",
+            "зуб Р2: уборка после цикла")
+    marker2 = Path(tempfile.mkdtemp(prefix="checks-teeth-fx2a."))
+    try:
+        (marker2 / "fixture").write_bytes(b"x")
+        mut, raw = _fx_mutant((_FX_CTRL_NONE_PAIR, raiser, bait))
+        try:
+            mut._FIXTURE_STATE.clear()
+            mut._FIXTURE_STATE["dir"] = marker2
+            mut._FIXTURE_STATE["path"] = marker2 / "fixture"
+            try:
+                mut._fixture_phase(0)
+            except RuntimeError:
+                pass
+            else:
+                return "приманка не подняла исключение -- плечо мертво"
+            if not marker2.exists():
+                return ("мутация пережила зуб: уборка вне finally не оставила "
+                        "каталога -- якорь приманки устарел")
+        finally:
+            shutil.rmtree(raw, ignore_errors=True)
+    finally:
+        shutil.rmtree(marker2, ignore_errors=True)
+    return None
+
+
+def _tooth_fixture_dir_weed_by_age(_fixture: Path) -> str | None:
+    """Прополка знает каталог фикстуры: возраст -- единственный предикат (Р2).
+
+    Каталог старше WORKER_TMP_HELD_SECONDS убирается, свежий -- нет: свежий
+    может быть каталогом ИДУЩЕГО прогона. Приманка гасит ветку каталогов --
+    старый каталог обязан пережить погашенную прополку. Каталоги БЕЗ файла
+    владельца (остаток прежней формы, Ф4 fix-волны #407) удаляются по
+    возрасту и здесь -- это объявленная норма, не дыра.
+    """
+    def _make_dirs(root: Path) -> tuple[Path, Path]:
+        old_dir = root / "checks-teeth-fixture407.old"
+        fresh_dir = root / "checks-teeth-fixture407.fresh"
+        old_dir.mkdir()
+        fresh_dir.mkdir()
+        (old_dir / "subject").write_bytes(b"x")
+        (fresh_dir / "subject").write_bytes(b"x")
+        stamp = time.time() - WORKER_TMP_HELD_SECONDS - 600
+        os.utime(old_dir, (stamp, stamp))
+        return old_dir, fresh_dir
+
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-weed.") as raw:
+        old_dir, fresh_dir = _make_dirs(Path(raw))
+        with _weed_env_tmpdir(Path(raw)):
+            weed_worker_leftovers()
+        if old_dir.exists():
+            return "старый каталог фикстуры пережил прополку"
+        if not fresh_dir.exists():
+            return "свежий каталог фикстуры снесён -- прополка бьёт по идущему прогону"
+    # CONSTRAINT (Х6 раунда 3): ветка каталогов идёт по РЕЕСТРУ префиксов --
+    # приманка гасит сам обход реестра, а не одно имя.
+    weed_bait = ("    for prefix in _WEED_DIR_PREFIXES:\n",
+                 "    for prefix in ():  # зуб Р2: обход реестра погашен\n",
+                 "зуб Р2: ветка каталогов прополки погашена")
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-weed.") as raw2:
+        old2, _fresh2 = _make_dirs(Path(raw2))
+        with _weed_env_tmpdir(Path(raw2)):
+            mut, mutraw = _fx_mutant((weed_bait,))
+            try:
+                mut.weed_worker_leftovers()
+            finally:
+                shutil.rmtree(mutraw, ignore_errors=True)
+        if not old2.exists():
+            return "мутация пережила зуб: погашенная ветка всё ещё убирает старый каталог"
+    return None
+
+
+def _tooth_weed_registry_covers_every_mkdtemp() -> str | None:
+    """Каждый mkdtemp прибора стоит в реестре прополки (Х6 #407, раунд 3).
+
+    Реестр знал ДВА префикса из восьми живых: новый временный каталог
+    появлялся без владельца уборки и копился без предела. Перечень снимается
+    с ИСХОДНИКА разбором (ast), а не текстовым поиском: перечень-проекция и
+    был корнем класса. Направление проверяется в ОБЕ стороны -- префикс
+    реестра без единого mkdtemp есть мёртвая запись, пережившая причину.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+        if name != "mkdtemp":
+            continue
+        for kw in node.keywords:
+            if (kw.arg == "prefix" and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)):
+                found.add(kw.value.value)
+    if not found:
+        return ("ни одного mkdtemp(prefix=...) не найдено разбором -- "
+                "зуб мерит пустоту, а не реестр")
+    missing = sorted(f for f in found if f not in _WEED_DIR_PREFIXES)
+    if missing:
+        return "префиксы mkdtemp без владельца прополки: " + ", ".join(missing)
+    dead = sorted(x for x in _WEED_DIR_PREFIXES if x not in found)
+    if dead:
+        return ("записи реестра прополки без единого mkdtemp: "
+                + ", ".join(dead))
+    return None
+
+
+def _tooth_fixture_dir_weed_owner_alive(_fixture: Path) -> str | None:
+    """Прополка каталога фикстуры: возраст И владелец (Ф4 fix-волны #407).
+
+    Живой процесс, держащий старый каталог (cwd), обязан его пережить;
+    мёртвый владелец -- нет: предикат «только возраст» сносил каталог под
+    ИДУЩИМ прогоном (воспроизведено дорожкой проб). Приманка снимает проверку
+    живости -- каталог с живым владельцем обязан пасть, и зуб это ловит.
+    """
+    def _held_dir(root: Path, owner_pid: int) -> Path:
+        held = root / "checks-teeth-fixture407.held"
+        held.mkdir()
+        (held / "subject").write_bytes(b"x")
+        # Файл владельца пишется ДО уноса mtime в прошлое: запись в каталог
+        # обновляет его возраст, и старый каталог стал бы «свежим».
+        (held / _FIXTURE_OWNER_NAME).write_text(
+            _owner_file_text(owner_pid), encoding="utf-8")
+        stamp = time.time() - WORKER_TMP_HELD_SECONDS - 600
+        os.utime(held, (stamp, stamp))
+        return held
+
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-weed4.") as raw:
+        (Path(raw) / "wee4-hold").mkdir()   # настоящий cwd держателя
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os, time; os.chdir(os.environ['WEED4_HELD']); "
+             "time.sleep(120)"],
+            env=dict(os.environ, WEED4_HELD=str(Path(raw) / "wee4-hold")),
+            cwd=str(Path(raw)))
+        try:
+            held = _held_dir(Path(raw), holder.pid)
+            with _weed_env_tmpdir(Path(raw)):
+                weed_worker_leftovers()
+            if not held.exists():
+                return "живой владелец: старый каталог фикстуры снесён прополкой"
+            holder.kill()
+            holder.wait()
+            with _weed_env_tmpdir(Path(raw)):
+                weed_worker_leftovers()
+            if held.exists():
+                return "мёртвый владелец: старый каталог фикстуры пережил прополку"
+        finally:
+            holder.kill()
+            holder.wait()
+    liveness_bait = ("                if " + "alive:\n"
+                     "                    continue\n",
+                     "                if False:\n"
+                     "                    continue\n",
+                     "зуб Ф4: проверка живости владельца снята")
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-weed4.") as raw2:
+        (Path(raw2) / "wee4-hold").mkdir()   # настоящий cwd держателя
+        holder2 = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os, time; os.chdir(os.environ['WEED4_HELD']); "
+             "time.sleep(120)"],
+            env=dict(os.environ, WEED4_HELD=str(Path(raw2) / "wee4-hold")),
+            cwd=str(Path(raw2)))
+        try:
+            held2 = _held_dir(Path(raw2), holder2.pid)
+            with _weed_env_tmpdir(Path(raw2)):
+                mut, mutraw = _fx_mutant((liveness_bait,))
+                try:
+                    mut.weed_worker_leftovers()
+                finally:
+                    shutil.rmtree(mutraw, ignore_errors=True)
+            if held2.exists():
+                return ("мутация пережила зуб: погашенная живость владельца "
+                        "всё ещё держит старый каталог")
+        finally:
+            holder2.kill()
+            holder2.wait()
+    return None
+
+
+_X7_STAMP_BAIT = ("                    if got is not None and got != want:\n"
+                  "                        alive = " + "False\n",
+                  "                    if False:\n"
+                  "                        alive = False\n",
+                  "зуб Х7: сверка метки старта владельца снята")
+
+
+def _tooth_fixture_dir_weed_pid_reuse(_fixture: Path) -> str | None:
+    """Переиспользованный pid не держит каталог вечно (Х7 #407, раунд 3).
+
+    Предикат живости был голым os.kill(pid, 0): каталог, чей владелец умер, а
+    НОМЕР достался чужому живому процессу, не убирался НИКОГДА -- замерено на
+    pid 1, который жив всегда. Файл владельца несёт метку старта, и её
+    несовпадение означает мёртвого владельца при живом номере. Приманка
+    снимает сверку метки -- каталог с чужим живым номером обязан снова
+    пережить прополку, и зуб это ловит.
+    """
+    if _proc_start_stamp(os.getpid()) is None:
+        return ("ПРИБОР: метка старта процесса недоступна (ps) -- предикат "
+                "переиспользования pid не измерим на этой машине")
+
+    def _aged(root: Path, name: str, body: str) -> Path:
+        d = root / name
+        d.mkdir()
+        (d / "subject").write_bytes(b"x")
+        # Файл владельца пишется ДО уноса mtime: запись в каталог обновляет
+        # его возраст, и старый каталог стал бы «свежим».
+        (d / _FIXTURE_OWNER_NAME).write_text(body, encoding="utf-8")
+        stamp = time.time() - WORKER_TMP_HELD_SECONDS - 600
+        os.utime(d, (stamp, stamp))
+        return d
+
+    foreign = "1\nМЕТКА-СТАРТА-КОТОРОЙ-НЕТ\n"
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-weedx7.") as raw:
+        root = Path(raw)
+        reused = _aged(root, "checks-teeth-fixture407.reused", foreign)
+        mine = _aged(root, "checks-teeth-fixture407.mine",
+                     _owner_file_text(os.getpid()))
+        with _weed_env_tmpdir(root):
+            weed_worker_leftovers()
+        if reused.exists():
+            return ("чужой живой номер (pid 1) держит каталог: прополка не "
+                    "различила переиспользованный pid")
+        if not mine.exists():
+            return "свой живой владелец: каталог снесён прополкой"
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-weedx7.") as raw2:
+        root2 = Path(raw2)
+        reused2 = _aged(root2, "checks-teeth-fixture407.reused", foreign)
+        with _weed_env_tmpdir(root2):
+            mut, mutraw = _fx_mutant((_X7_STAMP_BAIT,))
+            try:
+                mut.weed_worker_leftovers()
+            finally:
+                shutil.rmtree(mutraw, ignore_errors=True)
+        if not reused2.exists():
+            return ("мутация пережила зуб: без сверки метки каталог с чужим "
+                    "живым номером всё равно убран")
+    return None
+
+
+def _tooth_fixture_fork_one_home(_fixture: Path) -> str | None:
+    """Предпроверка форка смотрит в FORK строителя (Р10 fix-волны #407).
+
+    Питон пинил жёсткий путь, а строитель исполнял ${FORK:-…}: заданный
+    FORK не пробовался вовсе. Примака возвращает жёсткий путь -- предпроверка
+    перестаёт видеть настроенный FORK, зуб это ловит.
+    """
+    bait_path = "/нет/такого/форка-Р10"
+    saved = os.environ.get("FORK")
+    try:
+        os.environ["FORK"] = bait_path
+        miss = _fixture_missing_tool()
+    finally:
+        if saved is None:
+            os.environ.pop("FORK", None)
+        else:
+            os.environ["FORK"] = saved
+    if miss is None:
+        return f"предпроверка не заметила несуществующий FORK={bait_path}"
+    if bait_path not in miss:
+        return f"причина не назвала настроенный FORK: {miss!r}"
+    fork_bait = ("    env = os.environ.get(\"FORK\")\n"
+                 "    if env:\n",
+                 "    env = None  # мутация Р10: FORK игнорируется\n"
+                 "    if env:\n",
+                 "зуб Р10: жёсткий путь форка")
+    mut, raw = _fx_mutant((fork_bait,))
+    try:
+        os.environ["FORK"] = bait_path
+        try:
+            mmiss = mut._fixture_missing_tool()
+        finally:
+            if saved is None:
+                os.environ.pop("FORK", None)
+            else:
+                os.environ["FORK"] = saved
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    if mmiss is None:
+        # CONSTRAINT (Ф2 fix-волны #407): «нет предмета» здесь -- ЗЕЛЁНЫЙ
+        # исход приманки: копия с погашенным чтением FORK обязана перестать
+        # видеть несуществующий форк (все прочие дома есть). Прежний порядок
+        # проверок падал на этом месте TypeError, а зелень за чужую причину
+        # (каталог копии без FIXTURE_BUILDER до перепривязки констант) была
+        # вакуумом -- приманка не мерила ветку FORK вовсе.
+        return None
+    if bait_path in mmiss:
+        return (f"мутация пережила зуб: копия с жёстким путём всё ещё видит "
+                f"FORK: {mmiss!r}")
+    return (f"мутантное плечо отчиталось причиной вне FORK -- зелень была бы "
+            f"чужой: {mmiss!r}")
+
+
+def _tooth_fixture_builder_code3_is_unmeasured(_fixture: Path) -> str | None:
+    """Код 3 строителя -- «НЕ ИЗМЕРЕНО» с причиной строителя (Р6 fix-волны #407).
+
+    Потребитель сводил любой ненулевой код строителя в один исход; площадка
+    без инструментария и сломанный предмет обязаны быть различимы.
+    """
+    marker = "НЕ ИЗМЕРЕНО -- зуб Р6: нет форка на этой площадке"
+    code, out = _probe_fixture_builder(3, marker)
+    if code != 2:
+        return (f"код 3 строителя обязан отдавать фазе код 2 (НЕ ИЗМЕРЕНО), "
+                f"получила {code}: {out!r}")
+    if "ИТОГ фикстур=НЕ ИЗМЕРЕНО -- нет инструментария/предмета" not in out:
+        return f"итог не назвал исход строителя кодом 3: {out!r}"
+    if marker not in out:
+        return f"причина строителя не доехала до вывода: {out!r}"
+    rc3_bait = ("    if r.returncode == 3:\n",
+                "    if False:\n",
+                "зуб Р6: код 3 строителя не различается")
+    mut, raw = _fx_mutant((rc3_bait,))
+    try:
+        mcode, mout = _probe_fixture_builder(3, marker, mod=mut)
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    if mcode != 9 or "ОТКАЗ ПРИБОРА" not in mout:
+        return (f"мутация «различение снято» пережила зуб: код 3 не ушёл в "
+                f"отказ прибора: rc={mcode} {mout!r}")
+    return None
+
+
+def _tooth_fixture_builder_refusal_is_refusal(_fixture: Path) -> str | None:
+    """Отказ построения (иной ненулевой код строителя) -- ОТКАЗ ПРИБОРА (Р6).
+
+    Сломанный предмет не имеет права читаться как неизмеренность площадки:
+    исходы обязаны различаться текстом итоговой строки и кодом фазы.
+    """
+    marker = "ОТКАЗ -- зуб Р6: нейтрализация легла не двумя заменами"
+    code, out = _probe_fixture_builder(2, marker)
+    if code != 9:
+        return (f"отказ строителя обязан отдавать фазе код 9 (ОТКАЗ "
+                f"ПРИБОРА), получила {code}: {out!r}")
+    if "ИТОГ фикстур=ОТКАЗ ПРИБОРА -- строитель фикстуры отказал" not in out:
+        return f"итог не назвал отказ строителя: {out!r}"
+    if marker not in out:
+        return f"причина строителя не доехала до вывода: {out!r}"
+    if "ИТОГ фикстур=НЕ ИЗМЕРЕНО" in out:
+        return f"отказ построения свёрнут в неизмеренность: {out!r}"
+    raise_bait = ("    raise Refusal(f\"строитель фикстуры отказал на {stage} \"\n"
+                  "                  f\"(rc={r.returncode}): {tail}\")\n",
+                  "    return None, (\"предмет не построен (rc=%s): %s\" % "
+                  "(r.returncode, tail))\n",
+                  "зуб Р6: отказ строителя сведён в неизмеренность")
+    mut, raw = _fx_mutant((raise_bait,))
+    try:
+        mcode, mout = _probe_fixture_builder(2, marker, mod=mut)
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    if mcode != 2 or "ИТОГ фикстур=НЕ ИЗМЕРЕНО" not in mout:
+        return (f"мутация пережила зуб: отказ строителя не свернулся в "
+                f"неизмеренность: rc={mcode} {mout!r}")
+    return None
+
+
+def _tooth_fixture_refusal_reason_survives(_fixture: Path) -> str | None:
+    """Причина Refusal зуба фазы доезжает до итоговой строки (Р8 fix-волны #407).
+
+    Ветка except Refusal печатала причину построчно, но не клала её в why --
+    итог фикстуры читался «НЕ ИЗМЕРЕНО -- None». Все зубы кортежа заменены
+    бросками Refusal (длина кортежа -- пин фазы): почему обязан выжить.
+    """
+    own = Path(__file__).read_text(encoding="utf-8")
+    bait_item = ("lambda _f: (_ for _ in ()).throw("
+                 "Refusal(\"мутация Р8: причина отказа зуба\"))")
+    mut, raw = _fx_mutant_src(_once_replace(
+        _fx_bait_teeth(own, bait_item), *_FX_CTRL_NONE_PAIR))
+    try:
+        code, out = _fixture_recursion_probe(mut)
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    if code != 2:
+        return f"фаза на отказывающих зубах обязана дать код 2, получила {code}: {out!r}"
+    if "мутация Р8: причина отказа зуба" not in out:
+        return f"причина Refusal не напечатана: {out!r}"
+    if "НЕ ИЗМЕРЕНО -- None" in out:
+        return f"причина Refusal потеряна, итог называет None: {out!r}"
+    whyfix_bait = ("                if why " + "is None:\n"
+                   "                    why = str(exc)\n",
+                   "                pass  # мутация Р8: причина не кладётся в why\n",
+                   "зуб Р8: причина не кладётся в why")
+    mut, raw = _fx_mutant_src(_once_replace(
+        _once_replace(_fx_bait_teeth(own, bait_item), *_FX_CTRL_NONE_PAIR),
+        *whyfix_bait))
+    try:
+        code, mout = _fixture_recursion_probe(mut)
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    if "НЕ ИЗМЕРЕНО -- None" not in mout:
+        return (f"мутация пережила зуб: причина дожила и без «why»: {mout!r}")
+    return None
+
+
+def _tooth_fixture_empty_reason_is_refusal(_fixture: Path) -> str | None:
+    """Пустая причина зуба -- ОТКАЗ ПРИБОРА, а не зелёный исход (Р12 #407).
+
+    Цикл фазы проверял «if reason» -- зуб, вернувший пустую строку, попадал
+    в OK. Примака возвращает эту форму: пустая причина обязана снова стать
+    зелёной, и зуб это ловит.
+    """
+    own = Path(__file__).read_text(encoding="utf-8")
+    bait_src = _once_replace(
+        _fx_bait_teeth(own, 'lambda _f: ""'), *_FX_CTRL_NONE_PAIR)
+    mut, raw = _fx_mutant_src(bait_src)
+    try:
+        code, out = _fixture_recursion_probe(mut)
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    if code != 9:
+        return f"пустая причина обязана давать код 9, получила {code}: {out!r}"
+    if "ОТКАЗ ПРИБОРА -- зуб вернул пустую причину" not in out:
+        return f"строка отказа пустой причины не напечатана: {out!r}"
+    if "ИТОГ фикстур=ОТКАЗ ПРИБОРА" not in out:
+        return f"итог отказа не напечатан: {out!r}"
+    empty_bait = ("            if reason " + "is None:\n"
+                  "                print(f\"checks-teeth: ФИКСТУРА {name}: "
+                  "OK\", flush=True)\n",
+                  "            if reason is None or reason == \"\":\n"
+                  "                print(f\"checks-teeth: ФИКСТУРА {name}: "
+                  "OK\", flush=True)\n",
+                  "зуб Р12: пустая причина снова зелёная")
+    mut, raw = _fx_mutant_src(_once_replace(bait_src, *empty_bait))
+    try:
+        code, mout = _fixture_recursion_probe(mut)
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    if code == 9 or "ОТКАЗ ПРИБОРА -- зуб вернул пустую причину" in mout:
+        return (f"мутация пережила зуб: погашенная ветка всё ещё отказывает: "
+                f"rc={code} {mout!r}")
+    if ": OK" not in mout:
+        return f"примака не вернула пустой причине зелёный исход: {mout!r}"
+    return None
+
+
+# CONSTRAINT (Р3 fix-волны #407): перечень зубов фазы живёт ЗДЕСЬ одним домом --
+# фаза, пин и контрольный зуб читают этот кортеж; копия списка имён разошлась бы
+# молча при добавлении зуба.
+_FIXTURE_TEETH: tuple = (
+    ("steps-off-floor-predates", _tooth_steps_off_floor_predates),
+    ("steps-off-floor-from-registry", _tooth_steps_off_floor_from_registry),
+    ("carrier-absent-texts-distinct", _tooth_carrier_absent_texts_distinct),
+    ("fixture-control-is-load-bearing", _tooth_fixture_control_is_load_bearing),
+    ("fixture-cleanup-on-exception", _tooth_fixture_cleanup_on_exception),
+    ("fixture-dir-weed-by-age", _tooth_fixture_dir_weed_by_age),
+    ("fixture-dir-weed-owner-alive", _tooth_fixture_dir_weed_owner_alive),
+    ("fixture-dir-weed-pid-reuse", _tooth_fixture_dir_weed_pid_reuse),
+    ("fixture-fork-one-home", _tooth_fixture_fork_one_home),
+    ("fixture-builder-code3-is-unmeasured",
+     _tooth_fixture_builder_code3_is_unmeasured),
+    ("fixture-builder-refusal-is-refusal",
+     _tooth_fixture_builder_refusal_is_refusal),
+    ("fixture-refusal-reason-survives",
+     _tooth_fixture_refusal_reason_survives),
+    ("fixture-empty-reason-is-refusal",
+     _tooth_fixture_empty_reason_is_refusal),
+)
+
+
 def _tooth_builder_refusal_is_row_scoped() -> str | None:
     """Отказ строителя одной строки не ослепляет остальные (#350).
 
@@ -2771,7 +3704,7 @@ def _version_row(rid: str, step: str) -> dict[str, str]:
 
 
 def _mutated_self(anchor: str, repl: str, what: str):
-    """Копия прибора с названной мутацией; ROOT возвращён домой."""
+    """Копия прибора с названной мутацией; константы возвращены дому."""
     own = Path(__file__).read_text(encoding="utf-8")
     mutated = _once_replace(own, anchor, repl, what)
     with tempfile.TemporaryDirectory(prefix="checks-teeth-third.") as raw:
@@ -2780,9 +3713,10 @@ def _mutated_self(anchor: str, repl: str, what: str):
         spec = importlib.util.spec_from_file_location("checks_teeth_mutated_third", mod)
         mut = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mut)
-        # Копия модуля лежит вне дома: её ROOT указывает в пустоту. Возвращаем
-        # реальный: предмет мутации -- ветка третьего исхода, а не пути копии.
-        mut.ROOT = ROOT
+        # Копия модуля лежит вне дома: её константы указывают в пустоту.
+        # Возвращаем дому ЕДИНЫМ механизмом перепривязки (_rebind_copy_home):
+        # предмет мутации -- ветка третьего исхода, а не пути копии.
+        _rebind_copy_home(mut)
         return mut
 
 
@@ -4089,7 +5023,7 @@ def _tooth_phases_unmeasured_mutation_is_not_zero() -> str | None:
 # Предмет -- приоритет кодов ПОСЛЕ итога входа: отказ прибора (2) не имеет
 # права маскировать красный вход, а расхождение набора с пином (4) доминирует
 # над обоими -- и это ОБЪЯВЛЕННАЯ граница _phase_exit, не побочный голый код.
-_PHASE_EXIT_BOUNDARY = "    if code == 4:\n        return 4\n"
+_PHASE_EXIT_BOUNDARY = "    if code == 4 or fx_code == 4:\n        return 4\n"
 _PHASES407_STUB_RUNNER = "# stub: достаточно существования двери раннера\n"
 # Якорь пина мутаций собирается конкатенацией: цельный литерал в теле зуба
 # дал бы третье вхождение в снимок (определение + два кита зуба), и
@@ -4103,11 +5037,11 @@ _PHASES407_RED_CALL = (
     "else None)")
 # Якорь свёртки для приманки зуба refusal-does-not-mask-entry: код 2
 # возвращается к голому выходу -- красный вход снова маскируется.
-_PHASES407_BAIT_UNMASK_2 = ("    if code == 4:\n        return 4\n",
+_PHASES407_BAIT_UNMASK_2 = ("    if code == 4 or fx_code == 4:\n        return 4\n",
                             "    if code in (2, 4):\n        return code\n")
 # Якорь свёртки для приманки зуба pin-mismatch-outranks-entry: код 4
 # сворачивается в приоритет входа -- недоверенная опись уехала бы под дефект.
-_PHASES407_BAIT_COLLAPSE_4 = ("    if code == 4:\n        return 4\n",
+_PHASES407_BAIT_COLLAPSE_4 = ("    if code == 4 or fx_code == 4:\n        return 4\n",
                               "    if False:\n        return 4\n")
 
 
@@ -4226,7 +5160,8 @@ def _tooth_phases_pin_mismatch_outranks_entry() -> str | None:
         ((_PHASES407_PIN_OLD, _PHASES407_PIN_NEW,
           "зуб Р6: пин мутаций разошёлся"),
          (_PHASES407_BAIT_COLLAPSE_4[0], _PHASES407_BAIT_COLLAPSE_4[1],
-          "зуб Р6: код 4 свёрнут в приоритет входа")),)
+          "зуб Р6: код 4 свёрнут в приоритет входа")),
+        with_script=True)
     try:
         m = _phases407_run(copy, td)
         mout = (m.stdout or "") + (m.stderr or "")
@@ -4235,6 +5170,361 @@ def _tooth_phases_pin_mismatch_outranks_entry() -> str | None:
                     f"устарел, зуб мёртв: rc={m.returncode} {mout!r}")
     finally:
         shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+_FX407_GREEN_CALL = ("    for name, fn in entry_teeth:\n"
+                     "        reason = None  # зуб Р1: зелёный вход")
+_FX407_FX_ONE = ("    fx_code = _fixture_" + "phase(entry_bad)\n",
+                 "    fx_code = 1  # мутация снимка: фаза фикстуры нашла дефект\n",
+                 "зуб Р1: фаза фикстуры нашла дефект")
+
+
+def _tooth_phases_fx_defect_outranks_early_unmeasured() -> str | None:
+    """Дефект фазы фикстуры выше «НЕ ИЗМЕРЕНО» ранних выходов (Р1 fix-волны #407).
+
+    Три ранних выхода мутационной фазы -- отказ реестра из reds, провал
+    контроля красноты, смерть воркера -- возвращали _phase_exit(2, entry_bad)
+    мимо fx_code, и потребитель печатал «НЕ ИЗМЕРЕНЫ» поверх НАЙДЕННОГО
+    дефекта. Для КАЖДОГО пути: при fx_code=1 итог обязан быть 1. Приманка
+    возвращает на пути прежнюю форму без fx_code -- код обязан упасть до 2:
+    приманка, не меняющая код, означает, что путь живёт мимо правила.
+    """
+    def _run_kit(extra_pairs, runner_text=None):
+        td, copy = _phases407_kit(_FX407_GREEN_CALL, tuple(extra_pairs),
+                                  with_script=True)
+        if runner_text is not None:
+            (td / "tools" / "checks-on-image.sh").write_text(
+                runner_text, encoding="utf-8")
+        try:
+            r = _phases407_run(copy, td)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    c_setup = ("    jobs, inapp_rows, inapplicable_by_version, refused = "
+               "build_jobs(rows, picked, image, base)\n",
+               "    jobs, inapp_rows, inapplicable_by_version, refused = "
+               "[(\"<probe>\", \"c\", str(image), [(0, b\"x\")], [\"c\"])], "
+               "[], [], []\n",
+               "зуб Р1: управляемое задание воркера")
+    c_raise = ("        if jobs:\n",
+               "        if jobs:\n"
+               "            raise BrokenProcessPool(\"мутация снимка: "
+               "воркер умер\")\n",
+               "зуб Р1: смерть воркера")
+    cases = (
+        ("отказ-реестра", None, "реестр не назвал ни одной проверки",
+         ("        except Refusal as exc:\n"
+          "            print(f\"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}\", "
+          "file=sys.stderr)\n"
+          "            return _phase_exit(2, entry_bad, fx_code)\n",
+          "        except Refusal as exc:\n"
+          "            print(f\"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}\", "
+          "file=sys.stderr)\n"
+          "            return _phase_exit(2, entry_bad)\n",
+          "зуб Р1: приманка на пути отказа реестра")),
+        ("контроль-провален", "#!/bin/bash\necho '[FAIL] probe-red'\n",
+         "КОНТРОЛЬ ПРОВАЛЕН",
+         ("            for name in red:\n"
+          "                print(\"    \" + name, file=sys.stderr)\n"
+          "            return _phase_exit(2, entry_bad, fx_code)\n",
+          "            for name in red:\n"
+          "                print(\"    \" + name, file=sys.stderr)\n"
+          "            return _phase_exit(2, entry_bad)\n",
+          "зуб Р1: приманка на пути контроля красноты")),
+        ("воркер-умер", "#!/bin/bash\necho '[OK] probe-green'\n",
+         "воркер умер",
+         # Якорь -- ТОЛЬКО строка возврата (собирается конкатенацией: цельный
+         # литерал стал бы вторым вхождением для зуба Ф1 fix-волны #407,
+         # приманивающего ту же строку): констрейнт-комментарий у пути смерти
+         # не часть якоря -- приманка меняет одну переменную, свёртку.
+         ("        return _phase_" + "exit(1 if bad else (9 if refused "
+          "else 2), entry_bad, fx_code)\n",
+          "        return _phase_" + "exit(2, entry_bad)\n",
+          "зуб Р1: приманка на пути смерти воркера")),
+    )
+    for label, runner, marker, bait in cases:
+        extra = [_FX407_FX_ONE]
+        if label == "воркер-умер":
+            extra += [c_setup, c_raise]
+        rc, out = _run_kit(extra, runner)
+        if rc != 1:
+            return (f"путь {label}: при fx_code=1 итог обязан быть 1, "
+                    f"получили rc={rc}: {out!r}")
+        if marker not in out:
+            return f"путь {label}: маркер пути не напечатан: {out!r}"
+        rc2, out2 = _run_kit(extra + [bait], runner)
+        if rc2 != 2:
+            return (f"приманка на пути {label} обязана вернуть голую двойку "
+                    f"(мутация пережила зуб): rc={rc2} {out2!r}")
+    return None
+
+
+def _tooth_phases_fixture_line_on_early_refusal() -> str | None:
+    """Ранний отказ строк печатает строку фазы фикстуры (Р9 fix-волны #407).
+
+    Ранние отказы выбора строк возвращали _phase_exit без строки фазы --
+    молчание фазы читалось бы как её зелёный ноль (класс #396). Зуб гоняет
+    снимок с несуществующим --id: строка «ФАЗА НЕ ЗАПУСКАЛАСЬ» с причиной
+    обязана присутствовать. Приманка снимает печать -- зуб обязан это ловить.
+    """
+    td, copy = _phases407_kit(_FX407_GREEN_CALL)
+    try:
+        r = _phases407_run(copy, td, "--id", "ZZZ")
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 2:
+            return (f"несуществующий --id обязан давать rc=2: "
+                    f"rc={r.returncode} {out!r}")
+        if "ИТОГ фикстур=ФАЗА НЕ ЗАПУСКАЛАСЬ" not in out:
+            return f"строка фазы не напечатана при раннем отказе строк: {out!r}"
+        if "нет таких строк" not in out:
+            return f"причина раннего отказа не названа: {out!r}"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    bait = ("        picked = pick_ids(opts.id, {r[\"id\"] for r in rows})\n"
+            "    except Refusal as exc:\n"
+            "        print(f\"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}\", "
+            "file=sys.stderr)\n"
+            "        print(_fixture_not_started_line(str(exc)), flush=True)\n",
+            "        picked = pick_ids(opts.id, {r[\"id\"] for r in rows})\n"
+            "    except Refusal as exc:\n"
+            "        print(f\"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}\", "
+            "file=sys.stderr)\n",
+            "зуб Р9: строка фазы снята с раннего отказа")
+    td, copy = _phases407_kit(_FX407_GREEN_CALL, (bait,))
+    try:
+        m = _phases407_run(copy, td, "--id", "ZZZ")
+        mout = (m.stdout or "") + (m.stderr or "")
+        if "ИТОГ фикстур=ФАЗА НЕ ЗАПУСКАЛАСЬ" in mout:
+            return f"мутация пережила зуб: строка фазы осталась: {mout!r}"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+# Якорь блока смерти пула и управляемые замены зуба Ф1 (fix-волна #407, раунд 2):
+# якоря собираются конкатенацией, чтобы цельный литерал в теле зуба не стал
+# вторым вхождением при замене на тексте прибора.
+_FX1_DEATH_ANCHOR = ("    bad = " + "0\n"
+                     "    try:\n"
+                     "        if " + "jobs:\n")
+_FX1_JOBS_ANCHOR = ("    jobs, inapp_rows, inapplicable_by_version, refused = "
+                    "build_" + "jobs(rows, picked, image, base)\n")
+_FX1_JOBS_STUB = (_FX1_JOBS_ANCHOR,
+                  "    jobs, inapp_rows, inapplicable_by_version, refused = "
+                  "[(\"probe-death\", \"c\", str(image), [(0, b\"x\")], "
+                  "[\"c\"])], [], [], []\n",
+                  "зуб Ф1: управляемое задание воркера")
+_FX1_DEATH_BAD = (_FX1_DEATH_ANCHOR,
+                  _FX1_DEATH_ANCHOR +
+                  "            bad += 1\n"
+                  "            print(\"checks-teeth: МУТАЦИЯ probe-death: "
+                  "ПРОШЛА МОЛЧА -- мутация снимка\", flush=True)\n"
+                  "            raise BrokenProcessPool(\"мутация снимка: "
+                  "воркер умер\")\n",
+                  "зуб Ф1: смерть воркера после напечатанной находки")
+_FX1_DEATH_REFUSED = (_FX1_DEATH_ANCHOR,
+                      _FX1_DEATH_ANCHOR +
+                      "            refused.append((\"probe-ref\", \"мутация "
+                      "снимка: отказ строки\"))\n"
+                      "            print(\"checks-teeth: МУТАЦИЯ probe-ref: "
+                      "ОТКАЗ ПРИБОРА -- мутация снимка\",\n"
+                      "                  file=sys.stderr, flush=True)\n"
+                      "            raise BrokenProcessPool(\"мутация снимка: "
+                      "воркер умер\")\n",
+                      "зуб Ф1: смерть воркера после отказа строки")
+_FX1_RUNNER_GREEN = "#!/bin/bash\necho '[OK] probe-green'\n"
+
+
+def _tooth_phases_worker_death_keeps_printed_findings() -> str | None:
+    """Смерть воркера не съедает уже напечатанную находку (Ф1 fix-волны #407).
+
+    Снимок печатает одну молчавшую мутацию (или один отказ строки) и умирает
+    BrokenProcessPool'ом: путь смерти обязан отдавать _phase_exit тот же
+    первый аргумент, что и финальная свёртка, -- 1 (дефект) либо 9 (отказ
+    строк), а не безусловную 2: свип читает 2 как «не измеряли», и
+    НАПЕЧАТАННАЯ находка сворачивалась бы в «не мерили». Приманка возвращает
+    на пути смерти безусловную 2 -- код обязан упасть до 2.
+    """
+    def _run_kit(extra_pairs):
+        td, copy = _phases407_kit(_FX407_GREEN_CALL, tuple(extra_pairs),
+                                  with_script=True)
+        (td / "tools" / "checks-on-image.sh").write_text(
+            _FX1_RUNNER_GREEN, encoding="utf-8")
+        try:
+            r = _phases407_run(copy, td)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    rc, out = _run_kit((_FX1_JOBS_STUB, _FX1_DEATH_BAD))
+    if rc != 1:
+        return (f"смерть воркера после «ПРОШЛА МОЛЧА» обязана давать rc=1 "
+                f"(найденный дефект выше «не измерено»): rc={rc} {out!r}")
+    if "ПРОШЛА МОЛЧА" not in out:
+        return f"напечатанная находка не доехала до вывода: {out!r}"
+    if "воркер умер" not in out:
+        return f"причина смерти воркера не напечатана: {out!r}"
+    rc, out = _run_kit((_FX1_JOBS_STUB, _FX1_DEATH_REFUSED))
+    if rc != 9:
+        return (f"смерть воркера после отказа строки обязана давать rc=9 "
+                f"(отказ прибора выше «не измерено»): rc={rc} {out!r}")
+    if "ОТКАЗ ПРИБОРА" not in out:
+        return f"напечатанный отказ строки не доехал до вывода: {out!r}"
+    bait = ("        return _phase_" + "exit(1 if bad else (9 if refused "
+            "else 2), entry_bad, fx_code)\n",
+            "        return _phase_" + "exit(2, entry_bad, fx_code)\n",
+            "зуб Ф1: безусловная двойка на пути смерти")
+    rc, out = _run_kit((_FX1_JOBS_STUB, _FX1_DEATH_BAD, bait))
+    if rc != 2:
+        return (f"приманка не вернула безусловную 2 -- якорь устарел, зуб "
+                f"мёртв: rc={rc} {out!r}")
+    return None
+
+
+_X5_FIXTURE_PIN_OLD = "EXPECTED_FIXTURE_TEETH = " + "13"
+_X5_FIXTURE_PIN_NEW = "EXPECTED_FIXTURE_TEETH = " + "99"
+_X5_PHASE_PRINT = ('        print(_fixture_not_started_line(\n'
+                   '            f"зубов фикстуры {len(_FIXTURE_TEETH)}, '
+                   'объявлено "\n'
+                   '            f"{EXPECTED_FIXTURE_TEETH}"), flush=True)\n')
+
+
+def _tooth_phases_fixture_pin_prints_phase_line() -> str | None:
+    """Путь пина набора фикстур печатает итог фазы (Х5 #407, раунд 3).
+
+    Расхождение len(_FIXTURE_TEETH) с пином возвращало 4, напечатав причину
+    ТОЛЬКО в stderr: на stdout не оставалось ни одной строки «ИТОГ фикстур=»,
+    и потребитель, грепающий итог фазы, читал молчание как её зелёный ноль
+    (класс #396). Снимок расходит пин; прогон обязан вернуть 4 и назвать оба
+    числа. Приманка снимает печать -- зуб обязан это ловить.
+    """
+    pin = (_X5_FIXTURE_PIN_OLD, _X5_FIXTURE_PIN_NEW,
+           "зуб Х5: пин набора фикстур расхожден")
+    td, copy = _phases407_kit(_FX407_GREEN_CALL, (pin,), with_script=True)
+    try:
+        r = _phases407_run(copy, td)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 4:
+            return (f"расхождение пина набора фикстур обязано давать rc=4: "
+                    f"rc={r.returncode} {out!r}")
+        if "ИТОГ фикстур=ФАЗА НЕ ЗАПУСКАЛАСЬ" not in out:
+            return f"итог фазы не напечатан на пути пина набора: {out!r}"
+        if "зубов фикстуры" not in out or "99" not in out:
+            return f"причина не назвала оба числа пина: {out!r}"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    bait = (_X5_PHASE_PRINT, "", "зуб Х5: печать итога снята с пути пина")
+    td, copy = _phases407_kit(_FX407_GREEN_CALL, (pin, bait), with_script=True)
+    try:
+        m = _phases407_run(copy, td)
+        mout = (m.stdout or "") + (m.stderr or "")
+        if "ИТОГ фикстур=ФАЗА НЕ ЗАПУСКАЛАСЬ" in mout:
+            return f"мутация пережила зуб: итог фазы остался: {mout!r}"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return None
+
+
+def _tooth_phases_fixture_not_started_line() -> str | None:
+    """Ранний пропуск печатает «ФАЗА НЕ ЗАПУСКАЛАСЬ», не «НЕ ИЗМЕРЕНО» (Ф6).
+
+    Прогон с несуществующим --image уходит ДО фазы фикстуры: строка фазы
+    обязана называть отсутствие запуска; «ИТОГ фикстур=НЕ ИЗМЕРЕНО» печатает
+    САМА фаза, которая шла и не смогла, -- одной строкой на оба исхода
+    оператор не отличил бы «фазы не было» от «фаза сломалась». Приманка
+    возвращает пропускам прежнюю форму -- зуб обязан это ловить.
+    """
+    def _run(extra=()):
+        td, copy = _phases407_kit(_FX407_GREEN_CALL, tuple(extra))
+        try:
+            r = _phases407_run(copy, td, "--image", "/нет/такого/образа-Ф6")
+            return (r.returncode, (r.stdout or "") + (r.stderr or ""))
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    rc, out = _run()
+    if rc != 5:
+        return (f"несуществующий образ обязан давать rc=5: rc={rc} {out!r}")
+    if "ИТОГ фикстур=ФАЗА НЕ ЗАПУСКАЛАСЬ" not in out:
+        return f"строка «ФАЗА НЕ ЗАПУСКАЛАСЬ» не напечатана: {out!r}"
+    if "ИТОГ фикстур=НЕ ИЗМЕРЕНО" in out:
+        return f"ранний пропуск напечатан строкой «НЕ ИЗМЕРЕНО»: {out!r}"
+    bait = ("    print(_fixture_" + "not_started_line(why), flush=True)\n"
+            "    return _phase_" + "exit(code, entry_bad)\n",
+            "    print(_fixture_" + "unmeasured_line(why), flush=True)\n"
+            "    return _phase_" + "exit(code, entry_bad)\n",
+            "зуб Ф6: пропуск снова печатает «НЕ ИЗМЕРЕНО»")
+    rc, out = _run((bait,))
+    if "ИТОГ фикстур=НЕ ИЗМЕРЕНО" not in out or "ФАЗА НЕ ЗАПУСКАЛАСЬ" in out:
+        return (f"приманка не вернула прежнюю форму -- якорь устарел, зуб "
+                f"мёртв: rc={rc} {out!r}")
+    return None
+
+
+def _tooth_mutant_rebinds_root_derived() -> str | None:
+    """Копии прибора перепривязывают ВСЕ ROOT-производные константы (Ф2 #407).
+
+    Перечень собирается ИЗ ТЕКСТА прибора (ast, присвоения модульного уровня,
+    чьё значение ссылается на ROOT): копия лежит вне дома кита, и
+    неперепривязанная константа указывает в каталог копии -- зуб FORK был
+    зелен по чужой причине (нет FIXTURE_BUILDER в каталоге копии), измерено
+    дорожками ревью. Новая ROOT-производная константа не имеет права уехать
+    молча: зуб краснеет на имени, которого нет в перечне. Приманка возвращает
+    конструктору перепривязку только ROOT -- хотя бы одна константа обязана
+    разойтись с домом, иначе якорь приманки мёртв.
+
+    ГРАНИЦА (Х10 раунда 3): квантор «ВСЕ копии» относится к копиям, идущим
+    через _fx_mutant. Копия двери имён (prefix "checks-teeth-namedoor.") не
+    перепривязывает НИЧЕГО и делает это законно: она зовёт одну чистую
+    функцию разбора имён, у которой потребителей путей нет вовсе. Появится у
+    неё путь -- она обязана уехать на общий конструктор.
+    """
+    live = set()
+    for node in ast.parse(Path(__file__).read_text(encoding="utf-8")).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if names and any(isinstance(n, ast.Name) and n.id == "ROOT"
+                         for n in ast.walk(node.value)):
+            live.update(names)
+    not_bound = live - set(_ROOT_DERIVED)
+    if not_bound:
+        return (f"ROOT-производные константы вне перечня перепривязки: "
+                f"{sorted(not_bound)}")
+    mut, raw = _fx_mutant(())
+    try:
+        for name in sorted(live):
+            if getattr(mut, name) != globals()[name]:
+                return (f"копия не перепривязала {name}: "
+                        f"{getattr(mut, name)!r} != {globals()[name]!r}")
+    finally:
+        shutil.rmtree(raw, ignore_errors=True)
+    # Приманка исполняет КОНСТРУКТОР КОПИИ (по образцу зубов, зовущих функцию
+    # копии): конструктор, чинящий только ROOT, обязан оставить константы
+    # копии в её каталоге -- именно это состояние ловит проверка выше.
+    bait_src = _once_replace(
+        Path(__file__).read_text(encoding="utf-8"),
+        "    for name in _ROOT_" + "DERIVED:\n"
+        "        setattr(mod, name, globals()[name])\n",
+        "    pass  # мутация Ф2: перепривязывается только ROOT\n",
+        "зуб Ф2: конструктор чинит только ROOT")
+    raw2 = Path(tempfile.mkdtemp(prefix="checks-teeth-fxmut."))
+    mod2 = raw2 / "checks-teeth-mutated.py"
+    mod2.write_text(bait_src, encoding="utf-8")
+    spec2 = importlib.util.spec_from_file_location("checks_teeth_fx_mutant2", mod2)
+    mut2 = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mut2)
+    try:
+        mut2._rebind_copy_home(mut2)
+        stray = [name for name in sorted(live)
+                 if getattr(mut2, name) != globals()[name]]
+        if not stray:
+            return ("мутация пережила зуб: конструктор «только ROOT» держит "
+                    "все константы дома -- якорь приманки мёртв")
+    finally:
+        shutil.rmtree(raw2, ignore_errors=True)
     return None
 
 
@@ -4320,6 +5610,9 @@ def main() -> int:
     opts = ap.parse_args()
 
     if opts.self_check:
+        # CONSTRAINT (Ф6 fix-волны #407): --self-check -- другой РЕЖИМ: фазы
+        # фикстуры у него нет вовсе, итоговой строки фазы он не печатает
+        # и печатать не обязан.
         return self_check()
 
     # Код 2 «контракт вызова» -- тот же, которым соседи validate/adjudicate
@@ -4330,6 +5623,8 @@ def main() -> int:
     # машине образ, и не должен занимать замок.
     if opts.jobs < 1:
         print("checks-teeth: --jobs должен быть не меньше 1", file=sys.stderr)
+        print(_fixture_not_started_line(
+            "нарушен контракт вызова: --jobs меньше 1"), flush=True)
         return 2
 
     # Контракт вызова раннера. Стоит ДО поисков раннера и образа: нарушенный
@@ -4374,10 +5669,27 @@ def main() -> int:
          _tooth_phases_refusal_does_not_mask_entry),
         ("phases-pin-mismatch-outranks-entry",
          _tooth_phases_pin_mismatch_outranks_entry),
+        ("phases-fx-defect-outranks-early-unmeasured",
+         _tooth_phases_fx_defect_outranks_early_unmeasured),
+        ("phases-fixture-line-on-early-refusal",
+         _tooth_phases_fixture_line_on_early_refusal),
+        ("mutant-rebind-pins-root-derived",
+         _tooth_mutant_rebinds_root_derived),
+        ("phases-worker-death-keeps-printed-findings",
+         _tooth_phases_worker_death_keeps_printed_findings),
+        ("phases-fixture-not-started-line",
+         _tooth_phases_fixture_not_started_line),
+        ("phases-fixture-pin-prints-phase-line",
+         _tooth_phases_fixture_pin_prints_phase_line),
+        ("weed-registry-covers-every-mkdtemp",
+         _tooth_weed_registry_covers_every_mkdtemp),
     )
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
               f"объявлено {EXPECTED_ENTRY_TEETH}", file=sys.stderr)
+        print(_fixture_not_started_line(
+            f"зубов входа {len(entry_teeth)}, объявлено "
+            f"{EXPECTED_ENTRY_TEETH}"), flush=True)
         return 4
     entry_bad = 0
     for name, fn in entry_teeth:
@@ -4434,6 +5746,7 @@ def main() -> int:
         picked = pick_ids(opts.id, {r["id"] for r in rows})
     except Refusal as exc:
         print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
+        print(_fixture_not_started_line(str(exc)), flush=True)
         return _phase_exit(2, entry_bad)
     # Дверь реестра: имена полей 2 и 6 обязаны существовать в checks
     # конвейера (docnum:other -- номера КОЛОНОК таблицы, не счётчики кита).
@@ -4443,6 +5756,7 @@ def main() -> int:
         check_row_names(rows, set(_pipeline_check_names()))
     except Refusal as exc:
         print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
+        print(_fixture_not_started_line(str(exc)), flush=True)
         return _phase_exit(2, entry_bad)
     n_img = sum(1 for r in rows if r["kind"] in ("literal", "derived"))
     n_inapp = sum(1 for r in rows if r["kind"] == "inapplicable")
@@ -4450,14 +5764,21 @@ def main() -> int:
     if n_other:
         print(f"checks-teeth: ОТКАЗ -- неизвестный kind у {n_other} строк",
               file=sys.stderr)
+        print(_fixture_not_started_line(
+            f"неизвестный kind у {n_other} строк"), flush=True)
         return _phase_exit(4, entry_bad)
     if n_img != EXPECTED_MUTATIONS:
         print(f"checks-teeth: ОТКАЗ -- мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}",
               file=sys.stderr)
+        print(_fixture_not_started_line(
+            f"мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}"), flush=True)
         return _phase_exit(4, entry_bad)
     if n_inapp != EXPECTED_INAPPLICABLE_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов неприменимости {n_inapp}, "
               f"объявлено {EXPECTED_INAPPLICABLE_TEETH}", file=sys.stderr)
+        print(_fixture_not_started_line(
+            f"зубов неприменимости {n_inapp}, объявлено "
+            f"{EXPECTED_INAPPLICABLE_TEETH}"), flush=True)
         return _phase_exit(4, entry_bad)
 
     # CONSTRAINT (#407, Р5): зубы фикстуры идут ПОСЛЕ замка конвейера: они
@@ -4466,7 +5787,7 @@ def main() -> int:
     # объявленная граница (Р6): доминирует и не сворачивается.
     fx_code = _fixture_phase(entry_bad)
     if fx_code == 4:
-        return 4
+        return _phase_exit(4, entry_bad, fx_code)
 
     # CONSTRAINT (#335): громкий отказ стреляет в области действия и не шире.
     # Контроль красноты защищает мутационные зубы -- им нужен зелёный базис
@@ -4496,13 +5817,13 @@ def main() -> int:
             red, _ = reds(image)
         except Refusal as exc:
             print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
-            return _phase_exit(2, entry_bad)
+            return _phase_exit(2, entry_bad, fx_code)
         if red:
             print("checks-teeth: КОНТРОЛЬ ПРОВАЛЕН -- образ красен ещё до мутаций:",
                   file=sys.stderr)
             for name in red:
                 print("    " + name, file=sys.stderr)
-            return _phase_exit(2, entry_bad)
+            return _phase_exit(2, entry_bad, fx_code)
         print(f"checks-teeth: КОНТРОЛЬ без мутации: ЗЕЛЁНО ({image})", flush=True)
         base = image.read_bytes()
     else:
@@ -4542,12 +5863,16 @@ def main() -> int:
                     else:
                         print(f"checks-teeth: МУТАЦИЯ {mid}: RED «{'» + «'.join(want)}»", flush=True)
     except BrokenProcessPool:
-        # Воркер умер (SIGKILL/OOM): мутации НЕ ИЗМЕРЕНЫ. Класс 2, а не 1 --
-        # по таблице инструмента 1 значит «мутация прошла молча», и свип
-        # объявлял бы красным китом сломанный прибор.
+        # Воркер умер (SIGKILL/OOM): ненапечатанные мутации НЕ ИЗМЕРЕНЫ, но
+        # уже напечатанные находки (bad/refused) не имеют права сворачиваться
+        # в «не измерено»: находка, названная вслух, старше неизмеренности.
         print("checks-teeth: НЕ МЕРИЛ -- воркер умер (SIGKILL/OOM), "
               "мутации не измерены", file=sys.stderr, flush=True)
-        return _phase_exit(2, entry_bad)
+        # CONSTRAINT (Ф1 fix-волны #407): 2 здесь НЕ безусловна -- свёртка
+        # принимает найденный дефект/отказ строк, накопленные ДО смерти
+        # воркера (тот же приоритет, что у финальной свёртки ниже); «не
+        # измерено» остаётся только когда не накоплено ни того, ни другого.
+        return _phase_exit(1 if bad else (9 if refused else 2), entry_bad, fx_code)
 
     measured_inapp = 0
     for row in inapp_rows:
@@ -4594,19 +5919,11 @@ def main() -> int:
     if refused:
         print(refusal_line(refused), flush=True)
     lock.close()                       # замок снимается ПОСЛЕ последнего замера
-    # CONSTRAINT (#408): дефект входной фазы стоит в приоритете дефектов
-    # мутаций -- зелёная мутационная фаза не имеет права затереть красный
-    # вход; «не измерено» мутаций сюда не доходит -- оно вернулось выше
-    # своим кодом. CONSTRAINT (#407, Р5): приоритет итогов расширен на фазу
-    # фикстуры без перестройки старых ступеней: найденный дефект (1) >
-    # отказ прибора (9) > «не измерено» фазы фикстуры (2) > чистый ноль.
-    if bad or entry_bad or fx_code == 1:
-        return 1
-    if refused:
-        return 9
-    if fx_code == 2:
-        return 2
-    return 0
+    # CONSTRAINT (Р1 fix-волны #407): приоритет исходов -- найденный дефект (1)
+    # > отказ прибора (9) > «не измерено» фазы фикстуры (2) > чистый ноль --
+    # живёт ТОЛЬКО в _phase_exit; вторая копия правила здесь расходилась бы
+    # с ранними выходами молча.
+    return _phase_exit(1 if bad else (9 if refused else 0), entry_bad, fx_code)
 
 
 if __name__ == "__main__":
