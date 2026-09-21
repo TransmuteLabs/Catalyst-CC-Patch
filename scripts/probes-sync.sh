@@ -25,7 +25,10 @@
 # live writer holds the sync lock (flock, lock directory, or it has just won
 # the takeover race), retry later; 5 -- nothing to measure: this machine has no
 # deployment at all; 6 -- the lock machinery is broken: the lock file itself
-# cannot be opened. The return code is part of the report: --diff used to print
+# cannot be opened; 7 -- divergences found in --diff AND the direction is
+# PROVEN for every diverging file (the home equals a PAST state of the canon,
+# so no edit made in the home can be lost by --to-home).
+# The return code is part of the report: --diff used to print
 # "расходится: X" and exit 0, so a gate hung on it stayed green (round 18, F-10).
 # Death by signal is answered as 128+N (130 INT, 143 TERM, via the split
 # traps) and is NOT a kit verdict (round 28, F-8).
@@ -972,7 +975,7 @@ if [[ "$MODE" == "--diff" ]]; then
       echo "  Дом -- ПРОШЛОЕ состояние канона: потеряется только отставание дома, правок В ДОМЕ нет." >&2
       echo "    bash $0 --to-home     канон -> дом" >&2
       echo "  Стороны: канон $ROOT, дом проб $PROBES_HOME, дом инструментов $TOOLS_HOME" >&2
-      __DONE=1; exit 1
+      __DONE=1; exit 7
     fi
     echo "ИТОГ: расходится файлов: $DIFFERS$__also" >&2
     echo "  Направление НЕ выводится из расхождения -- решает человек:" >&2
