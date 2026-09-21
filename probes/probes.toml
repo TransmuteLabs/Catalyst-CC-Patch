@@ -207,17 +207,21 @@ F = "коммит только --only по явным путям; push толь�
 # КОНСТРЕЙНТ: GLM идёт первым там, где он ратифицирован носителем клетки.
 # Где клетка ратифицирована за другим носителем, первым стоит он, а GLM --
 # следующей ступенью: порядок задаёт ратификация, а не безлимитность.
+# КОНСТРЕЙНТ: grok-4.7 — носитель с 2026-09-21 (слово юзера «давай пересаживаем»):
+# ступень 4.7 стоит ПЕРЕД ступенью 4.6 в той же форме (эффорт унаследован от 4.6
+# до перемера — Catalyst/programs/2026-09-21-grok-4.7-intake/INTAKE.md); 4.6
+# остаётся следующей ступенью как сравнительный носитель (агенты grok46-*).
 [failover]
 enabled = true
 
 [failover.class.exec-0n]
-models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.exec-0w]
-models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.exec-0p]
-models = [{model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}]
+models = [{model = "glm-5.3", effort = "max"}, {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}]
 [failover.class.exec-1n]
-models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "high"}, {model = "grok-4.6", effort = "max"}, {model = "gpt-5.6-sol", effort = "high"}]
+models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "high"}, {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "gpt-5.6-sol", effort = "high"}]
 [failover.class.exec-1w]
 models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "high"}]
 [failover.class.exec-2]
@@ -240,7 +244,7 @@ models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = 
 # ---------------------------------------------------------------------------
 # CONSTRAINT: ступень glm-5.3 БЕЗ эффорта -- дом пина этой пары не сведён: агента этой модели на этой клетке не существует. Следствие -- чужой пин (блок выше), не отсутствие. Решает юзер, #266
 [failover.class.exec-test]
-models = [{model = "glm-5.3-flash", effort = "max"}, "glm-5.3", {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "glm-5.3-flash", effort = "max"}, "glm-5.3", {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 
 # CONSTRAINT: ступень gpt-6-astra БЕЗ эффорта -- дом пина этой пары не сведён: агента этой модели на этой клетке не существует. Следствие -- чужой пин (блок выше), не отсутствие. Решает юзер, #266
 [failover.class.doc-annex]
@@ -250,29 +254,29 @@ models = [{model = "glm-5.3", effort = "max"}, "gpt-6-astra"]
 [failover.class.doc-spec]
 models = [{model = "gpt-6-astra", effort = "xhigh"}, "glm-5.3"]
 [failover.class.crit-form]
-models = [{model = "glm-5.3-flash", effort = "high"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "medium"}, {model = "deepseek-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
+models = [{model = "glm-5.3-flash", effort = "high"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.7", effort = "medium"}, {model = "grok-4.6", effort = "medium"}, {model = "deepseek-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
 [failover.class.crit-mech]
-models = [{model = "gpt-6-astra", effort = "xhigh"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "medium"}, {model = "gpt-5.6-sol", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "max"}]
+models = [{model = "gpt-6-astra", effort = "xhigh"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.7", effort = "medium"}, {model = "grok-4.6", effort = "medium"}, {model = "gpt-5.6-sol", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "max"}]
 
 # CONSTRAINT: ступень glm-5.3 БЕЗ эффорта -- дом пина этой пары не сведён: агента этой модели на этой клетке не существует. Следствие -- чужой пин (блок выше), не отсутствие. Решает юзер, #266
-# CONSTRAINT: ступень grok-4.6 БЕЗ эффорта -- дом пина этой пары не сведён: агента этой модели на этой клетке не существует. Следствие -- чужой пин (блок выше), не отсутствие. Решает юзер, #266
+# CONSTRAINT: ступени grok-4.7 / grok-4.6 БЕЗ эффорта -- дом пина этой пары не сведён: агента этой модели на этой клетке не существует. Следствие -- чужой пин (блок выше), не отсутствие. Решает юзер, #266
 [failover.class.crit-doc]
-models = [{model = "glm-5.3-flash", effort = "high"}, "glm-5.3", "grok-4.6", {model = "deepseek-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
+models = [{model = "glm-5.3-flash", effort = "high"}, "glm-5.3", "grok-4.7", "grok-4.6", {model = "deepseek-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "max"}]
 
 # CONSTRAINT: ступень glm-5.3 БЕЗ эффорта -- веер #750 (6) пинит high, но допуск модели ["max"] (директива юзера 14.08): high отверг бы гейт, max -- замер, которого не было. Следствие -- чужой пин (блок выше), не отсутствие. Дома пина сводит юзер, #266
 [failover.class.audit-form]
-models = [{model = "glm-5.3-flash", effort = "max"}, "glm-5.3", {model = "grok-4.6", effort = "max"}, {model = "deepseek-flash", effort = "high"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "glm-5.3-flash", effort = "max"}, "glm-5.3", {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "deepseek-flash", effort = "high"}, {model = "qwen3.8-flash", effort = "high"}]
 
 # CONSTRAINT: ступень glm-5.3 БЕЗ эффорта -- веер #750 (6) пинит high, но допуск модели ["max"] (директива юзера 14.08): high отверг бы гейт, max -- замер, которого не было. Следствие -- чужой пин (блок выше), не отсутствие. Дома пина сводит юзер, #266
-# CONSTRAINT: ступень grok-4.6 БЕЗ эффорта -- дом пина этой пары не сведён: агента этой модели на этой клетке не существует. Следствие -- чужой пин (блок выше), не отсутствие. Решает юзер, #266
+# CONSTRAINT: ступени grok-4.7 / grok-4.6 БЕЗ эффорта -- дом пина этой пары не сведён: агента этой модели на этой клетке не существует. Следствие -- чужой пин (блок выше), не отсутствие. Решает юзер, #266
 [failover.class.audit-mech]
-models = [{model = "gpt-6-astra", effort = "xhigh"}, "glm-5.3", "grok-4.6", {model = "deepseek-flash", effort = "high"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "gpt-6-astra", effort = "xhigh"}, "glm-5.3", "grok-4.7", "grok-4.6", {model = "deepseek-flash", effort = "high"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.an-cause]
-models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "deepseek-flash", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "glm-5.3-flash", effort = "max"}, {model = "glm-5.3", effort = "max"}, {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "deepseek-flash", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.an-system]
-models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "xhigh"}, {model = "grok-4.6", effort = "max"}, {model = "gpt-5.6-sol", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "glm-5.3", effort = "max"}, {model = "gpt-6-astra", effort = "xhigh"}, {model = "grok-4.7", effort = "max"}, {model = "grok-4.6", effort = "max"}, {model = "gpt-5.6-sol", effort = "xhigh"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.scout-enum]
-models = [{model = "grok-4.6", effort = "medium"}, {model = "glm-5.3", effort = "max"}, {model = "glm-5.3-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
+models = [{model = "grok-4.7", effort = "medium"}, {model = "grok-4.6", effort = "medium"}, {model = "glm-5.3", effort = "max"}, {model = "glm-5.3-flash", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.scout-class]
 models = [{model = "gpt-6-astra", effort = "high"}, {model = "glm-5.3", effort = "max"}, {model = "qwen3.8-flash", effort = "high"}]
 [failover.class.res-fact]
