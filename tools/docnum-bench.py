@@ -127,7 +127,7 @@ PIPELINE = 'claude-patch-all.sh'
 ANCHOR = 'python3 - "$0" <<\'PYDOCS\'\n'
 END = '\nPYDOCS\n'
 # Круг 28, F-12(б): +1 -- мутация D40 на элидированную форму «все N».
-EXPECTED_MUTATIONS = 45
+EXPECTED_MUTATIONS = 48
 # ПУСТО НЕ НОЛЬ и для самих зубов: «ноль провалов» без счётчика проверок
 # неотличим от «зубы не измеряли ничего». Ровно столько проверок обязана
 # прогнать teeth(); расхождение -- код 2 (прибор измерил не то, что объявил),
@@ -668,6 +668,35 @@ def main():
             # повторить позже»; повтор тут не помогает никогда (раунд 19, A-4).
             return 2
         say('КОНТРОЛЬ без мутации: ЗЕЛЁНО')
+
+        # Зуб замыкания знаменателя: зелёный вердикт обязан разложить ВСЕ
+        # пары «величина × владелец» из OWNERS по двум разрядам --
+        # подтверждённые «(утв. N)» и «БЕЗ УТВЕРЖДЕНИЙ В ПРОЗЕ». Вердикт,
+        # печатающий реестр объявленного, неотличим от сверившего: молчащий
+        # разряд читается так же, как отсутствующий.
+        if 'БЕЗ УТВЕРЖДЕНИЙ В ПРОЗЕ:' not in out:
+            say('ОТКАЗ -- вердикт не замыкает знаменатель: нет строки '
+                '«БЕЗ УТВЕРЖДЕНИЙ В ПРОЗЕ:»')
+            return 1
+        head_line = [l for l in out.splitlines()
+                     if 'СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ' in l]
+        tail_line = [l for l in out.splitlines()
+                     if l.startswith('БЕЗ УТВЕРЖДЕНИЙ В ПРОЗЕ:')]
+        if len(head_line) != 1 or len(tail_line) != 1:
+            say('ОТКАЗ -- вердикт не замыкает знаменатель: строк вердикта '
+                'СОВПАДАЮТ=%d, БЕЗ УТВЕРЖДЕНИЙ=%d, нужно по одной'
+                % (len(head_line), len(tail_line)))
+            return 1
+        confirmed_n = head_line[0].count('(утв. ')
+        bare_text = tail_line[0].split(':', 1)[1].strip()
+        bare_n = 0 if bare_text == 'нет' else len(bare_text.split(', '))
+        registry = owners_registry(read(os.path.join(kit, PIPELINE)))
+        total = sum(len(counts) for _parts, counts in registry.values())
+        if confirmed_n + bare_n != total:
+            say('ОТКАЗ -- вердикт не замыкает знаменатель: сверено %d, '
+                'без утверждений %d, в реестре %d'
+                % (confirmed_n, bare_n, total))
+            return 1
 
         reddened = 0
         for name, rel, old, new, want in rows:

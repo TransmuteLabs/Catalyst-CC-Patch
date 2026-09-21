@@ -71,3 +71,6 @@ D42	claude-patch-all.sh	    """Все питоновские heredoc'и одно
 D43	README.md	build-path-probe has {OWNER:build-path-probe:scenarios} scenarios	build-path-probe has {OWNER:build-path-probe:scenarios:+1} scenarios	объявлено «{OWNER:build-path-probe:scenarios} scenarios» (владелец build-path-probe)
 D44	README.md	{OWNER:build-path-probe:scenarios} scenarios and {OWNER:build-path-probe:mutations} mutations	{OWNER:build-path-probe:scenarios} scenarios and 108 mutations	объявлено «{OWNER:build-path-probe:mutations} mutations» (владелец build-path-probe)
 D45	tools/corpus-tools-bench.sh	EXPECTED_SCENARIOS={OWNER:corpus-tools-bench:scenarios}	EXPECTED_SCENARIO_COUNT={OWNER:corpus-tools-bench:scenarios:+1}	не объявляет свою величину
+D47	README.md	13 scenarios and	14 scenarios and	объявлено «{OWNER:backup-divergence-probe:scenarios} scenarios»
+D48	README.md	and 2 mutations	and 3 mutations	объявлено «{OWNER:backup-divergence-probe:mutations} mutations»
+D46	README.md	41 мутацию	51 мутацию	объявлено «{OWNER:probes-sync-bench:mutations} мутацию»

@@ -4834,8 +4834,13 @@ OWNERS = (
      ('tools', 'checks-teeth-corpus.py'),
      {'mutations': r'^EXPECTED_MUTATIONS = (\d+)$'}),
 )
-# Существительное -> величина. Единственного числа нет намеренно: «1 check» как
-# утверждение не пишут, а слово в единственном числе стоит в прозе на каждом шагу.
+# Существительное -> величина. Формы ед. ч. живут отдельно (SINGULAR ниже):
+# слово в ед. ч. стоит в прозе на каждом шагу («+ 1 сценарий», «rc=1
+# (мутация прошла молча)»), и принимать его без оглядки на число значило бы
+# женить его с посторонними числами. Пара от формы SINGULAR возникает только
+# при числе, стоящем ВПЛОТНУЮ слева и оканчивающемся на 1, но не равном 1
+# и не оканчивающемся на 11: такой счёт («41 мутацию») пишут вплотную и в
+# ед. ч., а номер («мутация 101 ... сценарий 97») -- отделённым словом.
 NOUNS = {}
 for _forms, _q in (
         (('checks', 'проверок', 'проверки', 'проверкам', 'проверками',
@@ -4846,6 +4851,20 @@ for _forms, _q in (
           'мутациях'), 'mutations')):
     for _f in _forms:
         NOUNS[_f] = _q
+SINGULAR = {}
+for _forms, _q in (
+        (('проверка', 'проверку'), 'checks'),
+        (('сценарий',), 'scenarios'),
+        (('мутация', 'мутацию'), 'mutations')):
+    for _f in _forms:
+        SINGULAR[_f] = _q
+
+
+def noun_of(tok):
+    """Величина по токену-существительному; хвостовое «:»/«-» -- пунктуация
+    после счёта («2 mutations: one...»), слову она не принадлежит."""
+    word = tok.casefold().rstrip(':-')
+    return NOUNS.get(word) or SINGULAR.get(word)
 
 # Форма «все N» с опущенным существительным (круг 28, F-12). Живой случай
 # (docnum:example): «Реестр выше говорит, что все 114 сошлись» при
@@ -5336,16 +5355,31 @@ def scan(text, table, aliases, path='<текст>'):
     # Позиции ВСЕХ сверяемых счётных существительных: по ним пометка выбирает
     # себе счёт (см. exempt). Считаются один раз на текст. Сюда же -- числа
     # элидированной формы «все N»: пометка обязана освобождать и их.
-    anchors = [at for tok, at in toks
-               if NOUNS.get(tok.casefold()) in table]
+    # Форма SINGULAR становится якорем ТОЛЬКО как состоявшаяся пара:
+    # exempt() отдаёт пометку БЛИЖАЙШЕМУ якорю, и лишний якорь перетянул бы
+    # чужую пометку на себя, обнажая ранее освобождённое утверждение.
+    def _sing_pair(i):
+        tok = toks[i][0]
+        if SINGULAR.get(tok.casefold().rstrip(':-')) not in table:
+            return False
+        if i == 0:
+            return False
+        prev = toks[i - 1][0]
+        return (prev.isdigit() and prev.endswith('1')
+                and not prev.endswith('11') and prev != '1')
+
+    anchors = [at for i, (tok, at) in enumerate(toks)
+               if NOUNS.get(tok.casefold().rstrip(':-')) in table or _sing_pair(i)]
     anchors += [toks[i + 1][1] for i, (tok, _at) in enumerate(toks[:-1])
                 if tok.casefold() in ELIDE_ALL and toks[i + 1][0].isdigit()]
 
     bad = []
+    confirmed = {}
     for i, (tok, at) in enumerate(toks):
-        quantity = NOUNS.get(tok.casefold())
+        quantity = noun_of(tok)
         if quantity is None or quantity not in table:
             continue
+        lone = tok.casefold().rstrip(':-') in SINGULAR
         lo_s, hi_s = sentence_span(at)
         value, worded, ranged = None, False, False
         # Счёт словом принимается только ВПЛОТНУЮ к существительному. На
@@ -5388,6 +5422,10 @@ def scan(text, table, aliases, path='<текст>'):
                     break
                 if nxt.casefold() in LINKS:
                     linked = True
+        if lone and not _sing_pair(i):
+            # Ед. ч. -- пара только «вплотную + число на 1 (не 1, не ...11)»;
+            # прочие числа рядом со словом ед. ч. -- номера и проза, не счёт.
+            continue
         if ranged or (value is None and not worded) or exempt(at):
             continue
         if worded:
@@ -5406,7 +5444,10 @@ def scan(text, table, aliases, path='<текст>'):
         want = table[quantity][oid]
         if value != want:
             bad.append((lines[at], got,
-                        'объявлено «%s %s» (владелец %s)' % (want, tok, oid)))
+                        'объявлено «%s %s» (владелец %s)'
+                        % (want, tok.rstrip(':-'), oid)))
+        else:
+            confirmed[(quantity, oid)] = confirmed.get((quantity, oid), 0) + 1
 
     # Элидированная форма «все N» (круг 28, F-12): существительное опущено,
     # разбор от существительного её не видит. Владелец ищется среди ВСЕХ
@@ -5424,7 +5465,7 @@ def scan(text, table, aliases, path='<текст>'):
         # стоит при числе,
         # счёт уже разобран обычным путём выше; повторный отчёт не нужен.
         after = toks[i + 2][0] if i + 2 < len(toks) else ''
-        if NOUNS.get(after.casefold()) in table:
+        if noun_of(after) in table:
             continue
         if exempt(num_at):
             continue
@@ -5447,7 +5488,7 @@ def scan(text, table, aliases, path='<текст>'):
             bad.append((lines[num_at], got,
                         '«все %s» не сходится ни с одной величиной владельца %s '
                         '(объявлено: %s)' % (num_tok, oid, ', '.join(declared))))
-    return bad
+    return bad, confirmed
 
 
 # --- самопроверка грамматики --------------------------------------------------
@@ -5460,11 +5501,13 @@ def scan(text, table, aliases, path='<текст>'):
 # Литеральные пары «число + существительное» тут безопасны: это код, а гейт
 # читает в коде только комментарии.
 T = {'scenarios': {'probe-bench': '56', 'corpus-tools-bench': '12'},
-     'mutations': {'judge-tools-bench': '10', 'corpus-tools-bench': '6'},
+     'mutations': {'judge-tools-bench': '10', 'corpus-tools-bench': '6',
+                   'probes-sync-bench': '41'},
      'checks': {'pipeline': '114'}}
 A = [('probe-bench', 'probe-bench'), ('judge-tools-bench', 'judge-tools-bench'),
      ('corpus-tools-bench', 'corpus-tools-bench'),
-     ('pipeline', 'pipeline'), ('конвейер', 'pipeline')]
+     ('pipeline', 'pipeline'), ('конвейер', 'pipeline'),
+     ('probes-sync-bench', 'probes-sync-bench')]
 # Два имени -- отказ в ОБОИХ кругах, и расстояние до них больше ничего не
 # решает. Набивка, уравнивавшая его, стояла здесь ровно против правила
 # «побеждает ближнее»; правило снято, и её мутация (сдвиг набивки на символ)
@@ -5598,6 +5641,14 @@ CASES = (
      'элидированная форма требует владельца, как обычная'),
     ('все 113 сошлись docnum:other.', 0, '',
      'помеченная элидированная форма свободна'),
+    ('probes-sync-bench держит 41 мутацию.', 0, '', 'вин. ед. при числе на 1 — счёт верный'),
+    ('probes-sync-bench держит 51 мутацию.', 1, 'probes-sync-bench', 'вин. ед. при числе на 1 — счёт разошёлся'),
+    ('probes-sync-bench держит 41 мутация.', 0, '', 'им. ед. при числе на 1'),
+    ('в probes-sync-bench 11 мутация упала.', 0, '', '11 — ед. ч. не принимается, пара не возникает'),
+    ('probes-sync-bench: 1 мутация прошла молча.', 0, '', 'число 1 — ед. ч. не принимается, пара не возникает'),
+    ('ok мутация 41 покраснила сценарий 12 своей причиной.', 0, '', 'номер, а не счёт: число не вплотную к слову'),
+    ('corpus-tools-bench runs 13 scenarios: one is new.', 1, 'corpus-tools-bench', 'двоеточие после существительного не съедает пару'),
+    ('corpus-tools-bench runs 13 scenarios - one is new.', 1, 'corpus-tools-bench', 'дефис после существительного не съедает пару'),
 )
 # Проза живёт и в коде, но читается там по своим правилам: докстринг питона и
 # печатаемая шеллом строка -- проза, остальное -- значения.
@@ -5614,11 +5665,11 @@ FILE_CASES = (
 
 broken = []
 for path, text, want_n, want_why, name in FILE_CASES:
-    got = scan(text, T, A, path)
+    got, _confirmed = scan(text, T, A, path)
     if len(got) != want_n or (want_why and want_why not in got[0][2]):
         broken.append((name, want_n, want_why, got))
 for text, want_n, want_why, name in CASES:
-    got = scan(text, T, A, 'случай.md')
+    got, _confirmed = scan(text, T, A, 'случай.md')
     if len(got) != want_n or (want_why and want_why not in got[0][2]):
         broken.append((name, want_n, want_why, got))
 if broken:
@@ -5694,11 +5745,15 @@ if skipped:
 files = sorted(set(files + [readme, os.path.abspath(sys.argv[1])]))
 
 bad = []
+confirmed = {}
 for path in files:
     if not os.path.exists(path):
         continue
-    for lineno, got, why in scan(read(path), table, aliases, path):
+    file_bad, file_confirmed = scan(read(path), table, aliases, path)
+    for lineno, got, why in file_bad:
         bad.append((path, lineno, got, why))
+    for pair, n in file_confirmed.items():
+        confirmed[pair] = confirmed.get(pair, 0) + n
 
 if bad:
     print("ЧИСЛА В ДОКАХ РАЗОШЛИСЬ С ОБЪЯВЛЕННЫМИ:")
@@ -5710,10 +5765,23 @@ if bad:
     print("  Если число про конкретный стенд — рядом должно стоять его ИМЯ, а не")
     print("  общее слово «стенд»/«bench»: владелец выбирается по ближайшему имени.")
     sys.exit(1)
-print("ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (%s)" % '; '.join(
-    '%s: %s' % (quantity, ', '.join('%s=%s' % (oid, val)
-                                    for oid, val in sorted(by.items())))
-    for quantity, by in sorted(table.items())))
+# Вердикт называет СВЕРЕННОЕ, а не объявленное: первая строка несёт только
+# пары с живыми подтверждениями (со счётом «утв. N»), вторая -- пары без
+# утверждений в прозе. Печатаются ОБЕ всегда: молчащий разряд неотличим от
+# отсутствующего.
+named = '; '.join(
+    '%s: %s' % (quantity, ', '.join(
+        '%s=%s (утв. %d)' % (oid, val, confirmed[(quantity, oid)])
+        for oid, val in sorted(by.items())
+        if confirmed.get((quantity, oid))))
+    for quantity, by in sorted(table.items())
+    if any(confirmed.get((quantity, oid)) for oid in by))
+print("ЧИСЛА В ДОКАХ СОВПАДАЮТ С ОБЪЯВЛЕННЫМИ (%s)" % (named or 'нет'))
+silent = sorted('%s.%s=%s' % (quantity, oid, val)
+                for quantity, by in table.items()
+                for oid, val in by.items()
+                if not confirmed.get((quantity, oid)))
+print('БЕЗ УТВЕРЖДЕНИЙ В ПРОЗЕ: %s' % (', '.join(silent) if silent else 'нет'))
 PYDOCS
 
 # --- 0e. и у этого гейта должны быть зубы -----------------------------------
