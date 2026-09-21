@@ -289,7 +289,7 @@ tooth_6() {
   local kit2 rc6 out6
   kit2=$(_tooth_stub_kit \
     'echo "fixture-build: НЕ ИЗМЕРЕНО -- зуб 6: нет форка на этой площадке" >&2' \
-    'exit 3')
+    'exit 3') || refuse "зуб 6: снимок стенда не собран -- строитель заглушки отказал"
   rc6=0
   out6=$(cd / && FORK="${FORK}" IMAGE="${IMAGE}" \
     bash "${kit2}/tools/step7-window-teeth.sh" 2>&1) || rc6=$?
@@ -323,7 +323,7 @@ tooth_7() {
     'if [[ -f "$(dirname "$0")/.stub-called" ]]; then echo "stub ok"; exit 0; fi' \
     'touch "$(dirname "$0")/.stub-called"' \
     'echo "fixture-build: ОТКАЗ -- зуб 7: нейтрализация легла не двумя заменами" >&2' \
-    'exit 2')
+    'exit 2') || refuse "зуб 7: снимок стенда не собран -- строитель заглушки отказал"
   rc7=0
   out7=$(cd / && FORK="${FORK}" IMAGE="${IMAGE}" \
     bash "${kit2}/tools/step7-window-teeth.sh" 2>&1) || rc7=$?
@@ -354,7 +354,7 @@ tooth_7() {
     'if [[ -f "$(dirname "$0")/.stub-called" ]]; then echo "stub ok"; exit 0; fi' \
     'touch "$(dirname "$0")/.stub-called"' \
     'echo "fixture-build: ОТКАЗ -- зуб 7: нейтрализация легла не двумя заменами" >&2' \
-    'exit 2')
+    'exit 2') || refuse "зуб 7 (мутация): снимок стенда не собран -- строитель заглушки отказал"
   m7build=0
   python3 - "${kit3}/tools/step7-window-teeth.sh" <<'MUT7' || m7build=$?
 import sys
@@ -407,7 +407,7 @@ tooth_8() {
   kit2=$(_tooth_stub_kit \
     'case "${1:-}" in neutralize) exit 0 ;; *)' \
     'echo "fixture-build: НЕ ИЗМЕРЕНО -- зуб 8: нет форка на apply" >&2' \
-    'exit 3 ;; esac')
+    'exit 3 ;; esac') || refuse "зуб 8: снимок стенда не собран -- строитель заглушки отказал"
   rc8=0
   out8=$(cd / && FORK="${FORK}" IMAGE="${IMAGE}" \
     bash "${kit2}/tools/step7-window-teeth.sh" 2>&1) || rc8=$?
@@ -430,7 +430,7 @@ tooth_8() {
   kit3=$(_tooth_stub_kit \
     'case "${1:-}" in neutralize) exit 0 ;; *)' \
     'echo "fixture-build: НЕ ИЗМЕРЕНО -- зуб 8: нет форка на apply" >&2' \
-    'exit 3 ;; esac')
+    'exit 3 ;; esac') || refuse "зуб 8 (мутация): снимок стенда не собран -- строитель заглушки отказал"
   m8build=0
   python3 - "${kit3}/tools/step7-window-teeth.sh" <<'MUT8' || m8build=$?
 import sys
