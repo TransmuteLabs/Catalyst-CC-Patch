@@ -20,6 +20,13 @@
 2. Логическая строка: текст до перевода строки ВНЕ кавычек; `\\`-перенос
    склеивает; `#`-комментарий (на границе слова, вне кавычек) отрезается;
    тела heredoc (`<<TAG` ... `TAG`) пропускаются целиком -- это данные.
+   CONSTRAINT: `$'...'` (ANSI-C) -- НЕ то же, что `'...'`: внутри него
+   обратная косая экранирует, и `\\'` кавычку НЕ закрывает. Лексер без
+   этого различения закрывает строку на экранированном апострофе, состояние
+   кавычек уезжает, и десятки последующих физических строк склеиваются в
+   одно слово -- их содержимое начинает судиться как код (измерено:
+   tools/corpus-tools-bench.sh:9388 съедал 156 строк, и элемент таблицы
+   мутаций на 9506 читался как раскрытие массива на командной позиции).
 3. Сегменты разделяются переводами логических строк, `&&`, `||`, `;`,
    `|`, `&` вне кавычек (`&` после `>`/`<` -- часть перенаправления).
    Подоболочки `( ... )` и группы `{ ...; }` образуют вложенные области,
@@ -58,8 +65,19 @@
 6. Строки-ДАННЫЕ (в таблицах `tools/corpus-tools-bench*.sh`: строка
    начинается с двух пробелов и одиночной кавычки) кодом не считаются --
    то же правило, что у переписи замков в tools/lock-probe.sh (утверждение
-   9): иначе дословный текст открытия внутри строки массива читался бы как
-   настоящее открытие.
+   9). Гасится СОДЕРЖИМОЕ одиночных кавычек, а не строка: скобки,
+   операторы и переводы строк остаются кодом.
+   CONSTRAINT: гасить обязательно -- открытие и закрытие внутри кавычек
+   грамматика и так не читает (они не совпадают с OPEN_TOK/EXEC_OPEN), но
+   РАСКРЫТИЕ массива `${A[@]}` в данных читается: длинное слово, начавшееся
+   выше по файлу, уводит состояние кавычек, и текст элемента таблицы
+   становится командной позицией.
+   CONSTRAINT: выбрасывать строку целиком нельзя -- вместе с данными
+   уходит закрывающая скобка присваивания `ИМЯ+=(`. Замерено: 46 из 50
+   многострочных присваиваний корпусного стенда доразбирались до ЧУЖОЙ
+   скобки, и граница массива становилась ложной в обе стороны -- и лишним
+   отказом (`не разобрано присваивание`), и МОЛЧАНИЕМ на настоящем вызове
+   после такого присваивания.
 
 Объявленные слепые классы (как heredoc'ы у гейта чисел -- объём измерим,
 прозрачность обязательна): вызовы через переменные-пути (`bash "$PROBE_SH"`),
@@ -102,11 +120,55 @@ EXEC_CLOSE = re.compile(r"^exec\s+(\d)>&-")
 DATA_WORDS = {"printf", "echo", ":", "true", "false", "read", "test", "[",
               "local", "declare", "typeset", "export", "readonly"}
 CLOSE_TOK = re.compile(r"(?<!\d)(\d)>&-")
-HEREDOC = re.compile(r"<<(?!<)-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
-ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Строки-данные таблиц мутаций: только в corpus-tools-bench*.sh (см. пункт 6).
 DATA_FILE = re.compile(r"^corpus-tools-bench.*\.sh$")
 DATA_LINE = re.compile(r"^  '")
+HEREDOC = re.compile(r"<<(?!<)-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def blank_single_quoted(text):
+    """Содержимое одиночных кавычек -- данные; структура строки -- код.
+
+    CONSTRAINT: переводы строк сохраняются -- на них держится нумерация
+    физических строк внутри одной логической. Двойные кавычки не трогаются:
+    в них живут раскрытия массивов, ради которых гейт и существует.
+    """
+    out = []
+    i = 0
+    quote = None
+    ansi = False  # см. пункт 2: `$'...'` экранирует обратной косой
+    while i < len(text):
+        c = text[i]
+        if quote == "'":
+            if ansi and c == "\\" and i + 1 < len(text):
+                if text[i + 1] == "\n":
+                    out.append("\n")
+                i += 2
+                continue
+            if c == "'":
+                quote = None
+                out.append(c)
+            elif c == "\n":
+                out.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote == '"':
+            out.append(c)
+            if c == '"':
+                quote = None
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            ansi = c == "'" and bool(out) and out[-1] == "$"
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def strip_comments_split(lines):
@@ -117,6 +179,7 @@ def strip_comments_split(lines):
     cur = []
     cur_start = None
     sq = dq = False
+    sq_ansi = False  # `$'...'`: внутри обратная косая экранирует
     n = len(lines)
     while i < n:
         phys = lines[i]
@@ -129,6 +192,10 @@ def strip_comments_split(lines):
             c = phys[j]
             if sq:
                 cur.append(c)
+                if sq_ansi and c == "\\" and j + 1 < len(phys):
+                    cur.append(phys[j + 1])
+                    j += 2
+                    continue
                 if c == "'":
                     sq = False
                 j += 1
@@ -146,6 +213,7 @@ def strip_comments_split(lines):
             # вне кавычек
             if c == "'":
                 sq = True
+                sq_ansi = bool(cur) and cur[-1] == "$"
                 cur.append(c)
                 j += 1
                 continue
@@ -221,10 +289,11 @@ def shell_tokens(logical):
                 result.append(Token("op", text[start:i], line))
                 continue
             quote = None
+            ansi = False  # см. пункт 2: `$'...'` экранирует обратной косой
             expansion = []
             while i < len(text):
                 c = text[i]
-                if c == "\\" and quote != "'":
+                if c == "\\" and (quote != "'" or ansi):
                     line += text[i:i + 2].count("\n")
                     i += min(2, len(text) - i)
                     continue
@@ -236,6 +305,7 @@ def shell_tokens(logical):
                     continue
                 if c in "'\"`":
                     quote = c
+                    ansi = c == "'" and i > start and text[i - 1] == "$"
                     i += 1
                     continue
                 if text[i:i + 2] in ("${", "$("):
@@ -335,15 +405,17 @@ def array_refs(text, with_lines=False):
     """Одиночные кавычки и экранированный доллар не раскрывают массив."""
     i = 0
     quote = None
+    ansi = False  # см. пункт 2: `$'...'` экранирует обратной косой
     while i < len(text):
         c = text[i]
-        if c == "\\" and quote != "'":
+        if c == "\\" and (quote != "'" or ansi):
             i += 2
             continue
         if c == quote:
             quote = None
         elif c in "'\"" and quote is None:
             quote = c
+            ansi = c == "'" and i > 0 and text[i - 1] == "$"
         elif quote != "'":
             match = ARRAY_REF.match(text, i)
             if match:
@@ -426,15 +498,16 @@ def tool_spawn(seg):
     return False
 
 
-def scan_file(path, is_data_file):
+def scan_file(path, is_data_file=False):
     """-> (violations, open_events). violations: [(lineno, fd, text)]"""
     with open(path, encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     open_events = 0
     violations = []
     arrays = {}
-    logical = [(line, value) for line, value in strip_comments_split(text.split("\n"))
-               if not (is_data_file and DATA_LINE.match(value))]
+    logical = [(line, blank_single_quoted(value)
+                if is_data_file and DATA_LINE.match(value) else value)
+               for line, value in strip_comments_split(text.split("\n"))]
 
     def walk(nodes, opens):
         nonlocal open_events
@@ -583,9 +656,16 @@ SELF_CASES = [
     ("two-fds-both-required",
      "exec 9>\"$L\"\nexec 6>\"$M\"\nbash tools/x.sh 9>&-\n",
      [(3, 6)]),
-    ("data-line-in-bench",
-     None,  # особый случай: имя файла corpus-tools-bench.sh
+    # Дословный текст открытия ВНУТРИ одиночных кавычек -- данные: он
+    # принадлежит слову, а не структуре, и открытием не читается (пункт 6).
+    ("quoted-open-is-data",
+     "exec 9>\"$L\"\n  'bash tools/x.sh -- exec 9>\"$Z\"'\n",
      []),
+    # Тот же текст БЕЗ кавычек -- настоящий вызов: контроль, что предыдущий
+    # случай зелен по кавычкам, а не потому, что грамматика слепа к форме.
+    ("unquoted-open-is-code",
+     'exec 9>"$L"\nbash tools/x.sh -- exec 9>"$Z"\n',
+     [(2, 9)]),
     ("subshell-close-covers",
      "exec 9>\"$L\"\n( bash tools/x.sh ) 9>&- &\n",
      []),
@@ -706,6 +786,20 @@ SELF_CASES = [
      'exec 9>"$L"\n{ exec 9>&-; }\nbash tools/x.sh\n', []),
     ("group-boundary-close-temporary",
      'exec 9>"$L"\n{ bash tools/x.sh; } 9>&-\nbash tools/y.sh\n', [(3, 9)]),
+    # Закрывающая скобка присваивания стоит НА строке-данных: граница массива
+    # обязана пережить гашение данных, иначе разбор уезжает на чужую скобку --
+    # вызов ниже пропадает, а отказ называет не тот предмет.
+    ("data-line-array-boundary", None, [(4, 9)]),
+    # Прямая цель правила: элемент ТАБЛИЦЫ с путём инструмента -- данные, а не
+    # метка «массив нёс инструмент»: иначе раскрытие таблицы даёт ложный отказ.
+    # Парный контроль ниже держит случай от вакуумности.
+    ("data-line-array-ref-is-data", None, []),
+    ("unquoted-array-ref-is-code", None, [(3, 9)]),
+    # ANSI-C (пункт 2): `\'` внутри `$'...'` кавычку НЕ закрывает. Без этого
+    # различения строка 2 утаскивает строку 3 в своё слово, и вызов пропадает.
+    ("ansi-c-escaped-quote-does-not-close",
+     "exec 9>\"$L\"\necho $'a\\'b'\nbash tools/x.sh\n",
+     [(3, 9)]),
 ]
 
 
@@ -716,12 +810,22 @@ def self_check():
         for case in SELF_CASES:
             name, body, want = case[:3]
             fname = "case.sh"
-            if name == "data-line-in-bench":
-                # Правило данных привязано к ИМЕНИ файла: кладём в подкаталог
-                # под настоящим именем, иначе случай мерял бы не своё.
+            # Правило данных привязано к ИМЕНИ файла: случаи про него кладём в
+            # подкаталог под настоящим именем, иначе мерили бы не своё.
+            DATA_BODIES = {
+                "data-line-array-boundary":
+                    'exec 9>"$L"\nMUT_FILE+=(\n  \'bash tools/x.sh\')\n'
+                    'bash tools/y.sh\n',
+                "data-line-array-ref-is-data":
+                    'exec 9>"$L"\nMUT_FILE+=(\n  \'bash tools/x.sh\')\n'
+                    '"${MUT_FILE[@]}"\n',
+                "unquoted-array-ref-is-code":
+                    'exec 9>"$L"\nA=(bash tools/x.sh)\n${A[@]}\n',
+            }
+            if name in DATA_BODIES:
                 os.makedirs(os.path.join(root, name), exist_ok=True)
                 fname = os.path.join(name, "corpus-tools-bench.sh")
-                body = "exec 9>\"$L\"\n  'bash tools/x.sh -- exec 9>\"$Z\"'\n"
+                body = DATA_BODIES[name]
             path = (os.path.join(root, fname) if os.path.sep in fname
                     else os.path.join(root, name + "-" + fname))
             with open(path, "w", encoding="utf-8") as fh:
@@ -742,7 +846,7 @@ def self_check():
         # файл не даёт ни открытий, ни нарушений и не путает разметку.
         empty = os.path.join(root, "empty.sh")
         open(empty, "w").close()
-        got, _opens = scan_file(empty, False)
+        got, _opens = scan_file(empty)
         if got:
             fails += 1
             print(f"self-check: FAIL empty: {got}", file=sys.stderr)
