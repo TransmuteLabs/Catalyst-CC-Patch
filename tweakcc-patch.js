@@ -2770,17 +2770,75 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   }
   const seam = seamNames[0];
 
-  // The empty definition must be found in the SAME module as the call sites:
-  // the same letters may mean something else a chunk away, so the count is
-  // taken on moduleTextAt, never on js.
-  const seamModule = moduleTextAt(callSites[0].index);
+  // The empty definition is located STRUCTURALLY: which module holds it is a
+  // fact to be measured, not assumed. Two shapes are live and both are taken:
+  //   * SAME-MODULE (measured through 2.1.278): the definition sits between the
+  //     same pair of boundaries as its call sites;
+  //   * SPLIT (measured on 2.1.280): upstream moved the definition into another
+  //     chunk -- `function _kn(){return}` in chunk-7kwd28ae.js against both
+  //     `routesOverride:_kn()` in chunk-dt8bvbsd.js -- and the calling module
+  //     reaches it through an ESM import.
+  // What has to be proven is IDENTITY of the symbol, and co-membership was only
+  // ever a proxy for it. The split shape proves it by a chain instead: the
+  // definition is UNIQUE in the whole image, the module holding it EXPORTS that
+  // name, the calling module IMPORTS that name, and the calling module does not
+  // bind it itself. One definition in existence plus a caller that imports
+  // rather than declares leaves the call site no other referent.
+  // CONSTRAINT: every name test is BOUNDED. On 2.1.280 the seam is spelled
+  // `_kn`, which also occurs as a SUBSTRING inside `tengu_virtual_knuth` and
+  // `tengu_known_marketplaces_fallback_write` in the very module that calls it:
+  // an unbounded count reads 4 where the bounded one reads 3 (one import, two
+  // call sites). A locator that counts substrings counts the wrong thing.
   const seamDef = `function ${rxEsc(seam)}\\(\\)\\{return\\}`;
-  const seamDefs = seamModule.match(new RegExp(seamDef, 'g')) || [];
-  if (seamDefs.length !== 1) {
+  const bounded = n => `(?<![\\w$])${rxEsc(n)}(?![\\w$])`;
+  const seamModule = moduleTextAt(callSites[0].index);
+  const [callModStart] = moduleSliceAround(js, callSites[0].index);
+  const inCall = [...seamModule.matchAll(new RegExp(seamDef, 'g'))];
+  // Where the edit lands. The seam's BODY is rewritten, so the edit follows the
+  // definition into whichever module owns it -- never the call module, which on
+  // the split shape holds no definition to rewrite.
+  let seamDefPos;
+  if (inCall.length === 1) {
+    seamDefPos = callModStart + inCall[0].index;
+  } else if (inCall.length > 1) {
     fail(
-      `шов routesOverride не найден в том же модуле, что и его вызов ` +
-        `(${seamDefs.length} определения по имени '${seam}')`,
+      `шов routesOverride определён ${inCall.length} раза в модуле своего вызова ` +
+        `(имя '${seam}') -- какое из них править, не определено`,
     );
+  } else {
+    const all = [...js.matchAll(new RegExp(seamDef, 'g'))];
+    if (all.length !== 1) {
+      fail(
+        `шов routesOverride: пустое определение '${seam}' встречается во всём ` +
+          `образе ${all.length} раз (в модуле вызова -- ни разу), тождество символа ` +
+          `не доказуемо`,
+      );
+    }
+    seamDefPos = all[0].index;
+    const defModule = moduleTextAt(seamDefPos);
+    // The definition's module must ANNOUNCE the name, and the call module must
+    // ASK for it. Either half alone is satisfied by coincidence: a module may
+    // export a name nobody imports, and an import list may name a symbol this
+    // module never calls. Together with uniqueness they pin the referent.
+    const exported = (defModule.match(/export\{[^}]*\}/g) || []).some(x =>
+      new RegExp(bounded(seam)).test(x),
+    );
+    const imported = (seamModule.match(/import\{[^}]*\}from"[^"]*"/g) || []).some(x =>
+      new RegExp(bounded(seam)).test(x),
+    );
+    // A local binding in the call module would SHADOW the import, and then the
+    // call site's referent is that binding, not the definition found above.
+    const shadowed = new RegExp(
+      `(?:function|var|let|const|class)\\s+${rxEsc(seam)}(?![\\w$])`,
+    ).test(seamModule);
+    if (!exported || !imported || shadowed) {
+      fail(
+        `шов routesOverride: тождество символа '${seam}' не доказано через ` +
+          `связку модулей: экспорт в модуле определения=${exported}, ` +
+          `импорт в модуле вызова=${imported}, собственное связывание в модуле ` +
+          `вызова=${shadowed}`,
+      );
+    }
   }
 
   // BOTH call sites must sit in that same module. The whole-text pin above
@@ -2857,7 +2915,7 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   // is announced once per DISTINCT rejected value and only when the
   // variable was non-empty -- whoever never set it sees nothing by
   // construction.
-  editModuleAt(callSites[0].index, (body) =>
+  editModuleAt(seamDefPos, (body) =>
     body.replace(
       new RegExp(seamDef),
       `var ${repEsc(cache)};function ${repEsc(seam)}(){` +
@@ -2929,29 +2987,43 @@ step('28 refusal fallback routes from config, top of lineup reachable', () => {
   );
   const M = mHit ? mHit[1] : '(not adjacent)';
 
-  // Site B is bound to the SEAM'S module before any of its forms is
-  // trusted: the opt-in shapes written below name the seam (`<S>()`), and a
-  // shape sitting in another chunk would turn the edit into a reference
-  // across a module boundary -- an unresolvable name at best, a FOREIGN
-  // same-named binding at worst. The seam's letters are not unique: on the
-  // 2.1.270 stock the whole image carries them 16 times on darwin and 23
-  // on linux, of which ours are the definition and the two call sites
-  // alone -- every other binding of those letters is foreign, so a
-  // whole-text match can sit on a foreign module. The downgrade reader, the
-  // exclusion form and the ternary are therefore all searched (modText
-  // below) and edited (editModuleAt at the end of this step) inside this ONE
-  // module, exactly like site A. This check is also what scopes the reader:
-  // it is located over the whole text, so its module membership is proven
-  // here rather than assumed.
-  const seamBounds = moduleSliceAround(js, callSites[0].index);
+  // The opt-in shapes written below NAME the seam (`<S>()`), so what has to
+  // hold is that the name RESOLVES to our seam inside site B's module. The
+  // earlier form asked instead whether site B sits in the module of the
+  // seam's CALL SITES -- a proxy that held only while definition and calls
+  // shared one chunk (through 2.1.278) and that measures the wrong module
+  // once they split: on 2.1.280 the definition and site B are both in
+  // chunk-7kwd28ae.js while the two `routesOverride:<S>()` calls are in
+  // chunk-dt8bvbsd.js, so the proxy refuses an edit that is in fact sound.
+  // The seam's letters are not unique: on the 2.1.270 stock the whole image
+  // carries them 16 times on darwin and 23 on linux, of which ours are the
+  // definition and the two call sites alone -- every other binding of those
+  // letters is foreign, so resolution must be PROVEN, never assumed.
+  // Two shapes resolve, and nothing else does:
+  //   * site B in the DEFINITION's module -- the name is in lexical scope;
+  //   * site B elsewhere -- only if that module IMPORTS the name (bounded)
+  //     and does not bind it itself, which would shadow the import.
+  // This check is also what scopes the reader: it is located over the whole
+  // text, so its module membership is proven here rather than assumed.
+  const seamDefBounds = moduleSliceAround(js, seamDefPos);
   const bundleBounds = moduleSliceAround(js, bundle.index);
-  if (bundleBounds[0] !== seamBounds[0]) {
-    fail(
-      `site B forms have split from the seam's module: the downgrade reader ` +
-        `sits at offset ${bundle.index} while the seam '${seam}' lives in ` +
-        `the module of the call site at offset ${callSites[0].index} -- the ` +
-        `edit would spawn a reference across a module boundary`,
+  if (bundleBounds[0] !== seamDefBounds[0]) {
+    const bMod = moduleTextAt(bundle.index);
+    const importedInB = (bMod.match(/import\{[^}]*\}from"[^"]*"/g) || []).some(x =>
+      new RegExp(bounded(seam)).test(x),
     );
+    const shadowedInB = new RegExp(
+      `(?:function|var|let|const|class)\\s+${rxEsc(seam)}(?![\\w$])`,
+    ).test(bMod);
+    if (!importedInB || shadowedInB) {
+      fail(
+        `site B cannot reach the seam '${seam}': the downgrade reader sits at ` +
+          `offset ${bundle.index}, outside the module that defines the seam ` +
+          `(offset ${seamDefPos}), and that module ` +
+          `${importedInB ? 'imports the name but also binds it itself (the import is shadowed)' : 'does not import the name'} ` +
+          `-- the edit would spawn an unresolvable or foreign reference`,
+      );
+    }
   }
 
   // Structural pin instead of a pin on the written shape: within the SAME
@@ -3373,6 +3445,142 @@ step('30 mod-API per-call maxTokens ceiling becomes operator-set', () => {
 step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
   const ID = '[A-Za-z_$][\\w$]*';
 
+  // ---- the 2.1.280 shape: upstream took over effort and timeoutMs ---------
+  // MEASURED on 2.1.280 stock (chunk-dt8bvbsd.js): the entry now destructures
+  // `{model,prompt,system,maxTokens,effort,timeoutMs}` and upstream itself
+  //   (a) validates effort against its own list and forwards it as
+  //       `output_config.effort` -- the channel the harness already used, and
+  //       the one measured honored 2026-07-27;
+  //   (b) validates timeoutMs, caps it (`Math.min(<ms>,<ceiling>)`) and races
+  //       the provider call against it with a real AbortController.
+  // Both are strictly better than this step's own forwarding, so on this shape
+  // the step does NOT re-add them. Two live channels carrying one value is a
+  // conflict, not redundancy: our `extraBodyParams.reasoning_effort` and
+  // upstream's `output_config.effort` would both reach the gateway.
+  //
+  // What upstream did NOT do, and what this step still carries here:
+  //   * `max_tokens` as an alias of `maxTokens` -- absent from the entry;
+  //   * the CAUSE of an answer. The return became an object
+  //     (`{isAnswered,reason:"empty-reply",usage}` / `{isAnswered,text,usage}`),
+  //     which is progress, but "the model stayed silent", "everything went to
+  //     thinking blocks" and "the answer was cut at max_tokens" STILL arrive
+  //     as the one reason "empty-reply" -- the exact indistinguishability of
+  //     #153/#190. `stop_reason` and the block types sit in the response
+  //     object at this point and are still dropped.
+  //
+  // CONSTRAINT: the `detail` FLAG is gone on this shape, and its absence is
+  // the point, not an omission. The flag existed ONLY to keep the stock return
+  // a plain string for mods that depend on `""` being falsy. Upstream's return
+  // is already an object, so that contract no longer exists to protect: the
+  // two fields are added UNCONDITIONALLY. A reader that ignores them is
+  // unaffected, and `readComplete` in our own mod recognises the envelope by
+  // its own fields, so it takes them the moment they appear.
+  const headB = new RegExp(
+    'async function (' + ID + ')\\(\\{model:(' + ID + '),prompt:(' + ID + '),system:(' + ID +
+      '),maxTokens:(' + ID + '),effort:(' + ID + '),timeoutMs:(' + ID + ')\\},([^)]*)\\)\\{',
+    'g',
+  );
+  const headsB = [...js.matchAll(headB)];
+  if (headsB.length > 1) {
+    fail(
+      `the mod-API entry (2.1.280 shape) must occur exactly once, found ${headsB.length} -- ` +
+        `a second entry would take calls this edit never reaches`,
+    );
+  }
+  if (headsB.length === 1) {
+    const hB = headsB[0];
+    const [hbWhole, fnB, aMdlB, aPrmB, aSysB, aMaxB, aEffB, aTmoB, aRestB] = hB;
+
+    // The RETURN of the same entry, anchored as ONE unit and name-free: the
+    // two bindings, the log template and BOTH arms of the ternary, tied by
+    // backreferences. The reason literal is CAPTURED, never pinned: it is
+    // upstream's wording and this step does not own it.
+    const tailB = new RegExp(
+      'let (' + ID + ')=(' + ID + ')\\((' + ID + ')\\.content,""\\),(' + ID + ')=(' + ID +
+        ')\\(\\3\\.usage\\);return (' + ID + ')\\((`[^`]*`)\\),' +
+        '\\1===""\\?\\{isAnswered:!1,reason:"([^"]*)",usage:\\4\\}:' +
+        '\\{isAnswered:!0,text:\\1,usage:\\4\\}\\}',
+      'g',
+    );
+    const tailsB = [...js.matchAll(tailB)];
+    if (tailsB.length !== 1) {
+      fail(
+        `the mod-API return (2.1.280 shape) must occur exactly once, found ` +
+          `${tailsB.length} -- the cause fields would reach only one of several returns`,
+      );
+    }
+    const tB = tailsB[0];
+    const [tbWhole, tXeB, tJoinB, tResB, tHtB, tUfB, tLogB, tTplB, tReasonB] = tB;
+
+    const dB = tB.index - hB.index;
+    if (dB < 0 || dB > 4000) {
+      fail(
+        `the mod-API return sits ${dB} bytes from its entry -- outside the entry ` +
+          `the response binding is not in scope`,
+      );
+    }
+
+    // POSITIVE CONTROL for the field this edit reads: `stop_reason` has to
+    // exist in the module that owns the entry, or `<res>.stop_reason` would be
+    // a field invented by this patch rather than one dropped by upstream.
+    // EMPTY IS NOT ZERO: an edit that reads a field nobody produces writes
+    // `null` forever and looks like a working detail channel.
+    const entryModule = moduleTextAt(hB.index);
+    if (!/stop_reason/.test(entryModule)) {
+      fail(
+        `the entry's module carries no 'stop_reason' -- the cause field this ` +
+          `step forwards is not produced here`,
+      );
+    }
+
+    for (const name of ['__mcAlias', '__mcSt', '__mcBl', '__mcBlk']) {
+      if (js.indexOf(name) !== -1) {
+        fail(`the name '${name}' already occurs in the image -- this step would rebind it`);
+      }
+    }
+
+    // CONSTRAINT: every replacement is repEsc'd. The replacement carries
+    // CAPTURED minified names and the captured log TEMPLATE, and a `$` in
+    // either is read by String.replace as a substitution token ($& is the
+    // whole match) -- the template measured here already begins
+    // `$.model.complete (...)`.
+    editModuleAt(hB.index, text =>
+      text
+        .replace(
+          hbWhole,
+          repEsc(
+            'async function ' + fnB + '({model:' + aMdlB + ',prompt:' + aPrmB + ',system:' +
+              aSysB + ',maxTokens:' + aMaxB + ',effort:' + aEffB + ',timeoutMs:' + aTmoB +
+              ',max_tokens:__mcAlias},' + aRestB + '){' +
+              // Before upstream's ceiling and integer guards on purpose: an
+              // aliased value must be validated exactly like a direct one.
+              'if(' + aMaxB + '===void 0&&__mcAlias!==void 0)' + aMaxB + '=__mcAlias;',
+          ),
+        )
+        .replace(
+          tbWhole,
+          repEsc(
+            'let ' + tXeB + '=' + tJoinB + '(' + tResB + '.content,""),' + tHtB + '=' + tUfB +
+              '(' + tResB + '.usage);let __mcSt=' + tResB + '.stop_reason??null,' +
+              '__mcBl=(Array.isArray(' + tResB + '.content)?' + tResB + '.content:[])' +
+              '.map((__mcBlk)=>({type:__mcBlk&&__mcBlk.type,' +
+              'len:typeof(__mcBlk&&__mcBlk.text)==="string"?__mcBlk.text.length:0}));' +
+              'return ' + tLogB + '(' + tTplB + '),' + tXeB + '===""?{isAnswered:!1,reason:"' +
+              tReasonB + '",usage:' + tHtB + ',stopReason:__mcSt,blocks:__mcBl}:' +
+              '{isAnswered:!0,text:' + tXeB + ',usage:' + tHtB +
+              ',stopReason:__mcSt,blocks:__mcBl}}',
+          ),
+        ),
+    );
+    applied.push(
+      `31 mod-API (2.1.280 shape): max_tokens forwarded as an alias of maxTokens ` +
+        `through '${fnB}', and the return carries {stopReason, blocks} beside ` +
+        `upstream's {isAnswered, text|reason, usage} -- effort and timeoutMs are ` +
+        `upstream's own on this build and are NOT re-added`,
+    );
+    return;
+  }
+
   // Both needles are name-free: minified identifiers differ across PLATFORMS
   // and across versions. Measured on three images -- darwin 2.1.270 stock and
   // patched name the parts `iMt/LR/s/m/S/C/D/P`, linux 2.1.268 names the same
@@ -3484,14 +3692,21 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 
   editModuleAt(h.index, text =>
     text
+      // CONSTRAINT: repEsc on every replacement. Each one splices CAPTURED
+      // minified names and, below, the captured log TEMPLATE -- and a `$` in
+      // either is read by String.replace as a substitution token ($& is the
+      // whole match). The template measured here already begins
+      // `$.model.complete (...)`, so the hazard is live, not hypothetical.
       .replace(
         hWhole,
-        'async function ' + fn + '({model:' + aMdl + ',prompt:' + aPrm + ',system:' + aSys +
-        ',maxTokens:' + aMax + ',effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias' +
-        ',detail:__mcDetail},' +
-        aRest + '){' +
-        // Before the ceiling guard on purpose -- see the header.
-        'if(' + aMax + '===void 0&&__mcAlias!==void 0)' + aMax + '=__mcAlias;',
+        repEsc(
+          'async function ' + fn + '({model:' + aMdl + ',prompt:' + aPrm + ',system:' + aSys +
+          ',maxTokens:' + aMax + ',effort:__mcEff,timeoutMs:__mcTmo,max_tokens:__mcAlias' +
+          ',detail:__mcDetail},' +
+          aRest + '){' +
+          // Before the ceiling guard on purpose -- see the header.
+          'if(' + aMax + '===void 0&&__mcAlias!==void 0)' + aMax + '=__mcAlias;',
+        ),
       )
       .replace(
         tWhole,
@@ -3501,21 +3716,25 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
         // the falsiness of "" that an `if (!answer)` depends on. Only a caller
         // that asks for detail gets an object, and it asks by a name that
         // cannot exist in a stock image (checked above).
-        'let ' + tXe + '=' + tJoin + '(' + tRes + '.content,"");return ' + tLog + '(' + tTpl +
-        '),__mcDetail===true?{text:' + tXe + ',stopReason:' + tRes + '.stop_reason??null,' +
-        'blocks:(Array.isArray(' + tRes + '.content)?' + tRes + '.content:[]).map((__mcBlk)=>' +
-        '({type:__mcBlk&&__mcBlk.type,len:typeof(__mcBlk&&__mcBlk.text)==="string"' +
-        '?__mcBlk.text.length:0})),usage:' + tRes + '.usage??null}:' + tXe + '}',
+        repEsc(
+          'let ' + tXe + '=' + tJoin + '(' + tRes + '.content,"");return ' + tLog + '(' + tTpl +
+          '),__mcDetail===true?{text:' + tXe + ',stopReason:' + tRes + '.stop_reason??null,' +
+          'blocks:(Array.isArray(' + tRes + '.content)?' + tRes + '.content:[]).map((__mcBlk)=>' +
+          '({type:__mcBlk&&__mcBlk.type,len:typeof(__mcBlk&&__mcBlk.text)==="string"' +
+          '?__mcBlk.text.length:0})),usage:' + tRes + '.usage??null}:' + tXe + '}',
+        ),
       )
       .replace(
         cWhole,
-        'await ' + cFn + '({querySource:"hook_prompt",model:' + cMdl + ',max_tokens:' + cTok +
-        ',thinking:' + cThk + ',skipSystemPromptPrefix:!0,' +
-        // A non-finite or non-positive timeout means NO bound, never a bound of
-        // zero: a mod asking for an unusable value must not have its call cut
-        // instantly. Same reading of unusable values as steps 29 and 30.
-        '...Number.isFinite(__mcTmo)&&__mcTmo>0&&{timeout:__mcTmo},' +
-        '...typeof __mcEff==="string"&&__mcEff!==""&&{extraBodyParams:{reasoning_effort:__mcEff}},',
+        repEsc(
+          'await ' + cFn + '({querySource:"hook_prompt",model:' + cMdl + ',max_tokens:' + cTok +
+          ',thinking:' + cThk + ',skipSystemPromptPrefix:!0,' +
+          // A non-finite or non-positive timeout means NO bound, never a bound of
+          // zero: a mod asking for an unusable value must not have its call cut
+          // instantly. Same reading of unusable values as steps 29 and 30.
+          '...Number.isFinite(__mcTmo)&&__mcTmo>0&&{timeout:__mcTmo},' +
+          '...typeof __mcEff==="string"&&__mcEff!==""&&{extraBodyParams:{reasoning_effort:__mcEff}},',
+        ),
       ),
   );
   applied.push(
@@ -3526,29 +3745,228 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 });
 
 
+// 34. The requestText door. Five insertions into the image, each keyed to a
+//     construction site of the flag noun so the door rides the machinery the
+//     host already trusts:
+//       * the noun builder, a sibling of the flag builder, calling the same
+//         host invoker with "requestText.register"/"unregister"/"list";
+//       * the factory key -- the SAME literal the host builds both the noun
+//         name table and the plugin `$` from (a key added anywhere else would
+//         leave the noun absent from the registry and from `$`);
+//       * the three operation names in the host's prefix list. They are
+//         MANDATORY, but the reason first written here was the wrong one: the
+//         plugin-provided branch is gated by a comparison against
+//         "interface.call", so THAT branch alone would not divert the call.
+//         The gate that actually decides is the SCAN gate in the dispatcher
+//         (`rGe`, DOOR-DESIGN.md section 14): `knownArgs.get(plugin).scan`
+//         throws BEFORE `check` ever runs when the scan does not know the
+//         operation, so an unlisted name is refused before our code sees it.
+//         Two further consequences ride on the listing: the operation becomes
+//         interceptable by other plugins' hooks, and the official plugin test
+//         harness admits only listed names;
+//       * the op implementations, the rule table and the applier, inserted
+//         right after the flag.value op record -- the module that owns the
+//         request-body site, so the site's call shares its scope;
+//       * the dispatcher entries, beside flag.value's own.
+//     CONSTRAINT: a `check` message is a BARE phrase -- the `<plugin>: <op>: `
+//     prefix and the ` (host check)` suffix are added by the host.
+//     CONSTRAINT: a `check` that returns an empty string is still a refusal
+//     (the host reads `!==void 0`) -- never return "".
+//     CONSTRAINT: the rule table freezes on the FIRST application: on a
+//     continued server turn the host may omit `system`/`tools`, and a rule
+//     arriving mid-turn would silently not apply until the turn ended.
+//     CONSTRAINT: rewritten bodies are NEW objects: the arrays the request
+//     loop keeps for retries and inheritance checks must not be mutated. The
+//     container is replaced ONLY when an element actually changed -- a body
+//     nothing matched comes back with its own `system`/`tools` arrays, by
+//     identity, which is what the contract promises.
+//     CONSTRAINT: a rule is validated against a CLOSED key set and stored as a
+//     hand-built SNAPSHOT of the fields the validator proved to be strings.
+//     Two defects follow from the alternatives and both were live: an unknown
+//     key (`flgs` for `flags`) compiled a rule that silently never matched, and
+//     `JSON.parse(JSON.stringify(rule))` at read time THREW synchronously
+//     inside `Promise.resolve(...)` on a rule holding a BigInt, a cycle or a
+//     throwing `toJSON` -- one plugin's rule killed `list()` for everyone, and
+//     a frozen table cannot be unregistered. There is no `JSON.stringify` in
+//     this door: `list()` cannot throw BY CONSTRUCTION.
+//     CONSTRAINT: ownership is checked against the stored `owner` FIELD, never
+//     against a prefix of the id string, and `__ctlRemove` carries its own
+//     guard -- the door does not rely on the host always calling `check`
+//     before `run`. An id nobody owns passes `check` and removes nothing, so
+//     the refusal phrase never lies about a rule that does not exist.
+//     CONSTRAINT: the id is built from the LOWERCASED model because `mre`
+//     matches case-insensitively; keyed by the exact string, `devin/swe-2` and
+//     `DEVIN/SWE-2` would live as two rules and both would apply.
+//     CONSTRAINT: `find` is literal and replaces EVERY occurrence; `pattern`
+//     obeys its own flags (without `g`, the first occurrence only) and its
+//     `to` is subject to $-substitution ($&, $1). Neither is a defect -- both
+//     are the String/RegExp contracts -- but a rule author who assumes one
+//     behaves like the other writes a bug no validator can see.
+//     CONSTRAINT: the model is DATA now, matched by a TOKEN-BOUNDARY predicate,
+//     `^<model>(?![\w.-])`. This is a DECISION, not an observation: ids in this
+//     program do carry form suffixes (`claude-opus-5[1m]`), and a rule measured
+//     on a model must keep applying to them. The consequence, stated plainly:
+//     ANY character outside `[\w.-]` continues the match -- `[1m]`, a colon, a
+//     slash, even a trailing space. `devin/swe-2.1` and `devin/swe-20` do not
+//     match. The corollary is the trap: a rule whose model is the bare vendor
+//     (`devin`) catches `devin/swe-2` as well -- a rule names its model in full.
+//     CONSTRAINT: a compiled RegExp is REUSED across requests, so `__ctlOne`
+//     resets lastIndex before every replace. MEASURED, correcting the earlier
+//     wording: only `y` WITHOUT `g` carries a position across requests --
+//     `String.prototype.replace` zeroes lastIndex itself for a global regexp.
+//     The reset stays because it is correct under every flag and costs one
+//     statement; without it a sticky rule fires on every OTHER body.
+//     Runs BEFORE step 32 by file order. CONSTRAINT, corrected: this is a
+//     FILE CONVENTION, not a correctness requirement -- the two steps splice at
+//     non-overlapping offsets and commute, and a function declaration hoists
+//     regardless. The order is kept so the diff reads in dependency order and
+//     the anchors stay stable.
+step('34 requestText door', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+
+  const rxNoun = new RegExp(
+    `var (${ID})=\\((${ID})\\)=>(${ID})\\(\\{value:\\((${ID}),(${ID})\\)=>\\2\\("flag\\.value",\\{name:\\4,fallback:\\5\\}\\)\\}\\);`, 'g');
+  const nounSites = [...js.matchAll(rxNoun)];
+  if (nounSites.length !== 1) fail(`requestText door: flag noun builder: expected exactly 1 site, found ${nounSites.length}`);
+  const [noun] = nounSites;
+  const NOUN = noun[1];
+  const VH = noun[3];
+  // CONSTRAINT: the parameter names here are OUR OWN, carrying a prefix no
+  // minifier produces. The factory passes an ARGUMENT, never a name, so
+  // borrowing the flag builder's minified parameter bought nothing and
+  // risked everything: a method parameter that happens to collide with it
+  // would shadow the invoker, and the door would build -- silently -- dead.
+  const nounBuilder =
+    `var __ctlRT=(__ctlH)=>${VH}({register:(__ctlA)=>__ctlH("requestText.register",__ctlA),` +
+    `unregister:(__ctlA)=>__ctlH("requestText.unregister",{id:__ctlA}),` +
+    `list:()=>__ctlH("requestText.list",{})});`;
+  js = js.slice(0, noun.index + noun[0].length) + nounBuilder +
+    js.slice(noun.index + noun[0].length);
+
+  const rxFactory = new RegExp(`,flag:(${ID})\\(${rxEsc(NOUN)}\\((${ID})\\)\\)\\}\\}`, 'g');
+  const factorySites = [...js.matchAll(rxFactory)];
+  if (factorySites.length !== 1) fail(`requestText door: interface factory literal: expected exactly 1 site, found ${factorySites.length}`);
+  const [factory] = factorySites;
+  const factoryKey = `,requestText:${factory[1]}(__ctlRT(${factory[2]}))`;
+  js = js.slice(0, factory.index + factory[0].length - 2) + factoryKey + '}}' +
+    js.slice(factory.index + factory[0].length);
+
+  const rxNames = /("prompt\.read","flag\.value",)("tool\.list")/g;
+  const nameSites = [...js.matchAll(rxNames)];
+  if (nameSites.length !== 1) fail(`requestText door: operation name list: expected exactly 1 site, found ${nameSites.length}`);
+  const [names] = nameSites;
+  const namesAdd = '"requestText.register","requestText.unregister","requestText.list",';
+  js = js.slice(0, names.index + names[1].length) + namesAdd +
+    js.slice(names.index + names[1].length);
+
+  const rxOpImpl = new RegExp(
+    `var (${ID})=\\{check:\\((${ID})\\)=>(${ID})\\(\\)\\?(${ID})\\(\\2\\):"reads a feature flag[^"]*",run:\\((${ID})\\)=>Promise\\.resolve\\((${ID})\\(\\5\\.name,\\5\\.fallback\\)\\)\\};`, 'g');
+  const opSites = [...js.matchAll(rxOpImpl)];
+  if (opSites.length !== 1) fail(`requestText door: flag.value op record: expected exactly 1 site, found ${opSites.length}`);
+  const [op] = opSites;
+  const DQT = op[1];
+  // One line, no newlines and no //-comments: this lands inside the
+  // minified image; the break-up below is source readability only.
+  const door = [
+    'var __ctlRules=[],__ctlFrozen=!1,__ctlSeen=0,__ctlChanged=0;',
+    'function __ctlEsc(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,"\\\\$&")}',
+    'var __ctlRK={model:1,ops:1},__ctlOK={find:1,pattern:1,flags:1,to:1,tool:1};',
+    'function __ctlBad(r){',
+    'if(!r||typeof r!=="object")return "takes { model, ops }";',
+    'for(var rk in r)if(!__ctlRK[rk])return "unknown key \\""+rk+"\\" on the rule; takes { model, ops }";',
+    'if(typeof r.model!=="string"||r.model==="")return "model must be a non-empty string";',
+    'if(!Array.isArray(r.ops)||r.ops.length===0)return "ops must be a non-empty array";',
+    'for(var i=0;i<r.ops.length;i++){var o=r.ops[i];',
+    'if(!o||typeof o!=="object")return "ops["+i+"] must be an object";',
+    'for(var ok in o)if(!__ctlOK[ok])return "ops["+i+"]: unknown key \\""+ok+"\\"";',
+    'if(o.find!==void 0&&o.pattern!==void 0)return "ops["+i+"] takes exactly one of find / pattern, not both";',
+    'var hf=typeof o.find==="string"&&o.find!=="",hp=typeof o.pattern==="string"&&o.pattern!=="";',
+    'if(hf===hp)return "ops["+i+"] takes exactly one of find / pattern, a non-empty string";',
+    'if(hf&&o.flags!==void 0)return "ops["+i+"].flags applies to pattern only";',
+    'if(typeof o.to!=="string")return "ops["+i+"].to must be a string";',
+    'if(o.flags!==void 0&&(typeof o.flags!=="string"||/[^gimsuy]/.test(o.flags)))return "ops["+i+"].flags may only contain gimsuy";',
+    'if(o.tool!==void 0&&(typeof o.tool!=="string"||o.tool===""))return "ops["+i+"].tool must be a non-empty string";',
+    'if(hp){try{new RegExp(o.pattern,o.flags||"")}catch(x){return "ops["+i+"].pattern does not compile: "+String(x&&x.message||x)}}}',
+    'return}',
+    'function __ctlSnap(r){var ops=[],i;for(i=0;i<r.ops.length;i++){var o=r.ops[i],s={to:o.to};',
+    'if(typeof o.find==="string")s.find=o.find;else{s.pattern=o.pattern;if(o.flags!==void 0)s.flags=o.flags}',
+    'if(o.tool!==void 0)s.tool=o.tool;ops.push(s)}return {model:r.model,ops:ops}}',
+    'function __ctlCompile(r,owner){',
+    'var ops=[],i;for(i=0;i<r.ops.length;i++){var o=r.ops[i];',
+    'ops.push(typeof o.find==="string"&&o.find!==""?{find:o.find,to:o.to,tool:o.tool}:{re:new RegExp(o.pattern,o.flags||""),to:o.to,tool:o.tool})}',
+    'return {id:owner+":"+String(r.model).toLowerCase(),owner:owner,model:r.model,mre:new RegExp("^"+__ctlEsc(r.model)+"(?![\\\\w.-])","i"),ops:ops,matched:0,raw:__ctlSnap(r)}}',
+    'function __ctlUpsert(r,owner){',
+    'var c=__ctlCompile(r,owner),i;',
+    'for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===c.id){__ctlRules[i]=c;return {id:c.id}}',
+    '__ctlRules.push(c);return {id:c.id}}',
+    'function __ctlFind(id){var i;for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===id)return __ctlRules[i];return null}',
+    'function __ctlOwnBad(e,c){if(!e||typeof e.id!=="string"||e.id==="")return "unregister takes a non-empty string id";',
+    'var r=__ctlFind(e.id);if(r&&r.owner!==String(c&&c.plugin||"?"))return "the id belongs to another plugin";return}',
+    'function __ctlRemove(id,owner){',
+    'var i;for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===id){',
+    'if(__ctlRules[i].owner!==owner)return {removed:!1};__ctlRules.splice(i,1);return {removed:!0}}',
+    'return {removed:!1}}',
+    'function __ctlOne(t,o){if(o.find!==void 0)return t.split(o.find).join(o.to);o.re.lastIndex=0;return t.replace(o.re,o.to)}',
+    'function __ctlText(t,ops){var i;for(i=0;i<ops.length;i++)t=__ctlOne(t,ops[i]);return t}',
+    'function __ctlApply(b,model){',
+    '__ctlFrozen=!0;__ctlSeen++;',
+    'if(!b||typeof b!=="object"||__ctlRules.length===0)return b;',
+    'var sys=[],tls=[],i,j,ch=!1;',
+    'for(i=0;i<__ctlRules.length;i++){var r=__ctlRules[i];',
+    'if(!r.mre.test(model))continue;',
+    'r.matched++;',
+    'for(j=0;j<r.ops.length;j++)(r.ops[j].tool===void 0?sys:tls).push(r.ops[j])}',
+    'if(sys.length===0&&tls.length===0)return b;',
+    'if(sys.length){',
+    'if(typeof b.system==="string"){var s2=__ctlText(b.system,sys);if(s2!==b.system){b.system=s2;ch=!0}}',
+    'else if(Array.isArray(b.system)){var c1=!1,a1=b.system.map(function(k){var x;',
+    'return k&&typeof k==="object"&&typeof k.text==="string"&&(x=__ctlText(k.text,sys))!==k.text?(c1=!0,Object.assign({},k,{text:x})):k});',
+    'if(c1){b.system=a1;ch=!0}}}',
+    'if(tls.length&&Array.isArray(b.tools)){var c2=!1,a2=b.tools.map(function(t){',
+    'if(!t||typeof t.name!=="string"||typeof t.description!=="string")return t;',
+    'var d=t.description,k;',
+    'for(k=0;k<tls.length;k++)if(tls[k].tool===t.name)d=__ctlOne(d,tls[k]);',
+    'return d===t.description?t:(c2=!0,Object.assign({},t,{description:d}))});',
+    'if(c2){b.tools=a2;ch=!0}}',
+    'if(ch)__ctlChanged++;',
+    'return b}',
+    'var __ctlFrozenMsg="the rule table is frozen (first request already applied); a rule must be registered from session.start";',
+    'var __ctlRegOp={check:(e,c)=>__ctlFrozen?__ctlFrozenMsg:__ctlBad(e),run:(e,c)=>Promise.resolve(__ctlUpsert(e,String(c&&c.plugin||"?")))};',
+    'var __ctlUnregOp={check:(e,c)=>__ctlFrozen?__ctlFrozenMsg:__ctlOwnBad(e,c),run:(e,c)=>Promise.resolve(__ctlRemove(e.id,String(c&&c.plugin||"?")))};',
+    'var __ctlListOp={run:()=>Promise.resolve({frozen:__ctlFrozen,seen:__ctlSeen,changed:__ctlChanged,rules:__ctlRules.map(function(r){return {id:r.id,owner:r.owner,model:r.model,matched:r.matched,rule:__ctlSnap(r.raw)}})})};',
+  ].join('');
+  js = js.slice(0, op.index + op[0].length) + door + js.slice(op.index + op[0].length);
+
+  const rxDispatch = new RegExp(`"flag\\.value":${rxEsc(DQT)},`, 'g');
+  const dispatchSites = [...js.matchAll(rxDispatch)];
+  if (dispatchSites.length !== 1) fail(`requestText door: dispatcher entry: expected exactly 1 site, found ${dispatchSites.length}`);
+  const [dispatch] = dispatchSites;
+  const dispatchAdd =
+    '"requestText.register":__ctlRegOp,"requestText.unregister":__ctlUnregOp,"requestText.list":__ctlListOp,';
+  js = js.slice(0, dispatch.index + dispatch[0].length) + dispatchAdd +
+    js.slice(dispatch.index + dispatch[0].length);
+
+  applied.push(
+    `34 requestText door: noun builder beside '${NOUN}', factory key 'requestText', ` +
+    `3 names in the op list, rule table + applier + 3 dispatcher entries beside '${DQT}'`,
+  );
+});
+
+
 // 32. Devin's SWE-2 endpoint refuses a request whose text presents the caller
 //     as Claude: the stock request came back 403, and the same request with
-//     exactly three text edits came back 200 (A/B of 2026-09-22, program
-//     Catalyst-programs/2026-09-22-tool-descriptions). The edits are applied
-//     ONLY when the request names devin/swe-2 -- by its real id or by the
-//     proxy's disguise that patch 9 undoes -- and only at the one site where the
-//     outgoing body is assembled, where model, system and tools are all in hand:
-//       * the CLI identity prefix (any of the three stock forms) becomes
-//         "You are a coding agent.";
-//       * the "most recent Claude models" line leaves the environment section,
-//         line terminator included;
-//       * Read's description loses its second sentence;
-//       * the subagent "Notes" line about emojis is reworded (the sentence
-//         "For clear communication with the user the assistant MUST avoid
-//         using emojis." alone turns a subagent request into 403; the same
-//         request with only that sentence reworded came back 200 -- A/B of
-//         2026-09-22 on the captured swe2-executor and general-purpose bodies,
-//         same program, LEDGER 12:58-13:10). The classifier scores stock
-//         fragments in combination, so each request FORM is measured
-//         separately: headless main, custom subagent, general-purpose subagent.
-//     Every other model's request is untouched byte for byte. The arrays the
-//     loop keeps for retries and inheritance checks are never mutated: the
-//     rewrite builds new blocks and new tool objects on the body it owns.
+//     its text edited came back 200 (A/B of 2026-09-22, program
+//     Catalyst-programs/2026-09-22-tool-descriptions; the classifier scores
+//     stock fragments in combination, so each request FORM was measured
+//     separately: headless main, custom subagent, general-purpose subagent).
+//     That measurement is why the DOOR exists; the edits themselves are no
+//     longer baked into this patch -- they are data now, registered through
+//     the $.requestText noun (step 34) by the catalyst-swe-request plugin and
+//     applied here, at the one site where the outgoing body is assembled and
+//     model, system and tools are all in hand. A request whose model -- by its
+//     real id or by the proxy's disguise that patch 9 undoes -- matches no
+//     rule passes the site byte for byte, and the applier builds new blocks
+//     and new tool objects on the body it owns.
 //     CONSTRAINT: this cannot move to the mod API. The identity prefix is
 //     prepended to the system prompt AFTER the prompt.section hooks ran, and
 //     tool.describe carries neither the model nor the agent.
@@ -3569,43 +3987,46 @@ step('32 request text for devin/swe-2', () => {
   const a = after.exec(js);
   if (a === null || a.index - m.index > 4000) fail('statement after the request body not found');
 
-  const PREFIXES = [
-    "You are Claude Code, Anthropic's official CLI for Claude.",
-    "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
-    "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
-  ];
-  const IDENTITY = 'You are a coding agent.';
-  const READ_FROM =
-    'Reads a file from the local filesystem. You can access any file directly by using this tool.';
-  const READ_TO = 'Reads a file from the local filesystem.';
-  const NOTES_FROM = 'For clear communication with the user the assistant MUST avoid using emojis.';
-  const NOTES_TO = 'For clear communication with the user, avoid using emojis.';
+  // CONSTRAINT (DOOR-DESIGN 9.6/11.3): among the request-body consumers there
+  // is a late writer -- it publishes tools/system/messages from the result of
+  // a three-argument call whose callee body is an EMPTY return today. If
+  // upstream revives that writer, stock fields overwrite the applier's
+  // rewrite AFTER the door ran, and the carrier's refusal returns silently.
+  // The stub is pinned FROM THE CALL (the second argument spreads
+  // <f>(<p>,<g>()), the third carries querySource and isMainThread), never
+  // from the name: a second, same-name ONE-parameter function lives in the
+  // MCP cache digest parser, and the minified name changes every version.
+  const rxLateCall = new RegExp(
+    `(${ID})\\(${ID},\\{\\.\\.\\.${ID}\\(${ID},${ID}\\(\\)\\),messages:${ID}\\},` +
+      `\\{[^{}]*querySource[^{}]*isMainThread[^{}]*\\}\\)`, 'g');
+  const lateCalls = [...js.matchAll(rxLateCall)];
+  if (lateCalls.length !== 1) fail(`late writer call: expected exactly 1 site, found ${lateCalls.length}`);
+  const rxLateDef = new RegExp(
+    `function ${rxEsc(lateCalls[0][1])}\\(${ID},${ID},${ID}\\)\\{([^{}]*)\\}`, 'g');
+  const lateDefs = [...js.matchAll(rxLateDef)];
+  if (lateDefs.length !== 1) {
+    fail(`late writer ${lateCalls[0][1]}: expected exactly 1 three-parameter definition, ` +
+      `found ${lateDefs.length}`);
+  }
+  if (lateDefs[0][1] !== 'return') {
+    fail(`late writer ${lateCalls[0][1]}: the stub body is no longer an empty return ` +
+      `(${JSON.stringify(lateDefs[0][1])}) -- it would overwrite system/tools with ` +
+      `stock values after the rule applier ran`);
+  }
+
   const DISGUISE = 'claude-fable-5-dd-';
   const runtime =
     `/*swe32*/${rf}=(function(__r){` +
     `var __m=String(__r.model==null?"":__r.model);` +
     `if(__m.indexOf(${JSON.stringify(DISGUISE)})===0)` +
     `__m=__m.slice(${DISGUISE.length}).split("").reverse().join("");` +
-    `if(!/^devin\\/swe-2(?![\\w.-])/i.test(__m.trim()))return __r;` +
-    `var __P=${JSON.stringify(PREFIXES)},__fix=function(__t){` +
-    `var __l=__t.split(/(\\r?\\n)/),__i;` +
-    `for(__i=0;__i<__l.length;__i+=2)if(__P.indexOf(__l[__i])!==-1)__l[__i]=${JSON.stringify(IDENTITY)};` +
-    `return __l.join("").replace(/\\r?\\n[ \\t]*-[ \\t]*The most recent Claude models are [^\\r\\n]*(?=\\r?\\n|$)` +
-    `|^[ \\t]*-[ \\t]*The most recent Claude models are [^\\r\\n]*(?:\\r?\\n|$)/gm,"")` +
-    `.split(${JSON.stringify(NOTES_FROM)}).join(${JSON.stringify(NOTES_TO)})};` +
-    `if(typeof __r.system==="string")__r.system=__fix(__r.system);` +
-    `else if(Array.isArray(__r.system))__r.system=__r.system.map(function(__b){` +
-    `var __x;return __b&&typeof __b==="object"&&typeof __b.text==="string"&&(__x=__fix(__b.text))!==__b.text?Object.assign({},__b,{text:__x}):__b});` +
-    `if(Array.isArray(__r.tools))__r.tools=__r.tools.map(function(__t){` +
-    `if(!__t||__t.name!=="Read"||typeof __t.description!=="string")return __t;` +
-    `var __d=__t.description.split(${JSON.stringify(READ_FROM)}).join(${JSON.stringify(READ_TO)});` +
-    `return __d===__t.description?__t:Object.assign({},__t,{description:__d})});` +
-    `return __r})(${rf});/*swe32-end*/`;
+    `return __ctlApply(__r,__m.trim())})(${rf});/*swe32-end*/`;
   js = js.slice(0, a.index + 1) + runtime + js.slice(a.index + 1);
 
   applied.push(
-    `32 request text for devin/swe-2: identity prefix -> "${IDENTITY}", ` +
-    `models line dropped, Read description trimmed, Notes line reworded (body '${rf}', 1 site)`,
+    `32 request text for devin/swe-2: request body site found, rule applier ` +
+    `wired in front of the '${rf}.messages' statement (1 site; the rules ` +
+    `themselves live in the catalyst-swe-request plugin)`,
   );
 });
 

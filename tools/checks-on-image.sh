@@ -110,7 +110,9 @@ __exit_guard() {
   fi
   # Однократность: повторный вход ловушки уборки не делает.
   trap - EXIT
-  rm -f "$BLOCK"
+  # Форма `${X:+...}`: дом лестницы снимается ПОЗЖЕ ловушки и только в
+  # не-floor режиме, а `set -u` на голом "$LADDER" убил бы саму уборку.
+  rm -f "$BLOCK" ${LADDER:+"$LADDER"}
   if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
     echo "checks-on-image: ОТКАЗ -- прогон оборвался, не дойдя до конца (ошибка оболочки выше)" >&2
     exit 1
@@ -154,8 +156,52 @@ if [[ $FLOOR -eq 0 ]]; then
   # написан: часовой оборванного прогона обязан отличать красную проверку от
   # оболочки, умершей на полпути, а без отметки он различает их кодом, который
   # сам же и не контролирует.
+  # Третий вход блока -- пристинный близнец образа, и ТОЛЬКО при доказанной
+  # сопоставимости. Предикат сопоставимости НЕ дублируется: дом лестницы
+  # состояний снимается с claude-patch-all.sh по якорю, как и сам блок
+  # проверок -- копия разошлась бы с оригиналом молча.
+  LADDER="$(mktemp)" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан временный файл дома лестницы близнеца\n' >&2; exit 2; }
+  python3 - "$SCRIPT" "$LADDER" <<'LADDER_PY'
+import sys
+src, out = sys.argv[1], sys.argv[2]
+lines = open(src, encoding='utf-8').read().split('\n')
+BEG = '# --- НАЧАЛО ДОМА ЛЕСТНИЦЫ ПРИСТИННОГО БЛИЗНЕЦА (снимается tools/checks-on-image.sh) ---'
+END = '# --- КОНЕЦ ДОМА ЛЕСТНИЦЫ ПРИСТИННОГО БЛИЗНЕЦА ---'
+beg = [i for i, l in enumerate(lines) if l == BEG]
+end = [i for i, l in enumerate(lines) if l == END]
+# Пропавший или раздвоившийся якорь -- ОТКАЗ ПРИБОРА (код 2), а не красная
+# проверка: сверять нечем, измерения не было.
+if len(beg) != 1 or len(end) != 1 or end[0] <= beg[0]:
+    print('ЯКОРЬ ПРОПАЛ: дом лестницы близнеца не снят с ' + src
+          + ' (начал %d, концов %d)' % (len(beg), len(end)), file=sys.stderr)
+    sys.exit(2)
+open(out, 'w', encoding='utf-8').write('\n'.join(lines[beg[0] + 1:end[0]]))
+LADDER_PY
+  . "$LADDER"
+
+  # Сентинель несопоставимого близнеца берётся ИЗ БЛОКА: его единственный дом
+  # -- там, и перепечатка здесь расходилась бы молча, превращая «вход есть, да
+  # несопоставим» в «путь не читается».
+  __TWIN_SENTINEL="$(python3 - "$BLOCK" <<'SENT_PY'
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+found = re.findall(r"^_TWIN_SENTINEL = '([^']+)'$", text, re.M)
+if len(found) != 1:
+    sys.stderr.write('ЯКОРЬ ПРОПАЛ: сентинель несопоставимого близнеца назван '
+                     '%d раз в блоке проверок\n' % len(found))
+    sys.exit(2)
+sys.stdout.write(found[0])
+SENT_PY
+)" || { printf 'ПРИБОР НЕДОСТУПЕН: сентинель несопоставимого близнеца не снят с блока проверок\n' >&2; exit 2; }
+
+  __twin_state "$IMG" "$IMG.orig"
+  if [[ "$TWIN_STATE" == keep ]]; then
+    __twin_arg="$IMG.orig"
+  else
+    __twin_arg="$__TWIN_SENTINEL$TWIN_STATE"
+  fi
   __rc_block=0
-  python3 "$BLOCK" "$IMG" "$PATCH_SRC" || __rc_block=$?
+  python3 "$BLOCK" "$IMG" "$PATCH_SRC" "$__twin_arg" || __rc_block=$?
   __DONE=1
   exit $__rc_block
 fi
@@ -204,6 +250,12 @@ DECLARED = {
     # свойство, поэтому зелень на стоке здесь определение проверки.
     'the mod-API per-call maxTokens default is not the ceiling':
         'сторожит стоковую посылку шага 30 -- зелена на стоке по замыслу',
+    # П8 меряет ДИФФЕРЕНЦИАЛ девяти строк политики против пристинного
+    # близнеца, а близнец пристинного образа в этом режиме -- САМ образ
+    # (ниже третьим входом блока стоит `img`). Причина проверяема: разность
+    # файла с самим собой равна нулю на любых байтах.
+    'the nine policy strings count equal in the image and in the pristine twin':
+        'дифференциал меряется против САМОГО измеряемого пристина -- ноль по построению',
 }
 
 # CONSTRAINT: имена проверок шага, которые декларация может вывести из сверки.
@@ -250,7 +302,11 @@ def _read_inapplicable(path):
     return rows
 
 
-out = subprocess.run([sys.executable, block, img, patch_src],
+# CONSTRAINT: третий вход блока (пристинный близнец) в режиме пола -- САМ
+# измеряемый образ. Пол меряется на пристине, и дифференциал пристина против
+# себя равен нулю по определению; пропуск входа обнулил бы не эту одну
+# проверку, а самый смысл прогона -- неизмеренная проверка зелёной не бывает.
+out = subprocess.run([sys.executable, block, img, patch_src, img],
                      capture_output=True, text=True, errors="replace")
 green, red = [], []
 for line in out.stdout.splitlines():

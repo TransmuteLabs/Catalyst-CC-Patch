@@ -65,7 +65,7 @@ D36	README.md	probe-bench's {OWNER:probe-bench:mutations} recorded mutations	pro
 D37	README.md	checks-teeth's {OWNER:checks-teeth:mutations} recorded mutations	checks-teeth's {OWNER:checks-teeth:mutations:+1} recorded mutations	объявлено «{OWNER:checks-teeth:mutations} mutations» (владелец checks-teeth)
 D38	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = ()	docs/review/findings-ledger.md
 D39	claude-patch-all.sh	JOURNAL_DIRS = (os.path.join('docs', 'review'),)	JOURNAL_DIRS = (os.path.join('docs', 'reviews'),)	дом журнала кампании не найден
-D40	claude-patch-all.sh	все {OWNER:pipeline:checks} проверок конвейера сошлись	все {OWNER:pipeline:checks} сошлись	опущенным существительным
+D40	claude-patch-all.sh	все {OWNER:pipeline:checks} проверки конвейера сошлись	все {OWNER:pipeline:checks} сошлись	опущенным существительным
 D41	claude-patch-all.sh	# docnum:synthetic-block -- этот блок ЕСТЬ сам гейт	# этот блок ЕСТЬ сам гейт	the pipeline runs 999 checks
 D42	claude-patch-all.sh	    """Все питоновские heredoc'и одного файла	    """corpus-tools-bench has 12 scenarios. Питоновские heredoc'и одного файла	объявлено «{OWNER:corpus-tools-bench:scenarios} scenarios» (владелец corpus-tools-bench)
 D43	README.md	build-path-probe has {OWNER:build-path-probe:scenarios} scenarios	build-path-probe has {OWNER:build-path-probe:scenarios:+1} scenarios	объявлено «{OWNER:build-path-probe:scenarios} scenarios» (владелец build-path-probe)

@@ -72,7 +72,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 13
+EXPECTED_MUTATIONS = 20
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
 # 34 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
 # проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B) + 6 зубов
@@ -5028,8 +5028,12 @@ _PHASES407_STUB_RUNNER = "# stub: достаточно существовани�
 # Якорь пина мутаций собирается конкатенацией: цельный литерал в теле зуба
 # дал бы третье вхождение в снимок (определение + два кита зуба), и
 # _once_replace отказал бы на снимке, а не на предмете зуба.
-_PHASES407_PIN_OLD = "EXPECTED_MUTATIONS = " + "13"
-_PHASES407_PIN_NEW = "EXPECTED_MUTATIONS = " + "12"
+# CONSTRAINT: якорь ВЫВОДИТСЯ из живого значения счётчика, а не пинит его
+# копию литералом: пин чужого счётчика превращается в мину -- при законном
+# росте таблицы якорь перестаёт находиться и зуб обезоруживается молча
+# (класс #380, девятое попадание; найдено при адъюдикации 13 -> 20).
+_PHASES407_PIN_OLD = "EXPECTED_MUTATIONS = " + str(EXPECTED_MUTATIONS)
+_PHASES407_PIN_NEW = "EXPECTED_MUTATIONS = " + str(EXPECTED_MUTATIONS - 1)
 _PHASES407_RED_CALL = (
     "    for name, fn in entry_teeth:\n"
     '        reason = ("мутация снимка: единственный красный вход"\n'
@@ -5383,8 +5387,11 @@ def _tooth_phases_worker_death_keeps_printed_findings() -> str | None:
     return None
 
 
-_X5_FIXTURE_PIN_OLD = "EXPECTED_FIXTURE_TEETH = " + "13"
-_X5_FIXTURE_PIN_NEW = "EXPECTED_FIXTURE_TEETH = " + "99"
+# CONSTRAINT: якорь ВЫВОДИТСЯ из живого значения (тот же класс мины, что у
+# _PHASES407_PIN_OLD): литерал чужого счётчика отваливается при его законном
+# росте и обезоруживает зуб молча. Значение замены берётся заведомо иным.
+_X5_FIXTURE_PIN_OLD = "EXPECTED_FIXTURE_TEETH = " + str(EXPECTED_FIXTURE_TEETH)
+_X5_FIXTURE_PIN_NEW = "EXPECTED_FIXTURE_TEETH = " + str(EXPECTED_FIXTURE_TEETH + 86)
 _X5_PHASE_PRINT = ('        print(_fixture_not_started_line(\n'
                    '            f"зубов фикстуры {len(_FIXTURE_TEETH)}, '
                    'объявлено "\n'

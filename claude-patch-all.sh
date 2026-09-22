@@ -1095,7 +1095,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 41 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 42 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -1106,6 +1106,11 @@ echo "Target binary: $BIN"
 # patches in place and skips this step entirely; there the live file IS the
 # build, and the recognizer sends people to exactly that flag when it finds more
 # than one image on PATH.
+# --- НАЧАЛО ДОМА ЛЕСТНИЦЫ ПРИСТИННОГО БЛИЗНЕЦА (снимается tools/checks-on-image.sh) ---
+# КОНСТРЕЙНТ: всё между этим якорем и парным ему -- ОПРЕДЕЛЕНИЯ без побочных
+# действий: прибор проверок снимает этот кусок и исполняет его у себя, чтобы
+# не держать ВТОРОЙ предикат сопоставимости. Строка с действием, попавшая
+# сюда, исполнилась бы у прибора.
 OUR_MARKER='baseURL:/^claude/i.test('
 STAGED_FROM_LIVE=0
 # First line only: a patched image prints tweakcc's version on a second line,
@@ -1151,6 +1156,39 @@ img_ver() {   # <путь к образу> -> первое слово `--version
   __out="$("$1" --version)" || true
   __first_word "$__out"
 }
+
+# ЕДИНСТВЕННЫЙ ДОМ лестницы состояний пристинного близнеца. Состояние -- ТЕКСТ
+# для человека и предикат для машины одновременно: `keep` значит «близнец
+# сопоставим», всё прочее называет ПРИЧИНУ несопоставимости своим именем (два
+# отказа под одним именем неразличимы). Ответ отдаётся переменными, а не
+# выводом: у лестницы ДВА результата -- состояние и путь молчавшего образа, --
+# и склейка их в одну строку заставила бы каждого читателя её разбирать.
+__twin_state() {   # <образ> <близнец> -> TWIN_STATE, TWIN_SILENT; код ВСЕГДА 0
+  local __live __twin
+  TWIN_STATE=keep
+  TWIN_SILENT=""
+  if [[ ! -f "$2" ]]; then
+    TWIN_STATE="missing"
+  elif grep -q -a -F "$OUR_MARKER" "$2" || grep -q -a -F 'tweakcc' "$2"; then
+    TWIN_STATE="not pristine"
+  else
+    # img_ver объявляет «код ВСЕГДА 0» (пояс || true у неё в теле): пусто --
+    # законный ответ «образ не назвался», обе ветки -z ниже называют причину.
+    __live="$(img_ver "$1")" || true
+    __twin="$(img_ver "$2")" || true
+    if [[ -z "$__live" ]]; then
+      TWIN_STATE="not comparable: the live image did not name its version"
+      TWIN_SILENT="$1"
+    elif [[ -z "$__twin" ]]; then
+      TWIN_STATE="not comparable: $2 did not name its version"
+      TWIN_SILENT="$2"
+    elif [[ "$__live" != "$__twin" ]]; then
+      TWIN_STATE="a twin of $__twin, not of $__live"
+    fi
+  fi
+  return 0
+}
+# --- КОНЕЦ ДОМА ЛЕСТНИЦЫ ПРИСТИННОГО БЛИЗНЕЦА ---
 # `--only-ours` is excluded on purpose. The hazard 0b exists for is handing
 # tweakcc a patched image, and `--only-ours` never invokes tweakcc at all (the
 # whole stage is behind ONLY_OURS below). Staging from the pristine copy there
@@ -1168,34 +1206,16 @@ if [[ -z "$TARGET" && $DO_UPDATE -eq 0 && $ONLY_OURS -eq 0 ]]; then
   # Replaced when it is missing, when it is not pristine, or when it is a twin
   # of a DIFFERENT build -- `.orig` means "the stock bytes of the file next to
   # it", and a leftover from an earlier version silently breaks both readers.
-  ORIG_STATE=keep
-  # Имя молчавшего образа -- отдельная переменная: `ORIG_STATE` несёт ТЕКСТ
-  # для человека, а диагносту нужен ПУТЬ. Пусто = молчавших не было.
-  ORIG_SILENT=""
-  if [[ ! -f "$BIN.orig" ]]; then
-    ORIG_STATE="missing"
-  elif grep -q -a -F "$OUR_MARKER" "$BIN.orig" || grep -q -a -F 'tweakcc' "$BIN.orig"; then
-    ORIG_STATE="not pristine"
-  else
-    # img_ver объявляет «код ВСЕГДА 0» (пояс || true у неё в теле): пусто --
-    # законный ответ «образ не назвался», обе ветки -z ниже называют причину.
-    LIVE_VER="$(img_ver "$BIN")" || true
-    ORIG_VER="$(img_ver "$BIN.orig")" || true
-    # ПРИЧИНА называется ИЗМЕРЕННАЯ. Слово «unreadable» одинаково описывало
-    # битые байты и образ чужой платформы, а это РАЗНЫЕ поводы: у второго
-    # чинить нечего. Действие ветки волна 48 не меняет -- только основание, --
-    # потому что здесь `$BIN` уже признан пристинным, и класть его копию в
-    # `.orig` законно при любой из причин. Волна 48.
-    if [[ -z "$LIVE_VER" ]]; then
-      ORIG_STATE="not comparable: the live image did not name its version"
-      ORIG_SILENT="$BIN"
-    elif [[ -z "$ORIG_VER" ]]; then
-      ORIG_STATE="not comparable: $BIN.orig did not name its version"
-      ORIG_SILENT="$BIN.orig"
-    elif [[ "$LIVE_VER" != "$ORIG_VER" ]]; then
-      ORIG_STATE="a twin of $ORIG_VER, not of $LIVE_VER"
-    fi
-  fi
+  # ПРИЧИНА называется ИЗМЕРЕННАЯ. Слово «unreadable» одинаково описывало
+  # битые байты и образ чужой платформы, а это РАЗНЫЕ поводы: у второго
+  # чинить нечего. Действие ветки волна 48 не меняет -- только основание, --
+  # потому что здесь `$BIN` уже признан пристинным, и класть его копию в
+  # `.orig` законно при любой из причин. Волна 48.
+  # Имя молчавшего образа -- отдельная переменная: состояние несёт ТЕКСТ для
+  # человека, а диагносту нужен ПУТЬ. Пусто = молчавших не было.
+  __twin_state "$BIN" "$BIN.orig"
+  ORIG_STATE="$TWIN_STATE"
+  ORIG_SILENT="$TWIN_SILENT"
   if [[ -n "$ORIG_SILENT" ]]; then
     echo "NOTE: $ORIG_SILENT did not name its version -- the twin check was not made." >&2
     __image_run_note "$ORIG_SILENT"
@@ -6005,6 +6025,25 @@ bash "$(dirname "$0")/tools/step7-window-teeth.sh" 9>&- || {
   esac
 }
 
+# --- 0e-ter. зубы третьего входа блока проверок и пола -----------------------
+# Предмет: П8 (дифференциал девяти строк политики против пристинного близнеца)
+# и режим пола. Батарея приземлилась волной P и до этой врезки не имела НИ
+# ОДНОГО вызывающего -- то есть была зелена лишь в памяти оператора (#378).
+# КОНСТРЕЙНТ: код 3 прогон НЕ останавливает. Дом пристина есть не на каждой
+# площадке (#323), и «мерить нечем» -- свойство машины, а не вердикт о предмете.
+echo "==> Зубы пола проверок"
+bash "$(dirname "$0")/tools/floor-teeth.sh" 9>&- || {
+  __rc=$?
+  case $__rc in
+    2) echo "ЗУБЫ ПОЛА ПРОВЕРОК: НЕ ИЗМЕРЯЛИ -- прибор отказал (rc=2, имя отказа выше)" >&2
+       exit 2 ;;
+    3) echo "ЗУБЫ ПОЛА ПРОВЕРОК: НЕ ИЗМЕРЕНО -- дома пристина нет на этой машине (rc=3)" >&2 ;;
+    *) echo "ПОЛ ПРОВЕРОК БЕЗ ЗУБОВ: мутация не покраснела своей" >&2
+       echo "  причиной (rc=$__rc)" >&2
+       exit 1 ;;
+  esac
+}
+
 # --- 0e-bis. у стендов и гейтов должен быть ИСПОЛНИТЕЛЬ ----------------------
 # Дверь против инструмента-сироты: прибор есть, его числа сторожатся гейтом
 # чисел, а исполнителя нет -- такая тишина уже была на живом дереве (корпусный
@@ -6035,7 +6074,7 @@ python3 "$(dirname "$0")/tools/orphan-stand-gate.py" 9>&- || {
 # стадия источника не заявлена строкой канона, если строка канона мертва, если
 # pin sweep:<field> висит на несуществующем поле sweep.sh, либо счёт стадий
 # разошёлся с EXPECTED_STAGES. Так "стадия пиняема по умолчанию".
-EXPECTED_STAGES=38
+EXPECTED_STAGES=39
 echo "==> Перепись стадий конвейера"
 python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
     --source "$0" \
@@ -6835,7 +6874,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 41 проверки конвейера ниже этого не заметит: они пинят наш
+# ни одна из 42 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -7012,10 +7051,39 @@ fi
 
 # --- 5. verify ---------------------------------------------------------------
 echo "==> Verifying"
-python3 - "$BIN" "$OUR_PATCH" <<'PY'
+# КОНСТРЕЙНТ: третий вход (пристин) стоит ХВОСТОМ после heredoc-маркера:
+# tools/checks-on-image.sh снимает этот блок предикатом
+# l.startswith('python3 - "$BIN" "$OUR_PATCH" <<') -- аргумент, вставленный
+# до `<<`, оставляет все инструменты без блока проверок вовсе. $PRISTINE_SRC --
+# ЕДИНСТВЕННЫЙ дом пути пристина (снятие staging-суффикса уже сделано им).
+python3 - "$BIN" "$OUR_PATCH" <<'PY' "$PRISTINE_SRC"
 import importlib.util, json, os, re, sys
 d = open(sys.argv[1], 'rb').read()
 src = open(sys.argv[2], encoding='utf-8').read()
+# П8 (DOOR-DESIGN §10): пол девяти строк политики -- ДИФФЕРЕНЦИАЛ против
+# пристина, не «ноль вхождений»: у большинства строк стоковый пол ненулевой.
+# КОНСТРЕЙНТ: отсутствие третьего входа -- отказ ЭТОЙ проверки с её именем, а
+# не выход из блока. Выход из середины уносит ВСЕ прочие проверки, и реестр не
+# называет ни одной -- ранний отказ маскирует находки. Неизмеренная проверка
+# при этом НЕ зелёная: отказ учитывается там же, где исходы соседей (False в
+# реестре), и код блока остаётся ненулевым.
+# КОНСТРЕЙНТ: argv[3] -- либо ПУТЬ к близнецу, либо СОСТОЯНИЕ лестницы под
+# сентинелем. «Входа нет» и «вход есть, да несопоставим» -- разные отказы, и
+# одно имя на оба неразличимо. ЕДИНСТВЕННЫЙ ДОМ значения сентинеля -- эта
+# строка; tools/checks-on-image.sh снимает его с блока, а не повторяет.
+_TWIN_SENTINEL = '!TWIN-NOT-USABLE:'
+_PRISTINE_REFUSAL = None
+pristine = b''
+if len(sys.argv) < 4 or not sys.argv[3]:
+    _PRISTINE_REFUSAL = 'no pristine twin input (argv[3])'
+elif sys.argv[3].startswith(_TWIN_SENTINEL):
+    _PRISTINE_REFUSAL = 'twin not usable: ' + sys.argv[3][len(_TWIN_SENTINEL):]
+else:
+    try:
+        pristine = open(sys.argv[3], 'rb').read()
+    except OSError as _pristine_err:
+        _PRISTINE_REFUSAL = (f'pristine twin unreadable: {sys.argv[3]}: '
+                             f'{_pristine_err}')
 ID = rb'[A-Za-z_$][\w$]*'
 # Широкий детектор чтения фича-флага -- глаза постусловия session memory (#341):
 # голый идентификатор, возможно с `this.` или точечной цепочкой (`K.read(…)`,
@@ -8289,15 +8357,43 @@ _MOD_ENTRY_PATCHED = (
     rb',detail:__mcDetail\},' + ID + rb',' + ID + rb'\)\{'
 )
 
+# Голова мод-API 2.1.280 ПОСЛЕ нашей правки. На этой сборке апстрим сам принял
+# `effort` и `timeoutMs` в деструктуризацию, сам их проверяет и сам применяет,
+# поэтому шаг 31 их НЕ переврезает: две живые дороги к одному значению -- это
+# конфликт, а не запас (наш `extraBodyParams.reasoning_effort` и апстримовый
+# `output_config.effort` дошли бы до шлюза оба). В голове остаётся ОДИН алиас.
+# Имена эффорта и таймаута здесь АПСТРИМОВЫ и минифицированы -- они
+# ЗАХВАТЫВАЮТСЯ (группы 6 и 7) и подставляются в иглы обратной ссылкой, а не
+# вшиваются: на другой платформе и в следующей версии они будут другими.
+# group(5) по-прежнему аргумент maxTokens -- на его номер опирается проверка
+# алиаса, общая для обеих форм.
+_MOD_ENTRY_PATCHED_280 = (
+    rb'async function (' + ID + rb')\(\{model:(' + ID + rb'),prompt:(' + ID + rb'),system:(' + ID +
+    rb'),maxTokens:(' + ID + rb'),effort:(' + ID + rb'),timeoutMs:(' + ID +
+    rb'),max_tokens:__mcAlias\},([^)]*)\)\{'
+)
+
 # Вызов провайдера ПОСЛЕ правки, вместе с обоими пробросами. Окно от головы, а
 # не весь образ: `querySource:"hook_prompt"` больше нигде не встречается, но
 # привязка к голове держит проверку честной и тогда, когда апстрим заведёт
 # второй такой вызов в другом чанке.
 def _mod_entry_window(d, span=1400):
+    """Окно после головы входа мод-API И ИМЯ найденной формы.
+
+    Форм две, и различать их обязательно: до 2.1.280 эффорт и таймаут терялись
+    и правка несла их сама, а на 2.1.280 их носитель -- АПСТРИМ. Предмет
+    проверок эффорта, таймаута и причины на разных формах поэтому РАЗНЫЙ.
+    Слить их в «зелено по любой из двух» нельзя: такая проверка перестала бы
+    краснеть на потере любой из форм, а «зелень по чужой причине» здесь стоила
+    бы ровно той гарантии, ради которой шаг существует.
+    """
     site = re.search(_MOD_ENTRY_PATCHED, d)
-    if not site:
-        return None, None
-    return site, d[site.end():site.end() + span]
+    if site:
+        return site, d[site.end():site.end() + span], 'legacy'
+    site = re.search(_MOD_ENTRY_PATCHED_280, d)
+    if site:
+        return site, d[site.end():site.end() + span], '280'
+    return None, None, None
 
 
 def _mod_api_forwards_effort(d):
@@ -8317,9 +8413,29 @@ def _mod_api_forwards_effort(d):
     не украшение, а разница между «эффорт не задан» и «задан пустым», которая
     у провайдера означает разные вещи.
     """
-    site, win = _mod_entry_window(d)
+    site, win, shape = _mod_entry_window(d, 1600)
     if not site:
         return False
+    if shape == '280':
+        # СМЕНА НОСИТЕЛЯ, не потеря предмета. ЗАМЕРЕНО на 2.1.280 stock
+        # (chunk-dt8bvbsd.js): апстрим принял `effort` в деструктуризацию, сам
+        # проверяет его по своему списку и сам кладёт в тело как
+        # `output_config.effort` -- измеренный рабочий канал. Врезка снята
+        # шагом 31 сознательно, и проверка идёт за предметом: игла стала
+        # ПОЗИТИВНОЙ по апстримовой форме. Уберёт апстрим проброс -- проверка
+        # краснеет, то есть гарантия остаётся под зубом, сменив носителя.
+        # Пинятся ДВА конца, как и на прежней форме: валидация и проброс.
+        # Валидация здесь несёт ту же гарантию, что раньше несло наше
+        # `!==""` -- «задан пустым» не уезжает как «не задан»: её потеря
+        # молча вернула бы различие, ради которого условие и писалось.
+        # Проброс замерен в 1255 байтах от головы -- отсюда окно 1600.
+        eff = re.escape(site.group(6))
+        validated = re.search(
+            rb'if\(' + eff + rb'!==void 0&&\(typeof ' + eff + rb'!=="string"\|\|!' + ID
+            + rb'\(' + eff + rb'\)\)\)throw', win)
+        forwarded = re.search(
+            rb'\.\.\.' + eff + rb'!==void 0&&\{effort:' + eff + rb'\},', win)
+        return bool(validated and forwarded)
     return bool(re.search(
         rb'\.\.\.typeof __mcEff==="string"&&__mcEff!==""&&'
         rb'\{extraBodyParams:\{reasoning_effort:__mcEff\}\},', win))
@@ -8337,9 +8453,37 @@ def _mod_api_forwards_timeout(d):
     границы, а не границу в ноль: иначе мод, попросивший нечитаемое, получил бы
     вызов, обрываемый мгновенно. То же прочтение негодного, что у шагов 29 и 30.
     """
-    site, win = _mod_entry_window(d)
+    site, win, shape = _mod_entry_window(d, 1800)
     if not site:
         return False
+    if shape == '280':
+        # СМЕНА НОСИТЕЛЯ. ЗАМЕРЕНО на 2.1.280 stock: апстрим сам проверяет
+        # `timeoutMs`, сам режет его своим потолком и сам гонит вызов против
+        # него настоящим AbortController -- строго больше того, что делала наша
+        # врезка. Пинятся ТРИ конца, потому что каждый несёт свою гарантию и
+        # каждый может уйти поодиночке:
+        #   * отказ на негодном значении -- у нас его нёс `Number.isFinite`;
+        #     без него ноль или NaN стали бы границей вместо её отсутствия;
+        #   * кап потолком -- связь капа с гонкой держится ОБРАТНОЙ ССЫЛКОЙ на
+        #     имя, которое кап породил: кап, чьё значение никуда не идёт, есть
+        #     ровно та половина правки, что выглядит работающей ручкой;
+        #   * сама гонка -- без неё границы времени нет вообще (замер
+        #     2026-09-15: один вызов провисел 24 минуты).
+        # Гонка замерена в 1335 байтах от головы -- отсюда окно 1800.
+        tmo = re.escape(site.group(7))
+        rejected = re.search(
+            rb'if\(' + tmo + rb'!==void 0&&\(!Number\.isInteger\(' + tmo + rb'\)\|\|'
+            + tmo + rb'<1\)\)throw', win)
+        cap = re.search(
+            rb'let (' + ID + rb')=' + tmo + rb'===void 0\?void 0:Math\.min\(' + tmo
+            + rb',' + ID + rb'\);', win)
+        if not (rejected and cap):
+            return False
+        bound = re.escape(cap.group(1))
+        raced = re.search(
+            rb'await\(' + bound + rb'===void 0\?(' + ID + rb'):' + ID + rb'\(\1,'
+            + bound + rb',' + ID + rb'\)\)', win)
+        return bool(raced)
     return bool(re.search(
         rb'\.\.\.Number\.isFinite\(__mcTmo\)&&__mcTmo>0&&\{timeout:__mcTmo\},', win))
 
@@ -8360,9 +8504,13 @@ def _mod_api_alias_is_resolved_before_the_guard(d):
     запущенный как мод. Документированное `maxTokens` при этом старше: присваивание
     срабатывает только когда оно не задано.
     """
-    site, win = _mod_entry_window(d, 200)
+    site, win, _shape = _mod_entry_window(d, 200)
     if not site:
         return False
+    # ПРЕДМЕТ ОБЩИЙ ДЛЯ ОБЕИХ ФОРМ: алиас несём мы, апстрим его не завёл ни в
+    # одной сборке. group(5) -- аргумент maxTokens в любой из двух голов, и
+    # соседство с открывающей скобкой пинится одинаково: присваивание раньше
+    # любого другого выражения, то есть раньше апстримовых проверок и потолка.
     arg = site.group(5)
     return bool(re.match(
         rb'if\(' + re.escape(arg) + rb'===void 0&&__mcAlias!==void 0\)'
@@ -8391,9 +8539,33 @@ def _mod_api_returns_detail_on_request(d):
     объект истинен всегда, и безусловный возврат объекта развернул бы такую
     ветку наизнанку молча.
     """
-    site, win = _mod_entry_window(d)
+    site, win, shape = _mod_entry_window(d, 2600)
     if not site:
         return False
+    if shape == '280':
+        # ПРЕДМЕТ ЖИВ, УСЛОВНОСТЬ СНЯТА -- и снятие есть часть правки, а не её
+        # потеря. Флаг `detail` существовал РОВНО затем, чтобы стоковый возврат
+        # оставался СТРОКОЙ для модов, полагающихся на ложность пустой строки в
+        # `if (!answer)`. На 2.1.280 апстрим сам вернул объект
+        # (`{isAnswered,text|reason,usage}`), и того контракта больше нет --
+        # защищать нечего, поля добавляются безусловно. При этом сама
+        # неразличимость НЕ вылечена апстримом: «модель промолчала», «всё ушло
+        # в блоки размышления» и «ответ обрезан по max_tokens» по-прежнему
+        # приходят одним `reason:"empty-reply"` (#153, #190), а `stop_reason` и
+        # типы блоков лежат в том же объекте и выбрасываются.
+        # Пинятся ОБА конца одной иглой: постановка полей и ОБЕ ветки возврата.
+        # Ветка непустого ответа тоже обязана их нести: причина, доезжающая
+        # только до пустого ответа, не отличит «обрезано по max_tokens» на
+        # НЕПУСТОМ тексте -- тот самый случай, ради которого поля и добавлены.
+        # Вторая ветка замерена в 2036 байтах от головы -- отсюда окно 2600.
+        bound = re.search(
+            rb'let __mcSt=(' + ID + rb')\.stop_reason\?\?null,__mcBl=\(Array\.isArray\(\1'
+            rb'\.content\)\?\1\.content:\[\]\)\.map\(\(__mcBlk\)=>', win)
+        both = re.search(
+            rb'\{isAnswered:!1,reason:"[^"]*",usage:(' + ID + rb'),stopReason:__mcSt,'
+            rb'blocks:__mcBl\}:\{isAnswered:!0,text:(' + ID + rb'),usage:\1,'
+            rb'stopReason:__mcSt,blocks:__mcBl\}', win)
+        return bool(bound and both)
     return bool(re.search(
         rb'__mcDetail===true\?\{text:(' + ID + rb'),stopReason:(' + ID + rb')\.stop_reason\?\?null,'
         rb'blocks:\(Array\.isArray\(\2\.content\)\?\2\.content:\[\]\)\.map\(', win))
@@ -8625,42 +8797,207 @@ _S26 = _step26_verdict(_probe_full)
 _SWE32_ID = rb'[A-Za-z_$][\w$]*'
 
 
-def _swe32_request_text(d):
-    """Шаг 32: текст запроса для devin/swe-2 переписывается на сайте сборки тела.
+_SWE32_DOOR_CACHE = []
 
-    Devin отвечал 403 на стоковый запрос и 200 на тот же запрос с тремя
-    правками текста (A/B 2026-09-22): вступление CLI, строка о «most recent
-    Claude models», второе предложение описания Read; четвёртая правка —
-    строка «Notes» субагента про emoji (одна она даёт 403 запросу субагента,
-    A/B 2026-09-22 на снятых телах swe2-executor и general-purpose). Пинятся ОБА конца:
-    сайт тела (`let <rf>={model:<tI>(<h>.model),messages:`) и вставка сразу
-    за ним, в которой предикат модели, замена вступления и обрезка Read
-    стоят на своих местах. Предикат обязан быть УЗКИМ: чужая модель проходит
-    нетронутой, и проверка стережёт именно предикат на `devin/swe-2`.
+
+def _swe32_lit_unescape(body, where):
+    # Правило сборки (бриф L2, П1): обратный слэш + символ -> этот символ, и
+    # ТОЛЬКО для пар \\ и \'. Иная escape-последовательность -- ОТКАЗ с
+    # названной причиной: тихое искажение запинывает в образ не-тот текст.
+    out = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == '\\':
+            nxt = body[i + 1] if i + 1 < len(body) else ''
+            if nxt in ('\\', "'"):
+                out.append(nxt)
+                i += 2
+                continue
+            return None, f'{where}: unsupported escape \\{nxt}'
+        if ch == "'":
+            return None, f'{where}: bare quote inside a single-quoted literal'
+        out.append(ch)
+        i += 1
+    return ''.join(out), None
+
+
+def _swe32_door_bytes():
+    """П1: текст двери шага 34, собираемый из исходника патча."""
+    if _SWE32_DOOR_CACHE:
+        return _SWE32_DOOR_CACHE[0]
+    lo = src.find('const door = [')
+    hi = src.find("].join('');", lo)
+    if lo < 0 or hi < 0:
+        _SWE32_DOOR_CACHE.append((None, 'door array not found in the patch source'))
+        return _SWE32_DOOR_CACHE[0]
+    parts = []
+    for raw in src[lo + len('const door = ['):hi].split('\n'):
+        line = raw.strip()
+        if not line or line.startswith('//'):
+            continue
+        while line.endswith(','):
+            line = line[:-1].rstrip()
+        if not (line.startswith("'") and line.endswith("'") and len(line) >= 2):
+            _SWE32_DOOR_CACHE.append(
+                (None, 'door array: non-literal line ' + repr(line[:40])))
+            return _SWE32_DOOR_CACHE[0]
+        text, why = _swe32_lit_unescape(line[1:-1], 'door array literal')
+        if why:
+            _SWE32_DOOR_CACHE.append((None, why))
+            return _SWE32_DOOR_CACHE[0]
+        parts.append(text)
+    if not parts:
+        _SWE32_DOOR_CACHE.append((None, 'door array: no literals collected'))
+        return _SWE32_DOOR_CACHE[0]
+    _SWE32_DOOR_CACHE.append((''.join(parts).encode('utf-8'), None))
+    return _SWE32_DOOR_CACHE[0]
+
+
+def _swe32_wrapper_bytes(rf):
+    """П2: текст обёртки шага 32, собираемый из исходника патча."""
+    lo = src.find('const runtime =')
+    if lo < 0:
+        return None, 'step-32 runtime template not found in the patch source'
+    tail = ";/*swe32-end*/`;"
+    hi = src.find(tail, lo)
+    if hi < 0:
+        return None, 'step-32 runtime template is unterminated'
+    chunks = re.findall(r'`([^`]*)`', src[lo:hi + len(tail)])
+    if not chunks:
+        return None, 'step-32 runtime template holds no template literals'
+    tpl = ''.join(chunks)
+    if '\\' in tpl:
+        return None, 'step-32 runtime template carries an escape sequence'
+    dm = re.search(r"const DISGUISE = '([^'\n]*)';", src)
+    if not dm:
+        return None, 'DISGUISE literal not found in the patch source'
+    if '\\' in dm.group(1):
+        return None, 'DISGUISE literal carries an escape sequence'
+    disg = dm.group(1)
+    if any(not (0x20 <= ord(c) <= 0x7e) or c in '"\\' for c in disg):
+        return None, 'DISGUISE literal is not a simple ASCII string'
+    out = (tpl
+           .replace('${JSON.stringify(DISGUISE)}', '"' + disg + '"')
+           .replace('${DISGUISE.length}', str(len(disg)))
+           .replace('${rf}', rf))
+    if '${' in out:
+        return None, 'step-32 runtime template carries an unknown ${...} substitution'
+    return out.encode('utf-8'), None
+
+
+def _swe32_request_text(d):
+    """Шаги 32+34: дверь requestText -- шесть именованных игл + скан исходника.
+
+    Devin отвечал 403 на стоковый запрос и 200 на тот же запрос с правками
+    текста (A/B 2026-09-22); сами правки теперь ДАННЫЕ -- их регистрирует
+    плагин catalyst-swe-request через ноун $.requestText (шаг 34), а патч
+    держит дверь и вызывает применитель на сайте сборки тела (шаг 32).
+    Иглы П1/П2 пинят БАЙТЫ, собираемые из исходника патча (ни одна игла не
+    несёт литеральной копии кода двери); П3-П6 -- структуру с обратными
+    ссылками. Отказ каждой иглы печатается своим именем: два отказа одним
+    текстом неразличимы. Седьмая игла -- политики в исходнике патча нет.
     """
+    failed = []
+
+    def needle(ok, name):
+        if not ok:
+            failed.append(name)
+
+    # П1: байт-пин тела двери (закрывает подмену/удаление любой строки двери)
+    door, why = _swe32_door_bytes()
+    if door is None:
+        needle(False, 'door byte-pin: ' + why)
+    else:
+        needle(d.count(door) == 1,
+               f'door byte-pin: step-34 door text occurs exactly once in the image '
+               f'(found {d.count(door)})')
+    # П2: байт-пин обёртки шага 32; имя переменной тела -- из сайта тела
     site = re.search(
         rb'let (' + _SWE32_ID + rb')=\{model:' + _SWE32_ID + rb'\(' + _SWE32_ID +
         rb'\.model\),messages:', d)
     if not site:
-        return False
-    rf = re.escape(site.group(1))
-    win = d[site.end():site.end() + 6000]
-    block = re.search(
-        rb';/\*swe32\*/' + rf + rb'=\(function\(__r\)\{(.*?)\}\)\(' + rf +
-        rb'\);/\*swe32-end\*/' + _SWE32_ID + rb'=' + _SWE32_ID + rb'&&' + rf +
-        rb'\.messages\.some\(', win, re.S)
-    if not block:
-        return False
-    body = block.group(1)
-    return all(needle in body for needle in (
-        rb'/^devin\/swe-2(?![\w.-])/i.test(',
-        rb'"You are a coding agent."',
-        rb'The most recent Claude models are ',
-        rb'"Reads a file from the local filesystem."',
-        rb'__t.name!=="Read"',
-        rb'.split("For clear communication with the user the assistant MUST avoid using emojis.")'
-        rb'.join("For clear communication with the user, avoid using emojis.")',
-    ))
+        needle(False, 'wrapper byte-pin: request body site not found')
+    else:
+        wrapper, why = _swe32_wrapper_bytes(site.group(1).decode('utf-8', 'replace'))
+        if wrapper is None:
+            needle(False, 'wrapper byte-pin: ' + why)
+        else:
+            needle(d.count(wrapper) == 1,
+                   f'wrapper byte-pin: step-32 wrapper text occurs exactly once '
+                   f'in the image (found {d.count(wrapper)})')
+    # П3: строитель ноуна -- тот же упрочнитель, что у соседнего flag-строителя,
+    # ровно три метода, три литерала имён операций, один <H> во всех трёх телах
+    fb = re.search(
+        rb'var (' + _SWE32_ID + rb')=\((' + _SWE32_ID + rb')\)=>(' + _SWE32_ID + rb')\(\{value:\(('
+        + _SWE32_ID + rb'),(' + _SWE32_ID + rb')\)=>\2\("flag\.value",\{name:\4,fallback:\5\}\)\}\);', d)
+    if not fb:
+        needle(False, 'noun builder: flag noun builder (the invoker anchor) not found')
+    else:
+        inv = re.escape(fb.group(3))
+        b3 = re.findall(
+            rb'var __ctlRT=\((' + _SWE32_ID + rb')\)=>' + inv + rb'\(\{register:\('
+            + _SWE32_ID + rb'\)=>\1\("requestText\.register",' + _SWE32_ID
+            + rb'\),unregister:\(' + _SWE32_ID + rb'\)=>\1\("requestText\.unregister",\{id:'
+            + _SWE32_ID + rb'\}\),list:\(\)=>\1\("requestText\.list",\{\}\)\}\);', d)
+        needle(len(b3) == 1,
+               'noun builder: same host invoker as flag, three methods, three op '
+               'names, one <H> in all three bodies')
+    # П4: аргумент ключа фабрики -- обратной ссылкой на аргумент ключа flag
+    f4 = re.findall(
+        rb',flag:(' + _SWE32_ID + rb')\((' + _SWE32_ID + rb')\((' + _SWE32_ID
+        + rb')\)\),requestText:\1\(__ctlRT\(\3\)\)\}\}', d)
+    needle(len(f4) == 1,
+           'factory key: the requestText argument mirrors the flag key by backreference')
+    # П5: записи диспетчера ВПЛОТНУЮ за flag.value; три имени -- внутри точной
+    # последовательности "prompt.read","flag.value", ... "tool.list"
+    p5a = re.findall(
+        rb'"flag\.value":' + _SWE32_ID + rb',"requestText\.register":' + _SWE32_ID
+        + rb',"requestText\.unregister":' + _SWE32_ID + rb',"requestText\.list":'
+        + _SWE32_ID + rb',', d)
+    p5b = re.findall(
+        rb'"prompt\.read","flag\.value","requestText\.register","requestText\.unregister",'
+        rb'"requestText\.list","tool\.list"', d)
+    needle(len(p5a) == 1,
+           'dispatcher: the three entries sit immediately after the flag.value entry')
+    needle(len(p5b) == 1,
+           'dispatcher: the three names sit inside prompt.read..tool.list')
+    # П6: имя применителя уникально (затенение даёт третье вхождение), и тело
+    # двери стоит непосредственно за записью операции flag.value -- в том же
+    # чанке, что и сайт вызова
+    n_apply = d.count(b'__ctlApply')
+    needle(n_apply == 2,
+           f'applier: the name __ctlApply occurs exactly twice (found {n_apply})')
+    # ХВОСТ ЗАПИСИ -- ОДНА `}`: объект операции закрывается ровно один раз.
+    # ЗАМЕРЕНО побайтно на обоих образах: 2.1.278 боевой несёт
+    # `...Promise.resolve(P(e.name,e.fallback))};var Lqt=...`, 2.1.280 staging --
+    # `...Promise.resolve(x(e.name,e.fallback))};var __ctlRules=...`, то есть
+    # дверь встала ровно туда, где на 278 начинался следующий чужой оператор.
+    # Требование второй `}` не совпадало НИ НА ОДНОМ образе: эта игла ни разу
+    # не была зелёной -- её предмет (дверь шага 34) впервые появился здесь.
+    opr = list(re.finditer(
+        rb'var (' + _SWE32_ID + rb')=\{check:\((' + _SWE32_ID + rb')\)=>(' + _SWE32_ID
+        + rb')\(\)\?(' + _SWE32_ID + rb')\(\2\):"reads a feature flag[^"]*",run:\(('
+        + _SWE32_ID + rb')\)=>Promise\.resolve\((' + _SWE32_ID
+        + rb')\(\5\.name,\5\.fallback\)\)\};', d))
+    needle(door is not None and len(opr) == 1 and opr[0].end() == d.find(door),
+           'applier: the door sits right after the flag.value op record')
+    # Седьмая игла: политики в патче нет (src -- исходник патча в str, не байты
+    # образа) -- иначе правило жило бы в двух домах сразу
+    for lit in (
+        "You are a coding agent.",
+        "The most recent Claude models are",
+        "For clear communication with the user the assistant MUST avoid using emojis.",
+        "For clear communication with the user, avoid using emojis.",
+        "Reads a file from the local filesystem. You can access any file directly by using this tool.",
+        "You are Claude Code, Anthropic's official CLI for Claude",
+    ):
+        if lit in src:
+            needle(False, 'patch source: no policy literal remains in the patch source')
+            break
+    for name in failed:
+        print(f'  [NEEDLE-FAIL] swe32 door: {name}')
+    return not failed
 
 
 def _swe33_tool_chunk_id(d):
@@ -8681,6 +9018,45 @@ def _swe33_tool_chunk_id(d):
     new = re.compile(arm % (rb'/\^\\S\+\$/',
                             rb'"\{ index, id, name \} \(a non-empty id without whitespace\)"'))
     return len(new.findall(d)) == 1 and len(old.findall(d)) == 0
+
+
+# Девять строк политики -- ДОСЛОВНО из e2e/policy-verdict.py программы
+# 2026-09-22-tool-descriptions; происхождение копии проверяется сличением
+# с этим файлом, а не доверием перепечатке.
+_SWE_POLICY_NINE = tuple(
+    (name, text.encode('utf-8'))
+    for name, text in (
+        ('S1', "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."),
+        ('S2', "You are Claude Code, Anthropic's official CLI for Claude."),
+        ('S3', "You are a Claude agent, built on Anthropic's Claude Agent SDK."),
+        ('S4', "You are a coding agent."),
+        ('S5', "The most recent Claude models are"),
+        ('S6', "For clear communication with the user the assistant MUST avoid using emojis."),
+        ('S7', "For clear communication with the user, avoid using emojis."),
+        ('S8', "Reads a file from the local filesystem. You can access any file directly by using this tool."),
+        ('S9', "Reads a file from the local filesystem."),
+    ))
+
+
+def _swe_policy_pristine_diff(d):
+    """П8: дифференциал девяти строк политики против пристина (DOOR-DESIGN §10).
+
+    Счёт каждой строки в собранном образе обязан РАВНЯТЬСЯ пристинному:
+    текст политики патч больше не трогает, и любое расхождение -- литерал,
+    вошедший в образ сторонним путём. Равенство, а не «ноль вхождений»:
+    у большинства строк стоковый пол ненулевой, и нулевой предикат зеленел
+    бы вакуумно. Близнеца нет или он непригоден -- ИМЕНОВАННЫЙ отказ этой
+    проверки (False в реестре), а не пустой дифференциал и не смерть блока.
+    """
+    if _PRISTINE_REFUSAL is not None:
+        print(f'  [REFUSED] policy-vs-pristine differential: {_PRISTINE_REFUSAL}')
+        return False
+    for name, s in _SWE_POLICY_NINE:
+        n_img, n_pri = d.count(s), pristine.count(s)
+        if n_img != n_pri:
+            print(f'  [NEEDLE-FAIL] policy line {name}: image={n_img} pristine={n_pri}')
+            return False
+    return True
 
 
 checks = {
@@ -8961,11 +9337,17 @@ checks = {
         _mod_api_alias_is_resolved_before_the_guard(d),
     'the mod-API returns the cause of an empty answer on request':
         _mod_api_returns_detail_on_request(d),
-    # Шаг 32: запрос к devin/swe-2 уходит без трёх строк, на которые Devin
-    # отвечает 403; остальные модели -- байт в байт как в стоке. Мод-API этого
-    # места не достигает: вступление подклеивается ПОСЛЕ хуков prompt.section,
-    # а tool.describe не знает ни модели, ни агента.
-    'the request text for devin/swe-2 is rewritten at the body site': _swe32_request_text(d),
+    # Шаги 32+34: политика swe-2 уехала из патча в плагин catalyst-swe-request;
+    # в хосте осталась дверь ($.requestText: ноун, ключ фабрики, имена операций,
+    # записи диспетчера) и вызов применителя на сайте сборки тела. Проверка
+    # стережёт ОБА конца двери и отсутствие всех шести литералов политики в
+    # исходнике патча.
+    'the requestText door is keyed and the rule applier sits at the body site': _swe32_request_text(d),
+    # П8: девять строк политики -- дифференциал против пристина (третий вход
+    # блока). После ухода политики в плагин НИЧТО другое не утверждает, что
+    # патч оставил стоковый текст в покое: литерал, вошедший в образ не через
+    # tweakcc-patch.js, невидим скану исходника.
+    'the nine policy strings count equal in the image and in the pristine twin': _swe_policy_pristine_diff(d),
     # Шаг 33: валидатор выхода turn.step-хука принимает tool-чанк с id devin
     # (`call_<hex>#<hex>`); без него любой turn.step-хук, даже сквозной, терял
     # tool-чанк, и клиент отвечал tengu_malformed_tool_use_response.
@@ -8978,7 +9360,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 41
+EXPECTED_CHECKS = 42
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -9037,7 +9419,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 41 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 42 проверки конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
