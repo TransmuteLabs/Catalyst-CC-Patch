@@ -1095,7 +1095,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 39 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 41 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -6835,7 +6835,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 39 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 41 проверки конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -8622,6 +8622,63 @@ _probe_full = d
 _S29 = _step29_verdict(_probe_full, src)
 _S26 = _step26_verdict(_probe_full)
 
+_SWE32_ID = rb'[A-Za-z_$][\w$]*'
+
+
+def _swe32_request_text(d):
+    """Шаг 32: текст запроса для devin/swe-2 переписывается на сайте сборки тела.
+
+    Devin отвечал 403 на стоковый запрос и 200 на тот же запрос с тремя
+    правками текста (A/B 2026-09-22): вступление CLI, строка о «most recent
+    Claude models», второе предложение описания Read. Пинятся ОБА конца:
+    сайт тела (`let <rf>={model:<tI>(<h>.model),messages:`) и вставка сразу
+    за ним, в которой предикат модели, замена вступления и обрезка Read
+    стоят на своих местах. Предикат обязан быть УЗКИМ: чужая модель проходит
+    нетронутой, и проверка стережёт именно предикат на `devin/swe-2`.
+    """
+    site = re.search(
+        rb'let (' + _SWE32_ID + rb')=\{model:' + _SWE32_ID + rb'\(' + _SWE32_ID +
+        rb'\.model\),messages:', d)
+    if not site:
+        return False
+    rf = re.escape(site.group(1))
+    win = d[site.end():site.end() + 6000]
+    block = re.search(
+        rb';/\*swe32\*/' + rf + rb'=\(function\(__r\)\{(.*?)\}\)\(' + rf +
+        rb'\);/\*swe32-end\*/' + _SWE32_ID + rb'=' + _SWE32_ID + rb'&&' + rf +
+        rb'\.messages\.some\(', win, re.S)
+    if not block:
+        return False
+    body = block.group(1)
+    return all(needle in body for needle in (
+        rb'/^devin\/swe-2(?![\w.-])/i.test(',
+        rb'"You are a coding agent."',
+        rb'The most recent Claude models are ',
+        rb'"Reads a file from the local filesystem."',
+        rb'__t.name!=="Read"',
+    ))
+
+
+def _swe33_tool_chunk_id(d):
+    r"""Шаг 33: валидатор tool-чанка turn.step принимает id без пробелов.
+
+    Хост отбрасывал выход хука, если id tool-чанка не по /^[\w-]+$/, а devin
+    называет вызовы `call_<hex>#<hex>` (замер 2026-09-22): любой turn.step-хук,
+    даже сквозной, терял tool-чанк. Пинится ЦЕЛАЯ ветка `case"tool"`: новая
+    пара регэксп+сообщение ровно один раз, старой пары нет. Голый регэксп
+    не считается -- он стережёт ещё шесть чужих id в образе, а голое старое
+    сообщение живёт и в таблице строк байткода.
+    """
+    ID = _SWE32_ID
+    arm = (rb'case"tool":return (' + ID + rb')&&typeof (' + ID + rb')\.id==="string"&&%s\.test\(\2\.id\)'
+           rb'&&typeof \2\.name==="string"\?void 0:%s')
+    old = re.compile(arm % (rb'/\^\[\\w-\]\+\$/',
+                            rb'"\{ index, id, name \} \(an id of letters, digits, _ or -\)"'))
+    new = re.compile(arm % (rb'/\^\\S\+\$/',
+                            rb'"\{ index, id, name \} \(a non-empty id without whitespace\)"'))
+    return len(new.findall(d)) == 1 and len(old.findall(d)) == 0
+
+
 checks = {
     'routing (claude-* -> subscription)': _routing_agrees_with_connection(d),
     'patch source escapes every captured name': _escaped_interpolations(src),
@@ -8900,6 +8957,15 @@ checks = {
         _mod_api_alias_is_resolved_before_the_guard(d),
     'the mod-API returns the cause of an empty answer on request':
         _mod_api_returns_detail_on_request(d),
+    # Шаг 32: запрос к devin/swe-2 уходит без трёх строк, на которые Devin
+    # отвечает 403; остальные модели -- байт в байт как в стоке. Мод-API этого
+    # места не достигает: вступление подклеивается ПОСЛЕ хуков prompt.section,
+    # а tool.describe не знает ни модели, ни агента.
+    'the request text for devin/swe-2 is rewritten at the body site': _swe32_request_text(d),
+    # Шаг 33: валидатор выхода turn.step-хука принимает tool-чанк с id devin
+    # (`call_<hex>#<hex>`); без него любой turn.step-хук, даже сквозной, терял
+    # tool-чанк, и клиент отвечал tengu_malformed_tool_use_response.
+    'the turn.step tool chunk validator accepts an id without whitespace': _swe33_tool_chunk_id(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -8908,7 +8974,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 39
+EXPECTED_CHECKS = 41
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -8967,7 +9033,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 39 проверок конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 41 проверок конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна

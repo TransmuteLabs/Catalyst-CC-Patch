@@ -3526,6 +3526,111 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 });
 
 
+// 32. Devin's SWE-2 endpoint refuses a request whose text presents the caller
+//     as Claude: the stock request came back 403, and the same request with
+//     exactly three text edits came back 200 (A/B of 2026-09-22, program
+//     Catalyst-programs/2026-09-22-tool-descriptions). The edits are applied
+//     ONLY when the request names devin/swe-2 -- by its real id or by the
+//     proxy's disguise that patch 9 undoes -- and only at the one site where the
+//     outgoing body is assembled, where model, system and tools are all in hand:
+//       * the CLI identity prefix (any of the three stock forms) becomes
+//         "You are a coding agent.";
+//       * the "most recent Claude models" line leaves the environment section,
+//         line terminator included;
+//       * Read's description loses its second sentence.
+//     Every other model's request is untouched byte for byte. The arrays the
+//     loop keeps for retries and inheritance checks are never mutated: the
+//     rewrite builds new blocks and new tool objects on the body it owns.
+//     CONSTRAINT: this cannot move to the mod API. The identity prefix is
+//     prepended to the system prompt AFTER the prompt.section hooks ran, and
+//     tool.describe carries neither the model nor the agent.
+//     CONSTRAINT: the Read sentence lives only in the legacy description
+//     branch; a lean-description request never carries it, so there the
+//     Read edit is a no-op by construction, not a missed site.
+step('32 request text for devin/swe-2', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+  const rx = new RegExp(`let (${ID})=\\{model:(${ID})\\((${ID})\\.model\\),messages:`, 'g');
+  const sites = [...js.matchAll(rx)];
+  if (sites.length !== 1) fail(`request body site: expected exactly 1, found ${sites.length}`);
+  const [m] = sites;
+  const rf = m[1];
+  // The statement right after the body literal reads `<rf>.messages`; the
+  // rewrite is spliced in front of it, so the literal itself is never parsed.
+  const after = new RegExp(`;(${ID})=(${ID})&&${rxEsc(rf)}\\.messages\\.some\\(`, 'g');
+  after.lastIndex = m.index;
+  const a = after.exec(js);
+  if (a === null || a.index - m.index > 4000) fail('statement after the request body not found');
+
+  const PREFIXES = [
+    "You are Claude Code, Anthropic's official CLI for Claude.",
+    "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+  ];
+  const IDENTITY = 'You are a coding agent.';
+  const READ_FROM =
+    'Reads a file from the local filesystem. You can access any file directly by using this tool.';
+  const READ_TO = 'Reads a file from the local filesystem.';
+  const DISGUISE = 'claude-fable-5-dd-';
+  const runtime =
+    `/*swe32*/${rf}=(function(__r){` +
+    `var __m=String(__r.model==null?"":__r.model);` +
+    `if(__m.indexOf(${JSON.stringify(DISGUISE)})===0)` +
+    `__m=__m.slice(${DISGUISE.length}).split("").reverse().join("");` +
+    `if(!/^devin\\/swe-2(?![\\w.-])/i.test(__m.trim()))return __r;` +
+    `var __P=${JSON.stringify(PREFIXES)},__fix=function(__t){` +
+    `var __l=__t.split(/(\\r?\\n)/),__i;` +
+    `for(__i=0;__i<__l.length;__i+=2)if(__P.indexOf(__l[__i])!==-1)__l[__i]=${JSON.stringify(IDENTITY)};` +
+    `return __l.join("").replace(/\\r?\\n[ \\t]*-[ \\t]*The most recent Claude models are [^\\r\\n]*(?=\\r?\\n|$)` +
+    `|^[ \\t]*-[ \\t]*The most recent Claude models are [^\\r\\n]*(?:\\r?\\n|$)/gm,"")};` +
+    `if(typeof __r.system==="string")__r.system=__fix(__r.system);` +
+    `else if(Array.isArray(__r.system))__r.system=__r.system.map(function(__b){` +
+    `var __x;return __b&&typeof __b==="object"&&typeof __b.text==="string"&&(__x=__fix(__b.text))!==__b.text?Object.assign({},__b,{text:__x}):__b});` +
+    `if(Array.isArray(__r.tools))__r.tools=__r.tools.map(function(__t){` +
+    `if(!__t||__t.name!=="Read"||typeof __t.description!=="string")return __t;` +
+    `var __d=__t.description.split(${JSON.stringify(READ_FROM)}).join(${JSON.stringify(READ_TO)});` +
+    `return __d===__t.description?__t:Object.assign({},__t,{description:__d})});` +
+    `return __r})(${rf});/*swe32-end*/`;
+  js = js.slice(0, a.index + 1) + runtime + js.slice(a.index + 1);
+
+  applied.push(
+    `32 request text for devin/swe-2: identity prefix -> "${IDENTITY}", ` +
+    `models line dropped, Read description trimmed (body '${rf}', 1 site)`,
+  );
+});
+
+// 33. The turn.step hook validator refuses a tool chunk whose id is not
+//     /^[\w-]+$/. Devin's SWE-2 names its calls `call_<hex>#<hex>`, so with
+//     ANY turn.step hook installed -- a pure pass-through included -- the
+//     re-yielded tool chunk is "the wrong shape", the hook is left mid-stream,
+//     the chunk is dropped, the input deltas land on a text block and the
+//     client reports tengu_malformed_tool_use_response (measured 2026-09-22,
+//     program Catalyst-programs/2026-09-22-tool-descriptions; the same id
+//     passes the whole chain when no turn.step hook is installed). The rule
+//     becomes "non-empty, no whitespace" and the message names the new rule.
+//     The locator pins the whole `case"tool"` arm, not the regexp: the same
+//     regexp guards six unrelated ids elsewhere in the bundle.
+//     CONSTRAINT: this cannot move to the mod API -- the refusal is applied to
+//     the hook's OUTPUT, before any of the hook's own code could act on it.
+step('33 turn.step tool chunk id', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+  const FROM_RX = '/^[\\w-]+$/';
+  const TO_RX = '/^\\S+$/';
+  const FROM_MSG = '"{ index, id, name } (an id of letters, digits, _ or -)"';
+  const TO_MSG = '"{ index, id, name } (a non-empty id without whitespace)"';
+  const rx = new RegExp(
+    `case"tool":return (${ID})&&typeof (${ID})\\.id==="string"&&${rxEsc(FROM_RX)}\\.test\\(\\2\\.id\\)` +
+    `&&typeof \\2\\.name==="string"\\?void 0:${rxEsc(FROM_MSG)}`,
+    'g',
+  );
+  const sites = [...js.matchAll(rx)];
+  if (sites.length !== 1) fail(`tool chunk validator: expected exactly 1 site, found ${sites.length}`);
+  const [m] = sites;
+  const to = m[0].replace(FROM_RX, () => TO_RX).replace(FROM_MSG, () => TO_MSG);
+  js = js.slice(0, m.index) + to + js.slice(m.index + m[0].length);
+  applied.push(`33 turn.step tool chunk id: ${FROM_RX} -> ${TO_RX} (1 site)`);
+});
+
+
 // The gate lives at the very END on purpose: it was once placed mid-file, and
 // the four steps written after it ran unguarded — a broken locator among them
 // was recorded and never read, so the build reported success while the patch

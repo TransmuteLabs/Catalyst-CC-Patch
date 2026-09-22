@@ -928,7 +928,7 @@ silently looked successful.
 
 1. Unpack the new version's image, run `claude-patch-all.sh` — the
    locators are structural and usually apply as is.
-2. 39/39 checks must pass; any `fail` — read the locator, do not work
+2. 41/41 checks must pass; any `fail` — read the locator, do not work
    around it. The locators survived 2.1.229–2.1.238 without edits (the
    237→238 transition — on the first run). On 2.1.239 two broke: the
    adapter around the tool call, and the `$jS` name glued into a pattern
