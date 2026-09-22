@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Teeth of patch step 32 (request text for devin/swe-2), run against the REAL
 // image: the step's locator must find exactly one request-body site there,
-// and the code it emits must perform the three text edits on fixtures shaped
+// and the code it emits must perform the four text edits on fixtures shaped
 // like the live body -- and nothing else. CONSTRAINT: the image is read as
 // latin-1 so byte offsets stay honest; the other steps are switched off
 // through the same STEPS_OFF channel the pipeline uses, so this exercises
@@ -128,6 +128,20 @@ const expectRewritten = (r, tag) => {
     try { rewrite(body('devin/swe-2', s, [null, { name: 'Read' }, { name: 'Read', description: 5 }])); } catch { threw = true; }
     ok(!threw, `F8: system ${JSON.stringify(s)} and odd tools do not throw`);
   }
+}
+{ // F9 the subagent "Notes" line (4th edit): exact sentence reworded in place, neighbours and cache_control kept
+  const NOTES = 'Notes:\n- Agent threads always have their cwd reset between bash calls.\n- For clear communication with the user the assistant MUST avoid using emojis.\n- Do not use a colon before tool calls.';
+  const FIXED = 'Notes:\n- Agent threads always have their cwd reset between bash calls.\n- For clear communication with the user, avoid using emojis.\n- Do not use a colon before tool calls.';
+  const r = rewrite(body('devin/swe-2', [{ type: 'text', text: `${Z}\n\n${NOTES}\n\n<total_tokens>1</total_tokens>`, cache_control: { type: 'ephemeral', ttl: '1h' } }], []));
+  ok(r.system[0].text === `You are a coding agent.\n\n${FIXED}\n\n<total_tokens>1</total_tokens>`, 'F9: Notes line reworded in place, neighbours kept');
+  ok(same(r.system[0].cache_control, { type: 'ephemeral', ttl: '1h' }), 'F9: cache_control kept');
+  const r2 = rewrite(body('devin/swe-2', 'For clear communication with the user the assistant MUST avoid using emojis. Extra', []));
+  ok(r2.system === 'For clear communication with the user, avoid using emojis. Extra', 'F9: string system, sentence replaced wherever it occurs');
+  const r3 = rewrite(body('devin/swe-2', [{ type: 'text', text: 'For clear communication with the user the assistant must avoid using emojis.' }], []));
+  ok(r3.system[0].text === 'For clear communication with the user the assistant must avoid using emojis.', 'F9: near-miss (lowercase must) stays');
+  const sys = [{ type: 'text', text: NOTES }];
+  const r4 = rewrite(body('glm-5.3', sys, []));
+  ok(r4.system === sys && r4.system[0].text === NOTES, 'F9: other model keeps the Notes line');
 }
 console.log(`SWE32 PASS=${pass} FAILED=${failed}`);
 process.exit(failed === 0 ? 0 : 1);

@@ -238,10 +238,15 @@ is forbidden. Without `CLAUDE_JUDGE` there is no injection; subagents do
 not get it.
 
 Provider fit for devin/swe-2 (steps 32 and 33): the outgoing request to
-that model loses the three lines its endpoint refuses (the CLI identity
-prefix becomes "You are a coding agent.", the "most recent Claude models"
-line leaves the environment section, Read's description loses its second
-sentence) — every other model's request is untouched byte for byte; and
+that model loses the four stock fragments its endpoint's classifier scores
+(the CLI identity prefix becomes "You are a coding agent.", the "most
+recent Claude models" line leaves the environment section, Read's
+description loses its second sentence, and the subagent "Notes" line about
+emojis is reworded to "For clear communication with the user, avoid using
+emojis." — the classifier scores stock fragments in combination, so every
+request form is measured on its own: headless main, custom subagent,
+general-purpose, Explore and Plan) — every other model's request is
+untouched byte for byte; and
 the turn.step hook validator accepts a tool chunk whose id is any
 non-empty string without whitespace, because the model names its calls
 `call_<hex>#<hex>` and the stock rule (letters, digits, `_`, `-`) made

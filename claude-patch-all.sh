@@ -8630,7 +8630,9 @@ def _swe32_request_text(d):
 
     Devin отвечал 403 на стоковый запрос и 200 на тот же запрос с тремя
     правками текста (A/B 2026-09-22): вступление CLI, строка о «most recent
-    Claude models», второе предложение описания Read. Пинятся ОБА конца:
+    Claude models», второе предложение описания Read; четвёртая правка —
+    строка «Notes» субагента про emoji (одна она даёт 403 запросу субагента,
+    A/B 2026-09-22 на снятых телах swe2-executor и general-purpose). Пинятся ОБА конца:
     сайт тела (`let <rf>={model:<tI>(<h>.model),messages:`) и вставка сразу
     за ним, в которой предикат модели, замена вступления и обрезка Read
     стоят на своих местах. Предикат обязан быть УЗКИМ: чужая модель проходит
@@ -8656,6 +8658,8 @@ def _swe32_request_text(d):
         rb'The most recent Claude models are ',
         rb'"Reads a file from the local filesystem."',
         rb'__t.name!=="Read"',
+        rb'.split("For clear communication with the user the assistant MUST avoid using emojis.")'
+        rb'.join("For clear communication with the user, avoid using emojis.")',
     ))
 
 

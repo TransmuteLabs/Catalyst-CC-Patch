@@ -3537,7 +3537,15 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 //         "You are a coding agent.";
 //       * the "most recent Claude models" line leaves the environment section,
 //         line terminator included;
-//       * Read's description loses its second sentence.
+//       * Read's description loses its second sentence;
+//       * the subagent "Notes" line about emojis is reworded (the sentence
+//         "For clear communication with the user the assistant MUST avoid
+//         using emojis." alone turns a subagent request into 403; the same
+//         request with only that sentence reworded came back 200 -- A/B of
+//         2026-09-22 on the captured swe2-executor and general-purpose bodies,
+//         same program, LEDGER 12:58-13:10). The classifier scores stock
+//         fragments in combination, so each request FORM is measured
+//         separately: headless main, custom subagent, general-purpose subagent.
 //     Every other model's request is untouched byte for byte. The arrays the
 //     loop keeps for retries and inheritance checks are never mutated: the
 //     rewrite builds new blocks and new tool objects on the body it owns.
@@ -3570,6 +3578,8 @@ step('32 request text for devin/swe-2', () => {
   const READ_FROM =
     'Reads a file from the local filesystem. You can access any file directly by using this tool.';
   const READ_TO = 'Reads a file from the local filesystem.';
+  const NOTES_FROM = 'For clear communication with the user the assistant MUST avoid using emojis.';
+  const NOTES_TO = 'For clear communication with the user, avoid using emojis.';
   const DISGUISE = 'claude-fable-5-dd-';
   const runtime =
     `/*swe32*/${rf}=(function(__r){` +
@@ -3581,7 +3591,8 @@ step('32 request text for devin/swe-2', () => {
     `var __l=__t.split(/(\\r?\\n)/),__i;` +
     `for(__i=0;__i<__l.length;__i+=2)if(__P.indexOf(__l[__i])!==-1)__l[__i]=${JSON.stringify(IDENTITY)};` +
     `return __l.join("").replace(/\\r?\\n[ \\t]*-[ \\t]*The most recent Claude models are [^\\r\\n]*(?=\\r?\\n|$)` +
-    `|^[ \\t]*-[ \\t]*The most recent Claude models are [^\\r\\n]*(?:\\r?\\n|$)/gm,"")};` +
+    `|^[ \\t]*-[ \\t]*The most recent Claude models are [^\\r\\n]*(?:\\r?\\n|$)/gm,"")` +
+    `.split(${JSON.stringify(NOTES_FROM)}).join(${JSON.stringify(NOTES_TO)})};` +
     `if(typeof __r.system==="string")__r.system=__fix(__r.system);` +
     `else if(Array.isArray(__r.system))__r.system=__r.system.map(function(__b){` +
     `var __x;return __b&&typeof __b==="object"&&typeof __b.text==="string"&&(__x=__fix(__b.text))!==__b.text?Object.assign({},__b,{text:__x}):__b});` +
@@ -3594,7 +3605,7 @@ step('32 request text for devin/swe-2', () => {
 
   applied.push(
     `32 request text for devin/swe-2: identity prefix -> "${IDENTITY}", ` +
-    `models line dropped, Read description trimmed (body '${rf}', 1 site)`,
+    `models line dropped, Read description trimmed, Notes line reworded (body '${rf}', 1 site)`,
   );
 });
 
