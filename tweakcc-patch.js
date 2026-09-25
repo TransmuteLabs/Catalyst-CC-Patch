@@ -4775,6 +4775,106 @@ step('33 turn.step tool chunk id', () => {
   applied.push(`33 turn.step tool chunk id: ${FROM_RX} -> ${TO_RX} (1 site)`);
 });
 
+// 35. The status line is the one chrome seat with no `ui.render` site: the
+//     engine's component table is closed, and a mod cannot add a component
+//     to it, so nothing a mod drew could stand in that place. This step opens
+//     the seat: `StatusLine` joins the component and surface tables, keeps
+//     the live pace beside PromptHint, and the layout slot mounts our site
+//     component whenever the prompt is shown — a mod draws at the status
+//     line's place also where the status-line command is not configured, so
+//     the CONF flag stops gating the slot and rides in the site's props
+//     instead. CONSTRAINT: the footer-hint suppression still keys on CONF
+//     alone — with no hooks the slot renders exactly what the stock line did
+//     (the engine's SL element when configured, null otherwise), so widening
+//     the suppression to a merely-open site would eat the footer for
+//     nothing. CONSTRAINT: `RenderComponent` in claude-code.d.ts (a zstd
+//     asset inside the image) is NOT widened here — a mod writes
+//     `component:"StatusLine"` outside the union, and the engine's table,
+//     not the .d.ts, is what admits it.
+step('35 StatusLine render site', () => {
+  const ID = '[A-Za-z_$][\\w$]*';
+
+  const rxComp = /PromptHint:"PromptHintSite",AbovePrompt:"AbovePromptSite",Pane:"PaneSite"\}/g;
+  const compSites = [...js.matchAll(rxComp)];
+  if (compSites.length !== 1) fail(`StatusLine site: component table: expected exactly 1 site, found ${compSites.length}`);
+  const [comp] = compSites;
+
+  const rxSurf = new RegExp(`AbovePrompt:\\["terminal","desktop"\\],Pane:(${ID})\\}`, 'g');
+  const surfSites = [...js.matchAll(rxSurf)];
+  if (surfSites.length !== 1) fail(`StatusLine site: surface table: expected exactly 1 site, found ${surfSites.length}`);
+  const [surf] = surfSites;
+
+  const rxPace = new RegExp(`(${ID})=(${ID})\\.component==="PromptHint",`, 'g');
+  const paceSites = [...js.matchAll(rxPace)];
+  if (paceSites.length !== 1) fail(`StatusLine site: live pace: expected exactly 1 site, found ${paceSites.length}`);
+  const [pace] = paceSites;
+  // The selector must be in the same function as the PromptHint test: a closing brace
+  // that leaves the function before it means the test no longer decides the pace.
+  const paceTail = js.slice(pace.index + pace[0].length, pace.index + pace[0].length + 400);
+  const selAt = paceTail.indexOf('?"live":"steady"');
+  let paceDepth = 0, paceLeft = false;
+  for (let i = 0; i < selAt && !paceLeft; i++) {
+    if (paceTail[i] === '{') paceDepth++;
+    else if (paceTail[i] === '}' && --paceDepth < 0) paceLeft = true;
+  }
+  if (selAt < 0 || paceLeft)
+    fail('StatusLine site: live pace: the pace selector is not where the PromptHint test is');
+
+  const rxSlot = new RegExp(
+    `(${ID})==="prompt"&&!(${ID})\\.show&&!(${ID})&&(${ID})&&(${ID})\\((${ID}),\\{transcript:(${ID}),vimMode:(${ID})\\}\\)`, 'g');
+  const slotSites = [...js.matchAll(rxSlot)];
+  if (slotSites.length !== 1) fail(`StatusLine site: layout slot: expected exactly 1 site, found ${slotSites.length}`);
+  const [slot] = slotSites;
+  const CONF = slot[4], CE = slot[5], SL = slot[6], TR = slot[7], VIM = slot[8];
+
+  const rxNs = new RegExp(`(${ID})\\.useRenderInput\\("PromptHint",`, 'g');
+  const nsSites = [...js.matchAll(rxNs)];
+  if (nsSites.length !== 1) fail(`StatusLine site: render hooks namespace: expected exactly 1 site, found ${nsSites.length}`);
+  const [ns] = nsSites;
+  const UL = ns[1];
+  const draws = js.split(`${UL}.useRenderDrawing(`).length - 1;
+  if (draws !== 1) fail(`StatusLine site: render hooks namespace: ${UL}.useRenderDrawing( expected exactly 1, found ${draws}`);
+  if (!js.includes(`${UL}.useHasRenderHooks(`)) fail(`StatusLine site: render hooks namespace: ${UL}.useHasRenderHooks( not found`);
+
+  const windowStart = Math.max(0, slot.index - 6000);
+  const fnMatches = [...js.slice(windowStart, slot.index).matchAll(new RegExp(`function (${ID})\\(`, 'g'))];
+  if (fnMatches.length === 0) fail('StatusLine site: layout function boundary: no function declaration within 6000 chars before the slot');
+  const fn = fnMatches[fnMatches.length - 1];
+  const fnAt = windowStart + fn.index;
+  if (!';}\n'.includes(js[fnAt - 1])) fail('StatusLine site: layout function boundary: the character before the function is not a statement boundary');
+  if (js.slice(fnAt + 'function'.length, slot.index).includes('function '))
+    fail('StatusLine site: layout function boundary: another function keyword sits between the layout function and its slot');
+  if (!js.slice(fnAt, slot.index).includes('.statusLine;'))
+    fail('StatusLine site: layout function is not the status-line consumer');
+
+  const decl =
+    `function __ctlStatusLineSite(__ctlP){var __ctlC=__ctlP.configured,` +
+    `__ctlH=${UL}.useHasRenderHooks("StatusLine"),` +
+    `__ctlIn=${UL}.useRenderInput("StatusLine",()=>({requestId:"status-line",props:{configured:__ctlC}}),[__ctlC]),` +
+    `__ctlD=${UL}.useRenderDrawing(__ctlIn,()=>__ctlC?${CE}(${SL},{transcript:__ctlP.transcript,vimMode:__ctlP.vimMode}):null);` +
+    `return __ctlH?__ctlD.node:__ctlC?${CE}(${SL},{transcript:__ctlP.transcript,vimMode:__ctlP.vimMode}):null}`;
+
+  // All five sites and the function boundary were found on the ORIGINAL js
+  // above; the splices run from the largest index down so earlier indices
+  // stay valid, and a failure anywhere leaves nothing written.
+  const edits = [
+    { at: slot.index, end: slot.index + slot[0].length,
+      text: `${slot[1]}==="prompt"&&!${slot[2]}.show&&!${slot[3]}&&${CE}(__ctlStatusLineSite,{configured:${CONF},transcript:${TR},vimMode:${VIM}})` },
+    { at: fnAt, end: fnAt, text: decl },
+    { at: pace.index, end: pace.index + pace[0].length,
+      text: `${pace[1]}=${pace[2]}.component==="PromptHint"||${pace[2]}.component==="StatusLine",` },
+    { at: surf.index + surf[0].length - 1, end: surf.index + surf[0].length - 1,
+      text: ',StatusLine:["terminal"]' },
+    { at: comp.index + comp[0].length - 1, end: comp.index + comp[0].length - 1,
+      text: ',StatusLine:"StatusLineSite"' },
+  ].sort((a, b) => b.at - a.at);
+  for (const e of edits) js = js.slice(0, e.at) + e.text + js.slice(e.end);
+
+  applied.push(
+    `35 StatusLine render site: component 'StatusLine' in the component and surface tables, live pace, site '__ctlStatusLineSite' in the layout slot of '${SL}' (namespace '${UL}')`,
+  );
+});
+
 
 // The gate lives at the very END on purpose: it was once placed mid-file, and
 // the four steps written after it ran unguarded — a broken locator among them

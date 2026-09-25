@@ -72,7 +72,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 23
+EXPECTED_MUTATIONS = 28
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
 # 34 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
 # проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B) + 6 зубов

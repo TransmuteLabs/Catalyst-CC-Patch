@@ -1095,7 +1095,7 @@ echo "Target binary: $BIN"
 #
 # The pristine case used to patch in place, and that was a hole of its own: the
 # live installation was the build for the whole run, so a gate that fired late
-# (the interface gate, the probes, any of the pipeline's 42 checks) left the human
+# (the interface gate, the probes, any of the pipeline's 43 checks) left the human
 # with an image that had been patched and then declared unfit -- while the run
 # reported a refusal. `set -e` cannot undo bytes. Now every default run has the
 # same shape: nothing touches the live name until every gate has passed.
@@ -6878,7 +6878,7 @@ fi
 # файле, который выбрал он сам. Если он выбрал не тот файл (а до перехода на
 # TWEAKCC_CC_INSTALLATION_PATH на чистой машине это было штатным исходом), все
 # ✓ честны и все относятся к чужому образу -- к нашему не приложено ничего, и
-# ни одна из 42 проверок конвейера ниже этого не заметит: они пинят наш
+# ни одна из 43 проверок конвейера ниже этого не заметит: они пинят наш
 # текст, а его пишет наш патчер, работающий по --target.
 #
 # Поэтому landing проверяется на САМИХ БАЙТАХ цели, а не по чужому отчёту.
@@ -9028,6 +9028,43 @@ def _swe33_tool_chunk_id(d):
     return len(new.findall(d)) == 1 and len(old.findall(d)) == 0
 
 
+def _statusline35_site(d):
+    r"""Шаг 35: сайт ui.render «StatusLine» в месте статус-строки.
+
+    У статус-строки нет сайта ui.render: таблица компонентов движка закрыта,
+    и мод не может добавить в неё имя. Шаг вписывает StatusLine в обе таблицы
+    (компонентов и поверхностей), держит живой пейс и ставит в слот раскладки
+    сайт-компонент, монтируемый и без настроенной команды. Иглы пинят байты
+    вставок шага; отказ каждой печатается своим именем: два отказа одним
+    текстом неразличимы. Игла N6 — регэксп: стоковая форма слота обязана
+    уйти из образа (на пристине она ровно одна).
+    """
+    failed = []
+
+    def needle(ok, name):
+        if not ok:
+            failed.append(name)
+
+    for lit, name in (
+        (b',StatusLine:"StatusLineSite"}', 'N1 component table'),
+        (b',StatusLine:["terminal"]}', 'N2 surface table'),
+        (b'.component==="StatusLine",', 'N3 live pace'),
+        (b'function __ctlStatusLineSite(', 'N4 site function declaration'),
+        (b'(__ctlStatusLineSite,{configured:', 'N4 layout slot call'),
+        (b'.useHasRenderHooks("StatusLine")', 'N5 useHasRenderHooks'),
+        (b'.useRenderInput("StatusLine",', 'N5 useRenderInput'),
+        (b'requestId:"status-line"', 'N5 requestId'),
+    ):
+        n = d.count(lit)
+        needle(n == 1, f'{name}: expected exactly 1, found {n}')
+    stock = re.findall(
+        rb'==="prompt"&&![\w$]+\.show&&![\w$]+&&[\w$]+&&[\w$]+\([\w$]+,\{transcript:', d)
+    needle(len(stock) == 0, f'N6 stock layout slot: expected 0, found {len(stock)}')
+    for name in failed:
+        print(f'  [NEEDLE-FAIL] statusline35 site: {name}')
+    return not failed
+
+
 # Девять строк политики -- ДОСЛОВНО из e2e/policy-verdict.py программы
 # 2026-09-22-tool-descriptions; происхождение копии проверяется сличением
 # с этим файлом, а не доверием перепечатке.
@@ -9371,6 +9408,9 @@ checks = {
     # (`call_<hex>#<hex>`); без него любой turn.step-хук, даже сквозной, терял
     # tool-чанк, и клиент отвечал tengu_malformed_tool_use_response.
     'the turn.step tool chunk validator accepts an id without whitespace': _swe33_tool_chunk_id(d),
+    # Шаг 35: сайт ui.render на месте статус-строки — StatusLine в таблицах
+    # движка, слот раскладки под сайт-компонентом; иглы в _statusline35_site.
+    'the StatusLine render site is registered and mounted in the status-line slot': _statusline35_site(d),
 }
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
@@ -9379,7 +9419,7 @@ checks = {
 # breaks on the escaped apostrophe inside `current turn is the judge\'s alone`,
 # reported 88, and was corrected by the run itself printing 89 — historical:
 # both are what was miscounted then, not a count of anything now.
-EXPECTED_CHECKS = 42
+EXPECTED_CHECKS = 43
 if len(checks) != EXPECTED_CHECKS:
     print(f"  [FAIL] the check registry holds {len(checks)} entries, expected "
           f"{EXPECTED_CHECKS} — checks were added or lost without updating the count")
@@ -9438,7 +9478,7 @@ PY
 # элидировано, и гейт чисел не видел расхождения ПО УСТРОЙСТВУ (пару «число +
 # существительное» не из чего было строить). Число починено, существительное
 # и владелец названы явно.
-# Реестр выше говорит, что все 42 проверки конвейера сошлись НА СОБРАННОМ
+# Реестр выше говорит, что все 43 проверки конвейера сошлись НА СОБРАННОМ
 # образе. Он ничего не
 # говорит о проверке, которая сошлась бы и без наших патчей -- а такая
 # неотличима от работающей ровно до того дня, когда её свойство потеряют. Одна
