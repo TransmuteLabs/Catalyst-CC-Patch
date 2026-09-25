@@ -142,8 +142,12 @@ step('1 routing', () => {
   // when that variable is set, which is the ordinary configuration. The
   // caller's own `...<options>` still follows ours, exactly as before, so the
   // caller keeps the last word.
+  // The field before the spread is the last auth field of the object: up to
+  // 2.1.280 an inline `accessToken??null:null,`, from 2.1.281 the auth pair
+  // `apiKey:<o>.apiKey,authToken:<o>.authToken,` (the token logic moved into a
+  // helper). Either form anchors the same object; the spread order is unchanged.
   const rx = new RegExp(
-    `(accessToken\\?\\?null:null,)` +
+    `((?:accessToken\\?\\?null:null,|apiKey:${ID}\\.apiKey,authToken:${ID}\\.authToken,))` +
       `(\\.\\.\\.(?:!1|${ID}\\.ANTHROPIC_BASE_URL\\?\\{baseURL:${ID}\\.ANTHROPIC_BASE_URL\\}:!1),)` +
       `(\\.\\.\\.${ID},)`,
   );
@@ -2051,6 +2055,613 @@ step('18 a named agent carries its agent type into the task list', () => {
 step('19 a broken stream is retried, never finalized as a half answer', () => {
   const ID = '[A-Za-z_$][\\w$]*';
   const before = js.length;
+  const MULTI_OPS = ['>>>=', '===', '!==', '**=', '<<=', '>>=', '&&=', '||=', '??=', '>>>', '=>', '&&', '||', '??', '==', '!=', '+=', '-=', '*=', '%=', '&=', '|=', '^=', '<=', '>=', '<<', '>>', '**', '?.'];
+  const REGEX_PUNCT = new Set(['(', ',', '=', ':', '[', '!', '&', '|', '?', '{', ';', '+', '-', '*', '%', '<', '>', '~', '^']);
+  const REGEX_KW = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'yield', 'await']);
+  const HEADER_KW = new Set(['if', 'while', 'for', 'with', 'catch', 'switch']);
+  const STMT_KW = new Set(['else', 'do', 'try', 'finally']);
+  const lexModule = (text) => {
+    const tokens = [];
+    const spans = [];
+    const events = [];
+    let i = 0;
+    const n = text.length;
+    let mode = 'code';
+    let brace = 0;
+    const parenStack = [];
+    const interpStack = [];
+    const braceStack = [];
+    let spanStart = 0;
+    let spanMode = 'code';
+    const mark = (nextMode) => {
+      if (nextMode !== spanMode) {
+        if (i > spanStart) spans.push({ start: spanStart, end: i, mode: spanMode });
+        spanStart = i;
+        spanMode = nextMode;
+      }
+      mode = nextMode;
+    };
+    const emit = (type, start, end, value, extra) => {
+      const tok = { type: type, start: start, end: end, value: value };
+      if (extra) tok.headerClose = true;
+      tokens.push(tok);
+    };
+    // CONSTRAINT: a '/' misread as division where it opens a regex either
+    // fails the lexer self-check loudly or leaves a stray token the shadow
+    // scan sees; a '/' misread as regex where it divides hides declarations.
+    // Every ambiguous case is decided as division.
+    const decideSlash = (prev) => {
+      if (!prev) return true;
+      if (prev.type === 'punct' && prev.value === '}') return !!prev.stmtClose;
+      if (prev.type === 'punct' && REGEX_PUNCT.has(prev.value)) return true;
+      if (prev.type === 'op') return true;
+      if (prev.type === 'id' && !prev.prop && REGEX_KW.has(prev.value)) return true;
+      if (prev.type === 'punct' && prev.value === ')' && prev.headerClose) return true;
+      return false;
+    };
+    while (i < n) {
+      const c = text[i];
+      if (mode === 'line') {
+        if (c === '\n') { i++; mark('code'); }
+        else i++;
+        continue;
+      }
+      if (mode === 'block') {
+        if (c === '*' && text[i + 1] === '/') { i += 2; mark('code'); }
+        else i++;
+        continue;
+      }
+      if (mode === 'sq' || mode === 'dq') {
+        const q = mode === 'sq' ? "'" : '"';
+        if (c === '\\') { i += 2; continue; }
+        if (c === q) { i++; mark('code'); continue; }
+        i++;
+        continue;
+      }
+      if (mode === 'tmpl') {
+        if (c === '\\') { i += 2; continue; }
+        if (c === '`') { i++; mark('code'); continue; }
+        if (c === '$' && text[i + 1] === '{') {
+          events.push({ ch: '{', pos: i + 1 });
+          braceStack.push({ stmtPos: false });
+          i += 2;
+          interpStack.push(brace);
+          brace++;
+          mark('code');
+          continue;
+        }
+        i++;
+        continue;
+      }
+      if (mode === 'regex') {
+        if (c === '\\') { i += 2; continue; }
+        if (c === '[') {
+          i++;
+          while (i < n) {
+            if (text[i] === '\\') { i += 2; continue; }
+            if (text[i] === ']') { i++; break; }
+            i++;
+          }
+          continue;
+        }
+        if (c === '/') {
+          i++;
+          while (i < n && 'gimsuyvd'.includes(text[i])) i++;
+          mark('code');
+          continue;
+        }
+        i++;
+        continue;
+      }
+      if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+      if (c === '/' && text[i + 1] === '/') { mark('line'); i += 2; continue; }
+      if (c === '/' && text[i + 1] === '*') { mark('block'); i += 2; continue; }
+      if (c === "'") { i++; mark('sq'); continue; }
+      if (c === '"') { i++; mark('dq'); continue; }
+      if (c === '`') { i++; mark('tmpl'); continue; }
+      if (c === '/') {
+        const slashOpensRegex = decideSlash(tokens[tokens.length - 1]);
+        if (slashOpensRegex) { mark('regex'); i++; continue; }
+        emit('punct', i, i + 1, '/');
+        i++;
+        continue;
+      }
+      if (c === '}') {
+        const start = i;
+        brace--;
+        // CONSTRAINT: `}` интерполяции не является токеном кода. `${` токена
+        // тоже не даёт, поэтому токенная глубина считалась только по
+        // закрывающей -- и уезжала на -1 за каждую `${...}`, порождая ложные
+        // деклараторы в checkOptsForms (живой случай: L278, Ctn).
+        const isInterpClose = interpStack.length && brace === interpStack[interpStack.length - 1];
+        if (isInterpClose) {
+          events.push({ ch: '}', pos: start });
+          if (braceStack.length) braceStack.pop();
+          interpStack.pop();
+          i++;
+          mark('tmpl');
+          continue;
+        }
+        const braceRec = braceStack.length ? braceStack.pop() : { stmtPos: false };
+        events.push({ ch: '}', pos: start });
+        const closeTok = { type: 'punct', start: start, end: start + 1, value: '}' };
+        closeTok.stmtClose = braceRec.stmtPos;
+        tokens.push(closeTok);
+        i++;
+        continue;
+      }
+      if (c === '{') {
+        const stmtPrev = tokens[tokens.length - 1];
+        const stmtPos = !stmtPrev
+          || (stmtPrev.type === 'punct' && (stmtPrev.value === ';' || stmtPrev.value === '{' || stmtPrev.value === '}'))
+          || (stmtPrev.type === 'punct' && stmtPrev.value === ')' && stmtPrev.headerClose)
+          || (stmtPrev.type === 'id' && STMT_KW.has(stmtPrev.value));
+        braceStack.push({ stmtPos: stmtPos });
+        events.push({ ch: '{', pos: i });
+        emit('punct', i, i + 1, '{');
+        brace++;
+        i++;
+        continue;
+      }
+      if (c === '(') {
+        const prev = tokens[tokens.length - 1];
+        parenStack.push(!!(prev && prev.type === 'id' && !prev.prop && HEADER_KW.has(prev.value)));
+        emit('punct', i, i + 1, '(');
+        i++;
+        continue;
+      }
+      if (c === ')') {
+        const isHeader = parenStack.length ? parenStack.pop() : false;
+        emit('punct', i, i + 1, ')', isHeader);
+        i++;
+        continue;
+      }
+      if (/[A-Za-z_$]/.test(c)) {
+        const s = i;
+        i++;
+        while (i < n && /[\w$]/.test(text[i])) i++;
+        emit('id', s, i, text.slice(s, i));
+        // CONSTRAINT: an identifier after '.' or '?.' is a property name, never a keyword: p.catch(f)/2 divides.
+        // The spread '...' lexes as three '.' tokens, and a keyword after it stays a keyword: [...typeof /{/] holds a regex.
+        const idTok = tokens[tokens.length - 1];
+        const idBefore = tokens[tokens.length - 2];
+        const idBefore2 = tokens[tokens.length - 3];
+        if (idBefore && ((idBefore.type === 'punct' && idBefore.value === '.' && !(idBefore2 && idBefore2.type === 'punct' && idBefore2.value === '.')) || (idBefore.type === 'op' && idBefore.value === '?.'))) idTok.prop = true;
+        continue;
+      }
+      if ((c >= '0' && c <= '9') || (c === '.' && text[i + 1] >= '0' && text[i + 1] <= '9')) {
+        const s = i;
+        if (text.slice(i, i + 2) === '0x' || text.slice(i, i + 2) === '0X' || text.slice(i, i + 2) === '0b' || text.slice(i, i + 2) === '0B' || text.slice(i, i + 2) === '0o' || text.slice(i, i + 2) === '0O') {
+          i += 2;
+          while (i < n && /[0-9a-fA-F]/.test(text[i])) i++;
+        } else {
+          while (i < n && /[0-9]/.test(text[i])) i++;
+          if (text[i] === '.') { i++; while (i < n && /[0-9]/.test(text[i])) i++; }
+          if (text[i] === 'e' || text[i] === 'E') {
+            i++;
+            if (text[i] === '+' || text[i] === '-') i++;
+            while (i < n && /[0-9]/.test(text[i])) i++;
+          }
+        }
+        emit('num', s, i, text.slice(s, i));
+        continue;
+      }
+      if ((c === '+' || c === '-') && text[i + 1] === c) {
+        emit('punct', i, i + 2, c + c);
+        i += 2;
+        continue;
+      }
+      let mop = null;
+      for (const op of MULTI_OPS) {
+        if (text.startsWith(op, i)) { mop = op; break; }
+      }
+      if (mop) { emit('op', i, i + mop.length, mop); i += mop.length; continue; }
+      if (c === ';' && brace === 0) events.push({ ch: ';', pos: i });
+      emit('punct', i, i + 1, c);
+      i++;
+    }
+    if (n > spanStart) spans.push({ start: spanStart, end: n, mode: spanMode });
+    const stateAt = (pos) => {
+      let lo = 0;
+      let hi = spans.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const s = spans[mid];
+        if (pos < s.start) hi = mid - 1;
+        else if (pos >= s.end) lo = mid + 1;
+        else return s.mode;
+      }
+      return 'missing';
+    };
+    return { tokens: tokens, events: events, brace: brace, mode: mode, interp: interpStack.length, paren: parenStack.length, stateAt: stateAt };
+  };
+  const parseImportSpecs = (modText) => {
+    const specs = [];
+    const others = [];
+    const lx = lexModule(modText);
+    const rx = /import\s*(?:([A-Za-z_$][\w$]*)\s*,\s*)?\{([^}]*)\}\s*from\s*"([^"]+)"\s*;/g;
+    let m;
+    while ((m = rx.exec(modText)) !== null) {
+      if (lx.stateAt(m.index) !== 'code') continue;
+      const path = m[3];
+      for (const raw of m[2].split(',')) {
+        const part = raw.trim();
+        if (!part) continue;
+        const asM = part.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+        if (asM) specs.push({ exportName: asM[1], local: asM[2], path: path });
+        else if (/^[A-Za-z_$][\w$]*$/.test(part)) specs.push({ exportName: part, local: part, path: path });
+      }
+    }
+    const rxNs = /import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s*from\s*"([^"]+)"/g;
+    while ((m = rxNs.exec(modText)) !== null) {
+      if (lx.stateAt(m.index) !== 'code') continue;
+      others.push({ kind: 'namespace', local: m[1], path: m[2] });
+    }
+    const rxDef = /import\s+([A-Za-z_$][\w$]*)\s*from\s*"([^"]+)"/g;
+    while ((m = rxDef.exec(modText)) !== null) {
+      if (lx.stateAt(m.index) !== 'code') continue;
+      others.push({ kind: 'default', local: m[1], path: m[2] });
+    }
+    return { specs: specs, others: others };
+  };
+  const takeSiteLocal = (found, exportName, path, others) => {
+    const sother = found.length === 0 ? others.find((o) => o.path === path) : null;
+    if (sother) fail(`${exportName} is imported from ${path} in the site module only as a ${sother.kind} import (unsupported form)`);
+    if (found.length === 0) fail(`${exportName} is not imported from ${path} in the site module`);
+    if (found.length !== 1) fail(`${exportName} imported ${found.length} times`);
+    return found[0].local;
+  };
+  const findReader = () => {
+    const rxReader = new RegExp(
+      'function ' + ID + '\\((' + ID + '),(' + ID + '),(' + ID + ')\\)\\{return \\1\\?\\.type==="assistant"&&\\1\\.isApiErrorMessage===!0&&\\1\\.truncatedAfterOutput===!0&&\\((' + ID + ')\\(\\3\\)==="subagent"\\|\\|\\4\\(\\3\\)==="main"&&\\2\\.options\\.isNonInteractiveSession\\)&&(' + ID + ')\\("tengu_truncated_response_recovery",!0\\)\\}',
+      'g',
+    );
+    const hits = Array.from(js.matchAll(rxReader));
+    if (hits.length !== 1)
+      fail('truncation recovery reader: expected exactly one predicate, found ' + hits.length);
+    return { pos: hits[0].index, CLSr: hits[0][4], GATEr: hits[0][5] };
+  };
+  const resolveRecoveryNames = () => {
+    const reader = findReader();
+    const readerSlice = moduleSliceAround(js, reader.pos);
+    const rparse = parseImportSpecs(js.slice(readerSlice[0], readerSlice[1]));
+    const rspecs = rparse.specs;
+    const rothers = rparse.others;
+    const oneLocal = (name) => {
+      const found = rspecs.filter((s) => s.local === name);
+      if (found.length === 0) {
+        const rother = rothers.find((o) => o.local === name);
+        if (rother) fail('truncation recovery reader: ' + name + ' is a ' + rother.kind + ' import (unsupported form)');
+      }
+      if (found.length !== 1) fail('truncation recovery reader: ' + name + ' imported ' + found.length + ' times');
+      return found[0];
+    };
+    const clsR = oneLocal(reader.CLSr);
+    const gateR = oneLocal(reader.GATEr);
+    const siteSlice = moduleSliceAround(js, constStart);
+    const sparse = parseImportSpecs(js.slice(siteSlice[0], siteSlice[1]));
+    const sspecs = sparse.specs;
+    const localsOf = (expName, fromPath) => sspecs.filter((s) => s.exportName === expName && s.path === fromPath);
+    return {
+      CLSs: takeSiteLocal(localsOf(clsR.exportName, clsR.path), clsR.exportName, clsR.path, sparse.others),
+      GATEs: takeSiteLocal(localsOf(gateR.exportName, gateR.path), gateR.exportName, gateR.path, sparse.others),
+      CLSr: reader.CLSr,
+      GATEr: reader.GATEr,
+    };
+  };
+  const FN_HEADER_KW = new Set(['if', 'while', 'for', 'with', 'catch', 'switch']);
+  const ASSIGN_OPS = new Set(['+=', '-=', '*=', '%=', '&=', '|=', '^=', '**=', '<<=', '>>=', '>>>=', '&&=', '||=', '??=']);
+  const OPTS_FIELDS = new Set(['querySource', 'isNonInteractiveSession']);
+  const matchingOpen = (closeCh) => (closeCh === ')' ? '(' : closeCh === ']' ? '[' : '{');
+  // Nested function scopes as byte intervals: arrow and function/method
+  // bodies (a), bodies whose `(` is not a header paren (b), parameter parens
+  // (c), and concise arrow bodies (d). The construct's own body brace is
+  // passed in and excluded -- the construct itself is not "nested".
+  const nestedFnScopes = (toks, ownBodyOpen) => {
+    const scopes = [];
+    const stack = [];
+    const parenOpenOf = {};
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i];
+      if (t.type === 'punct' && (t.value === '(' || t.value === '[' || t.value === '{')) {
+        stack.push({ ch: t.value, openIdx: i });
+      } else if (t.type === 'punct' && (t.value === ')' || t.value === ']' || t.value === '}')) {
+        const fr = stack.pop();
+        if (!fr || fr.ch !== matchingOpen(t.value)) continue;
+        if (fr.ch === '(') {
+          parenOpenOf[i] = fr.openIdx;
+          const jn0 = i + 1;
+          const nx = jn0 < toks.length ? toks[jn0] : null;
+          if (nx && nx.type === 'op' && nx.value === '=>') scopes.push([toks[fr.openIdx].start, t.end]);
+        } else if (fr.ch === '{') {
+          const before = fr.openIdx > 0 ? toks[fr.openIdx - 1] : null;
+          let fnScope = false;
+          if (before && before.type === 'op' && before.value === '=>') fnScope = true;
+          else if (before && before.type === 'punct' && before.value === ')') {
+            const openIdx = parenOpenOf[fr.openIdx - 1];
+            if (openIdx !== undefined) {
+              const kw = openIdx > 0 ? toks[openIdx - 1] : null;
+              if (!(kw && kw.type === 'id' && FN_HEADER_KW.has(kw.value))) {
+                fnScope = true;
+                scopes.push([toks[openIdx].start, toks[fr.openIdx - 1].end]);
+              }
+            }
+          }
+          if (fnScope && fr.openIdx !== ownBodyOpen) scopes.push([toks[fr.openIdx].start, t.end]);
+        }
+      } else if (t.type === 'op' && t.value === '=>') {
+        const jn1 = i + 1;
+        const nx = jn1 < toks.length ? toks[jn1] : null;
+        if (nx && nx.type === 'punct' && nx.value === '{') continue;
+        let d = 0;
+        let j = i + 1;
+        while (j < toks.length) {
+          const u = toks[j];
+          if (u.type === 'punct' && (u.value === '(' || u.value === '[' || u.value === '{')) d++;
+          else if (u.type === 'punct' && (u.value === ')' || u.value === ']' || u.value === '}')) {
+            if (d === 0) break;
+            d--;
+          } else if (d === 0 && u.type === 'punct' && (u.value === ',' || u.value === ';')) break;
+          j++;
+        }
+        if (j > i + 1) {
+          const endPos = j < toks.length ? toks[j].start : toks[toks.length - 1].end;
+          scopes.push([toks[jn1].start, endPos]);
+        }
+      }
+    }
+    return scopes;
+  };
+  // Declarator positions of var|let|const lists: right after the keyword or
+  // after a comma at the keyword's depth; a declarator starting with { or [
+  // contributes the whole template inside.
+  const declIntervals = (toks) => {
+    const out = [];
+    const depthAt = [];
+    let d = 0;
+    for (let i = 0; i < toks.length; i++) {
+      depthAt[i] = d;
+      const t = toks[i];
+      if (t.type === 'punct' && (t.value === '(' || t.value === '[' || t.value === '{')) d++;
+      else if (t.type === 'punct' && (t.value === ')' || t.value === ']' || t.value === '}')) d--;
+    }
+    for (let k = 0; k < toks.length; k++) {
+      const kw = toks[k];
+      if (!(kw.type === 'id' && (kw.value === 'var' || kw.value === 'let' || kw.value === 'const'))) continue;
+      const d0 = depthAt[k];
+      let i = k + 1;
+      let wantDeclarator = true;
+      while (i < toks.length) {
+        const t = toks[i];
+        // CONSTRAINT: закрывающая скобка НА глубине ключевого слова тоже
+        // кончает список: заголовок for(let X of Y) закрывается `)` на d0,
+        // и без этого проход проваливается в тело цикла.
+        if (t.type === 'punct' && (t.value === ')' || t.value === ']' || t.value === '}') && depthAt[i] <= d0) break;
+        if (t.type === 'punct' && t.value === ';' && depthAt[i] === d0) break;
+        if (wantDeclarator) {
+          if (t.type === 'punct' && (t.value === '{' || t.value === '[')) {
+            let dd = 0;
+            let j = i;
+            while (j < toks.length) {
+              const u = toks[j];
+              if (u.type === 'punct' && (u.value === '(' || u.value === '[' || u.value === '{')) dd++;
+              else if (u.type === 'punct' && (u.value === ')' || u.value === ']' || u.value === '}')) {
+                dd--;
+                if (dd === 0) break;
+              }
+              j++;
+            }
+            if (j < toks.length) out.push([t.start, toks[j].end]);
+            i = j + 1;
+          } else {
+            out.push([t.start, t.end]);
+            i++;
+          }
+          wantDeclarator = false;
+        } else {
+          if (t.type === 'punct' && t.value === ',' && depthAt[i] === d0) wantDeclarator = true;
+          i++;
+        }
+      }
+    }
+    return out;
+  };
+  const inCatchParens = (toks, i) => {
+    let dd = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const u = toks[j];
+      if (u.type === 'punct' && u.value === ')') dd++;
+      else if (u.type === 'punct' && u.value === '(') {
+        if (dd === 0) {
+          const kw = j > 0 ? toks[j - 1] : null;
+          return !!(kw && kw.type === 'id' && kw.value === 'catch');
+        }
+        dd--;
+      }
+    }
+    return false;
+  };
+  // A position belongs to the construct when it is inside its bounds and in
+  // no nested function scope.
+  const constructOwns = (built, relPos) => {
+    if (relPos < built.relStart || relPos >= built.relEnd) return false;
+    for (const scope of built.nestedScopes) {
+      if (relPos >= scope[0] && relPos < scope[1]) return false;
+    }
+    return true;
+  };
+  const checkOptsForms = (built, opts) => {
+    const toks = built.tokens.filter((t) => t.start >= built.relStart && t.start < built.relEnd);
+    const start = built.ownBodyOpen > 0 ? built.ownBodyOpen + 1 : 0;
+    const decls = declIntervals(toks);
+    const inIntervals = (t, list) => list.some((iv) => t.start >= iv[0] && t.start < iv[1]);
+    for (let i = start; i < toks.length; i++) {
+      const t = toks[i];
+      if (!(t.type === 'id' && t.value === opts)) continue;
+      if (inIntervals(t, built.nestedScopes)) continue;
+      const prev = i > 0 ? toks[i - 1] : null;
+      const jn = i + 1;
+      const next = jn < toks.length ? toks[jn] : null;
+      const isProp = !!(prev && prev.type === 'punct' && prev.value === '.'
+        && !(i >= 2 && toks[i - 2].type === 'punct' && toks[i - 2].value === '.'));
+      if (isProp) continue;
+      const inDecl = inIntervals(t, decls);
+      const isKey = !!(prev && prev.type === 'punct' && (prev.value === '{' || prev.value === ',')
+        && next && next.type === 'punct' && next.value === ':');
+      if (isKey && !inDecl) continue;
+      const d1 = !!(prev && prev.type === 'id'
+          && (prev.value === 'var' || prev.value === 'let' || prev.value === 'const'
+            || prev.value === 'function' || prev.value === 'class'))
+        || !!(prev && prev.type === 'punct' && prev.value === '*'
+          && i >= 2 && toks[i - 2].type === 'id' && toks[i - 2].value === 'function')
+        || inDecl;
+      if (d1) fail('streaming fallback site: ' + built.id + ' declares ' + opts + ' again');
+      const d2 = inCatchParens(toks, i);
+      if (d2) fail('streaming fallback site: ' + built.id + ' catch binds ' + opts);
+      const d3 = !!(next && ((next.type === 'punct' && next.value === '=')
+          || (next.type === 'op' && ASSIGN_OPS.has(next.value))))
+        || !!(next && next.type === 'punct' && (next.value === '++' || next.value === '--'))
+        || !!(prev && prev.type === 'punct' && (prev.value === '++' || prev.value === '--'))
+        || !!(prev && prev.type === 'punct' && prev.value === '('
+          && i >= 2 && toks[i - 2].type === 'id' && toks[i - 2].value === 'for'
+          && next && next.type === 'id' && (next.value === 'in' || next.value === 'of'));
+      if (d3) fail('streaming fallback site: ' + built.id + ' rebinds ' + opts);
+      let d4msg = null;
+      if (next && next.type === 'punct' && next.value === '.') {
+        const fld = jn + 1 < toks.length ? toks[jn + 1] : null;
+        const after2 = jn + 2 < toks.length ? toks[jn + 2] : null;
+        const writesAhead = !!(after2 && ((after2.type === 'punct' && (after2.value === '=' || after2.value === '++' || after2.value === '--'))
+          || (after2.type === 'op' && ASSIGN_OPS.has(after2.value))));
+        const bumpedBehind = !!(prev && prev.type === 'punct' && (prev.value === '++' || prev.value === '--'));
+        const deleted = !!(prev && prev.type === 'id' && prev.value === 'delete');
+        if (fld && fld.type === 'id' && OPTS_FIELDS.has(fld.value) && (writesAhead || bumpedBehind || deleted))
+          d4msg = 'writes ' + opts + '.' + fld.value;
+      }
+      if (!d4msg && next && next.type === 'punct' && next.value === '[') {
+        let dd = 0;
+        let j = jn;
+        while (j < toks.length) {
+          const u = toks[j];
+          if (u.type === 'punct' && (u.value === '(' || u.value === '[' || u.value === '{')) dd++;
+          else if (u.type === 'punct' && (u.value === ')' || u.value === ']' || u.value === '}')) {
+            dd--;
+            if (dd === 0) break;
+          }
+          j++;
+        }
+        const after3 = j + 1 < toks.length ? toks[j + 1] : null;
+        if (after3 && ((after3.type === 'punct' && after3.value === '=')
+          || (after3.type === 'op' && ASSIGN_OPS.has(after3.value)))) d4msg = 'writes ' + opts + '[…]';
+      }
+      if (d4msg) fail('streaming fallback site: ' + built.id + ' ' + d4msg);
+    }
+  };
+  const buildSiteConstruct = (constAbs, regionAbs) => {
+    const siteSlice = moduleSliceAround(js, constAbs);
+    const mod = js.slice(siteSlice[0], siteSlice[1]);
+    const lx = lexModule(mod);
+    if (lx.brace !== 0 || lx.mode !== 'code' || lx.interp !== 0 || lx.paren !== 0)
+      fail('streaming fallback site: lexer depth did not return to 0 (' + lx.brace + ', mode ' + lx.mode + ')');
+    const relConst = constAbs - siteSlice[0];
+    const relRegion = regionAbs - siteSlice[0];
+    if (lx.stateAt(relConst) !== 'code')
+      fail('streaming fallback site: lexer state at the telemetry constant is ' + lx.stateAt(relConst));
+    if (lx.stateAt(relRegion) !== 'code')
+      fail('streaming fallback site: lexer state at the partial-finalize region is ' + lx.stateAt(relRegion));
+    let depth = 0;
+    let stmtStart = 0;
+    let found = null;
+    for (const ev of lx.events) {
+      if (ev.ch === '{') depth++;
+      else if (ev.ch === '}') {
+        depth--;
+        if (depth === 0) {
+          if (stmtStart <= relRegion && relRegion < ev.pos + 1)
+            found = { relStart: stmtStart, relEnd: ev.pos + 1 };
+          stmtStart = ev.pos + 1;
+        }
+      } else if (ev.ch === ';' && depth === 0) stmtStart = ev.pos + 1;
+    }
+    const notGen = 'streaming fallback site: the enclosing construct is not an async generator taking \'' + opts + '\'';
+    if (!found) fail(notGen);
+    if (relConst < found.relStart || relConst >= found.relEnd)
+      fail('streaming fallback site: the telemetry constant is outside the enclosing construct');
+    const raw = mod.slice(found.relStart, found.relEnd).replace(/^\s+/, '');
+    const hm = raw.match(new RegExp('^async function\\*(' + ID + ')\\(([^)]*)\\)\\{'));
+    if (!hm) fail(notGen);
+    const paramNames = [];
+    let pd = 0;
+    let cur = '';
+    for (const ch of hm[2]) {
+      if (ch === '(' || ch === '[' || ch === '{') pd++;
+      else if (ch === ')' || ch === ']' || ch === '}') pd--;
+      else if (ch === ',' && pd === 0) { paramNames.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    if (cur.trim()) paramNames.push(cur);
+    const names = paramNames.map((p) => p.trim().replace(/=[\s\S]*$/, '').trim()).filter(Boolean);
+    if (!names.includes(opts)) fail('streaming fallback site: the enclosing construct does not take \'' + opts + '\' as a parameter');
+    const siteToks = lx.tokens.filter((t) => t.start >= found.relStart && t.start < found.relEnd);
+    let ownBodyOpen = -1;
+    if (siteToks.length > 4 && siteToks[0].value === 'async' && siteToks[1].value === 'function'
+      && siteToks[2].value === '*' && siteToks[3].type === 'id' && siteToks[4].value === '(') {
+      let dd = 0;
+      for (let j = 4; j < siteToks.length; j++) {
+        const u = siteToks[j];
+        if (u.type === 'punct' && u.value === '(') dd++;
+        else if (u.type === 'punct' && u.value === ')') {
+          dd--;
+          if (dd === 0) {
+            const jn = j + 1;
+            if (jn < siteToks.length && siteToks[jn].value === '{') ownBodyOpen = jn;
+            break;
+          }
+        }
+      }
+    }
+    return {
+      id: hm[1],
+      relStart: found.relStart,
+      relEnd: found.relEnd,
+      absEnd: siteSlice[0] + found.relEnd,
+      mod: mod,
+      modStart: siteSlice[0],
+      tokens: lx.tokens,
+      ownBodyOpen: ownBodyOpen,
+      nestedScopes: nestedFnScopes(siteToks, ownBodyOpen),
+    };
+  };
+  const shadowScan = (built, clsName, gateName) => {
+    const constructRelEnd = built.relEnd;
+    const toks = built.tokens.filter((t) => t.start >= built.relStart && t.start < constructRelEnd);
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i];
+      if (t.type !== 'id' || (t.value !== clsName && t.value !== gateName)) continue;
+      const prevTok = i > 0 ? toks[i - 1] : null;
+      const isMember = !!(prevTok && prevTok.value === '.');
+      let called = false;
+      const nextTok = toks[i + 1] || null;
+      if (nextTok && nextTok.type === 'punct' && nextTok.value === '(') {
+        let pd = 1;
+        let j = i + 2;
+        while (j < toks.length) {
+          const u = toks[j];
+          if (u.type === 'punct' && u.value === '(') pd++;
+          else if (u.type === 'punct' && u.value === ')') {
+            pd--;
+            if (pd === 0) break;
+          }
+          j++;
+        }
+        const jn = j + 1;
+        const after = jn < toks.length ? toks[jn] : null;
+        const isDefBrace = !!(after && after.type === 'punct' && after.value === '{');
+        called = !isDefBrace;
+      }
+      if (!isMember && !called)
+        fail('streaming fallback site: ' + t.value + ' is bound or referenced other than by a call inside ' + built.id);
+    }
+  };
 
   // The shared backoff helper: min(500*2^(n-1), cap) with up to 25% jitter.
   const backoffMatch = js.match(new RegExp(
@@ -2068,31 +2679,96 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   //    simple declarations is allowed in the middle and carried through
   //    untouched. The two counters this patch raises are still identified by
   //    their position in the tail run, which has kept its shape.
+  //
+  //    From 2.1.281 the tail carries one more pair between <connRetry> and
+  //    <flag>: <truncMax>=1,<trunc>=0 -- the budget and counter of the
+  //    StreamTruncated retry. The pair is optional here and carried through
+  //    untouched: its budget has exactly one reader, the cap site in 3, and is
+  //    raised there, so it has one home.
   const rxBudget = new RegExp(
     `(${ID})=3,(${ID})=\\{value:0\\},((?:${ID}=[^,;]{1,24},){0,8})` +
-      `(${ID})=2,(${ID})=0,(${ID})=0,(${ID})=!1,(${ID})=1,(${ID})=0,`,
+      `(${ID})=2,(${ID})=0,(${ID})=0,(?:(${ID})=1,(${ID})=0,)?(${ID})=!1,(${ID})=1,(${ID})=0,`,
   );
+  const nBudget = (js.match(new RegExp(rxBudget.source, 'g')) || []).length;
+  if (nBudget !== 1) fail(`streaming retry budgets: expected exactly one site, found ${nBudget}`);
   const mBudget = js.match(rxBudget);
-  if (!mBudget) fail('streaming retry budgets not found');
-  js = js.replace(rxBudget, '$1=3,$2={value:0},$3$4=300,$5=0,$6=0,$7=!1,$8=300,$9=0,');
+  js = js.replace(
+    rxBudget,
+    (all, qo, un, mid, staleMax, stale, conn, truncMax, trunc, flag, idleMax, idle) =>
+      `${qo}=3,${un}={value:0},${mid}${staleMax}=300,${stale}=0,${conn}=0,` +
+      (truncMax === undefined ? '' : `${truncMax}=1,${trunc}=0,`) +
+      `${flag}=!1,${idleMax}=300,${idle}=0,`,
+  );
 
   // 2. The linear wait on the stale-connection retry inside the finalize
-  //    branch: `if(<req>=null,!<idle>)await <sleep>(100*<stale>,<signal>)`
+  //    branch: `if(<req>=null,!<idle>)await <sleep>(100*<stale>,<signal>)`.
+  //    From 2.1.281 the reset is the last operand of a comma list inside the
+  //    same `if(`, so the character before it is either `if(` or `,`; it is
+  //    captured and written back as it was.
   const rxWait = new RegExp(
-    `if\\((${ID})=null,!(${ID})\\)await (${ID})\\(100\\*(${ID}),(${ID})\\);continue (${ID})\\}`,
+    `(if\\(|,)(${ID})=null,!(${ID})\\)await (${ID})\\(100\\*(${ID}),(${ID})\\);continue (${ID})\\}`,
   );
-  const mWait = js.match(rxWait);
-  if (!mWait) fail('streaming retry wait not found');
-  js = js.replace(rxWait, `if($1=null,!$2)await $3(${repEsc(backoff)}($4),$5);continue $6}`);
+  const nWait = (js.match(new RegExp(rxWait.source, 'g')) || []).length;
+  if (nWait !== 1) fail(`streaming retry wait: expected exactly one site, found ${nWait}`);
+  js = js.replace(rxWait, `$1$2=null,!$3)await $4(${repEsc(backoff)}($5),$6);continue $7}`);
 
   // 3. The connection-retry cap taken from the max-retries setting:
   //    `let <cap>=<maxRetries>();if(<isConn>&&<stop>===null&&<n><<cap>){`
-  const rxCap = new RegExp(
+  //    From 2.1.281 the cap splits on the error code: a StreamTruncated
+  //    error counts against its own budget (<truncMax>, declared =1 in the run
+  //    of 1.) and its own counter, every other connection error against the
+  //    setting as before:
+  //    `let <isTr>=<err>?.code==="StreamTruncated",<cap>=<isTr>?<truncMax>:<maxRetries>();
+  //     if(<isConn>&&<stop>===null&&(<isTr>?<trunc>:<n>)<<cap>){`
+  //    Both arms are raised: a truncated stream left at one retry would be
+  //    finalized as a half answer after a single break, which is the outcome
+  //    this step exists to prevent. Exactly one of the two forms must be
+  //    present, exactly once.
+  const rxCapSingle = new RegExp(
     `let (${ID})=(${ID})\\(\\);if\\((${ID})&&(${ID})===null&&(${ID})<\\1\\)\\{`,
   );
-  const mCap = js.match(rxCap);
-  if (!mCap) fail('streaming connection-retry cap not found');
-  js = js.replace(rxCap, 'let $1=$2();if($3&&$4===null&&$5<Math.max($1,300)){');
+  const rxCapSplit = new RegExp(
+    `let (${ID})=(${ID})\\?\\.code==="StreamTruncated",(${ID})=\\1\\?(${ID}):(${ID})\\(\\);` +
+      `if\\((${ID})&&(${ID})===null&&\\(\\1\\?(${ID}):(${ID})\\)<\\3\\)\\{`,
+  );
+  const nCapSingle = (js.match(new RegExp(rxCapSingle.source, 'g')) || []).length;
+  const nCapSplit = (js.match(new RegExp(rxCapSplit.source, 'g')) || []).length;
+  if (nCapSingle + nCapSplit !== 1)
+    fail(
+      `streaming connection-retry cap: expected exactly one site across both forms, ` +
+        `found ${nCapSingle} (single budget) + ${nCapSplit} (truncation split)`,
+    );
+  // CONSTRAINT: the StreamTruncated budget of 1. has exactly one reader, the
+  // split cap; a budget without that reader, a split cap reading another name,
+  // or a second reader in the budget's module would leave that retry at 1
+  // (measured on 2.1.281/282: two occurrences in the module, the declaration
+  // and the cap read)
+  const truncMax = mBudget[7];
+  if ((truncMax === undefined) !== (nCapSplit === 0))
+    fail(
+      `streaming retry budgets: the StreamTruncated budget is ${truncMax === undefined ? 'absent' : `'${truncMax}'`}, ` +
+        `the truncation-split cap ${nCapSplit === 0 ? 'absent' : 'present'}`,
+    );
+  if (truncMax !== undefined) {
+    const mCap = js.match(rxCapSplit);
+    if (mCap[4] !== truncMax)
+      fail(`streaming connection-retry cap: the split cap reads '${mCap[4]}', not the StreamTruncated budget '${truncMax}'`);
+    const [bs, be] = moduleSliceAround(js, mBudget.index);
+    if (mCap.index < bs || mCap.index >= be)
+      fail(`streaming connection-retry cap: the split cap is outside the module of the StreamTruncated budget '${truncMax}'`);
+    const reads = (js.slice(bs, be).match(new RegExp(`(?<![\\w$])${rxEsc(truncMax)}(?![\\w$])`, 'g')) || []).length;
+    if (reads !== 2)
+      fail(`streaming retry budgets: the StreamTruncated budget '${truncMax}' occurs ${reads} times in its module, expected 2 (the declaration and the cap read)`);
+  }
+  if (nCapSingle === 1) {
+    js = js.replace(rxCapSingle, 'let $1=$2();if($3&&$4===null&&$5<Math.max($1,300)){');
+  } else {
+    js = js.replace(
+      rxCapSplit,
+      'let $1=$2?.code==="StreamTruncated",$3=$1?Math.max($4,300):Math.max($5(),300);' +
+        'if($6&&$7===null&&($1?$8:$9)<$3){',
+    );
+  }
 
   // 4. The retry that already discards a partial and re-runs the request is
   //    gated on `!<hasRealContent>` — it only fires after a thinking-only
@@ -2109,61 +2785,27 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   const rxGate = new RegExp(
     `if\\(!(${ID})&&(${ID})===null&&\\((${ID})\\?(${ID})<(${ID}):(${ID})<(${ID})\\)\\)\\{`,
   );
+  const nGate = (js.match(new RegExp(rxGate.source, 'g')) || []).length;
+  if (nGate !== 1) fail(`thinking-only retry gate: expected exactly one site, found ${nGate}`);
   const mGate = js.match(rxGate);
-  if (!mGate) fail('thinking-only retry gate not found');
   js = js.replace(rxGate, 'if($2===null&&($3?$4<$5:$6<$7)){');
 
-  // 5. If the 300 retries still cannot complete the stream, do not leave a
-  //    half answer marked as success. Throw the original error instead of
-  //    emitting the synthetic "may be incomplete" message; the request loop
-  //    and the model fallback then get their turn, and a turn that cannot
-  //    be completed fails honestly.
-  // 2.1.246 added `truncatedAfterOutput:<hasOutput>&&!<isToolUse>?!0:void 0` to
-  // this marker, and with it a RECOVERY the earlier releases had no equivalent
-  // of. The field has exactly one producer -- this yield -- and one meaningful
-  // reader:
-  //
-  //   function GJn(e,t,n){return e?.type==="assistant"&&e.isApiErrorMessage===!0
-  //     &&e.truncatedAfterOutput===!0&&t.options.isNonInteractiveSession
-  //     &&wl(n)==="main"&&we("tengu_truncated_response_recovery",!0)}
-  //
-  // whose consumer nudges the model with "Your response above was cut off
-  // mid-stream. Resume directly from where it stops" and re-runs the turn, up to
-  // WJn=3 attempts -- PRESERVING the partial answer instead of discarding it.
-  // In that same case the marker is suppressed from the output stream, so it
-  // never reaches the user as a half answer.
-  //
-  // Deleting the yield outright therefore killed a strictly better recovery in
-  // the sessions it was written for, while doing the right thing everywhere
-  // else: for an INTERACTIVE session GJn is false, nothing suppresses the
-  // marker, and "The response above may be incomplete." is exactly the half
-  // answer this leg exists to prevent.
-  //
-  // So the leg now splits on the same conditions the reader uses, expressed with
-  // values in scope at this site: the session flag, the main-loop lane, and the
-  // marker's own truthiness.
-  //
-  // The lane test must be the reader's WHOLE test, not the half of it that is
-  // easy to spell. `GJn` asks `wl(n)==="main"`, and that classifier is
-  //
-  //   function kD(e){if(e===void 0)return;
-  //     if(e.startsWith("repl_main_thread")||e==="sdk")return"main";
-  //     if(e.startsWith("agent:")||e==="hook_agent")return"subagent";
-  //     return"auxiliary"}
-  //
-  // -- so `querySource:"sdk"` is a main-loop lane too, and an earlier version of
-  // this guard tested only the prefix. The subset is invisible in every check
-  // that pins the guard's own text: an SDK session that truncated took the throw
-  // while upstream's recovery stood ready for it. Both arms of the classifier
-  // are spelled out here. Where they hold, the stock yield and break
-  // run untouched and the recovery gets its turn; everywhere else the throw
-  // stands. If any of them is missing from a build the expression is falsy and
-  // the behaviour is exactly what it was before this change.
-  //
-  // Measured: the field exists on 2.1.246 and on NO earlier build in range
-  // (233/240/242 carry zero occurrences), so the capture is optional and older
-  // builds keep the unconditional throw -- there is no recovery there to
-  // preserve.
+  // CONSTRAINT: this yield is the only producer of truncatedAfterOutput.
+  // Readers are two: the recovery reader, whose predicate is repeated here
+  // through the classifier and the gate the site imports, and the WebSearch
+  // formatter, which reads the marker as text.
+  // The expression repeats the body of the reader predicate, not the
+  // caller's whole predicate. The caller also applies !needsFollowUp, loop
+  // state above the turn.step hook chain, not observable here. When a hook
+  // yields tool_use in this same step, stock skips recovery, emits the
+  // marker, and continues the turn with the tool follow-up; this site leaves
+  // that path stock. A hook that has started yielding tool_use changes the
+  // outcome of this leg.
+  // Names are taken from the site module's imports, not from the reader:
+  // the two sites are different bundle files, so one spelling is not one binding.
+  // The shadow scan covers the whole enclosing construct, header and the
+  // text after the splice included, because declarations are hoisted.
+  // The recovery gate is an upstream kill-switch and is not inlined.
   // The site is parsed FROM THE TELEMETRY CONSTANT, not by one long regexp
   // pinning the shape of a whole instruction. That was the sixth case of the
   // root defect "the locator pins a written form instead of a stable
@@ -2250,16 +2892,74 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   // The rewritable region ends where the candidate's `throw` begins, so the
   // pattern is anchored to the END of the slice and the label -- already
   // known from the anchor -- goes in as a literal.
-  const rxRegion = new RegExp(
+  //
+  // Two forms. Up to 2.1.280 the usage accrual is inlined between the marker
+  // and the break (`,<c>!=="credited")<c>="credited",<acc>+=<expr>;break`) and
+  // is part of the region. From 2.1.281 the accrual is a function called
+  // BEFORE the marker (`$0(),yield <ar>({...});break <label>}`), so it stays
+  // outside the region and runs before any throw spliced in here; the region
+  // is the marker alone. Exactly one form must match.
+  const rxRegionCredited = new RegExp(
     `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"` +
       `(?:,truncatedAfterOutput:([^,;{}]{0,80}))?((?:,[^;]{0,300}?)?)\\}\\),(${ID})!=="credited"\\)` +
       `\\5="credited",(${ID})\\+=([^;]{0,300}?);break ${rxEsc(label)}\\}$`,
   );
+  const rxRegionPlain = new RegExp(
+    `,yield (${ID})\\(\\{content:([^;]{0,1400}?),error:"server_error"` +
+      `(?:,truncatedAfterOutput:([^,;{}]{0,80}))?((?:,[^;]{0,300}?)?)\\}\\);break ${rxEsc(label)}\\}$`,
+  );
   const regionSliceStart = Math.max(0, throwStart - 2500);
-  const mRegion = js.slice(regionSliceStart, throwStart).match(rxRegion);
+  const regionSlice = js.slice(regionSliceStart, throwStart);
+  const mRegionCredited = regionSlice.match(rxRegionCredited);
+  const mRegionPlain = regionSlice.match(rxRegionPlain);
+  if (mRegionCredited && mRegionPlain)
+    fail('streaming partial-finalize region: both the inline-accrual and the plain form match');
+  const mRegion = mRegionCredited || mRegionPlain;
   if (!mRegion) fail('streaming partial-finalize region not found before the telemetry throw');
   const regionStart = regionSliceStart + mRegion.index;
-  const [, arFn, content, truncExpr, extraTail, credited, acc, accExpr] = mRegion;
+  const [, arFn, content, truncExpr, extraTail] = mRegion;
+  let CLSs;
+  let GATEs;
+  let CLSr;
+  let GATEr;
+  let built = null;
+  let constructId = '';
+  let accWindowEnd = constStart + 4000;
+  if (!mRegionCredited || truncExpr !== undefined) {
+    built = buildSiteConstruct(constStart, regionStart);
+    constructId = built.id;
+    accWindowEnd = built.absEnd;
+    checkOptsForms(built, opts);
+    if (truncExpr !== undefined) {
+      const names = resolveRecoveryNames();
+      CLSs = names.CLSs;
+      GATEs = names.GATEs;
+      CLSr = names.CLSr;
+      GATEr = names.GATEr;
+      shadowScan(built, CLSs, GATEs);
+    }
+  }
+  let credited;
+  let acc;
+  let accExpr;
+  if (mRegionCredited) {
+    [, , , , , credited, acc, accExpr] = mRegionCredited;
+  } else {
+    // The grounding below needs the accrual expression. In this form it is
+    // not in the region; the first inline accrual after the telemetry
+    // constant (the retry path of the same function) reads the same options
+    // object and serves as the witness.
+    const rxAcc = new RegExp(`(${ID})!=="credited"\\)\\1="credited",(${ID})\\+=([^;]{0,300}?);`, 'g');
+    let mAcc = null;
+    for (const cand of js.slice(constStart, accWindowEnd).matchAll(rxAcc)) {
+      if (constructOwns(built, constStart + cand.index - built.modStart)) {
+        mAcc = cand;
+        break;
+      }
+    }
+    if (!mAcc) fail('streaming partial-finalize: no usage accrual owned by ' + constructId + ' after the telemetry constant');
+    accExpr = mAcc[3];
+  }
 
   // Захваченный объект обязан быть ТЕМ САМЫМ объектом запроса, а не обёрткой
   // вокруг него: ниже у него читаются `isNonInteractiveSession` и
@@ -2283,31 +2983,44 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   // syntax, so a doubled `$` from repEsc would reach the image as a literal
   // and corrupt the spliced name.
   let replacement;
-  if (truncExpr === undefined) {
+  const recoverable =
+    truncExpr === undefined
+      ? undefined
+      : `((${CLSs}(${opts}.querySource)==="subagent"||${CLSs}(${opts}.querySource)==="main"&&${opts}.isNonInteractiveSession)&&${GATEs}("tengu_truncated_response_recovery",!0)&&(${truncExpr}))`;
+  if (mRegionCredited && truncExpr === undefined) {
     // No truncation marker in this build: nothing downstream can recover from
     // it, so the half answer is simply not finalized.
     replacement =
       `,${credited}!=="credited")${credited}="credited",` +
       `${acc}+=${accExpr};throw ${thrown}}`;
-  } else {
-    const recoverable =
-      `(${opts}.isNonInteractiveSession&&` +
-      `(${opts}.querySource?.startsWith("repl_main_thread")||${opts}.querySource==="sdk")&&` +
-      `(${truncExpr}))`;
+  } else if (mRegionCredited) {
     replacement =
       `,${recoverable}?yield ${arFn}({content:${content},` +
       `error:"server_error",truncatedAfterOutput:${truncExpr}${extraTail}})` +
       `:void 0,${credited}!=="credited")${credited}="credited",` +
       `${acc}+=${accExpr};` +
       `if(!${recoverable})throw ${thrown};break ${label}}`;
+  } else if (truncExpr === undefined) {
+    replacement = `;throw ${thrown}}`;
+  } else {
+    replacement =
+      `,${recoverable}?yield ${arFn}({content:${content},` +
+      `error:"server_error",truncatedAfterOutput:${truncExpr}${extraTail}})` +
+      `:void 0;if(!${recoverable})throw ${thrown};break ${label}}`;
   }
   js = js.slice(0, regionStart) + replacement + js.slice(throwStart);
 
+  const namesProse = CLSs
+    ? `; classifier '${CLSs}', flag gate '${GATEs}', reader '${CLSr}'/'${GATEr}', construct '${constructId}'`
+    : '';
   applied.push(
     `a broken stream is retried, never finalized as a half answer ` +
-      `(interactive lanes; the non-interactive recoverable lane keeps the stock ` +
-      `partial-plus-nudge by design) ` +
-      `(backoff '${backoff}', budgets ${mBudget[3]}/${mBudget[7]} -> 300, ` +
+      (truncExpr === undefined
+        ? `(recovery splice skipped: no truncation marker in this build${namesProse}) `
+        : `(stock yield where the reader predicate accepts the marker: ` +
+          `subagent lanes and non-interactive main lanes, under the recovery flag${namesProse}) `) +
+      `(backoff '${backoff}', budgets ${mBudget[4]}/${mBudget[10]}` +
+      `${nCapSplit === 1 ? ` and the StreamTruncated budget '${mBudget[7]}'` : ''} -> 300, ` +
       `dropped content gate on '${mGate[1]}', thrown var '${thrown}', ` +
       `${truncExpr === undefined ? 'no truncation marker in this build' : `truncation marker kept for the recoverable lane ('${truncExpr}')`}, ` +
       `+${js.length - before} bytes)`,

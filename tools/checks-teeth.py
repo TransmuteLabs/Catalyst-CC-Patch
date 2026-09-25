@@ -72,7 +72,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 20
+EXPECTED_MUTATIONS = 23
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
 # 34 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
 # проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B) + 6 зубов
@@ -606,7 +606,35 @@ def edits_s1(base: bytes) -> list[tuple[int, bytes]]:
     return [(span_at, guard.ljust(len(span)))]
 
 
-DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2, "M2": edits_m2, "S1": edits_s1}
+def _stock_into_padding(base: bytes, tag: str, text: bytes) -> list[tuple[int, bytes]]:
+    # CONSTRAINT: the patched site stays in place, so only the negative predicate can turn the check red;
+    # a NUL run is outside every JS token the registry reads.
+    run = re.search(rb"\x00{%d}" % (len(text) + 2), base)
+    if not run:
+        raise Refusal(f"{tag}: в образе нет пробега NUL длиной {len(text) + 2} -- вписать стоковую форму некуда")
+    return [(run.start() + 1, text)]
+
+
+def edits_r1(base: bytes) -> list[tuple[int, bytes]]:
+    """Доказывает отрицательный предикат стокового одиночного потолка
+    `not let X=Y();if(Z&&W===null&&V<U){` (:9248-9250, claude-patch-all.sh)."""
+    return _stock_into_padding(base, "R1", b'let a=b();if(c&&d===null&&e<a){')
+
+
+def edits_r2(base: bytes) -> list[tuple[int, bytes]]:
+    """Доказывает отрицательный предикат стокового расщеплённого потолка
+    `not let X=Y?.code==="StreamTruncated",Z=W?V:U();` (:9251-9253, claude-patch-all.sh)."""
+    return _stock_into_padding(base, "R2", b'let a=b?.code==="StreamTruncated",c=a?d:e();')
+
+
+def edits_r3(base: bytes) -> list[tuple[int, bytes]]:
+    """Доказывает отрицательный предикат стокового гейта контента
+    `not if(!X&&Y===null&&(Z?A<B:C<D)){` (:9258-9260, claude-patch-all.sh)."""
+    return _stock_into_padding(base, "R3", b'if(!a&&b===null&&(c?d<e:f<g)){')
+
+
+DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2, "M2": edits_m2, "S1": edits_s1,
+           "R1": edits_r1, "R2": edits_r2, "R3": edits_r3}
 
 
 STEP29_CEILING = "the mod-API model budget ceiling is operator-set"

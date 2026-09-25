@@ -3142,6 +3142,8 @@ def check(src, name):
 # стендов кита, и ошибка каждой молчала. Зубы формы гоняет стадия выше; здесь
 # правило только загружается, и отказ загрузки -- отказ стадии, а не откат к
 # собственной редакции.
+# CONSTRAINT: загрузка прибора кита не оставляет .pyc рядом с ним в дереве кита
+sys.dont_write_bytecode = True
 _anchor_spec = importlib.util.spec_from_file_location(
     'heredoc_anchor', os.path.join(here, 'tools/heredoc-anchor.py'))
 if _anchor_spec is None or _anchor_spec.loader is None:
@@ -4775,6 +4777,8 @@ read = lambda p: io.open(p, encoding='utf-8').read()
 # python3 в ЛЮБОМ месте строки принимал стабы и упоминания. Форма загрузки --
 # как у стадии PYCOMPILE выше; отказ загрузки ИЛИ зубов прибора -- отказ
 # сверки (код 2), а не откат к местной редакции и не «тел нет».
+# CONSTRAINT: загрузка прибора кита не оставляет .pyc рядом с ним в дереве кита
+sys.dont_write_bytecode = True
 _anchor_spec = importlib.util.spec_from_file_location(
     'heredoc_anchor', os.path.join(here, 'tools/heredoc-anchor.py'))
 if _anchor_spec is None or _anchor_spec.loader is None:
@@ -6114,12 +6118,12 @@ python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
 # pin is its own integrity check: GitHub cannot serve a different tree under it.
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
-CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-7e2a07e5b78c0b1607ab109adc2e5d2f7ed61768}"
+CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-318088f6cd80443eae6a22ebb3c5322b8c8d7f6a}"
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
 [[ "$CATALYST_TWEAKCC_REPO" == "TransmuteLabs/Catalyst-tweakcc" \
-   && "$CATALYST_TWEAKCC_SHA" == "7e2a07e5b78c0b1607ab109adc2e5d2f7ed61768" ]] \
+   && "$CATALYST_TWEAKCC_SHA" == "318088f6cd80443eae6a22ebb3c5322b8c8d7f6a" ]] \
   || echo "Unpacker source OVERRIDDEN: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12} (not the pinned fork)"
 CATALYST_TWEAKCC_CACHE="${CATALYST_TWEAKCC_CACHE:-$HOME/.cache/catalyst-tweakcc}"
 
@@ -7473,29 +7477,33 @@ def _session_memory_ungated(d):
     return not FLAG_READ.search(body)
 
 
+def _stream_recoverable_cond():
+    # CONSTRAINT: cond is the first capturing groups of every regexp it is
+    # pasted into, so the backreferences stay \\1 and \\2.
+    return (rb'\(\((' + ID + rb')\((' + ID + rb')\.querySource\)==="subagent"\|\|'
+            rb'\1\(\2\.querySource\)==="main"&&\2\.isNonInteractiveSession\)&&('
+            + ID + rb')\("tengu_truncated_response_recovery",!0\)&&\([^()]{0,80}\)\)')
+
+
 def _stream_finalize_ok(d):
     """The exhaustion path must never finalize a half answer as a success.
 
-    Which shape proves that depends on the build, because 2.1.246 added a
-    recovery the earlier releases have no equivalent of:
+    Which shape proves that depends on the build:
 
-      - no truncation marker in the image (233..242 in range): there is nothing
-        downstream that could recover from the marker, so the yield is gone and
-        the original error is thrown unconditionally.
-      - marker present (246): the yield survives ONLY for the lane whose reader
-        can act on it -- a non-interactive main-loop session, where the product
-        suppresses the marker from the output and nudges the model to resume
-        from the truncation. Every other lane still throws.
+      - no truncation marker at the finalize site: nothing downstream can
+        recover from the marker, so the yield is gone and the original error
+        is thrown unconditionally.
+      - marker present: the yield survives only where the recovery reader's
+        predicate accepts the marker. That is subagent lanes, and main lanes
+        that are non-interactive, and only while the recovery flag is on.
+        Every other lane still throws.
 
-    Asserting only the first shape would fail the second, and asserting only
-    "no marker is emitted" would pass a build where the yield came back
-    unguarded, which is the stock half answer.
+    The lane test is the body of that predicate (the site's classifier and
+    the flag gate), not a hand-spelled subset of querySource prefixes.
+    Asserting only "no marker is emitted" would pass a build where the yield
+    came back unguarded, which is the stock half answer.
     """
-    # The lane test is the reader's WHOLE classifier -- `repl_main_thread*` OR
-    # `"sdk"`, both of which `kD()` maps to "main". Pinning only the prefix let a
-    # guard that was a strict subset of the reader read as correct.
-    cond = (rb'\((' + ID + rb')\.isNonInteractiveSession&&\(\1\.querySource\?\.startsWith\('
-            rb'"repl_main_thread"\)\|\|\1\.querySource==="sdk"\)&&\([^()]{0,80}\)\)')
+    cond = _stream_recoverable_cond()
     # WHICH branch is decided by the finalize site knowing the field, not by the
     # bytes existing somewhere in the image. A build's string pool outlives the
     # code that read the string -- measured on step 24, where `root/sudo
@@ -9230,12 +9238,23 @@ checks = {
                                               # counters this patch raises
                                               rb'=3,' + ID + rb'=\{value:0\},(?:' + ID + rb'=[^,;]{1,24},){0,8}'
                                               rb'' + ID + rb'=300,' + ID + rb'=0,'
-                                              rb'' + ID + rb'=0,' + ID + rb'=!1,' + ID + rb'=300,' + ID + rb'=0,', d))
+                                              rb'' + ID + rb'=0,(?:' + ID + rb'=1,' + ID + rb'=0,)?'
+                                              + ID + rb'=!1,' + ID + rb'=300,' + ID + rb'=0,', d))
                                           and bool(re.search(
-                                              rb'if\((' + ID + rb')=null,!(' + ID + rb')\)await (' + ID + rb')\('
+                                              rb'(?:if\(|,)(' + ID + rb')=null,!(' + ID + rb')\)await (' + ID + rb')\('
                                               rb'(' + ID + rb')\((' + ID + rb')\),(' + ID + rb')\);continue ', d))
-                                          and bool(re.search(
+                                          and (bool(re.search(
                                               rb'&&' + ID + rb'===null&&' + ID + rb'<Math\.max\(' + ID + rb',300\)\)\{', d))
+                                               or bool(re.search(
+                                              rb'' + ID + rb'=' + ID + rb'\?Math\.max\(' + ID + rb',300\):Math\.max\('
+                                              + ID + rb'\(\),300\);if\(' + ID + rb'&&' + ID + rb'===null&&\('
+                                              + ID + rb'\?' + ID + rb':' + ID + rb'\)<' + ID + rb'\)\{', d)))
+                                          and not re.search(
+                                              rb'let ' + ID + rb'=' + ID + rb'\(\);if\(' + ID + rb'&&' + ID
+                                              + rb'===null&&' + ID + rb'<' + ID + rb'\)\{', d)
+                                          and not re.search(
+                                              rb'let ' + ID + rb'=' + ID + rb'\?\.code==="StreamTruncated",'
+                                              + ID + rb'=' + ID + rb'\?' + ID + rb':' + ID + rb'\(\);', d)
                                           # the content-gate that blocked retry after a real block is gone
                                           and bool(re.search(
                                               rb'if\(' + ID + rb'===null&&\(' + ID + rb'\?' + ID + rb'<' + ID + rb':'

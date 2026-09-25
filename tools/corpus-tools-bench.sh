@@ -66,8 +66,10 @@ KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # Раунд 3 (Х1): + 1 сценарий и + 1 мутация -- тот же класс 9, но с ИЗМЕРЕННЫМИ
 # строками: производитель девятки не определяет, измерялись ли строки
 # (docnum:other -- Х1 есть номер пункта брифа, не счётчик стенда).
-EXPECTED_SCENARIOS=255
-EXPECTED_MUTATIONS=337
+# FIX-STEP19 (#490): corpus-tools-bench, сценарии 256-304 и мутации 338-388 (docnum:subset) -- зубы правки 19 (лексер, скан, владелец,
+# формы opts, импорты, HEADER_KW, имена свойств, единственность сайтов 1-4, прибор образа).
+EXPECTED_SCENARIOS=313
+EXPECTED_MUTATIONS=409
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -337,6 +339,10 @@ require_no_real_run
 # Пустой путь mktemp ушёл бы в rm -rf трапа уборки и во все склейки путей.
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/corpus-bench.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан рабочий каталог стенда\n' >&2; exit 2; }
 [ -n "$ROOT" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь рабочего каталога стенда пуст\n' >&2; exit 2; }
+# CONSTRAINT: база декораций «вне корня» (сценарии 85/86) снимается ЗДЕСЬ, до
+# блока TMPDIR ниже: на машине без TMPDIR (usbox) стенд переводит его под
+# $ROOT, и «внешний» каталог лёг бы под корень и вычитался как свой.
+BENCH_OUTSIDE_BASE="${TMPDIR:-/tmp}"
 # Часовой оборванного прогона: bash 3.2 отдаёт код 0, когда скрипт с
 # EXIT-трапом умирает на фатальной ошибке ПОДСТАНОВКИ (unbound variable под
 # `set -u`, `${x:?}`, bad substitution) -- провал невидим вызывающему
@@ -2460,6 +2466,19 @@ run_all() {
   # Правка 19 (#114): локатор от константы телеметрии, отказ у каждой
   # двери, врезка срезами, брошенное значение -- из хвоста инструкции.
   scenario_208; scenario_209; scenario_210; scenario_211; scenario_212; scenario_213
+  scenario_256; scenario_257; scenario_258; scenario_259; scenario_260; scenario_261
+  scenario_262; scenario_263; scenario_264; scenario_265; scenario_266
+  # FIX-STEP19-2 (#490): лексер ++/--, } по стеку, вызов по парной скобке,
+  # владелец позиции, формы opts, импорты по состоянию и формам.
+  scenario_267; scenario_268; scenario_269; scenario_270; scenario_271; scenario_272
+  scenario_273; scenario_274; scenario_275; scenario_276; scenario_277; scenario_278
+  scenario_279; scenario_280; scenario_281; scenario_282; scenario_283; scenario_284
+  scenario_285; scenario_286; scenario_287; scenario_288; scenario_289; scenario_290
+  scenario_291
+  scenario_292; scenario_293
+  scenario_294; scenario_295; scenario_305
+  scenario_296; scenario_297; scenario_298; scenario_299; scenario_300; scenario_301; scenario_302; scenario_303; scenario_304; scenario_306; scenario_307
+  scenario_308; scenario_309; scenario_310; scenario_311; scenario_312; scenario_313
   # Волна 53 (#120): выключенный ручкой слой промтов -- дверь не сравнивает;
   # пустое значение ручки -- это ЗАДАНО у обеих обёрток (класс #117); ветви
   # самого выключателя слоя (подстановка с ключом, объявление, отмена, оператор).
@@ -2892,8 +2911,9 @@ scenario_85() {   # предусловие: чужой прогон -- да, с�
   inside="$C/fake85"; mkdir -p "$inside"
   printf '#!/bin/sh\nsleep 30\n' > "$inside/claude-patch-all.sh"
   # Пустой путь mktemp ушёл бы в rm -rf декорации ниже.
-  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside85.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан внешний каталог декорации\n' >&2; exit 2; }
+  outside=$(mktemp -d "$BENCH_OUTSIDE_BASE/cb-outside85.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан внешний каталог декорации\n' >&2; exit 2; }
   [ -n "$outside" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь внешнего каталога декорации пуст\n' >&2; exit 2; }
+  case "$outside" in *"$ROOT"*) printf 'ПРИБОР НЕДОСТУПЕН: внешний каталог декорации лёг под корень стенда: %s\n' "$outside" >&2; exit 2;; esac
   printf '#!/bin/sh\nsleep 30\n' > "$outside/claude-patch-all.sh"
   # `9>&-`: оба живут по 30 секунд и убиваются без ожидания выхода -- с копией
   # дескриптора они держали бы замок стенда после его выхода.
@@ -2937,8 +2957,9 @@ scenario_86() {   # отметка настоящего прогона пере�
   # живой abort_if_real_run исполняется из живого файла и мутации недоступен.
   local outside pid out rc marker sub_rc form
   # Пустой путь mktemp ушёл бы в rm -rf декорации ниже.
-  outside=$(mktemp -d "${TMPDIR:-/tmp}/cb-outside86.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан внешний каталог декорации\n' >&2; exit 2; }
+  outside=$(mktemp -d "$BENCH_OUTSIDE_BASE/cb-outside86.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан внешний каталог декорации\n' >&2; exit 2; }
   [ -n "$outside" ] || { printf 'ПРИБОР НЕДОСТУПЕН: путь внешнего каталога декорации пуст\n' >&2; exit 2; }
+  case "$outside" in *"$ROOT"*) printf 'ПРИБОР НЕДОСТУПЕН: внешний каталог декорации лёг под корень стенда: %s\n' "$outside" >&2; exit 2;; esac
   printf '#!/bin/sh\nsleep 30\n' > "$outside/claude-patch-all.sh"
   bash "$outside/claude-patch-all.sh" 9>&- & pid=$!
   sleep 1
@@ -5179,7 +5200,7 @@ scenario_148() {   # самопроверка не засчитывает зуб
   # обязана уходить в «НЕ ИЗМЕРЕНО», а не в «покраснела своей причиной».
   #
   # Настоящая самопроверка гоняется здесь ВЫРЕЗАННОЙ по якорю и на заглушках:
-  # вложенный полный `--self-check` -- это все 337 мутаций corpus-tools-bench
+  # вложенный полный `--self-check` -- это все EXPECTED_MUTATIONS мутаций corpus-tools-bench
   # по два прогона каждая, то есть минуты внутри одного сценария, а измерить
   # надо ровно код
   # самопроверки, а не её нагрузку. Заглушки дают ДВА зуба с известным ответом:
@@ -8159,16 +8180,22 @@ const fixture = fs.readFileSync(process.argv[3], 'utf8');
 const lines = patch.split('\n');
 let start = -1;
 let end = -1;
+let ms = -1;
+let me = -1;
 for (let i = 0; i < lines.length; i++) {
+  if (ms < 0 && lines[i].startsWith('const moduleSliceAround = (text, pos) => {')) ms = i;
+  else if (ms >= 0 && me < 0 && lines[i] === '};') me = i;
   if (start < 0 && lines[i].startsWith("step('19 a broken stream")) start = i;
   else if (start >= 0 && lines[i] === '});') { end = i; break; }
 }
-if (start < 0 || end < 0) {
+if (start < 0 || end < 0 || ms < 0 || me < 0) {
   console.log('СРЕЗ_НЕ_НАЙДЕН');
   process.exit(0);
 }
+const sliceSrc = lines.slice(ms, me + 1).join('\n');
 const body = lines.slice(start, end + 1).join('\n');
 const failures = [];
+const crashes = [];
 const applied = [];
 const fail = (msg) => { throw new Error('multi-provider patch: ' + msg); };
 const repEsc = (s) => String(s).replace(/\$/g, '$$$$');
@@ -8177,21 +8204,43 @@ const step = (name, fn) => {
   try {
     fn();
   } catch (error) {
-    failures.push(`${name}: ${String(error.message).replace(/^multi-provider patch: /, '')}`);
+    if (error && typeof error.message === 'string' && error.message.startsWith('multi-provider patch: ')) {
+      failures.push(`${name}: ${String(error.message).replace(/^multi-provider patch: /, '')}`);
+    } else {
+      crashes.push(name + ': crash:' + (error && error.name ? error.name : typeof error) + ' ' + String(error && error.message));
+    }
   }
 };
 const run = new Function('js', 'step', 'fail', 'applied', 'repEsc', 'rxEsc',
-                         body + '\nreturn js;');
+                         sliceSrc + '\n' + body + '\nreturn js;');
 const out = run(fixture, step, fail, applied, repEsc, rxEsc);
-if (failures.length > 0) {
+const rec = '((cl(p.querySource)==="subagent"||cl(p.querySource)==="main"&&p.isNonInteractiveSession)&&G("tengu_truncated_response_recovery",!0)&&(ta&&!it?!0:void 0))';
+if (crashes.length > 0) {
+  console.log('ШАГ_УПАЛ ' + crashes.join(' | '));
+} else if (failures.length > 0) {
   console.log('ШАГ_КРАСЕН ' + failures.join(' | '));
 } else {
   console.log('ШАГ_ЗЕЛЁН spliced=' +
     (out.includes('throw Iw;break e}throw tel(') ? 1 : 0) +
-    ' tail=' + (out.includes('error:NN,') ? 1 : 0));
+    ' tail=' + (out.includes('error:NN,') ? 1 : 0) +
+    ' rec=' + (out.includes(rec) ? 1 : 0) +
+    ' applied=' + applied.join(' | '));
 }
 S19DRV
-  printf '%s' 'function bk(n,c,j=32000){let w=Math.min(500*Math.pow(2,n-1),j),x=w*j;return x}let q=3,cnt={value:0},sm=2,st=0,cr=0,fl=!1,im=1,iv=0,res=1;if(res=null,!iv)await sl(100*st,sig);continue e}let cap=mr();if(conn&&stop===null&&tries<cap){if(!hc&&stop===null&&(iv?ivn<im:stn<sm)){,yield ar({content:"partial text",error:"server_error",truncatedAfterOutput:ta&&!it?!0:void 0}),cr!=="credited")cr="credited",acc+=p.querySource;break e}throw tel("tengu_streaming_fallback_to_non_streaming",{model:St(p.model),error:NN,attemptNumber:hf,maxOutputTokens:cS,thinkingType:u(r.type),fallback_disabled:Wp,request_id:lS(qr),fallback_cause:_("partial_yield"),any_stream_event_yielded:nc}),Iw}if(done)' > "$S19_D/fixture.js"
+  cat > "$S19_D/fixture.js" <<'S19FIX'
+/*chunk*/
+
+/*__tweakcc_module_boundary_1__*/
+
+import{cl as Q,gt}from"/$bunfs/root/chunk-f.js";
+function Rd(e,n,r){return e?.type==="assistant"&&e.isApiErrorMessage===!0&&e.truncatedAfterOutput===!0&&(Q(r)==="subagent"||Q(r)==="main"&&n.options.isNonInteractiveSession)&&gt("tengu_truncated_response_recovery",!0)}
+
+/*__tweakcc_module_boundary_2__*/
+
+import{gt as G,cl}from"/$bunfs/root/chunk-f.js";
+async function*KS(a,b,p){e:for(;;){for(;;){var __lx=/[}]/;var __tp=`${'}'}`;function bk(n,c,j=32000){let w=Math.min(500*Math.pow(2,n-1),j),x=w*j;return x}let q=3,cnt={value:0},sm=2,st=0,cr=0,fl=!1,im=1,iv=0,res=1;if(res=null,!iv)await sl(100*st,sig);continue e}let cap=mr();if(conn&&stop===null&&tries<cap){if(!hc&&stop===null&&(iv?ivn<im:stn<sm)){,yield ar({content:"partial text",error:"server_error",truncatedAfterOutput:ta&&!it?!0:void 0}),cr!=="credited")cr="credited",acc+=p.querySource;break e}throw tel("tengu_streaming_fallback_to_non_streaming",{model:St(p.model),error:NN,attemptNumber:hf,maxOutputTokens:cS,thinkingType:u(r.type),fallback_disabled:Wp,request_id:lS(qr),fallback_cause:_("partial_yield"),any_stream_event_yielded:nc}),Iw}}}
+S19FIX
+
 }
 
 s19_run() {   # вывод драйвера на образе каталога S19_D
@@ -8202,19 +8251,33 @@ s19_mut_fixture() {   # образец, замена -- той же дисцип
   PAT="$1" REP="$2" perl -0pi -e 's/$ENV{PAT}/$ENV{REP}/' "$S19_D/fixture.js"
 }
 
+# CONSTRAINT: след s19-сценария обязан называть падение шага его КЛАССОМ, а
+# не меткой ветки: мутации, снимающие fail(), превращают отказ в падение, и
+# без класса след неразличим между «взят отказ» и «шаг рухнул».
+s19_cause() {   # <метка> <вывод>: CRASH:<класс> при ШАГ_УПАЛ, иначе метка
+  local label=$1 out=$2 rest cls
+  if [[ "$out" == *"ШАГ_УПАЛ"* ]]; then
+    rest=${out#*: crash:}
+    if [[ "$rest" != "$out" ]]; then
+      cls=${rest%%[!A-Za-z0-9_$]*}
+      printf 'CRASH:%s :: %s' "$cls" "$out"
+      return 0
+    fi
+  fi
+  printf '%s :: %s' "$label" "$out"
+}
+
 scenario_208() {   # образ 267-формы: шаг применяется, хвост телеметрии нетронут
   local out
   s19_prepare s208
   # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
   # а не кодом); вердикт ниже читает только текст вывода.
   out=$(s19_run) || true
-  LAST_EVID="$out"
-  if [[ "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
-    LAST_EVID="ШАГ_УПАЛ :: $out"
+  LAST_EVID="$(s19_cause 'ВРЕЗКА_НЕ_ТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
     bad "208 правка 19: на синтетическом образе шаг упал целиком"; return
   fi
   if [[ "$out" != *"spliced=1"* ]]; then
-    LAST_EVID="ВРЕЗКА_НЕ_ТА :: $out"
     bad "208 правка 19: наша ветка броска не врезана в образ"; return
   fi
   if [[ "$out" != *"tail=1"* ]]; then
@@ -8233,9 +8296,8 @@ scenario_209() {   # якорь: вхождений константы с пре
   # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
   # а не кодом); вердикт ниже читает только текст вывода.
   out=$(s19_run) || true
-  LAST_EVID="$out"
+  LAST_EVID="$(s19_cause 'ЯКОРЬ_НЕ_СЧИТЕН' "$out")" || true
   if [[ "$out" != *"found 2"* ]]; then
-    LAST_EVID="ЯКОРЬ_НЕ_СЧИТЕН :: $out"
     bad "209 правка 19: два кандидата под константой не названы числом"; return
   fi
   ok "209 правка 19: единственность якоря телеметрии считается и отказывает"
@@ -8248,9 +8310,8 @@ scenario_210() {   # объект запроса не разобрался -- с
   # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
   # а не кодом); вердикт ниже читает только текст вывода.
   out=$(s19_run) || true
-  LAST_EVID="$out"
+  LAST_EVID="$(s19_cause 'ОПТС_НЕ_ОТКАЗАН' "$out")" || true
   if [[ "$out" != *"the request options object not found"* ]]; then
-    LAST_EVID="ОПТС_НЕ_ОТКАЗАН :: $out"
     bad "210 правка 19: пропажа объекта запроса не отказывает своим текстом"; return
   fi
   ok "210 правка 19: объект запроса опознаётся, пропажа названа своим текстом"
@@ -8263,9 +8324,8 @@ scenario_211() {   # контроль формы объекта телеметр
   # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
   # а не кодом); вердикт ниже читает только текст вывода.
   out=$(s19_run) || true
-  LAST_EVID="$out"
+  LAST_EVID="$(s19_cause 'КОНТРОЛЬ_НЕ_ОТКАЗАН' "$out")" || true
   if [[ "$out" != *"the telemetry object is not the partial-finalize one"* ]]; then
-    LAST_EVID="КОНТРОЛЬ_НЕ_ОТКАЗАН :: $out"
     bad "211 правка 19: чужой объект телеметрии не опознан контролем формы"; return
   fi
   ok "211 правка 19: контроль формы опознаёт объект телеметрии правки"
@@ -8278,9 +8338,8 @@ scenario_212() {   # брошенное значение ищется в хво�
   # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
   # а не кодом); вердикт ниже читает только текст вывода.
   out=$(s19_run) || true
-  LAST_EVID="$out"
+  LAST_EVID="$(s19_cause 'БРОСОК_НЕ_НАЙДЕН' "$out")" || true
   if [[ "$out" != *"the thrown value not found"* ]]; then
-    LAST_EVID="БРОСОК_НЕ_НАЙДЕН :: $out"
     bad "212 правка 19: хвост броска пропал, а отказа нет"; return
   fi
   ok "212 правка 19: брошенное значение берётся из хвоста инструкции"
@@ -8293,12 +8352,805 @@ scenario_213() {   # переписываемая область перед бр
   # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
   # а не кодом); вердикт ниже читает только текст вывода.
   out=$(s19_run) || true
-  LAST_EVID="$out"
+  LAST_EVID="$(s19_cause 'РЕГИОН_НЕ_ОТКАЗАН' "$out")" || true
   if [[ "$out" != *"region not found before the telemetry throw"* ]]; then
-    LAST_EVID="РЕГИОН_НЕ_ОТКАЗАН :: $out"
     bad "213 правка 19: испорченная область перед броском не отказывает"; return
   fi
   ok "213 правка 19: область перед броском опознаётся своей формой"
+}
+
+scenario_256() {   # фикстура 6.2: выражение берёт локальные имена сайта
+  local out
+  s19_prepare s256
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'REC_SUBAGENT_НЕТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "256 правка 19: штатный предикат ридера не встал (rec)"; return
+  fi
+  ok "256 правка 19: фикстура берёт cl и G, rec=1"
+}
+
+scenario_257() {   # та же фикстура: конъюнкт гейта на месте
+  local out
+  s19_prepare s257
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'REC_GATE_НЕТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "257 правка 19: конъюнкт гейта не в выражении"; return
+  fi
+  ok "257 правка 19: конъюнкт гейта в предикате, rec=1"
+}
+
+scenario_258() {   # имена сайта, не имена ридера
+  local out
+  s19_prepare s258
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'REC_ИМЕНА_РИДЕРА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "258 правка 19: выражение взяло имена ридера, а не сайта"; return
+  fi
+  ok "258 правка 19: алиасы сайта cl и G, rec=1"
+}
+
+scenario_259() {   # в модуле сайта нет импорта классификатора
+  local out
+  s19_prepare s259
+  s19_mut_fixture 'import\{gt as G,cl\}' 'import{gt as G}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ИМПОРТ_НЕ_ОТКАЗАН' "$out")" || true
+  if [[ "$out" != *"is not imported"* ]]; then
+    bad "259 правка 19: пропажа импорта классификатора не названа"; return
+  fi
+  ok "259 правка 19: нет импорта классификатора -- «is not imported»"
+}
+
+scenario_260() {   # два спецификатора того же экспорта
+  local out
+  s19_prepare s260
+  s19_mut_fixture 'import\{gt as G,cl\}' 'import{gt as G,cl,cl as cl2}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СЧЁТ_НЕ_ОТКАЗАН' "$out")" || true
+  if [[ "$out" != *"imported 2 times"* ]]; then
+    bad "260 правка 19: два импорта одного экспорта не названы числом"; return
+  fi
+  ok "260 правка 19: два спецификатора -- «imported 2 times»"
+}
+
+scenario_261() {   # var cl после сплайса, внутри конструкции
+  local out
+  s19_prepare s261
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}var cl=1;}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СВЯЗКА_ПОСЛЕ_СПЛАЙСА' "$out")" || true
+  if [[ "$out" != *"bound or referenced"* ]]; then
+    bad "261 правка 19: объявление после сплайса не поймано сканом"; return
+  fi
+  ok "261 правка 19: var cl после сплайса -- «bound or referenced»"
+}
+
+scenario_262() {   # параметр стрелки (cl)=> внутри конструкции
+  local out
+  s19_prepare s262
+  s19_mut_fixture 'var __lx=' '(cl)=>0;var __lx='
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СТРЕЛКА_НЕ_ОТКАЗАНА' "$out")" || true
+  if [[ "$out" != *"bound or referenced"* ]]; then
+    bad "262 правка 19: параметр стрелки не пойман сканом"; return
+  fi
+  ok "262 правка 19: (cl)=> -- «bound or referenced»"
+}
+
+scenario_263() {   # заголовок не async function*
+  local out
+  s19_prepare s263
+  s19_mut_fixture 'async function\*KS' 'function KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ЗАГОЛОВОК_НЕ_ОТКАЗАН' "$out")" || true
+  if [[ "$out" != *"not an async generator taking"* ]]; then
+    bad "263 правка 19: чужой заголовок не отказывает"; return
+  fi
+  ok "263 правка 19: не async function* -- «not an async generator taking»"
+}
+
+scenario_264() {   # маркер есть, предиката ридера нет
+  local out
+  s19_prepare s264
+  s19_mut_fixture 'function Rd\(e,n,r\)\{return e\?\.type==="assistant"' 'function Rd(){return 0}/*'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'РИДЕР_НЕ_СЧЁЛСЯ' "$out")" || true
+  if [[ "$out" != *"expected exactly one predicate, found 0"* ]]; then
+    bad "264 правка 19: ноль предикатов ридера не назван"; return
+  fi
+  ok "264 правка 19: ридера нет -- «expected exactly one predicate, found 0»"
+}
+
+scenario_265() {   # plain: начисление только за концом конструкции
+  local out
+  s19_prepare s265
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}}}
+cr!=="credited")cr="credited",acc+=p.querySource;'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ОКНО_СВИДЕТЕЛЯ' "$out")" || true
+  if [[ "$out" != *"no usage accrual"* ]]; then
+    bad "265 правка 19: начисление за концом конструкции не отказывает"; return
+  fi
+  ok "265 правка 19: свидетель за конструкцией -- «no usage accrual»"
+}
+
+scenario_266() {   # лексер держит regex с } в классе и шаблон
+  local out
+  s19_prepare s266
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ЛЕКСЕР_СЛОМАН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "266 правка 19: regex и шаблон перед сплайсом уронили шаг"; return
+  fi
+  ok "266 правка 19: regex /[}]/ и шаблон перед сплайсом, rec=1"
+}
+
+scenario_267() {   # ++ жуётся одним токеном: деление после него не regex
+  local out
+  s19_prepare s267
+  s19_mut_fixture 'var __lx=' '__i++/__k;var cl=9;f(__a/__b);var __lx='
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПЛЮС_НЕ_ЖУЁТСЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"bound or referenced"* ]]; then
+    bad "267 правка 19: ++ не жуётся одним токеном -- деление съело объявление cl"; return
+  fi
+  ok "267 правка 19: ++ один токен, деление после него видит var cl"
+}
+
+scenario_268() {   # -- жуётся одним токеном: симметрия ++
+  local out
+  s19_prepare s268
+  s19_mut_fixture 'var __lx=' '__i--/__k;var cl=9;f(__a/__b);var __lx='
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'МИНУС_НЕ_ЖУЁТСЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"bound or referenced"* ]]; then
+    bad "268 правка 19: -- не жуётся одним токеном -- деление съело объявление cl"; return
+  fi
+  ok "268 правка 19: -- один токен, деление после него видит var cl"
+}
+
+scenario_269() {   # } объектного литерала не позиция стейтмента
+  local out
+  s19_prepare s269
+  s19_mut_fixture 'var __lx=' 'var __x={}/__k;var cl=9;f(__a/__b);var __lx='
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ЛИТЕРАЛ_ПРИНЯТ_ЗА_БЛОК' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"bound or referenced"* ]]; then
+    bad "269 правка 19: } литерала решает делением, а не всегда regex"; return
+  fi
+  ok "269 правка 19: } литерала -- деление, var cl виден"
+}
+
+scenario_270() {   # } блока стейтмента открывает regex /[}]/
+  local out
+  s19_prepare s270
+  s19_mut_fixture 'var __lx=' ';{}/[}]/.test(__s);var __lx='
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'БЛОК_ПРИНЯТ_ЗА_ЛИТЕРАЛ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "270 правка 19: } блока стейтмента обязан открывать regex"; return
+  fi
+  ok "270 правка 19: } блока -- regex, /[}]/ жив, rec=1"
+}
+
+scenario_271() {   # function*cl(){} -- определение, не вызов
+  local out
+  s19_prepare s271
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}function*cl(){};}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ОПРЕДЕЛЕНИЕ_ПРИНЯТО_ЗА_ВЫЗОВ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"bound or referenced"* ]]; then
+    bad "271 правка 19: определение после парной скобки не отличается от вызова"; return
+  fi
+  ok "271 правка 19: function*cl(){} -- определение, «bound or referenced»"
+}
+
+scenario_272() {   # комментарий между именем и скобкой не режет вызов
+  local out
+  s19_prepare s272
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}cl/* note */(p.querySource);}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'КОММЕНТАРИЙ_РЕЖЕТ_ВЫЗОВ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "272 правка 19: следующий токен после cl обязан быть (, а не сырой символ"; return
+  fi
+  ok "272 правка 19: комментарий между cl и ( не прячет вызов, rec=1"
+}
+
+scenario_273() {   # импорт внутри строки не разбирается как импорт
+  local out
+  s19_prepare s273
+  s19_mut_fixture 'import\{gt as G,cl\}from"/\$bunfs/root/chunk-f\.js";' 'import{gt as G}from"/$bunfs/root/chunk-f.js";var __s='"'"'import{cl}from"/$bunfs/root/chunk-f.js";'"'"';'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ИМПОРТ_ИЗ_СТРОКИ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"is not imported"* ]]; then
+    bad "273 правка 19: импорт в строковом литерале не должен разбираться"; return
+  fi
+  ok "273 правка 19: импорт в строке отбит состоянием лексера"
+}
+
+scenario_274() {   # форма с default-группой: import __d,{...}from"..."
+  local out
+  s19_prepare s274
+  s19_mut_fixture 'import\{gt as G,cl\}from' 'import __d,{gt as G,cl}from'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДЕФОЛТ_ГРУППА_СНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "274 правка 19: default-группа обязана быть в форме импорта"; return
+  fi
+  ok "274 правка 19: import __d,{...} разбирается, rec=1"
+}
+
+scenario_275() {   # форма с пробелами: import { gt as G, cl } from "..."
+  local out
+  s19_prepare s275
+  s19_mut_fixture 'import\{gt as G,cl\}from"/\$bunfs/root/chunk-f\.js";' 'import { gt as G, cl } from "/$bunfs/root/chunk-f.js";'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛЫ_ИМПОРТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"rec=1"* ]]; then
+    bad "275 правка 19: пробелы вокруг from и спецификаторов поддерживаются"; return
+  fi
+  ok "275 правка 19: импорт с пробелами разбирается, rec=1"
+}
+
+scenario_276() {   # сайт везёт только namespace-импорт -- свой отказ
+  local out
+  s19_prepare s276
+  s19_mut_fixture 'import\{gt as G,cl\}from"/\$bunfs/root/chunk-f\.js";' 'import*as NS from"/$bunfs/root/chunk-f.js";'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ТОЛЬКО_NAMESPACE_НЕ_НАЗВАН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"only as a namespace import"* ]]; then
+    bad "276 правка 19: namespace-импорт сайта не назван своей формой"; return
+  fi
+  ok "276 правка 19: только namespace -- «only as a namespace import»"
+}
+
+scenario_277() {   # ридер везёт default-импорт -- свой отказ
+  local out
+  s19_prepare s277
+  s19_mut_fixture 'import\{cl as Q,gt\}from"/\$bunfs/root/chunk-f\.js";' 'import Q from"/$bunfs/root/chunk-f.js";import{gt}from"/$bunfs/root/chunk-f.js";'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДЕФОЛТ_РИДЕРА_НЕ_НАЗВАН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"is a default import"* ]]; then
+    bad "277 правка 19: default-импорт ридера не назван своей формой"; return
+  fi
+  ok "277 правка 19: default у ридера -- «is a default import»"
+}
+
+scenario_278() {   # второй ридер той же формы -- отказ числом
+  local out
+  s19_prepare s278
+  s19_mut_fixture 'gt\("tengu_truncated_response_recovery",!0\)\}' 'gt("tengu_truncated_response_recovery",!0)}function Rd2(e2,n2,r2){return e2?.type==="assistant"&&e2.isApiErrorMessage===!0&&e2.truncatedAfterOutput===!0&&(Q(r2)==="subagent"||Q(r2)==="main"&&n2.options.isNonInteractiveSession)&&gt("tengu_truncated_response_recovery",!0)}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДВА_РИДЕРА_НЕ_СЧИТАЮТСЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"expected exactly one predicate, found 2"* ]]; then
+    bad "278 правка 19: два предиката ридера не названы числом"; return
+  fi
+  ok "278 правка 19: второй ридер -- «found 2»"
+}
+
+scenario_279() {   # plain: начисление только внутри вложенной функции
+  local out
+  s19_prepare s279
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}var __f=function(p){if(cr!=="credited")cr="credited",acc+=p.querySource;};}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ВЛАДЕЛЕЦ_СВИДЕТЕЛЯ_СНЯТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"no usage accrual owned by"* ]]; then
+    bad "279 правка 19: свидетель обязан принадлежать самой конструкции"; return
+  fi
+  ok "279 правка 19: начисление во вложенной функции не свидетель -- «owned by»"
+}
+
+scenario_280() {   # var __z=0,p=1 внутри -- повторное объявление
+  local out
+  s19_prepare s280
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}var __z=0,p=1;}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПОВТОРНОЕ_ОБЪЯВЛЕНИЕ_НЕ_ПОЙМАНО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"declares p again"* ]]; then
+    bad "280 правка 19: декларатор p в списке var не пойман"; return
+  fi
+  ok "280 правка 19: var __z=0,p=1 -- «declares p again»"
+}
+
+scenario_281() {   # try{}catch(p){} внутри -- catch-параметр
+  local out
+  s19_prepare s281
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}try{}catch(p){}}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'CATCH_НЕ_ПОЙМАН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"catch binds p"* ]]; then
+    bad "281 правка 19: параметр catch не пойман"; return
+  fi
+  ok "281 правка 19: catch(p) -- «catch binds p»"
+}
+
+scenario_282() {   # p=__q; внутри -- переприсваивание
+  local out
+  s19_prepare s282
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}p=__q;}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПЕРЕЗАПИСЬ_НЕ_ПОЙМАНА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"rebinds p"* ]]; then
+    bad "282 правка 19: присваивание p не поймано"; return
+  fi
+  ok "282 правка 19: p=__q -- «rebinds p»"
+}
+
+scenario_283() {   # p.querySource="x"; внутри -- запись поля
+  local out
+  s19_prepare s283
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}p.querySource="x";}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ЗАПИСЬ_ПОЛЯ_НЕ_ПОЙМАНА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"writes p.querySource"* ]]; then
+    bad "283 правка 19: запись поля не поймана"; return
+  fi
+  ok "283 правка 19: p.querySource= -- «writes p.querySource»"
+}
+
+scenario_284() {   # ридер импортирует cl as Q дважды -- отказ числом
+  local out
+  s19_prepare s284
+  s19_mut_fixture 'import\{cl as Q,gt\}from"/\$bunfs/root/chunk-f\.js";' 'import{cl as Q,cl as Q,gt}from"/$bunfs/root/chunk-f.js";'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДУБЛЬ_РИДЕРА_НЕ_СЧИТАН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"imported 2 times"* ]]; then
+    bad "284 правка 19: дубль импорта у ридера не назван числом"; return
+  fi
+  ok "284 правка 19: cl as Q дважды -- «imported 2 times»"
+}
+
+scenario_285() {   # начисление читает чужой объект -- заземление отказывает
+  local out
+  s19_prepare s285
+  s19_mut_fixture 'acc\+=p\.querySource;break e\}' 'acc+=q.querySource;break e}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ЗАЗЕМЛЕНИЕ_СНЯТО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"is not the one the accrual reads"* ]]; then
+    bad "285 правка 19: захваченный объект не тот, что читает начисление"; return
+  fi
+  ok "285 правка 19: acc+=q.querySource -- «not the one the accrual reads»"
+}
+
+scenario_286() {   # обе формы региона совпали -- отказ двойной формы
+  local out
+  s19_prepare s286
+  s19_mut_fixture 'acc\+=p\.querySource;break e\}' 'acc+=p.querySource+f({});break e}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДВОЙНАЯ_ФОРМА_НЕ_СЧИТАЕТСЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"both the inline-accrual and the plain form match"* ]]; then
+    bad "286 правка 19: совпадение обеих форм региона не названо"; return
+  fi
+  ok "286 правка 19: обе формы -- «both ... match»"
+}
+
+scenario_287() {   # заголовок без p -- свой отказ параметра
+  local out
+  s19_prepare s287
+  s19_mut_fixture 'async function\*KS\(a,b,p\)' 'async function*KS(a,b,q)'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПАРАМЕТР_НЕ_ПРОВЕРЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"does not take 'p' as a parameter"* ]]; then
+    bad "287 правка 19: чужой параметр не отказывает своим текстом"; return
+  fi
+  ok "287 правка 19: (a,b,q) -- «does not take 'p' as a parameter»"
+}
+
+scenario_288() {   # незакрытая строка в модуле сайта -- самопроверка глубины
+  local out
+  s19_prepare s288
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}}}var __u='"'"''
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ГЛУБИНА_НЕ_ПРОВЕРЯЕТСЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"lexer depth did not return to 0"* ]]; then
+    bad "288 правка 19: незакрытая строка не поймана самопроверкой"; return
+  fi
+  ok "288 правка 19: незакрытая строка -- «lexer depth did not return to 0»"
+}
+
+scenario_289() {   # константа телеметрии в состоянии шаблона -- свой отказ
+  local out
+  s19_prepare s289
+  s19_mut_fixture 'var __tp=`\$\{'"'"'\}'"'"'\}\`;' 'var __tp=0;'
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'var __w=`;async function*KS(a,b,p){'
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}}}`'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СОСТОЯНИЕ_КОНСТАНТЫ_НЕ_ПРОВЕРЕНО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"lexer state at the telemetry constant is"* ]]; then
+    bad "289 правка 19: состояние лексера у константы не названо"; return
+  fi
+  ok "289 правка 19: константа в шаблоне -- «state at the telemetry constant»"
+}
+
+scenario_290() {   # регион в состоянии шаблона -- свой отказ
+  local out
+  s19_prepare s290
+  s19_mut_fixture '\)\{,yield ar\(' '){`,yield ar('
+  s19_mut_fixture 'acc\+=p\.querySource;break e\}' 'acc+=p.querySource`;break e}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СОСТОЯНИЕ_РЕГИОНА_НЕ_ПРОВЕРЕНО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"lexer state at the partial-finalize region is"* ]]; then
+    bad "290 правка 19: состояние лексера у региона не названо"; return
+  fi
+  ok "290 правка 19: регион в шаблоне -- «state at the partial-finalize region»"
+}
+
+scenario_291() {   # константа вне объемлющей конструкции -- свой отказ
+  local out
+  s19_prepare s291
+  s19_mut_fixture 'throw tel\("tengu_streaming_fallback_to_non_streaming"' 'throw telX("tengu_streaming_other_constant"'
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' ';{,yield ar({content:"partial text",error:"server_error",truncatedAfterOutput:ta&&!it?!0:void 0}),cr!=="credited")cr="credited",acc+=p.querySource;break e}throw z("tengu_streaming_fallback_to_non_streaming",{model:St(p.model),error:NN,attemptNumber:hf,any_stream_event_yielded:nc}),Iw;{h({}),Iw};async function*KS(a,b,p){'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ГРАНИЦА_КОНСТРУКЦИИ_НЕ_ПРОВЕРЕНА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"the telemetry constant is outside the enclosing construct"* ]]; then
+    bad "291 правка 19: константа вне конструкции не названа"; return
+  fi
+  ok "291 правка 19: константа за блоком -- «outside the enclosing construct»"
+}
+
+scenario_292() {   # if (!found): регион не покрыт парой глубины 0
+  # CONSTRAINT: лишняя '}' перед регионом уводит глубину ниже 0, поэтому
+  # закрытие объекта content не возвращает её в 0 и found остаётся null;
+  # хвостовые '{' возвращают счётчик в 0, иначе самопроверка глубины стреляет раньше.
+  local out
+  s19_prepare s292
+  s19_mut_fixture '\{,yield ar\(' '{}}}}},yield ar('
+  s19_mut_fixture 'Iw\}\}\}' 'Iw}{{{'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'КОНСТРУКЦИЯ_НЕ_НАЙДЕНА' "$out")" || true
+  if [[ "$out" != *"not an async generator taking"* ]]; then
+    bad "292 правка 19: регион вне конструкции не отказывает"; return
+  fi
+  ok "292 правка 19: found пуст -- «not an async generator taking»"
+}
+
+scenario_293() {   # backoff-хелпер не матчится -- свой отказ
+  local out
+  s19_prepare s293
+  s19_mut_fixture 'function bk\(n,c,j=32000\)' 'function bk(n,c,j=1)'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'BACKOFF_НЕ_НАЙДЕН' "$out")" || true
+  if [[ "$out" != *"shared retry backoff helper not found"* ]]; then
+    bad "293 правка 19: пропажа backoff-хелпера не названа"; return
+  fi
+  ok "293 правка 19: нет хелпера -- «shared retry backoff helper not found»"
+}
+
+scenario_294() {   # switch(q){default:} и /{/ перед конструкцией -- шаг применяется
+  # CONSTRAINT: '/' после '}' открывает regex только когда '}' закрыл блок
+  # оператора: цепочка headerClose у ')' (tweakcc-patch.js:2208, :2215) ->
+  # stmtPos у '{' (:2197) -> stmtClose у '}' -> decideSlash (:2095), и живёт
+  # она на 'switch' в HEADER_KW (:2061). Без слова фрагмент читается
+  # делением, и самопроверка глубины отказывает (матрица: probe-fixtures-2.js,
+  # logs-FIX-STEP19-3/probe-fixtures-2.log).
+  local out
+  s19_prepare s294
+  s19_mut_fixture 'async function\*KS' 'switch(q){default:}/{/.test(q);async function*KS'
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'SWITCH_ЗАГОЛОВОК_СЪЕХАЛ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    bad "294 правка 19: switch(q)-заголовок перед конструкцией уронил шаг"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    bad "294 правка 19: switch(q)-заголовок перед конструкцией не врезал ветку броска"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "294 правка 19: телеметрия после врезки со switch(q)-заголовком не побайтово та же"; return
+  fi
+  ok "294 правка 19: switch-заголовок и /{/ перед конструкцией -- шаг применяется"
+}
+
+scenario_295() {   # try{}catch(q){} и /{/ перед конструкцией -- шаг применяется
+  # CONSTRAINT: та же цепочка stmtClose (tweakcc-patch.js:2208, :2215, :2197,
+  # :2095), но держится она на 'catch' в HEADER_KW (:2061) -- мутация
+  # однопеременная: 376 снимает только 'switch', 377 только 'catch'.
+  local out
+  s19_prepare s295
+  s19_mut_fixture 'async function\*KS' 'try{}catch(q){}/{/.test(q);async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'CATCH_ЗАГОЛОВОК_СЪЕХАЛ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    bad "295 правка 19: catch(q)-заголовок перед конструкцией уронил шаг"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    bad "295 правка 19: catch(q)-заголовок перед конструкцией не врезал ветку броска"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "295 правка 19: телеметрия после врезки с catch(q)-заголовком не побайтово та же"; return
+  fi
+  ok "295 правка 19: catch-заголовок и /{/ перед конструкцией -- шаг применяется"
+}
+
+scenario_305() {   # правка 19: typeof после spread и /{/ перед конструкцией -- шаг применяется
+  # CONSTRAINT: spread '...' раскладывается тремя '.'-токенами, и охранка
+  # idBefore2 (tweakcc-patch.js, ветка id-токена лексера шага 19) оставляет ключевое слово после него
+  # ключевым: '/' открывает regex и самопроверка глубины держится; без охранки
+  # /{/ читается делением -- «lexer depth did not return to 0» (мутация 389
+  # снимает ровно охранку).
+  local out
+  s19_prepare s305
+  s19_mut_fixture 'async function\*KS' 'q=[...typeof /{/];async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'SPREAD_КЛЮЧЕВОЕ_СЛОВО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    bad "305 правка 19: typeof после spread перед конструкцией уронил шаг"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    bad "305 правка 19: typeof после spread не врезал ветку броска"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "305 правка 19: телеметрия после врезки с typeof после spread не побайтово та же"; return
+  fi
+  ok "305 правка 19: typeof после spread и /{/ перед конструкцией -- шаг применяется"
+}
+
+scenario_296() {   # a.catch(b)/2 перед конструкцией: catch -- имя свойства, не заголовок
+  local out
+  s19_prepare s296
+  s19_mut_fixture 'async function\*KS' 'var __c=a.catch(b)/2;var __d={c:1};async function*KS'
+  # Драйвер шага обязан выйти нулём в любом исходе (отказы он печатает текстом,
+  # а не кодом); вердикт ниже читает только текст вывода.
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'CATCH_СВОЙСТВО_ПРИНЯТО_ЗА_ЗАГОЛОВОК' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    bad "296 правка 19: a.catch(b) перед конструкцией уронил шаг"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    bad "296 правка 19: a.catch(b) перед конструкцией не врезал ветку броска"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "296 правка 19: телеметрия после врезки с a.catch(b) не побайтово та же"; return
+  fi
+  ok "296 правка 19: a.catch(b)/2 перед конструкцией -- шаг применяется"
+}
+
+scenario_297() {   # a?.catch(b)/2 перед конструкцией: '?.' тоже позиция свойства
+  local out
+  s19_prepare s297
+  s19_mut_fixture 'async function\*KS' 'var __c=a?.catch(b)/2;var __d={c:1};async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'OPT_CATCH_СВОЙСТВО_ПРИНЯТО_ЗА_ЗАГОЛОВОК' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    bad "297 правка 19: a?.catch(b) перед конструкцией уронил шаг"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    bad "297 правка 19: a?.catch(b) перед конструкцией не врезал ветку броска"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "297 правка 19: телеметрия после врезки с a?.catch(b) не побайтово та же"; return
+  fi
+  ok "297 правка 19: a?.catch(b)/2 перед конструкцией -- шаг применяется"
+}
+
+scenario_298() {   # a.return/2 перед конструкцией: return -- имя свойства, не ключевое слово
+  local out
+  s19_prepare s298
+  s19_mut_fixture 'async function\*KS' 'var __c=a.return/2;var __d={c:1};async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'RETURN_СВОЙСТВО_ПРИНЯТО_ЗА_СЛОВО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    bad "298 правка 19: a.return перед конструкцией уронил шаг"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    bad "298 правка 19: a.return перед конструкцией не врезал ветку броска"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "298 правка 19: телеметрия после врезки с a.return не побайтово та же"; return
+  fi
+  ok "298 правка 19: a.return/2 перед конструкцией -- шаг применяется"
+}
+
+scenario_299() {   # второй сайт бюджета рядом с первым -- дверь единственности 1
+  local out
+  s19_prepare s299
+  s19_mut_fixture 'async function\*KS' 'var q9=3,c9={value:0},s9=2,t9=0,r9=0,f9=!1,i9=1,v9=0,z9=0;async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'БЮДЖЕТ_НЕ_ЕДИНСТВЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"streaming retry budgets: expected exactly one site, found 2"* ]]; then
+    bad "299 правка 19: второй бюджетный сайт не назван числом"; return
+  fi
+  ok "299 правка 19: два бюджета -- «expected exactly one site, found 2»"
+}
+
+scenario_300() {   # второй сайт ожидания рядом с первым -- дверь единственности 2
+  local out
+  s19_prepare s300
+  s19_mut_fixture 'async function\*KS' 'function w9(){if(r9=null,!v9)await sl(100*t9,sig);continue e}async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ОЖИДАНИЕ_НЕ_ЕДИНСТВЕННО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"streaming retry wait: expected exactly one site, found 2"* ]]; then
+    bad "300 правка 19: второй сайт ожидания не назван числом"; return
+  fi
+  ok "300 правка 19: два ожидания -- «expected exactly one site, found 2»"
+}
+
+scenario_301() {   # второй потолок той же формы -- дверь единственности 3, счёт по формам
+  local out
+  s19_prepare s301
+  s19_mut_fixture 'async function\*KS' 'function c9(){let k9=mr();if(n9&&o9===null&&u9<k9){}}async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПОТОЛОК_ДВАЖДЫ_ОДНОЙ_ФОРМЫ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"found 2 (single budget) + 0 (truncation split)"* ]]; then
+    bad "301 правка 19: два потолка одной формы не названы по формам"; return
+  fi
+  ok "301 правка 19: две single-формы -- «found 2 (single budget) + 0 (truncation split)»"
+}
+
+scenario_302() {   # потолок в обеих формах сразу -- дверь единственности 3, вторая ветвь счёта
+  local out
+  s19_prepare s302
+  s19_mut_fixture 'async function\*KS' 'function c9(){let t9=e9?.code==="StreamTruncated",k9=t9?m9:mr();if(n9&&o9===null&&(t9?x9:u9)<k9){}}async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПОТОЛОК_В_ОБЕИХ_ФОРМАХ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"found 1 (single budget) + 1 (truncation split)"* ]]; then
+    bad "302 правка 19: потолок в обеих формах не назван по формам"; return
+  fi
+  ok "302 правка 19: single+split -- «found 1 (single budget) + 1 (truncation split)»"
+}
+
+scenario_303() {   # второй гейт thinking-only -- дверь единственности 4
+  local out
+  s19_prepare s303
+  s19_mut_fixture 'async function\*KS' 'function g9(){if(!h9&&s9===null&&(a9?b9<c9:d9<e9)){}}async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ГЕЙТ_НЕ_ЕДИНСТВЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"thinking-only retry gate: expected exactly one site, found 2"* ]]; then
+    bad "303 правка 19: второй thinking-only гейт не назван числом"; return
+  fi
+  ok "303 правка 19: два гейта -- «expected exactly one site, found 2»"
+}
+
+scenario_304() {   # прибор образа шага 19: пул, кодовый непарный сайт, окно > 240
+  local out rc
+  out=$(python3 "$K/tools/step19-image-check.py" --self-test 2>&1); rc=$?
+  LAST_EVID="ПРИБОР_ОБРАЗА_СЛЕП :: $out"
+  if (( rc != 0 )) || [[ "$out" != *"SELFTEST ok 22"* ]]; then
+    bad "304 прибор образа шага 19: самопроверка не прошла"; return
+  fi
+  ok "304 прибор образа шага 19: окно, кэп и имена -- двадцать две фикстуры"
+}
+
+scenario_306() {   # прибор образа шага 19: образ без маркеров -- отказ 2; байткод в кит не пишется
+  local out rc d
+  d=$(mktemp -d "$ROOT/s306.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 306\n' >&2; exit 2; }
+  mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 306\n' >&2; exit 2; }
+  cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 306 не скопирован\n' >&2; exit 2; }
+  printf 'x' > "$d/p"; printf 'y' > "$d/a"
+  out=$(env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX STEP19_KIT="$d/kit" python3 "$K/tools/step19-image-check.py" "$d/p" "$d/a" S306 2>&1); rc=$?
+  LAST_EVID="БЕЗ_МАРКЕРОВ_НЕ_ОТКАЗ :: rc=$rc $out"
+  if (( rc != 2 )) || [[ "$out" != *"no module boundary markers"* ]]; then
+    bad "306 прибор образа шага 19: образ без маркеров не отказан кодом 2"; return
+  fi
+  if [[ -d "$d/kit/tools/__pycache__" ]]; then
+    LAST_EVID="ПИШЕТ_БАЙТКОД :: $(ls "$d/kit/tools/__pycache__")"
+    bad "306 прибор образа шага 19: загрузка heredoc-anchor оставила __pycache__ в ките"; return
+  fi
+  ok "306 прибор образа шага 19: без маркеров -- отказ 2, байткода в ките нет"
+}
+
+scenario_307() {   # прибор образа шага 19: отказ анализа -- код 2, не вердикт 1
+  local out rc d n
+  d=$(mktemp -d "$ROOT/s307.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 307\n' >&2; exit 2; }
+  mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 307\n' >&2; exit 2; }
+  cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 307 не скопирован\n' >&2; exit 2; }
+  n=$(perl -0ne 'my $c = () = /def _stream_recoverable_cond\(\):.*?(?=\ndef _stream_finalize_ok)/gs; print $c' "$d/kit/claude-patch-all.sh") || true
+  if [[ "$n" != "1" ]]; then
+    printf 'ПРИБОР НЕДОСТУПЕН: якорь _stream_recoverable_cond в конвейере встречен %s раз, нужна одна\n' "$n" >&2; exit 2
+  fi
+  perl -0pi -e 's/(def _stream_recoverable_cond\(\):).*?(?=\ndef _stream_finalize_ok)/$1\n    return "("\n/s' "$d/kit/claude-patch-all.sh"
+  # Фикстуры заведомо измеримы (пристин single, патченный single с бюджетом, маркер
+  # границ есть): отказ обязан родиться в анализе имён -- cond не компилируется.
+  printf 'let cap=mr();if(conn&&stop===null&&tries<cap){' > "$d/p"
+  printf '\n/*__tweakcc_module_boundary_1__*/\nq=300,r=0,s=0,t=!1,u=300,v=0,if(conn&&stop===null&&tries<Math.max(cap,300)){' > "$d/a"
+  out=$(env -u PYTHONPYCACHEPREFIX STEP19_KIT="$d/kit" python3 "$K/tools/step19-image-check.py" "$d/p" "$d/a" S307 2>&1); rc=$?
+  LAST_EVID="АНАЛИЗ_ОТКАЗ_КОД_2 :: rc=$rc $out"
+  if (( rc != 2 )) || [[ "$out" != *"analysis failed: "* ]]; then
+    bad "307 прибор образа шага 19: отказ анализа не доехал кодом 2 со словами analysis failed"; return
+  fi
+  ok "307 прибор образа шага 19: отказ анализа -- код 2, не вердикт"
+}
+
+scenario_308() {   # правка 6b: пара бюджета и сплит-потолок -- шаг применён, бюджет назван
+  local out
+  s19_prepare s308
+  s19_mut_fixture 'cr=0,fl=!1' 'cr=0,tm=1,tc=0,fl=!1'
+  s19_mut_fixture 'let cap=mr\(\);if\(conn&&stop===null&&tries<cap\)\{' 'let isTr=er?.code==="StreamTruncated",cap=isTr?tm:mr();if(conn&&stop===null&&(isTr?tc:tries)<cap){'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СПЛИТ_ФОРМА_ПРИМЕНЕНА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" == *"СРЕЗ_НЕ_НАЙДЕН"* ]]; then
+    bad "308 правка 6b: пара+сплит уронили или окрасили шаг"; return
+  fi
+  if [[ "$out" != *"spliced=1"* ]]; then
+    bad "308 правка 6b: сплит-форма не врезала ветку броска"; return
+  fi
+  if [[ "$out" != *"tail=1"* ]]; then
+    LAST_EVID="ХВОСТ_ИСПОРЧЕН :: $out"
+    bad "308 правка 6b: телеметрия после сплит-врезки не побайтово та же"; return
+  fi
+  if [[ "$out" != *"the StreamTruncated budget 'tm' -> 300"* ]]; then
+    bad "308 правка 6b: успех не назвал бюджет 'tm' в применённой строке"; return
+  fi
+  ok "308 правка 6b: пара+сплит -- шаг применён, бюджет 'tm' назван в успехе"
+}
+
+scenario_309() {   # правка 6b: сплит-потолок без пары бюджета -- отказ с обеими частями
+  local out
+  s19_prepare s309
+  s19_mut_fixture 'let cap=mr\(\);if\(conn&&stop===null&&tries<cap\)\{' 'let isTr=er?.code==="StreamTruncated",cap=isTr?tm:mr();if(conn&&stop===null&&(isTr?tc:tries)<cap){'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СПЛИТ_БЕЗ_БЮДЖЕТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"the StreamTruncated budget is absent, the truncation-split cap present"* ]]; then
+    bad "309 правка 6b: сплит без бюджета не назван отказом"; return
+  fi
+  ok "309 правка 6b: сплит без бюджета -- «budget is absent, cap present»"
+}
+
+scenario_310() {   # правка 6b: пара бюджета без сплит-потолка -- отказ, имя бюджета названо
+  local out
+  s19_prepare s310
+  s19_mut_fixture 'cr=0,fl=!1' 'cr=0,tm=1,tc=0,fl=!1'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'БЮДЖЕТ_БЕЗ_СПЛИТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"the StreamTruncated budget is 'tm', the truncation-split cap absent"* ]]; then
+    bad "310 правка 6b: бюджет без сплита не назван отказом"; return
+  fi
+  ok "310 правка 6b: бюджет без сплита -- «budget is 'tm', cap absent»"
+}
+
+scenario_311() {   # правка 6b: сплит-потолок читает чужое имя -- отказ с обоими именами
+  local out
+  s19_prepare s311
+  s19_mut_fixture 'cr=0,fl=!1' 'cr=0,tm=1,tc=0,fl=!1'
+  s19_mut_fixture 'let cap=mr\(\);if\(conn&&stop===null&&tries<cap\)\{' 'let isTr=er?.code==="StreamTruncated",cap=isTr?tm:mr();if(conn&&stop===null&&(isTr?tc:tries)<cap){'
+  s19_mut_fixture 'isTr\?tm:' 'isTr?tx:'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СПЛИТ_ЧУЖОЕ_ИМЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"the split cap reads 'tx', not the StreamTruncated budget 'tm'"* ]]; then
+    bad "311 правка 6b: чужое имя в сплите не названо отказом"; return
+  fi
+  ok "311 правка 6b: сплит читает 'tx' -- «reads 'tx', not the StreamTruncated budget 'tm'»"
+}
+
+scenario_312() {   # правка 6b: третий читатель tm в модуле бюджета -- отказ с числом
+  local out
+  s19_prepare s312
+  s19_mut_fixture 'cr=0,fl=!1' 'cr=0,tm=1,tc=0,fl=!1'
+  s19_mut_fixture 'let cap=mr\(\);if\(conn&&stop===null&&tries<cap\)\{' 'let isTr=er?.code==="StreamTruncated",cap=isTr?tm:mr();if(conn&&stop===null&&(isTr?tc:tries)<cap){'
+  s19_mut_fixture 'async function\*KS' 'function r9(){void tm}async function*KS'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ВТОРОЙ_ЧИТАТЕЛЬ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"occurs 3 times in its module, expected 2"* ]]; then
+    bad "312 правка 6b: третий читатель бюджета не назван числом"; return
+  fi
+  ok "312 правка 6b: третий читатель tm -- «occurs 3 times in its module, expected 2»"
+}
+
+scenario_313() {   # правка 6b: сплит-потолок вне модуля бюджета -- отказ с именем бюджета
+  local out
+  s19_prepare s313
+  s19_mut_fixture 'cr=0,fl=!1' 'cr=0,tm=1,tc=0,fl=!1'
+  s19_mut_fixture 'let cap=mr\(\);if\(conn&&stop===null&&tries<cap\)\{' 'if(conn){'
+  s19_mut_fixture 'function Rd\(' 'function c9(){let isTr=er?.code==="StreamTruncated",cap=isTr?tm:mr();if(conn&&stop===null&&(isTr?tc:tries)<cap){}}function Rd('
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СПЛИТ_ВНЕ_МОДУЛЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"the split cap is outside the module of the StreamTruncated budget 'tm'"* ]]; then
+    bad "313 правка 6b: сплит вне модуля бюджета не назван отказом"; return
+  fi
+  ok "313 правка 6b: сплит в чужом модуле -- «outside the module of the StreamTruncated budget 'tm'»"
 }
 
 scenario_214() {   # слой ВЫКЛЮЧЕН ручкой -- «нечего мерить», сравнения нет
@@ -10093,10 +10945,12 @@ MUT_CAUSE=(x
   # Правка 19 (#114): свой след на каждую дверь отказа локатора.
   'ВРЕЗКА_НЕ_ТА'
   'ЯКОРЬ_НЕ_СЧИТЕН'
-  'ОПТС_НЕ_ОТКАЗАН'
+  # FIX-STEP19-2: снятые guards 19-шага при новом коде падают позже по ходу
+  # (mOpts[1]/mThrown[1]/mRegion.index на null) -- причины МЕРЯНЫ прогоном.
+  'crash:TypeError Cannot read properties of null (reading '"'"'1'"'"')'
   'КОНТРОЛЬ_НЕ_ОТКАЗАН'
-  'БРОСОК_НЕ_НАЙДЕН'
-  'РЕГИОН_НЕ_ОТКАЗАН'
+  'crash:TypeError Cannot read properties of null (reading '"'"'1'"'"')'
+  'crash:TypeError Cannot read properties of null (reading '"'"'index'"'"')'
   'больше объявленного: конфликтных 3'
   # Волна 53 (доработка): след каждой мутации обёрток.
   'ОПЕРАТОР_ПЕРЕЗАПИСАН'
@@ -10357,6 +11211,436 @@ MUT_CAUSE+=(
 # Своей двери у него нет по устройству, а краснит его любая мутация, сделавшая
 # вердикт всегда-красным. Всякий ДРУГОЙ пробел -- недосмотр, и сверка ниже
 # превращает его в отказ, а не в тишину.
+
+# Правка 19, предикат ридера: по мутации на каждую новую дверь.
+# FIX-STEP19-2 (#490): 340 переехала на строки присваивания у вызова; 343/344
+# потеряли якоря (relRegion убран, called теперь по парной скобке) и меряют
+# прежние свойства новыми заменами.
+# CONSTRAINT: мутация, снимающая null-проверку результата match/exec,
+# объявляет CRASH:TypeError с текстом сообщения: метку отказа печатала сама снятая проверка.
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'querySource\)==="subagent"\|\|'
+  '&&\$\{GATEs\}\("tengu_truncated_response_recovery",!0\)'
+  'CLSs = names\.CLSs;\n      GATEs = names\.GATEs;'
+  'if \(found\.length === 0\) fail\(`\$\{exportName\} is not imported from \$\{path\} in the site module`\)'
+  'if \(found\.length !== 1\) fail\(`\$\{exportName\} imported \$\{found\.length\} times`\)'
+  'const constructRelEnd = built\.relEnd;'
+  'let called = false;'
+  'if \(!hm\) fail\(notGen\);'
+  'if \(hits\.length !== 1\)'
+  'if \(!mAcc\) fail\(\x27streaming partial-finalize: no usage accrual owned by \x27'
+  'const slashOpensRegex = decideSlash\(tokens\[tokens\.length - 1\]\);')
+MUT_REP+=(
+  'querySource)==="other"||'
+  ''
+  'CLSs = names.CLSr;
+      GATEs = names.GATEr;'
+  'if (found.length === -1) fail(`${exportName} is not imported from ${path} in the site module`)'
+  'if (false) fail(`${exportName} imported ${found.length} times`)'
+  'const constructRelEnd = built.relStart;'
+  'let called = true;'
+  'if (false) fail(notGen);'
+  'if (false)'
+  'if (false) fail('"'"'streaming partial-finalize: no usage accrual owned by '"'"''
+  'const slashOpensRegex = false;')
+MUT_SCENARIO+=(
+  '256'
+  '257'
+  '258'
+  '259'
+  '260'
+  '261'
+  '262'
+  '263'
+  '264'
+  '265'
+  '266')
+MUT_CAUSE+=(
+  'REC_SUBAGENT_НЕТ'
+  'REC_GATE_НЕТ'
+  'REC_ИМЕНА_РИДЕРА'
+  'ИМПОРТ_НЕ_ОТКАЗАН'
+  'СЧЁТ_НЕ_ОТКАЗАН'
+  'СВЯЗКА_ПОСЛЕ_СПЛАЙСА'
+  'СТРЕЛКА_НЕ_ОТКАЗАНА'
+  'crash:TypeError Cannot read properties of null (reading '"'"'2'"'"')'
+  'crash:TypeError Cannot read properties of undefined (reading '"'"'index'"'"')'
+  'crash:TypeError Cannot read properties of null (reading '"'"'3'"'"')'
+  'ЛЕКСЕР_СЛОМАН')
+
+# FIX-STEP19-2 (#490): по мутации на каждый новый сценарий 267-291.
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  '(c === \x27\+\x27 \|\| c === \x27-\x27)'
+  '(c === \x27\+\x27 \|\| c === \x27-\x27)'
+  'return !!prev.stmtClose;'
+  'return !!prev.stmtClose;'
+  'called = !isDefBrace;'
+  'toks\[i \+ 1\]'
+  'while \(\(m = rx\.exec\(modText\)\) !== null\) \{\n      if \(lx\.stateAt\(m\.index\) !== \x27code\x27\) continue;'
+  '\(\?:\(\[A-Za-z_\$\]\[\\w\$\]\*\)\\s\*,\\s\*\)\?'
+  '\}\\s\*from\\s\*'
+  'if \(sother\)'
+  'if \(rother\)'
+  'if \(hits\.length !== 1\)'
+  'constructOwns\(built, constStart \+ cand\.index - built\.modStart\)'
+  'if \(d1\)'
+  'if \(d2\)'
+  'if \(d3\)'
+  'if \(d4msg\)'
+  'if \(found\.length !== 1\) fail\(\x27truncation recovery reader: \x27'
+  'if \(!accExpr\.includes'
+  'if \(mRegionCredited && mRegionPlain\)'
+  '!names\.includes\(opts\)'
+  'if \(lx\.brace !== 0 \|\| lx\.mode !== \x27code\x27 \|\| lx\.interp !== 0 \|\| lx\.paren !== 0\)'
+  'if \(lx\.stateAt\(relConst\) !== \x27code\x27\)'
+  'if \(lx\.stateAt\(relRegion\) !== \x27code\x27\)'
+  'if \(relConst < found\.relStart \|\| relConst >= found\.relEnd\)')
+MUT_REP+=(
+  '(c === '"'"'-'"'"')'
+  '(c === '"'"'+'"'"')'
+  'return true;'
+  'return false;'
+  'called = true;'
+  'null'
+  'while ((m = rx.exec(modText)) !== null) {
+      if (false) continue;'
+  '(?:)'
+  '\}from'
+  'if (false)'
+  'if (false)'
+  'if (hits.length === 0)'
+  'true'
+  'if (false)'
+  'if (false)'
+  'if (false)'
+  'if (false)'
+  'if (false) fail('"'"'truncation recovery reader: '"'"''
+  'if (false && !accExpr.includes'
+  'if (false)'
+  'false'
+  'if (false)'
+  'if (false)'
+  'if (false)'
+  'if (false)')
+MUT_SCENARIO+=(
+  '267'
+  '268'
+  '269'
+  '270'
+  '271'
+  '272'
+  '273'
+  '274'
+  '275'
+  '276'
+  '277'
+  '278'
+  '279'
+  '280'
+  '281'
+  '282'
+  '283'
+  '284'
+  '285'
+  '286'
+  '287'
+  '288'
+  '289'
+  '290'
+  '291')
+MUT_CAUSE+=(
+  'ПЛЮС_НЕ_ЖУЁТСЯ'
+  'МИНУС_НЕ_ЖУЁТСЯ'
+  'ЛИТЕРАЛ_ПРИНЯТ_ЗА_БЛОК'
+  'БЛОК_ПРИНЯТ_ЗА_ЛИТЕРАЛ'
+  'ОПРЕДЕЛЕНИЕ_ПРИНЯТО_ЗА_ВЫЗОВ'
+  'КОММЕНТАРИЙ_РЕЖЕТ_ВЫЗОВ'
+  'ИМПОРТ_ИЗ_СТРОКИ'
+  'ДЕФОЛТ_ГРУППА_СНЯТА'
+  'ПРОБЕЛЫ_ИМПОРТА'
+  'ТОЛЬКО_NAMESPACE_НЕ_НАЗВАН'
+  'ДЕФОЛТ_РИДЕРА_НЕ_НАЗВАН'
+  'ДВА_РИДЕРА_НЕ_СЧИТАЮТСЯ'
+  'ВЛАДЕЛЕЦ_СВИДЕТЕЛЯ_СНЯТ'
+  'ПОВТОРНОЕ_ОБЪЯВЛЕНИЕ_НЕ_ПОЙМАНО'
+  'CATCH_НЕ_ПОЙМАН'
+  'ПЕРЕЗАПИСЬ_НЕ_ПОЙМАНА'
+  'ЗАПИСЬ_ПОЛЯ_НЕ_ПОЙМАНА'
+  'ДУБЛЬ_РИДЕРА_НЕ_СЧИТАН'
+  'ЗАЗЕМЛЕНИЕ_СНЯТО'
+  'ДВОЙНАЯ_ФОРМА_НЕ_СЧИТАЕТСЯ'
+  'ПАРАМЕТР_НЕ_ПРОВЕРЕН'
+  'ГЛУБИНА_НЕ_ПРОВЕРЯЕТСЯ'
+  'СОСТОЯНИЕ_КОНСТАНТЫ_НЕ_ПРОВЕРЕНО'
+  'СОСТОЯНИЕ_РЕГИОНА_НЕ_ПРОВЕРЕНО'
+  'ГРАНИЦА_КОНСТРУКЦИИ_НЕ_ПРОВЕРЕНА')
+
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'if \(!found\) fail\(notGen\);'
+  'if \(!backoffMatch\) fail\(\x27shared retry backoff helper not found\x27\);')
+MUT_REP+=(
+  'if (false) fail(notGen);'
+  'if (false) fail('"'"'shared retry backoff helper not found'"'"');')
+MUT_SCENARIO+=(
+  '292'
+  '293')
+MUT_CAUSE+=(
+  'crash:TypeError Cannot read properties of null (reading '"'"'relStart'"'"')'
+  'crash:TypeError Cannot read properties of null (reading '"'"'1'"'"')')
+
+# FIX-STEP19-3b (#490): зубы HEADER_KW. Мутация 376 снимает 'switch' --
+# красит 294; 377 снимает 'catch' -- красит 295. Причина -- метка, которую
+# реально печатает шаг на этом пути (снята прогоном, probe-fixtures-2.log):
+# самопроверка глубины лексера отказывает, когда '/' после '}' читается
+# делением из-за нераспознанного заголовка.
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'const HEADER_KW = new Set\(\[\x27if\x27, \x27while\x27, \x27for\x27, \x27with\x27, \x27catch\x27, \x27switch\x27\]\);'
+  'const HEADER_KW = new Set\(\[\x27if\x27, \x27while\x27, \x27for\x27, \x27with\x27, \x27catch\x27, \x27switch\x27\]\);')
+MUT_REP+=(
+  'const HEADER_KW = new Set(['"'"'if'"'"', '"'"'while'"'"', '"'"'for'"'"', '"'"'with'"'"', '"'"'catch'"'"']);'
+  'const HEADER_KW = new Set(['"'"'if'"'"', '"'"'while'"'"', '"'"'for'"'"', '"'"'with'"'"', '"'"'switch'"'"']);')
+MUT_SCENARIO+=(
+  '294'
+  '295')
+MUT_CAUSE+=(
+  'lexer depth did not return to 0'
+  'lexer depth did not return to 0')
+
+# CONSTRAINT: 378/381 красят 296, 379 -- 297, 380 -- 298, 382-386 -- двери 1-4
+# красят 299-303, 387-388 -- прибор образа красит 304; причины сняты прогоном.
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tools/step19-image-check.py
+  tools/step19-image-check.py)
+MUT_PAT+=(
+  'idBefore\.type === \x27punct\x27 && idBefore\.value === \x27\.\x27'
+  'idBefore\.value === \x27\?\.\x27'
+  'prev\.type === \x27id\x27 && !prev\.prop && REGEX_KW'
+  'prev\.type === \x27id\x27 && !prev\.prop && HEADER_KW'
+  'if \(nBudget !== 1\) fail\('
+  'if \(nWait !== 1\) fail\('
+  'if \(nCapSingle \+ nCapSplit !== 1\)'
+  'if \(nCapSingle \+ nCapSplit !== 1\)'
+  'if \(nGate !== 1\) fail\('
+  'end\(\)\) == "code":'
+  'far = dist > 240')
+MUT_REP+=(
+  'idBefore.type === '"'"'punct'"'"' && idBefore.value === '"'"'#'"'"''
+  'idBefore.value === '"'"'#.'"'"''
+  'prev.type === '"'"'id'"'"' && REGEX_KW'
+  'prev.type === '"'"'id'"'"' && HEADER_KW'
+  'if (false) fail('
+  'if (false) fail('
+  'if (nCapSingle + nCapSplit < 1)'
+  'if (nCapSingle !== 1)'
+  'if (false) fail('
+  'end()) == "none":'
+  'far = dist > 240000')
+MUT_SCENARIO+=(
+  '296'
+  '297'
+  '298'
+  '296'
+  '299'
+  '300'
+  '301'
+  '302'
+  '303'
+  '304'
+  '304')
+MUT_CAUSE+=(
+  'lexer depth did not return to 0'
+  'lexer depth did not return to 0'
+  'lexer depth did not return to 0'
+  'lexer depth did not return to 0'
+  'БЮДЖЕТ_НЕ_ЕДИНСТВЕН'
+  'ОЖИДАНИЕ_НЕ_ЕДИНСТВЕННО'
+  'ПОТОЛОК_ДВАЖДЫ_ОДНОЙ_ФОРМЫ'
+  'ПОТОЛОК_В_ОБЕИХ_ФОРМАХ'
+  'ГЕЙТ_НЕ_ЕДИНСТВЕН'
+  'SELFTEST FAIL F_CODE'
+  'SELFTEST FAIL F_FAR')
+
+# CONSTRAINT: 389 красит 305; 390-395 и 397 -- самопроверка прибора образа
+# красит 304; 396 и 398 -- 306; причины -- метки сценариев. Якорь 396/398 без
+# `^...$`: mutate() считает совпадения perl-ом в режиме -0 без /m, строчных
+# границ у якоря нет -- count == 1 держится на уникальном тексте строки.
+MUT_FILE+=(
+  tweakcc-patch.js
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py)
+MUT_PAT+=(
+  '&& !\(idBefore2 && idBefore2\.type === \x27punct\x27 && idBefore2\.value === \x27\.\x27\)'
+  'good = n_split == 1 and n_single == 0 and'
+  'good = n_single == 1 and n_bare == 1 and'
+  'good = n_split == 1 and n_single == 0 and n_pair == 1 and'
+  'ok = cls_s == cls_site\[0\]\[1\] and gate_s == gate_site\[0\]\[1\]'
+  'if re\.compile\(cond\)\.groups != 3:'
+  'start > 0 and end < len\(data\) and '
+  'sys\.dont_write_bytecode = True'
+  'data\[start - 1\] == 0 and data\[end\] == 0'
+  'if not BOUNDARY\.search\(patched\):')
+MUT_REP+=(
+  ''
+  'good = n_split == 1 and'
+  'good = n_single == 1 and'
+  'good = n_split == 1 and n_single == 0 and'
+  'ok = True'
+  'if False:'
+  'end < len(data) and '
+  'pass'
+  'data[start - 1] == 0'
+  'if False:')
+MUT_SCENARIO+=(
+  '305'
+  '304'
+  '304'
+  '304'
+  '304'
+  '304'
+  '304'
+  '306'
+  '304'
+  '306')
+MUT_CAUSE+=(
+  'lexer depth did not return to 0'
+  'SELFTEST FAIL C_SPLIT_STRAY'
+  'SELFTEST FAIL C_SINGLE_NOBUDGET'
+  'SELFTEST FAIL C_SPLIT_NOPAIR'
+  'SELFTEST FAIL N_SWAP'
+  'SELFTEST FAIL N_LAYOUT'
+  'SELFTEST FAIL F_EDGE'
+  'ПИШЕТ_БАЙТКОД'
+  'SELFTEST FAIL F_HALF'
+  'БЕЗ_МАРКЕРОВ_НЕ_ОТКАЗ')
+
+# CONSTRAINT: 399 красит 307 (снятие catch-all анализа возвращает трассу вместо
+# кода 2); 400-403 -- двери правки 6b красят 309, 311, 313, 312; 404 -- строка
+# успеха красит 308, 405 -- подпись имени бюджета красит 310; 406-409 --
+# самопроверка прибора красит 304 (N_OPT, P_MIXED, C_BAIT, F_END). Якоря 6b --
+# полный текст двери, каждый `if (...)` встречается в tweakcc-patch.js ровно
+# раз; якоря прибора -- ровно новый текст правок KIT-FIX6 п.1-4 (count == 1
+# мерил perl-ом в режиме -0, как mutate()).
+MUT_FILE+=(
+  tools/step19-image-check.py
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py)
+MUT_PAT+=(
+  'except Exception as exc:\n +die\("analysis failed: '
+  'if \(\(truncMax === undefined\) !== \(nCapSplit === 0\)\)'
+  'if \(mCap\[4\] !== truncMax\)'
+  'if \(mCap\.index < bs \|\| mCap\.index >= be\)'
+  'if \(reads !== 2\)'
+  'nCapSplit === 1 \? '
+  '`\x27\$\{truncMax\}\x27`'
+  'if \(rec\.group\(1\) is None or rec\.group\(3\) is None'
+  'if p_single \+ p_split != 1:'
+  'rb"&&" \+ ID\.encode\(\) \+ rb"===null&&" \+ ID\.encode\(\) \+ rb"<Math\\\.max\\\(" \+ ID\.encode\(\) \+ rb",300\\\)\\\)\\\{"'
+  'end < len\(data\)')
+MUT_REP+=(
+  'except KeyError as exc: die("analysis failed: '
+  'if (false)'
+  'if (false)'
+  'if (false)'
+  'if (false)'
+  'nCapSplit === 2 ? '
+  '''"'"'absent'"'"'''
+  'if (False or rec.group(3) is None'
+  'if False:'
+  'rb"<Math\\.max\\(" + ID.encode() + rb",300\\)"'
+  'end <= len(data)')
+MUT_SCENARIO+=(
+  '307'
+  '309'
+  '311'
+  '313'
+  '312'
+  '308'
+  '310'
+  '304'
+  '304'
+  '304'
+  '304')
+MUT_CAUSE+=(
+  'АНАЛИЗ_ОТКАЗ_КОД_2'
+  'СПЛИТ_БЕЗ_БЮДЖЕТА'
+  'СПЛИТ_ЧУЖОЕ_ИМЯ'
+  'СПЛИТ_ВНЕ_МОДУЛЯ'
+  'ВТОРОЙ_ЧИТАТЕЛЬ'
+  'СПЛИТ_ФОРМА_ПРИМЕНЕНА'
+  'БЮДЖЕТ_БЕЗ_СПЛИТА'
+  'SELFTEST FAIL N_OPT'
+  'SELFTEST FAIL P_MIXED'
+  'SELFTEST FAIL C_BAIT'
+  'SELFTEST FAIL F_END')
+
 UNMUTATED_OK=21
 
 # Длины пяти таблиц сверяются ДО первого прогона: рассинхрон сдвигает описания
@@ -10468,6 +11752,9 @@ mutate() {   # номер
     *.sh|*.real) sh_victim_parses "$f" || return 2 ;;
     *.py) python3 -c 'import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True)' \
             "$f" >/dev/null 2>&1 || return 2 ;;
+    # CONSTRAINT: stderr node --check не глушится: отказ разбора -- находка,
+    # и сырой текст обязан остаться в журнале прогона.
+    *.js) node --check "$f" >/dev/null || return 2 ;;
   esac
   return 0
 }
@@ -10601,6 +11888,10 @@ self_check() {
 }
 
 if [[ "${1:-}" == "--self-check" ]]; then
+  # CONSTRAINT: the crash:TypeError causes are compared here -- the node line
+  # belongs to this log.
+  say "corpus-tools-bench: bash $BASH_VERSION"
+  say "corpus-tools-bench: node $(node --version 2>&1)"
   check_mut_tables || exit 4
   run_stand_env_guard "$KIT/tools/sweep.sh" "$KIT/tools/fetch-corpus.sh"
   __rc=0; self_check || __rc=$?
@@ -10618,6 +11909,9 @@ run_stand_env_guard "$K/tools/sweep.sh" "$K/tools/fetch-corpus.sh"
 # и поведение пустого массива под `set -u` у bash 3.2 и bash 4+ разные, и
 # причина отказа, запиненная на одну из них, недоказуема на другой машине.
 say "corpus-tools-bench: bash $BASH_VERSION"
+# Строка V8 -- тоже условие прогона: восемь причин `crash:TypeError …` в
+# MUT_CAUSE -- текст ошибки этой версии node.
+say "corpus-tools-bench: node $(node --version 2>&1)"
 say "corpus-tools-bench: игрушечный корпус $C, копия кита $K"
 run_all
 say "corpus-tools-bench: ИТОГ сценариев=$RUN расхождений=$FAILED"
