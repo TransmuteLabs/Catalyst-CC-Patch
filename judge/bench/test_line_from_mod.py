@@ -112,6 +112,157 @@ def main():
     check('улика без вида -- ОТКАЗ прибора кодом 2, а не тихий skip',
           refused, f'отказ: {refused}')
 
+    # --- #393-A2-FIX4: t0 вне диапазона платформенных часов ------------------
+    line = compact._line_from_mod(dict(base, t0=1e308), 'mod-j.json', 'judge')
+    check('t0 = 1e308 не роняет проектор: t нет, t0Invalid несёт значение',
+          't' not in line and line.get('t0Invalid') == '1e+308',
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=float('inf')), 'mod-k.json', 'judge')
+    check('t0 = inf не роняет проектор: t нет, t0Invalid несёт значение',
+          't' not in line and line.get('t0Invalid') == 'inf',
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=1700000000000), 'mod-l.json', 'judge')
+    check('обычное t0 даёт t и не даёт t0Invalid',
+          line.get('t') == '2023-11-14T22:13:20.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    # --- #393-A2-FIX5: время улики проецируется как есть ----------------------
+    line = compact._line_from_mod(dict(base, t0=True), 'mod-m.json', 'judge')
+    check('t0=True (bool) -> t нет, t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == 'True',
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=False), 'mod-n.json', 'judge')
+    check('t0=False (bool) -> t нет, t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == 'False',
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=float('nan')), 'mod-o.json', 'judge')
+    check('t0=NaN -> t нет, t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == 'nan',
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0='1700000000000'), 'mod-p.json', 'judge')
+    check('t0 строкой -> t нет, t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == "'1700000000000'",
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0={}), 'mod-q.json', 'judge')
+    check('t0 не-число (пустой словарь) -> t нет, t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == '{}',
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=0), 'mod-r.json', 'judge')
+    check('t0=0 -- конечное число диапазона Date: t есть, t0Invalid нет',
+          line.get('t') == '1970-01-01T00:00:00.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-1000), 'mod-s.json', 'judge')
+    check('t0=-1000 -- конечное число диапазона Date: t есть, t0Invalid нет',
+          line.get('t') == '1969-12-31T23:59:59.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=8.64e15 + 1), 'mod-t.json', 'judge')
+    check('t0 за границей Date -> t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == '8640000000000001.0',
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    # --- #393-A2-FIX6: форма toISOString без обрыва ---------------------------
+    line = compact._line_from_mod(dict(base, t0=10**309), 'mod-f6-01.json', 'judge')
+    check('t0 = 10**309 (int за пределами float) -> t нет, t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == repr(10**309),
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-(10**400)), 'mod-f6-02.json', 'judge')
+    check('t0 = -(10**400) (int за пределами float) -> t нет, t0Invalid несёт repr',
+          't' not in line and line.get('t0Invalid') == repr(-(10**400)),
+          f't0Invalid: {line.get("t0Invalid")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=1500), 'mod-f6-03.json', 'judge')
+    check('t0 = 1500 -> t несёт миллисекунды, t0Invalid нет',
+          line.get('t') == '1970-01-01T00:00:01.500Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-1500), 'mod-f6-04.json', 'judge')
+    check('t0 = -1500 (до эпохи) -> t несёт миллисекунды, t0Invalid нет',
+          line.get('t') == '1969-12-31T23:59:58.500Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=1500.7), 'mod-f6-05.json', 'judge')
+    check('t0 = 1500.7 -> мс усечены к нулю: t есть, t0Invalid нет',
+          line.get('t') == '1970-01-01T00:00:01.500Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-1500.7), 'mod-f6-06.json', 'judge')
+    check('t0 = -1500.7 -> мс усечены к нулю: t есть, t0Invalid нет',
+          line.get('t') == '1969-12-31T23:59:58.500Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=1700000000123), 'mod-f6-07.json', 'judge')
+    check('t0 = 1700000000123 -> t несёт мс 123, t0Invalid нет',
+          line.get('t') == '2023-11-14T22:13:20.123Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=8.64e15), 'mod-f6-08.json', 'judge')
+    check('t0 = 8.64e15 (верхняя граница Date) -> t со знаком + и шестью цифрами года',
+          line.get('t') == '+275760-09-13T00:00:00.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-8.64e15), 'mod-f6-09.json', 'judge')
+    check('t0 = -8.64e15 (нижняя граница Date) -> t со знаком - и шестью цифрами года',
+          line.get('t') == '-271821-04-20T00:00:00.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-62167219200000), 'mod-f6-10.json', 'judge')
+    check('t0 = год 0 -> t с четырёхзначным нулевым годом',
+          line.get('t') == '0000-01-01T00:00:00.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-62198755200000), 'mod-f6-11.json', 'judge')
+    check('t0 = год -1 -> t со знаком минус и шестью цифрами года',
+          line.get('t') == '-000001-01-01T00:00:00.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=253402300800000), 'mod-f6-12.json', 'judge')
+    check('t0 = год 10000 -> t со знаком плюс и шестью цифрами года',
+          line.get('t') == '+010000-01-01T00:00:00.000Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    line = compact._line_from_mod(dict(base, t0=-61978089599500), 'mod-f6-13.json', 'judge')
+    check('t0 = -61978089599500 -> t несёт мс 500, t0Invalid нет',
+          line.get('t') == '0005-12-29T00:00:00.500Z' and 't0Invalid' not in line,
+          f't: {line.get("t")!r}')
+
+    no_t0 = dict(base)
+    del no_t0['t0']
+    line = compact._line_from_mod(no_t0, 'mod-u.json', 'judge')
+    check('без t0 -- ни t, ни t0Invalid',
+          't' not in line and 't0Invalid' not in line,
+          f't: {line.get("t")!r}, t0Invalid: {line.get("t0Invalid")!r}')
+
+    # CONSTRAINT: отказ платформенных часов (gmtime) -- значение в t0Invalid,
+    # а не падение проектора; подмена возвращается на место в finally.
+    orig_gmtime = compact.time.gmtime
+    try:
+        for exc_type in (ValueError, OSError):
+            def raising_gmtime(_ts, _et=exc_type):
+                raise _et('scripted gmtime refusal')
+            compact.time.gmtime = raising_gmtime
+            try:
+                line = compact._line_from_mod(dict(base, t0=1700000000000),
+                                              'mod-v.json', 'judge')
+                ok = 't' not in line and line.get('t0Invalid') == '1700000000000'
+                detail = f't0Invalid: {line.get("t0Invalid")!r}'
+            except Exception as exc:
+                ok = False
+                detail = f'поднялось исключение: {type(exc).__name__}: {exc}'
+            check(f'отказ gmtime ({exc_type.__name__}) -> t нет, t0Invalid несёт repr',
+                  ok, detail)
+    finally:
+        compact.time.gmtime = orig_gmtime
+
     failed = [name for name, ok in RESULTS if not ok]
     print(f'проверок: {len(RESULTS)}, провалено: {len(failed)}')
     if failed:

@@ -148,13 +148,30 @@ def _line_from_mod(rec, filename, probe):
     rest = rec.get('rest') or rec.get('by') or ''
     t0 = rec.get('t0')
     t = None
-    if isinstance(t0, (int, float)) and t0 > 0:
-        t = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(t0 / 1000.0))
+    t_bad = None
+    # CONSTRAINT: время улики проецируется как есть: конечное число в диапазоне Date (включая 0 и отрицательные) -- в t строкой Date.prototype.toISOString (мс усечены к нулю, год вне 0..9999 -- знак и шесть цифр); отсутствие -- без поля; всё прочее (bool, не-число, NaN, бесконечность, вне ±8.64e15, отказ платформенных часов) -- сырым repr в t0Invalid, не молча.
+    if t0 is None:
+        pass
+    elif isinstance(t0, bool) or not isinstance(t0, (int, float)):
+        t_bad = repr(t0)
+    elif not (isinstance(t0, int) or math.isfinite(t0)) or abs(t0) > 8.64e15:
+        # CONSTRAINT: int не приводится к float (isfinite бросает OverflowError на 10**309); сравнение int с float в Python точное.
+        t_bad = repr(t0)
+    else:
+        try:
+            sec, ms = divmod(int(t0), 1000)
+            g = time.gmtime(sec)
+            y = g.tm_year
+            ys = '%04d' % y if 0 <= y <= 9999 else ('+' if y > 0 else '-') + '%06d' % abs(y)
+            t = '%s-%02d-%02dT%02d:%02d:%02d.%03dZ' % (ys, g.tm_mon, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec, ms)
+        except (OverflowError, ValueError, OSError):
+            t_bad = repr(t0)
     verdict = None
     if kind:
         verdict = _clip(f'{kind}: {rest}')
     line = {
         't': t,
+        't0Invalid': t_bad,
         'tool': rec.get('tool'),
         'agent': rec.get('agent'),
         'sid': rec.get('sid'),
