@@ -8862,49 +8862,74 @@ def _swe32_door_bytes():
     return _SWE32_DOOR_CACHE[0]
 
 
-def _swe32_wrapper_bytes(rf):
-    """П2: текст обёртки шага 32, собираемый из исходника патча."""
-    lo = src.find('const runtime =')
-    if lo < 0:
-        return None, 'step-32 runtime template not found in the patch source'
-    tail = ";/*swe32-end*/`;"
-    hi = src.find(tail, lo)
-    if hi < 0:
-        return None, 'step-32 runtime template is unterminated'
-    chunks = re.findall(r'`([^`]*)`', src[lo:hi + len(tail)])
-    if not chunks:
-        return None, 'step-32 runtime template holds no template literals'
-    tpl = ''.join(chunks)
-    if '\\' in tpl:
-        return None, 'step-32 runtime template carries an escape sequence'
-    dm = re.search(r"const DISGUISE = '([^'\n]*)';", src)
-    if not dm:
-        return None, 'DISGUISE literal not found in the patch source'
-    if '\\' in dm.group(1):
-        return None, 'DISGUISE literal carries an escape sequence'
-    disg = dm.group(1)
-    if any(not (0x20 <= ord(c) <= 0x7e) or c in '"\\' for c in disg):
-        return None, 'DISGUISE literal is not a simple ASCII string'
-    out = (tpl
-           .replace('${JSON.stringify(DISGUISE)}', '"' + disg + '"')
-           .replace('${DISGUISE.length}', str(len(disg)))
-           .replace('${rf}', rf))
-    if '${' in out:
-        return None, 'step-32 runtime template carries an unknown ${...} substitution'
-    return out.encode('utf-8'), None
+def _swe32_source_bytes(d):
+    """П2: байты ДВУХ врезок источников шага 32, собираемые из исходника патча.
+
+    Шаблоны читаются из tweakcc-patch.js (const sysCut / const toolsCut --
+    те же литералы, что шаг подставляет в образ), идентификаторы берутся из
+    САМОГО образа структурной формой участка источников. Никакая игла не
+    несёт литеральной копии кода врезки.
+    """
+    m1 = re.search(r"const sysCut = `([^`]*)`;", src)
+    if not m1:
+        return None, None, 'sysCut template not found in the patch source'
+    m2 = re.search(r"const toolsCut = `([^`]*)`;", src)
+    if not m2:
+        return None, None, 'toolsCut template not found in the patch source'
+    ids = _SWE32_ID
+    # Форма участка в ПАТЧЕННОМ образе: обе врезки уже стоят, F/H врезки
+    # связаны с потребителем xst теми же именами; ВСЕ имена участка (sb, bde,
+    # cf тоже) -- захваты с обратными ссылками, ни одного минифицированного
+    # литерала.
+    shape = re.compile(
+        rb'(?P<sb>' + ids + rb')=__ctlSys\((?P<xko>' + ids + rb')\((?P<n1>' + ids + rb'),(?P<hb>' + ids + rb'),'
+        rb'\{skipGlobalCacheForSystemPrompt:(?P<vo>' + ids + rb'),cacheTtl:(?P<ls>' + ids + rb')\}\),'
+        rb'(?P<fn>' + ids + rb')\((?P<hn>' + ids + rb')\.model\)\),'
+        + ids + rb'=' + ids + rb'\.length>0,'
+        rb'(?P<bde>' + ids + rb')=\[\.\.\.(?P<hx>' + ids + rb')\.extraToolSchemas\?\?\[\]\];'
+        rb'if\(' + ids + rb'\)(?P=bde)\.push\(\{type:' + ids + rb',name:' + ids + rb',model:' + ids + rb','
+        rb'\.\.\.' + ids + rb'&&\{defer_loading:!0\}\}\);'
+        rb'let (?P<cf>' + ids + rb')=__ctlTools\(\[\.\.\.(?P<fo>' + ids + rb'),\.\.\.(?P=bde)\]\),'
+        + ids + rb'=' + ids + rb'\(' + ids + rb',\{model:(?P=fn)\((?P=hn)\.model\),tools:(?P=cf),system:(?P=sb),')
+    sites = list(shape.finditer(d))
+    if len(sites) != 1:
+        return None, None, ('the patched system/tools source region occurs exactly '
+                            f'once in the image (found {len(sites)})')
+    g = {k: v.decode('latin1') for k, v in sites[0].groupdict().items()}
+    if g['hn'] != g['hx']:
+        return None, None, (f'the extraToolSchemas holder {g["hx"]} is not the cut-in '
+                            f'model holder {g["hn"]}')
+    sys_b = (m1.group(1)
+             .replace('${SB}', g['sb'])
+             .replace('${XKO}', g['xko']).replace('${N1}', g['n1']).replace('${HB}', g['hb'])
+             .replace('${VO}', g['vo']).replace('${LS}', g['ls'])
+             .replace('${FN}', g['fn']).replace('${HN}', g['hn']))
+    tools_b = (m2.group(1)
+               .replace('${CF}', g['cf']).replace('${FO}', g['fo']).replace('${BDE}', g['bde']))
+    if '${' in sys_b or '${' in tools_b:
+        return None, None, 'a source cut-in template carries an unknown ${...} substitution'
+    return sys_b.encode('utf-8'), tools_b.encode('utf-8'), None
 
 
 def _swe32_request_text(d):
-    """Шаги 32+34: дверь requestText -- шесть именованных игл + скан исходника.
+    """Шаги 32+34: дверь requestText -- именованные иглы + скан исходника.
 
     Devin отвечал 403 на стоковый запрос и 200 на тот же запрос с правками
     текста (A/B 2026-09-22); сами правки теперь ДАННЫЕ -- их регистрирует
     плагин catalyst-swe-request через ноун $.requestText (шаг 34), а патч
-    держит дверь и вызывает применитель на сайте сборки тела (шаг 32).
-    Иглы П1/П2 пинят БАЙТЫ, собираемые из исходника патча (ни одна игла не
-    несёт литеральной копии кода двери); П3-П6 -- структуру с обратными
-    ссылками. Отказ каждой иглы печатается своим именем: два отказа одним
-    текстом неразличимы. Седьмая игла -- политики в исходнике патча нет.
+    применяет их в ИСТОЧНИКАХ system и tools запроса (шаг 32, #468:
+    заморозки нет, учёт поколений -- в двери). Иглы П1/П2 пинят БАЙТЫ,
+    собираемые из исходника патча (ни одна игла не несёт литеральной копии
+    кода двери или врезок); П3-П6 -- структуру с обратными ссылками;
+    lifecycle-иглы сторожат мост settle и ПОЛНЫЕ формы врезок жизненного
+    цикла с обратными ссылками: settle в Zt (без хука и .finally) и en,
+    __ctlTerm в terminate() и на каждом выходе неопубликованного кандидата
+    (zwe и хвост загрузчика, отказ загрузки worker-хоста, discard-воронка,
+    finally USt/GSt, одиночная перезагрузка от сборки до публикации --
+    смерть поколения, первой), __ctlGone в Pe/BN/GSt (уход владельца),
+    носитель лога отказов двери.
+    Отказ каждой иглы печатается своим именем: два отказа одним
+    текстом неразличимы. Последняя игла -- политики в исходнике патча нет.
     """
     failed = []
 
@@ -8920,20 +8945,17 @@ def _swe32_request_text(d):
         needle(d.count(door) == 1,
                f'door byte-pin: step-34 door text occurs exactly once in the image '
                f'(found {d.count(door)})')
-    # П2: байт-пин обёртки шага 32; имя переменной тела -- из сайта тела
-    site = re.search(
-        rb'let (' + _SWE32_ID + rb')=\{model:' + _SWE32_ID + rb'\(' + _SWE32_ID +
-        rb'\.model\),messages:', d)
-    if not site:
-        needle(False, 'wrapper byte-pin: request body site not found')
+    # П2: байт-пины ДВУХ врезок источников шага 32 (system и tools)
+    sys_b, tools_b, why = _swe32_source_bytes(d)
+    if sys_b is None:
+        needle(False, 'source byte-pin: ' + why)
     else:
-        wrapper, why = _swe32_wrapper_bytes(site.group(1).decode('utf-8', 'replace'))
-        if wrapper is None:
-            needle(False, 'wrapper byte-pin: ' + why)
-        else:
-            needle(d.count(wrapper) == 1,
-                   f'wrapper byte-pin: step-32 wrapper text occurs exactly once '
-                   f'in the image (found {d.count(wrapper)})')
+        needle(d.count(sys_b) == 1,
+               f'source byte-pin: the system cut-in occurs exactly once in the image '
+               f'(found {d.count(sys_b)})')
+        needle(d.count(tools_b) == 1,
+               f'source byte-pin: the tools cut-in occurs exactly once in the image '
+               f'(found {d.count(tools_b)})')
     # П3: строитель ноуна -- тот же упрочнитель, что у соседнего flag-строителя,
     # ровно три метода, три литерала имён операций, один <H> во всех трёх телах
     fb = re.search(
@@ -8970,12 +8992,20 @@ def _swe32_request_text(d):
            'dispatcher: the three entries sit immediately after the flag.value entry')
     needle(len(p5b) == 1,
            'dispatcher: the three names sit inside prompt.read..tool.list')
-    # П6: имя применителя уникально (затенение даёт третье вхождение), и тело
-    # двери стоит непосредственно за записью операции flag.value -- в том же
-    # чанке, что и сайт вызова
+    # П6: применители живут в источниках -- каждое имя ровно ДВА раза
+    # (определение + вызов), прежнее имя применителя исчезло из образа
+    n_sys = d.count(b'__ctlSys')
+    needle(n_sys == 2,
+           f'applier: the name __ctlSys occurs exactly twice, definition + source call '
+           f'(found {n_sys})')
+    n_tools = d.count(b'__ctlTools')
+    needle(n_tools == 2,
+           f'applier: the name __ctlTools occurs exactly twice, definition + source call '
+           f'(found {n_tools})')
     n_apply = d.count(b'__ctlApply')
-    needle(n_apply == 2,
-           f'applier: the name __ctlApply occurs exactly twice (found {n_apply})')
+    needle(n_apply == 0,
+           f'applier: the retired body-site name __ctlApply is gone from the image '
+           f'(found {n_apply})')
     # ХВОСТ ЗАПИСИ -- ОДНА `}`: объект операции закрывается ровно один раз.
     # ЗАМЕРЕНО побайтно на обоих образах: 2.1.278 боевой несёт
     # `...Promise.resolve(P(e.name,e.fallback))};var Lqt=...`, 2.1.280 staging --
@@ -8990,7 +9020,241 @@ def _swe32_request_text(d):
         + rb')\(\5\.name,\5\.fallback\)\)\};', d))
     needle(door is not None and len(opr) == 1 and opr[0].end() == d.find(door),
            'applier: the door sits right after the flag.value op record')
-    # Седьмая игла: политики в патче нет (src -- исходник патча в str, не байты
+    # Мост settle: присвоен ровно один раз; его вызовы (Zt x2, en x1) пинятся
+    # полными формами ниже. Отсутствие моста обязано ловить ИГЛА, а не
+    # молчание `?.`.
+    n_bridge = d.count(b'globalThis.__ctlRequestTextSettle=')
+    needle(n_bridge == 1,
+           f'settle bridge: assigned exactly once (found {n_bridge})')
+    # ЯКОРНЫЕ ЛИТЕРАЛЫ врезок жизненного цикла обязаны остаться ВЫЗОВАМИ
+    # (скобка + бэктик): врезка, потерявшая скобку лог-вызова, превращает
+    # регион в синтаксический мусор, а счётчик моста этого не видит.
+    for lit, where in ((b'(`session.start: raised for ', 'Zt raised'),
+                       (b'(`session.start: failed for ', 'Zt failed'),
+                       (b'(`session.start: raised (surface ', 'en raised'),
+                       (b'(`session.start: failed: ', 'en failed')):
+        n_lit = d.count(lit)
+        needle(n_lit == 1,
+               f'lifecycle anchors: the {where} log call keeps its exact shape '
+               f'(found {n_lit})')
+    # Врезки жизненного цикла -- ПОЛНЫЕ формы с обратными ссылками, каждая
+    # ровно одно совпадение: счёт имени не видит перестановки аргументов,
+    # чужого поля вместо environmentId или `;` вместо `,` (краевой вызов
+    # становится безусловным).
+    I = _SWE32_ID
+    ST = rb'globalThis\.__ctlRequestTextSettle\?\.\('
+    zt = list(re.finditer(
+        rb'if\((?P<ws>' + I + rb')\.add\((?P<R>' + I + rb')\),!(?P=R)\.hooks\("session\.start"\)\)'
+        rb'\{' + ST + rb'(?P=R)\.name,(?P=R)\.environmentId\);continue\}', d))
+    needle(len(zt) == 1,
+           f'lifecycle Zt: a module without a session.start hook settles its own name '
+           f'and generation before continue (found {len(zt)})')
+    # Модуль .finally связывается СВОЕЙ формой (литерал raise-цепочки), не
+    # иглой выше: отказ одной формы не должен краснить соседнюю.
+    ztf = re.findall(
+        rb'\(`session\.start: raised for \$\{(?P<R>' + I + rb')\.name\} \(loaded later\)`\),'
+        rb'Promise\.resolve\(\)\.then\(\(\)=>' + I + rb'\(\{only:(?P=R)\.name\}\)\.session\.start'
+        rb'\(\{cwd:' + I + rb'\(\),\.\.\.' + I + rb'\}\)\)'
+        rb'\.catch\(\((?P<s>' + I + rb')\)=>\{' + I + rb'\(`session\.start: failed for \$\{(?P=R)'
+        rb'\.name\}: \$\{' + I + rb'\((?P=s)\)\}`,\{level:"error"\}\)\}\)'
+        rb'\.finally\(\(\)=>' + ST + rb'(?P=R)\.name,(?P=R)\.environmentId\)\)', d)
+    needle(len(ztf) == 1,
+           f'lifecycle Zt: the raise chain ends with the settle finally of the same module '
+           f'(found {len(ztf)})')
+    en1 = re.findall(
+        rb'let __ctlLMs=(?P<ct>' + I + rb')\(\)\.loadedModules,(?P<s>' + I + rb')=new WeakSet\(__ctlLMs\);', d)
+    needle(len(en1) == 1,
+           f'lifecycle en: the initial-load set is captured before the WeakSet (found {len(en1)})')
+    en2 = re.findall(
+        rb'catch\((?P<e>' + I + rb')\)\{' + I + rb'\(`session\.start: failed: \$\{' + I
+        + rb'\((?P=e)\)\}`,\{level:"error"\}\)\}'
+        rb'for\(var __ctli=0;__ctli<__ctlLMs\.length;__ctli\+\+\)'
+        + ST + rb'__ctlLMs\[__ctli\]\.name,__ctlLMs\[__ctli\]\.environmentId\);', d)
+    needle(len(en2) == 1,
+           f'lifecycle en: every initial-load module settles right after the session.start '
+           f'try/catch (found {len(en2)})')
+    # Счёт вызовов моста: байты формы вызова встречаются РОВНО столько раз,
+    # сколько объявлено полных форм, несущих вызов (Zt без хука, Zt .finally,
+    # цикл en). Лишний вызов вне этих форм полные формы не видят. Ожидание --
+    # число ОБЪЯВЛЕННЫХ форм, не совпавших: отказ одной формы не краснит
+    # эту иглу.
+    call_forms = ('Zt without a hook', 'Zt .finally', 'en settle loop')
+    n_calls = d.count(b'globalThis.__ctlRequestTextSettle?.(')
+    needle(n_calls == len(call_forms),
+           f'settle bridge: the call count equals the call-bearing full forms '
+           f'(calls {n_calls}, forms {len(call_forms)})')
+    pe = re.findall(
+        rb'if\(!(?P<P>' + I + rb')\.has\((?P<N>' + I + rb')\.name\)\)' + I + rb'\((?P=N)\.name\),'
+        + I + rb'\((?P=N)\.name\),' + I + rb'\((?P=N)\.name\),__ctlGone\((?P=N)\.name,(?P=N)\.environmentId\)', d)
+    needle(len(pe) == 1,
+           f'lifecycle Pe: a module whose name left the set is an owner gone, inside the same '
+           f'condition (found {len(pe)})')
+    ft = list(re.finditer(
+        rb'(?P<ft>' + I + rb')\(\{name:(?P<N>' + I + rb')\.pluginName,[^{}]*environmentId:(?P<H>' + I + rb'),hopKey:', d))
+    n_term = 0
+    if len(ft) == 1:
+        N, H = re.escape(ft[0].group('N')), re.escape(ft[0].group('H'))
+        n_term = len(re.findall(
+            rb'terminate\(\)\{' + I + rb'\(' + N + rb'\.pluginName\),' + I + rb'\(' + N + rb'\.pluginName\),'
+            + I + rb'\(' + N + rb'\.pluginName\),' + I + rb'\.forgetPresses\(' + N + rb'\.pluginName\),'
+            rb'__ctlTerm\(' + N + rb'\.pluginName,' + H + rb'\),' + I + rb'\(\)\}',
+            d[ft[0].start():ft[0].start() + 2000]))
+    needle(len(ft) == 1 and n_term == 1,
+           f'lifecycle terminate: the generation death of the module literal\'s own '
+           f'environmentId closes the instance (literals {len(ft)}, cut-ins {n_term})')
+    bn = list(re.finditer(
+        rb'let (?P<s>' + I + rb')=' + I + rb'\(\),(?P<g>' + I + rb')=(?P=s)\.loadedModules\.filter\(\((?P<a>'
+        + I + rb')\)=>(?P<n>' + I + rb')\.has\((?P=a)\.name\)\),', d))
+    n_bn = 0
+    if len(bn) == 1:
+        G, S = re.escape(bn[0].group('g')), re.escape(bn[0].group('s'))
+        tail = re.compile(
+            rb'for\(let (?P<w>' + I + rb') of ' + G + rb'\)(?P=w)\.retire\(\);'
+            rb'for\(let (?P=w) of ' + G + rb'\)__ctlGone\((?P=w)\.name,(?P=w)\.environmentId\);'
+            + I + rb'\(' + I + rb'\),' + I + rb'\(\),' + I + rb'\(' + S + rb'\.loadedModules\),' + I
+            + rb'\(`hooks modules unloaded: ')
+        at = bn[0].start()
+        n_bn = len([m for m in tail.finditer(d, at, at + 2000) if m.start() - at < 600])
+    needle(len(bn) == 1 and n_bn == 1,
+           f'lifecycle BN: every unloaded module is an owner gone right after its retire '
+           f'(filters {len(bn)}, cut-ins {n_bn})')
+    gst = re.findall(
+        rb'let (?P<f>' + I + rb')=(?P<s>' + I + rb')\.loadedModules;(?P=s)\.loadedModules=(?P<h>' + I
+        + rb'),(?P<e>' + I + rb')\.state\.isSetRecord=!0;for\(let (?P<j>' + I + rb') of (?P=f)\)(?P=j)\.retire\(\);'
+        rb'for\(let (?P=j) of (?P=f)\)if\(!(?P=h)\.some\(\(__ctlx\)=>__ctlx\.name===(?P=j)\.name\)\)'
+        rb'__ctlGone\((?P=j)\.name,(?P=j)\.environmentId\);', d)
+    needle(len(gst) == 1,
+           f'lifecycle GSt: an old module absent from the respawned set is an owner gone '
+           f'(found {len(gst)})')
+    # Кандидат, ушедший неопубликованным (#468-FIX2 А1, FIX3 Б1, FIX4 Г1):
+    # смерть поколения на каждом выходе, где он не опубликован, и ПЕРВОЙ --
+    # до выгрузки и восстановления (Г2): бросающая выгрузка её не отменяет.
+    # zwe связан с литералом модуля: те же N/H, закрывается ДО литерала.
+    zwe = list(re.finditer(
+        rb'(?P<h>' + I + rb')=\+\+(?P<e>' + I + rb')\.state\.environmentCounter,(?P<S>' + I + rb')=await (?P<g>' + I
+        + rb')\.load\((?P=h),(?P<n>' + I + rb')\);try\{' + I + rb'\((?P=n)\.pluginName,(?P=n)\.scan,(?P=S)\.registered\.map\(\((?P<v>'
+        + I + rb')\)=>(?P=v)\.pattern\)\)\}catch\((?P<x>' + I + rb')\)\{throw __ctlTerm\((?P=n)\.pluginName,(?P=h)\),'
+        rb'(?P=g)\.unload\((?P=h)\),(?P=x)\}', d))
+    zwe_bound = (len(zwe) == 1 and len(ft) == 1 and zwe[0].group('n') == ft[0].group('N')
+                 and zwe[0].group('h') == ft[0].group('H')
+                 and 0 <= ft[0].start() - zwe[0].end() and ft[0].start() - zwe[0].start() < 2000)
+    needle(zwe_bound,
+           f'lifecycle zwe: a candidate whose scan check fails dies as a generation before it is '
+           f'unloaded, bound to the module literal (forms {len(zwe)}, literals {len(ft)})')
+    wload = re.findall(
+        rb'function ' + I + rb'\((?P<e>' + I + rb'),(?P<n>' + I + rb'),(?P<r>' + I + rb')\)\{if\((?P=e)\.died!==void 0\)'
+        rb'return Promise\.reject\(new ' + I + rb'\((?P=e)\.died\)\);(?P=e)\.names\.set\((?P=n),(?P=r)\.pluginName\);'
+        rb'let (?P<mc>' + I + rb')=new MessageChannel,(?P<pt>' + I + rb')=(?P=mc)\.port1;(?P=e)\.ports\.set\((?P=n),(?P=pt)\),'
+        rb'(?P=pt)\.onmessage=\((?P<fr>' + I + rb')\)=>' + I + rb'\((?P=e),\{environmentId:(?P=n),port:(?P=pt),frame:(?P=fr)\.data\}\),'
+        + I + rb'\((?P=pt)\);let (?P<tm>' + I + rb')=' + I + rb'\((?P=e)\.pendingLoads,(?P=n),' + I + rb'\((?P=r)\.pluginName\)\);'
+        rb'return new Promise\(\((?P<ok>' + I + rb'),(?P<no>' + I + rb')\)=>\{if\((?P=e)\.pendingLoads\.set\((?P=n),\{resolve:\((?P<a>'
+        + I + rb')\)=>\{clearTimeout\((?P=tm)\),(?P=ok)\((?P=a)\)\},reject:\((?P<b>' + I + rb')\)=>\{'
+        rb'__ctlTerm\((?P=r)\.pluginName,(?P=n)\),clearTimeout\((?P=tm)\),'
+        rb'(?P=e)\.names\.delete\((?P=n)\),' + I + rb'\((?P=e),(?P=n)\),' + I + rb'\((?P=e),\{type:"unload",environmentId:(?P=n)\}\),'
+        rb'(?P=no)\((?P=b)\)\}\}\)', d)
+    needle(len(wload) == 1,
+           f'lifecycle worker load: a refused or timed-out load dies as a generation before its '
+           f'unload (found {len(wload)})')
+    # discard-воронка: каждый вызывающий discard -- выход неопубликованного
+    # кандидата (отказ plugin.register, смерть хоста, пересвёртка, finally
+    # неприёмных); публикация зовёт retire, не discard. Врезка несёт n/h
+    # литерала модуля и стоит в самом литерале.
+    disc = list(re.finditer(
+        rb'discard:\(\)=>\{__ctlTerm\((?P<n>' + I + rb')\.pluginName,(?P<h>' + I + rb')\),(?P<G>' + I + rb')\(\)\},retire\(\)\{', d))
+    disc_bound = (len(disc) == 1 and len(ft) == 1 and disc[0].group('n') == ft[0].group('N')
+                  and disc[0].group('h') == ft[0].group('H')
+                  and ft[0].start() < disc[0].start() < ft[0].start() + 2000)
+    needle(disc_bound,
+           f'lifecycle discard: an unpublished candidate discarded through the funnel dies as a generation '
+           f'(found {len(disc)})')
+    # Хвост загрузчика ПОСЛЕ catch проверки скана: внешний try открыт ровно
+    # за этим catch (Г8: место `try{` закреплено формой `,g.unload(h),x}try{`
+    # в окне перед литералом модуля) и закрыт catch, который убивает
+    # поколение до выгрузки.
+    ztail = list(re.finditer(
+        rb'releasePresses:\((?P<rp>' + I + rb')\)=>\{if\((?P<Mk>' + I + rb')\.kind!=="unloaded"\)(?P<g>' + I
+        + rb')\.releasePresses\((?P<h>' + I + rb'),(?P=rp)\)\}\}\);return (?P<r>' + I + rb')\}'
+        rb'catch\(__ctle\)\{throw __ctlTerm\((?P<n>' + I + rb')\.pluginName,(?P=h)\),(?P=g)\.unload\((?P=h)\),__ctle\}\}', d))
+    n_try = 0
+    if len(ztail) == 1 and len(ft) == 1:
+        lo = max(0, ft[0].start() - 2000)
+        n_try = len(re.findall(
+            rb',' + re.escape(ztail[0].group('g')) + rb'\.unload\(' + re.escape(ztail[0].group('h'))
+            + rb'\),' + I + rb'\}try\{', d[lo:ft[0].start()]))
+    ztail_bound = (len(ztail) == 1 and len(ft) == 1 and ztail[0].group('n') == ft[0].group('N')
+                   and ztail[0].group('h') == ft[0].group('H') and n_try == 1
+                   and ft[0].end() < ztail[0].start() and ztail[0].start() - ft[0].start() < 4000)
+    needle(ztail_bound,
+           f'lifecycle zwe tail: a throw after the scan check dies as a generation before it leaves the '
+           f'loader, its try opened right after the scan-check catch (found {len(ztail)}, try {n_try})')
+    # USt/GSt (Г1): finally кандидатов безусловно убивает каждого, не
+    # вошедшего в опубликованный набор, ДО цикла выгрузки неприёмных. USt
+    # публикует функцией P внутри try (держатель -- `s` функции загрузки),
+    # GSt -- присваиванием сразу за finally.
+    ust = list(re.finditer(
+        rb'(?P<P>' + I + rb')\((?P<N>' + I + rb')\);return\}\}finally\{for\(let\[(?P<k>' + I + rb'),(?P<m>' + I
+        + rb')\]of (?P<St>' + I + rb')\)if\(!(?P<s>' + I + rb')\.loadedModules\.includes\((?P=m)\)\)'
+        rb'__ctlTerm\((?P=m)\.name,(?P=m)\.environmentId\);for\(let\[(?P=k),(?P=m)\]of (?P=St)\)'
+        rb'if\((?P<e>' + I + rb')\.state\.unadmitted\.has\((?P=k)\)\)(?P=m)\.discard\(\)\}\}', d))
+    n_pub = 0
+    if len(ust) == 1:
+        lo = max(0, ust[0].start() - 12000)
+        n_pub = len(re.findall(
+            rb'function ' + re.escape(ust[0].group('P')) + rb'\((?P<p>' + I + rb')\)\{let ' + I + rb'='
+            + re.escape(ust[0].group('s')) + rb'\.loadedModules,' + I + rb'=new Set\((?P=p)\),', d[lo:ust[0].start()]))
+    needle(len(ust) == 1 and n_pub == 1,
+           f'lifecycle USt: every candidate the load did not publish dies as a generation before the '
+           f'unadmitted unload (found {len(ust)}, publisher {n_pub})')
+    gstf = re.findall(
+        rb'__ctlOk=1;\}finally\{for\(let\[(?P<k>' + I + rb'),(?P<m>' + I + rb')\]of (?P<b>' + I + rb')\)if\(!__ctlOk\|\|!(?P<h>' + I
+        + rb')\?\.includes\((?P=m)\)\)__ctlTerm\((?P=m)\.name,(?P=m)\.environmentId\);'
+        rb'try\{for\(let\[(?P=k),(?P=m)\]of (?P=b)\)if\((?P<e>' + I + rb')\.state\.unadmitted\.has\((?P=k)\)\)(?P=m)\.discard\(\)\}'
+        rb'catch\(__ctle\)\{for\(let\[(?P=k),(?P=m)\]of (?P=b)\)if\((?P=h)\?\.includes\((?P=m)\)\)'
+        rb'__ctlTerm\((?P=m)\.name,(?P=m)\.environmentId\);throw __ctle\}\}'
+        rb'let (?P<f>' + I + rb')=(?P<s>' + I + rb')\.loadedModules;(?P=s)\.loadedModules=(?P=h),', d)
+    needle(len(gstf) == 1,
+           f'lifecycle GSt: every candidate the respawn did not publish dies as a generation before '
+           f'the unadmitted unload (found {len(gstf)})')
+    # Одиночная перезагрузка (Г1, Г8): её try тянется от сборки до
+    # публикации включительно; три выхода (пустая свёртка, смерть хоста,
+    # бросок) ищутся в окне, привязанном к голове этого try, по одному.
+    rel = list(re.finditer(rb'let __ctlWd=0;try\{(?P<xe>' + I + rb')=await ' + I + rb'\(' + I + rb',' + I
+                           + rb'\),(?P=xe)\.shown=', d))
+    n_if = n_death = n_catch = n_inner = -1
+    if len(rel) == 1:
+        xe = re.escape(rel[0].group('xe'))
+        win = d[rel[0].start():rel[0].start() + 2500]
+        term = rb'__ctlTerm\(' + xe + rb'\.name,' + xe + rb'\.environmentId\)'
+        n_if = len(re.findall(rb'if\(!' + I + rb'\)\{' + term + rb';__ctlWd=1;' + I + rb'\(\);let ', win))
+        n_death = len(re.findall(rb'if\(' + I + rb'!==void 0\)throw ' + term + rb',__ctlWd=1,' + I + rb'\(\),new ', win))
+        pub = list(re.finditer(rb'(?P<r>' + I + rb')\.loadedModules=(?P<X>' + I + rb')\}catch\((?P<c>' + I + rb')\)\{throw '
+                               + xe + rb'&&' + term + rb',__ctlWd\|\|' + I + rb'\(\),(?P=c)\}', win))
+        n_catch = len(pub)
+        n_inner = win[:pub[0].start()].count(b'catch(') if n_catch == 1 else -1
+    needle(len(rel) == 1 and n_if == 1,
+           f'lifecycle reload fold: an empty engine.create fold dies the candidate before the restore '
+           f'(heads {len(rel)}, found {n_if})')
+    needle(len(rel) == 1 and n_death == 1,
+           f'lifecycle reload: a built candidate the dead host never published dies before the restore '
+           f'(heads {len(rel)}, found {n_death})')
+    needle(len(rel) == 1 and n_catch == 1 and n_inner == 0,
+           f'lifecycle reload build: the try runs from the build through the publication and its catch '
+           f'dies the candidate before the restore (heads {len(rel)}, found {n_catch}, inner catches {n_inner})')
+    # Г4: носитель лога отказов двери -- логгер загрузчика (тот, которым он
+    # пишет `hooks modules unloaded: ` и который отдаёт рантайму как `log`),
+    # определён ровно за текстом двери.
+    lg = list(re.finditer(rb'function __ctlLog\(s\)\{(?P<T>' + I + rb')\(s,\{level:"error"\}\)\}', d))
+    lg_ok = False
+    if len(lg) == 1 and door is not None:
+        T = re.escape(lg[0].group('T'))
+        lg_ok = (d.find(door) + len(door) == lg[0].start()
+                 and len(re.findall(T + rb'\(`hooks modules unloaded: ', d)) == 1
+                 and len(re.findall(rb'log:\((?P<a>' + I + rb'),(?P<b>' + I + rb')\)=>' + T
+                                    + rb'\((?P=a),\{level:(?P=b)\?\?"debug"\}\),hookFailed\(', d)) == 1)
+    needle(lg_ok,
+           f'door log: refusals write through the loader\'s own debug logger, defined right after the door '
+           f'(found {len(lg)})')
+    # Последняя игла: политики в патче нет (src -- исходник патча в str, не байты
     # образа) -- иначе правило жило бы в двух домах сразу
     for lit in (
         "You are a coding agent.",
@@ -9105,15 +9369,15 @@ def _swe_policy_pristine_diff(d):
 
 
 checks = {
-    'routing (claude-* -> subscription)': _routing_agrees_with_connection(d),
-    'patch source escapes every captured name': _escaped_interpolations(src),
-    'full bypass keeps peer-machine immunity': _bypass_no_immunity(d),
-    'agent model schema relaxed':         _agent_model_schema_relaxed(d),
-    'each launch site carries effort by one route or the other':        _every_launch_carries_effort(d),
+    'routing (claude-* -> subscription)': lambda: _routing_agrees_with_connection(d),
+    'patch source escapes every captured name': lambda: _escaped_interpolations(src),
+    'full bypass keeps peer-machine immunity': lambda: _bypass_no_immunity(d),
+    'agent model schema relaxed':         lambda: _agent_model_schema_relaxed(d),
+    'each launch site carries effort by one route or the other':        lambda: _every_launch_carries_effort(d),
     # Две формы охранника (см. шаг 2): до 2.1.248 -- одна строка с ранним
     # `return`, с 2.1.248 -- цепочка промежуточных значений и блок. Гарантия в
     # обеих одна: первый конъюнкт погашен, ранний выход не срабатывает.
-    'gateway discovery without token':    bool(
+    'gateway discovery without token':    lambda: bool(
                                               re.search(rb'ANTHROPIC_AUTH_TOKEN,' + ID + rb'=' + ID + rb'\(\);if\(!1&&!', d)
                                               or re.search(rb'ANTHROPIC_AUTH_TOKEN,[^;]{0,240};if\(!1&&!' + ID + rb'\)\{', d)),
     # Two-sided: the stock branch must be gone AND the widened one must still
@@ -9121,7 +9385,7 @@ checks = {
     # sentinel test had been dropped from the ternary -- `"inherit"` is truthy,
     # so it reached the model-name parser and produced a badge from a parse of
     # the sentinel.
-    'subagent model badge':               not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d)
+    'subagent model badge':               lambda: not re.search(rb'else if\((' + ID + rb')\.model&&\1\.model!=="inherit"\)', d)
                                           and bool(re.search(
                                               rb',' + ID + rb'=(' + ID + rb')\.model&&\1\.model!=="inherit"\?'
                                               + ID + rb'\(\1\.model\):' + ID + rb';', d)),
@@ -9133,10 +9397,10 @@ checks = {
     # Anchored to the chevron itself, not to the shape of a ternary: `color:X?Y:"z"
     # ,dimColor:!1` occurs wherever someone writes one, so the stock chevron could
     # be restored and a lookalike elsewhere would keep this green.
-    'input chevron colour':               _chevron_colour_follows_state(d),
-    'session memory forced on':           _session_memory_ungated(d),
+    'input chevron colour':               lambda: _chevron_colour_follows_state(d),
+    'session memory forced on':           lambda: _session_memory_ungated(d),
     # every override read must now be a merge: `{...X().additionalModelCostsCache,...X().customModelCosts}`
-    'custom model costs':                 len(re.findall(rb'\{\.\.\.' + ID + rb'\(\)\.additionalModelCostsCache,\.\.\.' + ID + rb'\(\)\.customModelCosts\}', d))
+    'custom model costs':                 lambda: len(re.findall(rb'\{\.\.\.' + ID + rb'\(\)\.additionalModelCostsCache,\.\.\.' + ID + rb'\(\)\.customModelCosts\}', d))
                                           == len(re.findall(ID + rb'\(\)\.additionalModelCostsCache', d)) > 0,
     # every gateway-model filter must be followed by the de-disguise map
     # ...and the map must actually UNDO the disguise. Counting maps that merely
@@ -9144,7 +9408,7 @@ checks = {
     # gateway id stays masked, the filter above still reads as patched, and the
     # feature is gone with the gate green. The transformation is what the step
     # promises, so the transformation is what is pinned.
-    'gateway model de-disguise':          _gateway_ids_are_undisguised(d),
+    'gateway model de-disguise':          lambda: _gateway_ids_are_undisguised(d),
     # One site, two lookups (raw id, then canonical name), read through a
     # guarded local at the HEAD of the function. Counting `().customModelContext
     # Windows?.[` was satisfied by the old tail placement, where four earlier
@@ -9155,7 +9419,7 @@ checks = {
     # arms, testing the same identifier the lookup keys on. Without that tail the
     # check accepted the prelude after any `{` -- including one below the arms it
     # exists to outrank, which is the placement the step was written to fix.
-    'per-model context window':           bool(re.search(
+    'per-model context window':           lambda: bool(re.search(
                                               rb'\{let __ccw;try\{__ccw=' + ID + rb'\(\)\.customModelContextWindows\}catch\{\}'
                                               rb'let __ccv=__ccw\?\.\[(' + ID + rb')\]\?\?__ccw\?\.\['
                                               + ID + rb'\(' + ID + rb'\(\1\)\)\];'
@@ -9165,7 +9429,7 @@ checks = {
     # the expired-login bail must be reachable only for the subscription lane,
     # and the proxy lane that now survives it must null both auth headers or
     # the SDK rejects the request itself
-    'proxy lane survives expired login':  bool(re.search(
+    'proxy lane survives expired login':  lambda: bool(re.search(
                                               rb'\{if\(!\(!/\^claude/i\.test\(' + ID + rb'\)&&process\.env\.ANTHROPIC_BASE_URL\)\)'
                                               rb'throw new ' + ID + rb';\}if\(', d))
                                           and bool(re.search(
@@ -9181,8 +9445,8 @@ checks = {
     # образе там держит вторая половина, снос fork-ветки. Формулировка «никакой
     # путь не отбрасывает модель» была верна для старой записи и лгала для новой,
     # где env-путь отбрасывания обязан остаться на месте.
-    'dispatch keeps its model': _dispatch_keeps_its_model(d) and _fork_drops_are_gone(d),
-    'Vertex project resolution intact (fork-sweep tripwire)':  _fork_sweep_stayed_near_its_anchor(d),
+    'dispatch keeps its model': lambda: _dispatch_keeps_its_model(d) and _fork_drops_are_gone(d),
+    'Vertex project resolution intact (fork-sweep tripwire)':  lambda: _fork_sweep_stayed_near_its_anchor(d),
     # effort must be DECLARED (schema), CARRIED (call handler) and USED (spliced
     # into the definition the runtime reads) — declaring it alone would satisfy
     # a routing gate while the request still went at the vendor default
@@ -9198,7 +9462,7 @@ checks = {
     # ДВЕ формы привязки, по форме подписи обработчика: поле в образце
     # параметров (<=2.1.259) либо отдельный оператор в теле (2.1.260+).
     # Ровно одна из них обязана встретиться ровно один раз.
-    'dispatch carries effort':            (len(re.findall(rb'effort:__ccEffort', d))
+    'dispatch carries effort':            lambda: (len(re.findall(rb'effort:__ccEffort', d))
                                            + len(re.findall(rb'let __ccEffort=' + ID + rb'\.effort;', d))) == 1
                                           and bool(re.search(
                                               rb'=\{agentDefinition:\(\(\(\)=>\{let __ccRaw=typeof __ccEffort==="string"'
@@ -9214,7 +9478,7 @@ checks = {
     # anyone who turns the mode on
     # the switch must be parsed by the SAME helper that parses the variable
     # already gating this function — same identifier in both calls
-    'interactive coordinator mode':       bool(re.search(
+    'interactive coordinator mode':       lambda: bool(re.search(
                                               rb'if\(!(' + ID + rb')\(process\.env\.CLAUDE_CODE_COORDINATOR_MODE\)\)return!1;'
                                               rb'if\(' + ID + rb'\(\)&&!' + ID + rb'\(\)&&!' + ID + rb'\.CLAUDE_CODE_REMOTE'
                                               rb'&&!\1\(process\.env\.CLAUDE_CODE_COORDINATOR_INTERACTIVE\)\)return!1;', d))
@@ -9228,11 +9492,11 @@ checks = {
     # a resumed session must not be able to drag the process out of the mode the
     # environment asked for; the bail sits before the first read of the live
     # predicate, so nothing is flipped and no warning is produced
-    'env overrides resumed mode':         _env_overrides_resumed_mode(d),
+    'env overrides resumed mode':         lambda: _env_overrides_resumed_mode(d),
     # a row must carry what was actually spawned: the agent type and the model,
     # the latter falling back to the agent definition when the dispatch did not
     # override it (the normal case for the pinned vendor agents)
-    'agent row shows type and model':     bool(re.search(
+    'agent row shows type and model':     lambda: bool(re.search(
                                               rb'=\[(' + ID + rb')\.agentType,\1\.model\?\?\1\.selectedAgent\?\.model,'
                                               rb'.{0,80}?\]\.filter\(Boolean\)\.join\(" \\xB7 "\)', d, re.S)),
     # a search must be able to reach sessions the picker has not paged in yet:
@@ -9243,7 +9507,7 @@ checks = {
     # length to the dependencies (closing the deadlock the same way) and then
     # capped the scan with a give-up counter, which the patch now steps over
     # while the search UI is open
-    'resume search pages in the tail': (bool(re.search(
+    'resume search pages in the tail': lambda: (bool(re.search(
                                               rb'if\((' + ID + rb')==="search"\|\|(' + ID + rb')\+(' + ID + rb')>='
                                               rb'(' + ID + rb')\.length\)(' + ID + rb')\((' + ID + rb')\*3\)\},'
                                               rb'\[\2,\6,\4\.length,\5,\1,(' + ID + rb')\.length\]\),\7\.length===0', d))
@@ -9258,7 +9522,7 @@ checks = {
     # a NAMED dispatch becomes an in-process teammate, whose record is built
     # from a different literal than a plain local agent; the agent type has to
     # reach it through the spawn directive or the row shows only the model
-    'named agent carries its type': bool(re.search(
+    'named agent carries its type': lambda: bool(re.search(
                                               rb'planModeRequired:(' + ID + rb')\?\?!1,model:(' + ID + rb'),'
                                               rb'agentType:(' + ID + rb')\};', d))
                                           and bool(re.search(
@@ -9269,7 +9533,7 @@ checks = {
     # request and must never leave a truncated answer behind reported as a
     # success: budgets raised to 300, the shared backoff on the wait, and the
     # exhaustion path throws instead of emitting "…may be incomplete"
-    'broken stream retried, not halved': bool(re.search(
+    'broken stream retried, not halved': lambda: bool(re.search(
                                               # 2.1.245 inserts two more declarations right after
                                               # `{value:0}`; the tail run still identifies the two
                                               # counters this patch raises
@@ -9303,11 +9567,11 @@ checks = {
                                           and _stream_finalize_ok(d),
     # a session that ran on a proxy model must come back on it: the stock
     # verdict chain classifies every non-first-party id as unknown_family
-    'session model restore keeps a proxy model': bool(re.search(
+    'session model restore keeps a proxy model': lambda: bool(re.search(
                                               rb'let ' + ID + rb'=process\.env\.ANTHROPIC_BASE_URL&&'
                                               rb'!/\^claude/i\.test\(' + ID + rb'\)\?void 0:'
                                               rb'!\(' + ID + rb'\.has\(', d)),
-    'effort binding reaches the launch': _effort_binding_reaches_the_launch(d),
+    'effort binding reaches the launch': lambda: _effort_binding_reaches_the_launch(d),
     # the main loop is told the RULE, not the judge: a cancelled dispatch was
     # once read as the routing gate firing and blindly retried
     # The opening of the sentence is not the rule. Truncate it after "may be
@@ -9316,14 +9580,14 @@ checks = {
     # identical call, this is not the permission system -- is gone. The clauses
     # that make it actionable are pinned individually.
     _STEP26_CHECK: (
-        'note' if _S26['status'] == 'note' else
+        lambda: 'note' if _S26['status'] == 'note' else
         False if _S26['status'] == 'fail' else
         _cancellation_rule_is_whole(d)),
     # Step 12 also rewrites what the schema TELLS the model about a fork's model
     # override; stock says the override is ignored, which is false once the code
     # honours it. Nothing measured that, so restoring the stock sentence left all
     # gates green and the model reading the opposite of how the tool behaves.
-    'fork model override is documented as working': bool(re.search(
+    'fork model override is documented as working': lambda: bool(re.search(
                                               rb'For subagent_type: "fork" it selects the model the fork '
                                               rb'runs on', d))
                                           and not re.search(rb'forks always inherit the parent model', d),
@@ -9334,13 +9598,13 @@ checks = {
     # The escaping note the old form carried still holds and now lives inside
     # the helper; what it could not do is keep the search inside the module the
     # step edits.
-    'statusline throttle raised': _statusline_throttle_raised(d),
+    'statusline throttle raised': lambda: _statusline_throttle_raised(d),
     # One-sided: the exact stock phrase is gone. Rewrite the refusal in any other
     # words and it stays green while the refusal is alive again. The positive
     # half asserts what should be there instead -- the guard evaluating to
     # `void 0` -- and the step's own second anchor (the bare phrase) is checked
     # too, so a reworded upstream cannot pass unnoticed.
-    'root/sudo refusal neutralised': _sudo_refusal_is_neutralised(d),
+    'root/sudo refusal neutralised': lambda: _sudo_refusal_is_neutralised(d),
     # step 28: both site-B halves are OPT-IN -- with the handle set the
     # mapped refusal target stops being downgraded to the family default and
     # the top of the lineup stops being excluded from the fallback walk;
@@ -9351,9 +9615,9 @@ checks = {
     # preservation. Every record here has a mutation that reddens it: the
     # armed-model record rides the constants mutation's second door,
     # declared in that row, so none may quietly become unfailable.
-    'refusal fallback routes come from the config': _refusal_routes_read_the_config(d),
-    'top of the lineup is a reachable fallback': _top_of_lineup_is_reachable(d),
-    'the armed model keeps its stock downgrade': _armed_model_keeps_its_downgrade(d),
+    'refusal fallback routes come from the config': lambda: _refusal_routes_read_the_config(d),
+    'top of the lineup is a reachable fallback': lambda: _top_of_lineup_is_reachable(d),
+    'the armed model keeps its stock downgrade': lambda: _armed_model_keeps_its_downgrade(d),
     # step 29: the mod-API per-process model budget. Stock refuses every
     # `$.model.complete` call once a plugin has spent its ceiling, and the
     # counter lives in PROCESS memory -- the judge, the idle watch and every
@@ -9363,11 +9627,11 @@ checks = {
     # exists; the second record guards the premise that keeps the derived
     # warning silent with it.
     'the mod-API model budget ceiling is operator-set': (
-        'note' if _S29['status'] == 'note' else
+        lambda: 'note' if _S29['status'] == 'note' else
         False if _S29['status'] == 'fail' else
         _mod_budget_ceiling_is_operator_set(d)),
     'the mod-API budget warning derives from that ceiling': (
-        'note' if _S29['status'] == 'note' else
+        lambda: 'note' if _S29['status'] == 'note' else
         False if _S29['status'] == 'fail' else
         _mod_budget_warning_derives_from_the_ceiling(d)),
     # The SECOND door of the same room. Lifting only the process budget leaves
@@ -9377,8 +9641,8 @@ checks = {
     # guards the premise our edit depends on: the value a mod gets by NOT
     # passing maxTokens must stay a constant of its own, or lifting the
     # ceiling would silently turn that default into Infinity.
-    'the mod-API per-call maxTokens ceiling is operator-set': _mod_maxtokens_ceiling_is_operator_set(d),
-    'the mod-API per-call maxTokens default is not the ceiling': _mod_maxtokens_default_is_not_the_ceiling(d),
+    'the mod-API per-call maxTokens ceiling is operator-set': lambda: _mod_maxtokens_ceiling_is_operator_set(d),
+    'the mod-API per-call maxTokens default is not the ceiling': lambda: _mod_maxtokens_default_is_not_the_ceiling(d),
     # Третья дверь той же комнаты, и предмет у неё другой: не ПОТОЛОК, а ПОТЕРЯ.
     # Мод-API принимал ровно `{model, prompt, system, maxTokens}` и молча ронял
     # `effort`, `timeoutMs` и snake_case `max_tokens` -- все три судья шлёт.
@@ -9387,31 +9651,44 @@ checks = {
     # 69%. Ниже по течению всё нужное уже принималось (`timeout`, `extraBodyParams`),
     # так что правка сквозная; проверки стерегут оба её конца и ПОРЯДОК, в
     # котором алиас встречается со сторожем предела.
-    'the mod-API forwards a per-call effort': _mod_api_forwards_effort(d),
-    'the mod-API forwards a per-call timeout': _mod_api_forwards_timeout(d),
+    'the mod-API forwards a per-call effort': lambda: _mod_api_forwards_effort(d),
+    'the mod-API forwards a per-call timeout': lambda: _mod_api_forwards_timeout(d),
     'the mod-API token alias is resolved before the ceiling guard':
-        _mod_api_alias_is_resolved_before_the_guard(d),
+        lambda: _mod_api_alias_is_resolved_before_the_guard(d),
     'the mod-API returns the cause of an empty answer on request':
-        _mod_api_returns_detail_on_request(d),
+        lambda: _mod_api_returns_detail_on_request(d),
     # Шаги 32+34: политика swe-2 уехала из патча в плагин catalyst-swe-request;
     # в хосте осталась дверь ($.requestText: ноун, ключ фабрики, имена операций,
-    # записи диспетчера) и вызов применителя на сайте сборки тела. Проверка
-    # стережёт ОБА конца двери и отсутствие всех шести литералов политики в
-    # исходнике патча.
-    'the requestText door is keyed and the rule applier sits at the body site': _swe32_request_text(d),
+    # записи диспетчера, мост settle, врезки снятия правил) и применители в
+    # ИСТОЧНИКАХ system и tools запроса (#468: заморозки нет). Проверка
+    # стережёт ОБА конца двери, жизненный цикл правил и отсутствие всех шести
+    # литералов политики в исходнике патча.
+    'the requestText door is keyed and the rule applier sits at the system and tools sources': lambda: _swe32_request_text(d),
     # П8: девять строк политики -- дифференциал против пристина (третий вход
     # блока). После ухода политики в плагин НИЧТО другое не утверждает, что
     # патч оставил стоковый текст в покое: литерал, вошедший в образ не через
     # tweakcc-patch.js, невидим скану исходника.
-    'the nine policy strings count equal in the image and in the pristine twin': _swe_policy_pristine_diff(d),
+    'the nine policy strings count equal in the image and in the pristine twin': lambda: _swe_policy_pristine_diff(d),
     # Шаг 33: валидатор выхода turn.step-хука принимает tool-чанк с id devin
     # (`call_<hex>#<hex>`); без него любой turn.step-хук, даже сквозной, терял
     # tool-чанк, и клиент отвечал tengu_malformed_tool_use_response.
-    'the turn.step tool chunk validator accepts an id without whitespace': _swe33_tool_chunk_id(d),
+    'the turn.step tool chunk validator accepts an id without whitespace': lambda: _swe33_tool_chunk_id(d),
     # Шаг 35: сайт ui.render на месте статус-строки — StatusLine в таблицах
     # движка, слот раскладки под сайт-компонентом; иглы в _statusline35_site.
-    'the StatusLine render site is registered and mounted in the status-line slot': _statusline35_site(d),
+    'the StatusLine render site is registered and mounted in the status-line slot': lambda: _statusline35_site(d),
 }
+# Г9 (#468-FIX4): a check that raises is ITS OWN named failure, not a
+# traceback of the whole stage -- every value above is a lambda, evaluated
+# here one by one, so an exception names the check and the others still run.
+def _guarded_check(name, f):
+    try:
+        return f()
+    except Exception as exc:
+        print(f"  [RAISED] {name}: {type(exc).__name__}: {exc}")
+        return False
+
+
+checks = {name: _guarded_check(name, f) for name, f in checks.items()}
 # The count is an invariant, not a running total. `all({}.values())` is True,
 # so a merge that drops the dictionary -- or a block of it -- leaves a green
 # build with nothing behind it. And an unpinned count is a number people get

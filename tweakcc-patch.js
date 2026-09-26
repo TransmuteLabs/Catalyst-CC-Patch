@@ -4458,9 +4458,9 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 });
 
 
-// 34. The requestText door. Five insertions into the image, each keyed to a
-//     construction site of the flag noun so the door rides the machinery the
-//     host already trusts:
+// 34. The requestText door. Insertions into the image, each keyed to a
+//     construction site of the flag noun or a contentful host log literal so
+//     the door rides the machinery the host already trusts:
 //       * the noun builder, a sibling of the flag builder, calling the same
 //         host invoker with "requestText.register"/"unregister"/"list";
 //       * the factory key -- the SAME literal the host builds both the noun
@@ -4477,17 +4477,50 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 //         Two further consequences ride on the listing: the operation becomes
 //         interceptable by other plugins' hooks, and the official plugin test
 //         harness admits only listed names;
-//       * the op implementations, the rule table and the applier, inserted
-//         right after the flag.value op record -- the module that owns the
-//         request-body site, so the site's call shares its scope;
-//       * the dispatcher entries, beside flag.value's own.
+//       * the op implementations, the rule table and the two source appliers,
+//         inserted right after the flag.value op record -- the module that
+//         owns the request-body site, so the site's call shares its scope;
+//       * the dispatcher entries, beside flag.value's own;
+//       * the lifecycle cut-ins (ADJUDICATION-468.md): `Zt` settles a
+//         module's generation when it carries no `session.start` hook
+//         (before its `continue`) and when its hook settles (a `.finally` on
+//         the raise chain); `en` settles the initial-load set after its own
+//         `session.start` try/catch. Both live in ANOTHER segment, so they
+//         reach the door through the bridge `globalThis.__ctlRequestTextSettle`
+//         (precedent `globalThis.__tweakccForceRedraw`). The generation death
+//         in `terminate()` (`__ctlTerm`) and the owner-gone cut-ins in `Pe`,
+//         `BN` and `GSt` (`__ctlGone`) live in THIS segment and call the door
+//         directly.
 //     CONSTRAINT: a `check` message is a BARE phrase -- the `<plugin>: <op>: `
 //     prefix and the ` (host check)` suffix are added by the host.
 //     CONSTRAINT: a `check` that returns an empty string is still a refusal
 //     (the host reads `!==void 0`) -- never return "".
-//     CONSTRAINT: the rule table freezes on the FIRST application: on a
-//     continued server turn the host may omit `system`/`tools`, and a rule
-//     arriving mid-turn would silently not apply until the turn ended.
+//     CONSTRAINT: there is NO freeze. `register`/`unregister` are accepted at
+//     any moment of the session; the effect starts from the next request. The
+//     ordering hazards the freeze used to bury are carried by generations
+//     instead (ADJUDICATION-468.md, R6-R13): a rule carries its owner's module
+//     generation. The owner's floor is raised ONLY by settle (to `gen`) and by
+//     the owner leaving (to `gen + 1`), never by a registration -- a
+//     registration is undone when its generation dies, a floor is not.
+//     Seniority between live generations is per rule: a call on an id whose
+//     head carries a NEWER generation than the caller is refused by name.
+//     CONSTRAINT: the rules apply at the SOURCES of system and tools inside
+//     the request builder (step 32), never on the body literal: the thread
+//     planner compares hashes of the ORIGIN system/tools and omits fields it
+//     deems stable BEFORE the body literal is assembled, so an applier on the
+//     body would let the planner keep deciding on stock text while the wire
+//     carried rewritten text. One snapshot of the rule table serves one
+//     request (`__ctlSys` selects and stores it, `__ctlTools` consumes it), so
+//     a registration landing between the two calls cannot split a request.
+//     CONSTRAINT: retire is NOT the drop point for a replaced generation: the
+//     host retires the old instance BEFORE the new instance's `session.start`
+//     runs, so dropping there would open a window with no rule at all. Rules
+//     of an old generation are dropped by `settle` once the new generation's
+//     `session.start` has settled (or it has no hook). `terminate()` of
+//     instance `h` is the death of generation `h`, not the owner leaving: the
+//     host calls it on build candidates that failed, while the version that
+//     stayed loaded keeps its rules, so every head of generation `h` rolls
+//     back to the nearest live link of its chain.
 //     CONSTRAINT: rewritten bodies are NEW objects: the arrays the request
 //     loop keeps for retries and inheritance checks must not be mutated. The
 //     container is replaced ONLY when an element actually changed -- a body
@@ -4499,9 +4532,9 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 //     key (`flgs` for `flags`) compiled a rule that silently never matched, and
 //     `JSON.parse(JSON.stringify(rule))` at read time THREW synchronously
 //     inside `Promise.resolve(...)` on a rule holding a BigInt, a cycle or a
-//     throwing `toJSON` -- one plugin's rule killed `list()` for everyone, and
-//     a frozen table cannot be unregistered. There is no `JSON.stringify` in
-//     this door: `list()` cannot throw BY CONSTRUCTION.
+//     throwing `toJSON` -- one plugin's rule killed `list()` for everyone.
+//     There is no `JSON.stringify` in this door: `list()` cannot throw BY
+//     CONSTRUCTION.
 //     CONSTRAINT: ownership is checked against the stored `owner` FIELD, never
 //     against a prefix of the id string, and `__ctlRemove` carries its own
 //     guard -- the door does not rely on the host always calling `check`
@@ -4536,14 +4569,48 @@ step('31 mod-API forwards per-call effort, timeout and the token alias', () => {
 //     the anchors stay stable.
 step('34 requestText door', () => {
   const ID = '[A-Za-z_$][\\w$]*';
+  // CONSTRAINT (memory): a match array keeps `.input` -- the WHOLE image string
+  // of the generation it was taken on -- and a substring of 13+ bytes keeps its
+  // parent alive; every later splice then leaves that generation resident
+  // (measured ~+228 MB per edit, 4 GB cgroup). `hits` hands out detached copies
+  // only, and every locator reads the SAME image: `edit` records a splice in
+  // that image's offsets and `build` joins them once, so the step allocates one
+  // new image instead of one per edit (a flattened copy per edit left ~3 GB of
+  // garbage behind the heap limit, measured #468-FIX4).
+  const own = (s) => (typeof s === 'string' ? (' ' + s).slice(1) : s);
+  const hits = (rx, text = js) => [...text.matchAll(rx)].map((m) => ({
+    index: m.index,
+    text: own(m[0]),
+    list: m.slice(1).map(own),
+    groups: Object.fromEntries(Object.entries(m.groups || {}).map(([k, v]) => [k, own(v)])),
+  }));
+  const one = (rx, msg, text = js) => {
+    const h = hits(rx, text);
+    if (h.length !== 1) fail(msg(h.length));
+    return h[0];
+  };
+  const pending = [];
+  const edit = (at, cut, text) => { pending.push([at, cut, text]); };
+  const build = () => {
+    pending.sort((a, b) => a[0] - b[0]);
+    for (let i = 1; i < pending.length; i++) {
+      if (pending[i][0] < pending[i - 1][0] + pending[i - 1][1] ||
+          (pending[i][0] === pending[i - 1][0] && pending[i - 1][1] === 0)) {
+        fail(`requestText door: two cut-ins meet at offset ${pending[i][0]}`);
+      }
+    }
+    const parts = [];
+    let at = 0;
+    for (const [p, cut, text] of pending) { parts.push(js.slice(at, p), text); at = p + cut; }
+    parts.push(js.slice(at));
+    js = ('@' + parts.join('')).slice(1);
+  };
 
   const rxNoun = new RegExp(
     `var (${ID})=\\((${ID})\\)=>(${ID})\\(\\{value:\\((${ID}),(${ID})\\)=>\\2\\("flag\\.value",\\{name:\\4,fallback:\\5\\}\\)\\}\\);`, 'g');
-  const nounSites = [...js.matchAll(rxNoun)];
-  if (nounSites.length !== 1) fail(`requestText door: flag noun builder: expected exactly 1 site, found ${nounSites.length}`);
-  const [noun] = nounSites;
-  const NOUN = noun[1];
-  const VH = noun[3];
+  const noun = one(rxNoun, (n) => `requestText door: flag noun builder: expected exactly 1 site, found ${n}`);
+  const NOUN = noun.list[0];
+  const VH = noun.list[2];
   // CONSTRAINT: the parameter names here are OUR OWN, carrying a prefix no
   // minifier produces. The factory passes an ARGUMENT, never a name, so
   // borrowing the flag builder's minified parameter bought nothing and
@@ -4553,41 +4620,52 @@ step('34 requestText door', () => {
     `var __ctlRT=(__ctlH)=>${VH}({register:(__ctlA)=>__ctlH("requestText.register",__ctlA),` +
     `unregister:(__ctlA)=>__ctlH("requestText.unregister",{id:__ctlA}),` +
     `list:()=>__ctlH("requestText.list",{})});`;
-  js = js.slice(0, noun.index + noun[0].length) + nounBuilder +
-    js.slice(noun.index + noun[0].length);
+  edit(noun.index + noun.text.length, 0, nounBuilder);
 
   const rxFactory = new RegExp(`,flag:(${ID})\\(${rxEsc(NOUN)}\\((${ID})\\)\\)\\}\\}`, 'g');
-  const factorySites = [...js.matchAll(rxFactory)];
-  if (factorySites.length !== 1) fail(`requestText door: interface factory literal: expected exactly 1 site, found ${factorySites.length}`);
-  const [factory] = factorySites;
-  const factoryKey = `,requestText:${factory[1]}(__ctlRT(${factory[2]}))`;
-  js = js.slice(0, factory.index + factory[0].length - 2) + factoryKey + '}}' +
-    js.slice(factory.index + factory[0].length);
+  const factory = one(rxFactory, (n) => `requestText door: interface factory literal: expected exactly 1 site, found ${n}`);
+  const factoryKey = `,requestText:${factory.list[0]}(__ctlRT(${factory.list[1]}))`;
+  edit(factory.index + factory.text.length - 2, 0, factoryKey);
 
   const rxNames = /("prompt\.read","flag\.value",)("tool\.list")/g;
-  const nameSites = [...js.matchAll(rxNames)];
-  if (nameSites.length !== 1) fail(`requestText door: operation name list: expected exactly 1 site, found ${nameSites.length}`);
-  const [names] = nameSites;
+  const names = one(rxNames, (n) => `requestText door: operation name list: expected exactly 1 site, found ${n}`);
   const namesAdd = '"requestText.register","requestText.unregister","requestText.list",';
-  js = js.slice(0, names.index + names[1].length) + namesAdd +
-    js.slice(names.index + names[1].length);
+  edit(names.index + names.list[0].length, 0, namesAdd);
 
   const rxOpImpl = new RegExp(
     `var (${ID})=\\{check:\\((${ID})\\)=>(${ID})\\(\\)\\?(${ID})\\(\\2\\):"reads a feature flag[^"]*",run:\\((${ID})\\)=>Promise\\.resolve\\((${ID})\\(\\5\\.name,\\5\\.fallback\\)\\)\\};`, 'g');
-  const opSites = [...js.matchAll(rxOpImpl)];
-  if (opSites.length !== 1) fail(`requestText door: flag.value op record: expected exactly 1 site, found ${opSites.length}`);
-  const [op] = opSites;
-  const DQT = op[1];
+  const op = one(rxOpImpl, (n) => `requestText door: flag.value op record: expected exactly 1 site, found ${n}`);
+  const DQT = op.list[0];
+  // The door's refusal log is the loader's own debug logger: the name the
+  // loader writes `hooks modules unloaded: ` with, and the SAME name the hooks
+  // runtime is handed as its `log` adapter. The door lands right after the op
+  // record, a top-level statement of the loader's module, where that name is
+  // the module-level binding (DOOR-DESIGN §2, Г4).
+  const logUse = one(new RegExp(`(?<T>${ID})\\(\\\`hooks modules unloaded: `, 'g'),
+    (n) => `requestText door: the loader's debug log call (hooks modules unloaded): expected exactly 1, found ${n}`);
+  const logHost = one(new RegExp(
+    `log:\\((?<a>${ID}),(?<b>${ID})\\)=>(?<T>${ID})\\(\\k<a>,\\{level:\\k<b>\\?\\?"debug"\\}\\),hookFailed\\(`, 'g'),
+  (n) => `requestText door: the hooks runtime log adapter: expected exactly 1, found ${n}`);
+  if (logUse.groups.T !== logHost.groups.T) {
+    fail(`requestText door: the loader logs through '${logUse.groups.T}' but hands the runtime '${logHost.groups.T}'`);
+  }
+  const logDef = `function __ctlLog(s){${logUse.groups.T}(s,{level:"error"})}`;
   // One line, no newlines and no //-comments: this lands inside the
-  // minified image; the break-up below is source readability only.
+  // minified image; the break-up below is source readability only. Every
+  // element is a PLAIN single-quoted literal: the byte-pin in
+  // claude-patch-all.sh reassembles the door text from these lines, and a
+  // concatenated element would make the pin measure other bytes.
   const door = [
-    'var __ctlRules=[],__ctlFrozen=!1,__ctlSeen=0,__ctlChanged=0;',
+    'var __ctlRules=[],__ctlFloor=Object.create(null),__ctlDead=Object.create(null),__ctlSeen=0,__ctlChanged=0,__ctlPick=null;',
     'function __ctlEsc(s){return s.replace(/[.*+?^${}()|[\\]\\\\]/g,"\\\\$&")}',
     'var __ctlRK={model:1,ops:1},__ctlOK={find:1,pattern:1,flags:1,to:1,tool:1};',
     'function __ctlBad(r){',
     'if(!r||typeof r!=="object")return "takes { model, ops }";',
     'for(var rk in r)if(!__ctlRK[rk])return "unknown key \\""+rk+"\\" on the rule; takes { model, ops }";',
     'if(typeof r.model!=="string"||r.model==="")return "model must be a non-empty string";',
+    // The request model is trimmed by __ctlModel: a padded rule model could
+    // never match, so it is refused rather than kept dead.
+    'if(r.model!==r.model.trim())return "model must not begin or end with whitespace";',
     'if(!Array.isArray(r.ops)||r.ops.length===0)return "ops must be a non-empty array";',
     'for(var i=0;i<r.ops.length;i++){var o=r.ops[i];',
     'if(!o||typeof o!=="object")return "ops["+i+"] must be an object";',
@@ -4604,64 +4682,402 @@ step('34 requestText door', () => {
     'function __ctlSnap(r){var ops=[],i;for(i=0;i<r.ops.length;i++){var o=r.ops[i],s={to:o.to};',
     'if(typeof o.find==="string")s.find=o.find;else{s.pattern=o.pattern;if(o.flags!==void 0)s.flags=o.flags}',
     'if(o.tool!==void 0)s.tool=o.tool;ops.push(s)}return {model:r.model,ops:ops}}',
+    // The owner's LENGTH prefixes the id: a separator inside a plugin name or
+    // a model id must never let two owners' rules share one id. Callers treat
+    // the id as an opaque token. No JSON.stringify: the door carries none.
+    'function __ctlId(o,m){return o.length+":"+o+":"+String(m).toLowerCase()}',
     'function __ctlCompile(r,owner){',
     'var ops=[],i;for(i=0;i<r.ops.length;i++){var o=r.ops[i];',
     'ops.push(typeof o.find==="string"&&o.find!==""?{find:o.find,to:o.to,tool:o.tool}:{re:new RegExp(o.pattern,o.flags||""),to:o.to,tool:o.tool})}',
-    'return {id:owner+":"+String(r.model).toLowerCase(),owner:owner,model:r.model,mre:new RegExp("^"+__ctlEsc(r.model)+"(?![\\\\w.-])","i"),ops:ops,matched:0,raw:__ctlSnap(r)}}',
-    'function __ctlUpsert(r,owner){',
-    'var c=__ctlCompile(r,owner),i;',
-    'for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===c.id){__ctlRules[i]=c;return {id:c.id}}',
-    '__ctlRules.push(c);return {id:c.id}}',
+    // `u` with `i`: the predicate folds case exactly as toLowerCase folds the
+    // id (U+212A KELVIN SIGN is `k` for both), so one id never carries a rule
+    // its own predicate refuses.
+    'return {id:__ctlId(owner,r.model),owner:owner,model:r.model,mre:new RegExp("^"+__ctlEsc(r.model)+"(?![\\\\w.-])","iu"),ops:ops,matched:0,raw:__ctlSnap(r)}}',
+    'function __ctlSame(a,b){',
+    'if(a.model.toLowerCase()!==b.model.toLowerCase()||a.ops.length!==b.ops.length)return!1;',
+    'var i,k,K="find,pattern,flags,to,tool".split(",");',
+    'for(i=0;i<a.ops.length;i++)for(k=0;k<K.length;k++){var x=K[k]in a.ops[i],y=K[k]in b.ops[i];',
+    'if(x!==y||(x&&a.ops[i][K[k]]!==b.ops[i][K[k]]))return!1}',
+    'return!0}',
     'function __ctlFind(id){var i;for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===id)return __ctlRules[i];return null}',
     'function __ctlOwnBad(e,c){if(!e||typeof e.id!=="string"||e.id==="")return "unregister takes a non-empty string id";',
+    'if(e.id!==e.id.trim())return "unregister takes an id without surrounding whitespace";',
     'var r=__ctlFind(e.id);if(r&&r.owner!==String(c&&c.plugin||"?"))return "the id belongs to another plugin";return}',
-    'function __ctlRemove(id,owner){',
-    'var i;for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===id){',
-    'if(__ctlRules[i].owner!==owner)return {removed:!1};__ctlRules.splice(i,1);return {removed:!0}}',
+    // One check for `check` and `run` of both operations; the order is the
+    // contract: generation facts first, the rule/id shape next, and the
+    // per-rule seniority last, because it needs a well-formed id.
+    'var __ctlRepl="the module generation was replaced; a newer load of this plugin owns its rules";',
+    // CONSTRAINT: lifecycle generations are nonnegative safe integer host ids;
+    // refusing invalid ids must leave the rules and generation facts untouched.
+    'var __ctlBadGen="the generation is not a nonnegative safe integer environment id";',
+    // Every door refusal attempts a line in the host debug log: the lifecycle
+    // callers discard the returned phrase. The line is built INSIDE the try --
+    // a throwing log or a hostile name must not replace the host's own error
+    // in the comma expressions of the cut-ins that call the door.
+    'function __ctlSay(op,who,why,got,has){try{__ctlLog("$.requestText: "+op+" refused for "+String(who)+": "+why+(has?" (got "+(typeof got==="number"?String(got):typeof got)+")":""))}catch(x){}}',
+    'function __ctlNoGen(op,owner,g){__ctlSay(op,owner,__ctlBadGen,g,!0);return __ctlBadGen}',
+    'function __ctlCallBad(e,c,reg){var m=__ctlCallWhy(e,c,reg);if(m!==void 0)__ctlSay(reg?"register":"unregister",c&&c.plugin,m);return m}',
+    'function __ctlGen(g){return Number.isSafeInteger(g)&&g>=0}',
+    'function __ctlCallWhy(e,c,reg){var g=c&&c.environmentId;',
+    'if(!__ctlGen(g))return "the caller carries no module generation (environmentId)";',
+    'var o=String(c&&c.plugin||"?");',
+    'if(o==="environment "+g)return "the calling module is no longer loaded";',
+    'if(g<(o in __ctlFloor?__ctlFloor[o]:-1/0)||__ctlDead[o]&&__ctlDead[o][g])return __ctlRepl;',
+    'var m=reg?__ctlBad(e):__ctlOwnBad(e,c);if(m!==void 0)return m;',
+    'var r=__ctlFind(reg?__ctlId(o,e.model):e.id);',
+    'if(r&&r.owner===o&&r.gen>g)return __ctlRepl;',
+    'return}',
+    // A table element is the HEAD of its id's chain: `prev` is the rollback
+    // target when the head's generation dies, `tomb` is an unregister that
+    // still holds that target. Heads are replaced in place: the array
+    // reference never changes.
+    'function __ctlRemove(id,owner,g){',
+    'var i;for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===id){var r=__ctlRules[i];',
+    'if(r.owner!==owner||r.tomb)return {removed:!1};',
+    // A tomb is left even without a chain: it is the per-rule seniority that
+    // refuses an older live generation re-registering the id (Р13).
+    '__ctlRules[i]={id:id,owner:owner,gen:g,tomb:!0,prev:r.gen===g?r.prev:r};',
+    'return {removed:!0}}',
     'return {removed:!1}}',
+    'function __ctlSettle(owner,gen){owner=String(owner);',
+    'if(!__ctlGen(gen))return __ctlNoGen("settle",owner,gen);',
+    'if(!(owner in __ctlFloor)||gen>__ctlFloor[owner])__ctlFloor[owner]=gen;__ctlBury(owner);',
+    'for(var i=__ctlRules.length-1;i>=0;i--){var r=__ctlRules[i];if(r.owner!==owner)continue;',
+    'if(r.gen<gen||r.tomb&&r.gen<=gen){__ctlRules.splice(i,1);continue}',
+    'for(var v=r;v.prev;v=v.prev)if(v.prev.gen<gen){v.prev=void 0;break}}}',
+    // A death below the owner's floor is already refused by the floor, and no
+    // vertex below the floor survives settle or owner gone: the mark is dead
+    // weight.
+    'function __ctlBury(owner){var D=__ctlDead[owner],f=__ctlFloor[owner];if(D)for(var k in D)if(+k<f)delete D[k]}',
+    'function __ctlRoll(i){var r=__ctlRules[i],v=r,D=__ctlDead[r.owner];',
+    'while(v&&D&&D[v.gen])v=v.prev;',
+    'if(v===void 0){__ctlRules.splice(i,1);return}',
+    'if(!v.tomb&&!r.tomb&&__ctlSame(v.raw,r.raw))v.matched=r.matched;',
+    '__ctlRules[i]=v}',
+    // Death of ONE generation: the floor is not touched, so an older live
+    // generation of the same owner keeps registering.
+    'function __ctlTerm(owner,h){try{owner=String(owner);',
+    'if(!__ctlGen(h))return __ctlNoGen("term",owner,h);',
+    '(__ctlDead[owner]||(__ctlDead[owner]=Object.create(null)))[h]=1;',
+    'for(var i=__ctlRules.length-1;i>=0;i--)if(__ctlRules[i].owner===owner&&__ctlRules[i].gen===h)__ctlRoll(i)}catch(x){__ctlSay("term",owner,"generation death failed")}}',
+    'function __ctlGone(owner,gen){owner=String(owner);',
+    'if(!__ctlGen(gen))return __ctlNoGen("gone",owner,gen);',
+    'for(var i=__ctlRules.length-1;i>=0;i--)if(__ctlRules[i].owner===owner)__ctlRules.splice(i,1);',
+    'if(!(owner in __ctlFloor)||gen+1>__ctlFloor[owner])__ctlFloor[owner]=gen+1;__ctlBury(owner)}',
     'function __ctlOne(t,o){if(o.find!==void 0)return t.split(o.find).join(o.to);o.re.lastIndex=0;return t.replace(o.re,o.to)}',
     'function __ctlText(t,ops){var i;for(i=0;i<ops.length;i++)t=__ctlOne(t,ops[i]);return t}',
-    'function __ctlApply(b,model){',
-    '__ctlFrozen=!0;__ctlSeen++;',
-    'if(!b||typeof b!=="object"||__ctlRules.length===0)return b;',
-    'var sys=[],tls=[],i,j,ch=!1;',
+    'function __ctlModel(m){m=String(m==null?"":m);',
+    // 18 is the length of the disguise prefix below; the unmasking is the
+    // same byte-for-byte logic the step-32 wrapper carried before #468.
+    'if(m.indexOf("claude-fable-5-dd-")===0)m=m.slice(18).split("").reverse().join("");',
+    'return m.trim()}',
+    'function __ctlSys(b,model){',
+    '__ctlSeen++;__ctlPick=null;',
+    'if(__ctlRules.length===0)return b;',
+    'var m=__ctlModel(model),sys=[],tls=[],i,j;',
     'for(i=0;i<__ctlRules.length;i++){var r=__ctlRules[i];',
-    'if(!r.mre.test(model))continue;',
+    'if(r.tomb||!r.mre.test(m))continue;',
     'r.matched++;',
     'for(j=0;j<r.ops.length;j++)(r.ops[j].tool===void 0?sys:tls).push(r.ops[j])}',
-    'if(sys.length===0&&tls.length===0)return b;',
-    'if(sys.length){',
-    'if(typeof b.system==="string"){var s2=__ctlText(b.system,sys);if(s2!==b.system){b.system=s2;ch=!0}}',
-    'else if(Array.isArray(b.system)){var c1=!1,a1=b.system.map(function(k){var x;',
+    '__ctlPick={ops:tls,sys:!1};',
+    'if(sys.length===0)return b;',
+    'if(typeof b==="string"){var s2=__ctlText(b,sys);',
+    'if(s2!==b){__ctlChanged++;__ctlPick.sys=!0;return s2}return b}',
+    'if(Array.isArray(b)){var c1=!1,a1=b.map(function(k){var x;',
     'return k&&typeof k==="object"&&typeof k.text==="string"&&(x=__ctlText(k.text,sys))!==k.text?(c1=!0,Object.assign({},k,{text:x})):k});',
-    'if(c1){b.system=a1;ch=!0}}}',
-    'if(tls.length&&Array.isArray(b.tools)){var c2=!1,a2=b.tools.map(function(t){',
-    'if(!t||typeof t.name!=="string"||typeof t.description!=="string")return t;',
-    'var d=t.description,k;',
-    'for(k=0;k<tls.length;k++)if(tls[k].tool===t.name)d=__ctlOne(d,tls[k]);',
-    'return d===t.description?t:(c2=!0,Object.assign({},t,{description:d}))});',
-    'if(c2){b.tools=a2;ch=!0}}',
-    'if(ch)__ctlChanged++;',
+    'if(c1){__ctlChanged++;__ctlPick.sys=!0;return a1}}',
     'return b}',
-    'var __ctlFrozenMsg="the rule table is frozen (first request already applied); a rule must be registered from session.start";',
-    'var __ctlRegOp={check:(e,c)=>__ctlFrozen?__ctlFrozenMsg:__ctlBad(e),run:(e,c)=>Promise.resolve(__ctlUpsert(e,String(c&&c.plugin||"?")))};',
-    'var __ctlUnregOp={check:(e,c)=>__ctlFrozen?__ctlFrozenMsg:__ctlOwnBad(e,c),run:(e,c)=>Promise.resolve(__ctlRemove(e.id,String(c&&c.plugin||"?")))};',
-    'var __ctlListOp={run:()=>Promise.resolve({frozen:__ctlFrozen,seen:__ctlSeen,changed:__ctlChanged,rules:__ctlRules.map(function(r){return {id:r.id,owner:r.owner,model:r.model,matched:r.matched,rule:__ctlSnap(r.raw)}})})};',
+    'function __ctlTools(t){',
+    'var p=__ctlPick;__ctlPick=null;',
+    'if(!p||p.ops.length===0||!Array.isArray(t))return t;',
+    'var c2=!1,a2=t.map(function(k){',
+    'if(!k||typeof k.name!=="string"||typeof k.description!=="string")return k;',
+    'var d=k.description,i;',
+    'for(i=0;i<p.ops.length;i++)if(p.ops[i].tool===k.name)d=__ctlOne(d,p.ops[i]);',
+    'return d===k.description?k:(c2=!0,Object.assign({},k,{description:d}))});',
+    'if(c2){if(!p.sys)__ctlChanged++;return a2}',
+    'return t}',
+    // `run` never throws synchronously: any exception inside it becomes a
+    // rejection carrying its message. The message read is itself guarded --
+    // a hostile toString must not turn the rejection back into a throw.
+    'function __ctlErr(x){var s;try{s=String(x&&x.message||x)}catch(y){s="the operation failed with an unreadable exception"}return new Error(s)}',
+    'var __ctlRegOp={check:(e,c)=>__ctlCallBad(e,c,!0),',
+    'run:(e,c)=>{try{var m=__ctlCallBad(e,c,!0);',
+    'if(m!==void 0)return Promise.reject(new Error(m));',
+    'var o=String(c&&c.plugin||"?"),g=c.environmentId,cr=__ctlCompile(e,o),i;cr.gen=g;',
+    'for(i=0;i<__ctlRules.length;i++)if(__ctlRules[i].id===cr.id){var r=__ctlRules[i];',
+    'cr.prev=r.gen===g?r.prev:r;',
+    'if(!r.tomb&&__ctlSame(r.raw,cr.raw))cr.matched=r.matched;',
+    '__ctlRules[i]=cr;return Promise.resolve({id:cr.id})}',
+    '__ctlRules.push(cr);return Promise.resolve({id:cr.id})}catch(x){return Promise.reject(__ctlErr(x))}}};',
+    'var __ctlUnregOp={check:(e,c)=>__ctlCallBad(e,c,!1),',
+    'run:(e,c)=>{try{var m=__ctlCallBad(e,c,!1);',
+    'if(m!==void 0)return Promise.reject(new Error(m));',
+    'return Promise.resolve(__ctlRemove(e.id,String(c&&c.plugin||"?"),c.environmentId))}catch(x){return Promise.reject(__ctlErr(x))}}};',
+    'var __ctlListOp={run:()=>Promise.resolve({seen:__ctlSeen,changed:__ctlChanged,rules:__ctlRules.filter(function(r){return!r.tomb}).map(function(r){return {id:r.id,owner:r.owner,gen:r.gen,model:r.model,matched:r.matched,rule:__ctlSnap(r.raw)}})})};',
+    'globalThis.__ctlRequestTextSettle=__ctlSettle;',
   ].join('');
-  js = js.slice(0, op.index + op[0].length) + door + js.slice(op.index + op[0].length);
+  edit(op.index + op.text.length, 0, door + logDef);
 
   const rxDispatch = new RegExp(`"flag\\.value":${rxEsc(DQT)},`, 'g');
-  const dispatchSites = [...js.matchAll(rxDispatch)];
-  if (dispatchSites.length !== 1) fail(`requestText door: dispatcher entry: expected exactly 1 site, found ${dispatchSites.length}`);
-  const [dispatch] = dispatchSites;
+  const dispatch = one(rxDispatch, (n) => `requestText door: dispatcher entry: expected exactly 1 site, found ${n}`);
   const dispatchAdd =
     '"requestText.register":__ctlRegOp,"requestText.unregister":__ctlUnregOp,"requestText.list":__ctlListOp,';
-  js = js.slice(0, dispatch.index + dispatch[0].length) + dispatchAdd +
-    js.slice(dispatch.index + dispatch[0].length);
+  edit(dispatch.index + dispatch.text.length, 0, dispatchAdd);
+
+  // Lifecycle cut-ins. Every locator keys on CONTENTFUL literals (the host
+  // log lines, `pluginName`, `environmentId`, `hopKey`, `forgetPresses`,
+  // `extraToolSchemas`), never on minified names alone; each must find
+  // exactly one site or the step fails.
+  const rxZt = new RegExp(
+    `if\\((?<ws>${ID})\\.add\\((?<r>${ID})\\),!\\k<r>\\.hooks\\("session\\.start"\\)\\)continue;` +
+      `(?<t1>${ID})\\(\\\`session\\.start: raised for \\\$\\{\\k<r>\\.name\\} \\(loaded later\\)\\\`\\),` +
+      `Promise\\.resolve\\(\\)\\.then\\(\\(\\)=>(?<q>${ID})\\(\\{only:\\k<r>\\.name\\}\\)\\.session\\.start` +
+      `\\(\\{cwd:(?<ne>${ID})\\(\\),\\.\\.\\.(?<o>${ID})\\}\\)\\)` +
+      `\\.catch\\(\\((?<s>${ID})\\)=>\\{(?<t2>${ID})\\(\\\`session\\.start: failed for ` +
+      `\\\$\\{\\k<r>\\.name\\}: \\\$\\{(?<l>${ID})\\(\\k<s>\\)\\}\\\`,\\{level:"error"\\}\\)\\}\\)`, 'g');
+  const zt = one(rxZt, (n) => `requestText door: Zt lifecycle site: expected exactly 1, found ${n}`);
+  const Z = zt.groups;
+  const settleOf = `${Z.r}.name,${Z.r}.environmentId`;
+  const ztNew =
+    `if(${Z.ws}.add(${Z.r}),!${Z.r}.hooks("session.start"))` +
+    `{globalThis.__ctlRequestTextSettle?.(${settleOf});continue}` +
+    `${Z.t1}(\`session.start: raised for \$\{${Z.r}.name} (loaded later)\`),` +
+    `Promise.resolve().then(()=>${Z.q}({only:${Z.r}.name}).session.start` +
+    `({cwd:${Z.ne}(),...${Z.o}}))` +
+    `.catch((${Z.s})=>{${Z.t2}(\`session.start: failed for ` +
+    `\$\{${Z.r}.name}: \$\{${Z.l}(${Z.s})\}\`,{level:"error"})})` +
+    `.finally(()=>globalThis.__ctlRequestTextSettle?.(${settleOf}))`;
+  edit(zt.index, zt.text.length, ztNew);
+
+  // `en`: the loaded-module set must be captured BEFORE the WeakSet hides it
+  // behind membership, so the settle loop after the try/catch can address
+  // each module by name and generation.
+  const rxWs = new RegExp(`let (?<s>${ID})=new WeakSet\\((?<ct>${ID})\\(\\)\\.loadedModules\\);`, 'g');
+  const ws = one(rxWs, (n) => `requestText door: en loaded-modules set: expected exactly 1, found ${n}`);
+  const LMS = '__ctlLMs';
+  edit(ws.index, ws.text.length, `let ${LMS}=${ws.groups.ct}().loadedModules,${ws.groups.s}=new WeakSet(${LMS});`);
+
+  const rxEn = new RegExp(
+    `try\\{await (?<q>${ID})\\(\\)\\.session\\.start\\(\\{cwd:(?<ne>${ID})\\(\\),` +
+      `surface:${ID},isInteractive:${ID}\\}\\)\\}` +
+      `catch\\((?<d>${ID})\\)\\{(?<t>${ID})\\(\\\`session\\.start: failed: ` +
+      `\\\$\\{(?<l>${ID})\\(\\k<d>\\)\\}\\\`,\\{level:"error"\\}\\)\\}`, 'g');
+  const en = one(rxEn, (n) => `requestText door: en session.start try/catch: expected exactly 1, found ${n}`);
+  edit(en.index + en.text.length, 0,
+    `for(var __ctli=0;__ctli<${LMS}.length;__ctli++)` +
+    `globalThis.__ctlRequestTextSettle?.(${LMS}[__ctli].name,${LMS}[__ctli].environmentId);`);
+
+  const rxPe = new RegExp(
+    `if\\(!(?<u>${ID})\\.has\\((?<n>${ID})\\)\\)\\k<n>\\.retire\\(\\);` +
+      `if\\(!(?<p>${ID})\\.has\\(\\k<n>\\.name\\)\\)(?<a>${ID})\\(\\k<n>\\.name\\),` +
+      `(?<b>${ID})\\(\\k<n>\\.name\\),(?<c>${ID})\\(\\k<n>\\.name\\)`, 'g');
+  const pe = one(rxPe, (n) => `requestText door: Pe retire sequence: expected exactly 1, found ${n}`);
+  edit(pe.index + pe.text.length, 0, `,__ctlGone(${pe.groups.n}.name,${pe.groups.n}.environmentId)`);
+
+  const rxFt = new RegExp(`(?<ft>${ID})\\(\\{name:(?<n>${ID})\\.pluginName,[^{}]*environmentId:(?<h>${ID}),hopKey:`, 'g');
+  const ft = one(rxFt, (n) => `requestText door: module literal with environmentId: expected exactly 1, found ${n}`);
+  // The `terminate()` of the SAME closure: the same `n`, within 2000 bytes
+  // of the module literal -- a farther match would be someone else's.
+  const rxTerm = new RegExp(
+    `terminate\\(\\)\\{(?<a>${ID})\\((?<t>${rxEsc(ft.groups.n)})\\.pluginName\\),` +
+      `(?<b>${ID})\\(\\k<t>\\.pluginName\\),(?<c>${ID})\\(\\k<t>\\.pluginName\\),` +
+      `(?<i3>${ID})\\.forgetPresses\\(\\k<t>\\.pluginName\\),(?<z>${ID})\\(\\)\\}`, 'g');
+  {
+    const [tm] = hits(rxTerm, js.slice(ft.index, ft.index + 2000));
+    if (tm === undefined) fail(`requestText door: terminate() of module '${ft.groups.n}' not found within 2000 bytes of its literal`);
+    const zTail = `,${tm.groups.z}()}`;
+    edit(ft.index + tm.index, tm.text.length,
+      tm.text.slice(0, tm.text.length - zTail.length) + `,__ctlTerm(${ft.groups.n}.pluginName,${ft.groups.h})` + zTail);
+  }
+
+  // `BN` unloads a set of modules (disable, uninstall, a manifest without a
+  // module, a refused single reload): every retired module's owner is gone.
+  // The retire loop is bound to the loader's own `hooks modules unloaded: `
+  // log call that follows it, within 600 bytes of the filter head.
+  const rxBnHead = new RegExp(
+    `let (?<s>${ID})=${ID}\\(\\),(?<g>${ID})=\\k<s>\\.loadedModules\\.filter\\(\\((?<a>${ID})\\)=>(?<n>${ID})\\.has\\(\\k<a>\\.name\\)\\),`, 'g');
+  const bn = one(rxBnHead, (n) => `requestText door: BN unload filter: expected exactly 1, found ${n}`);
+  const rxBnTail = new RegExp(
+    `for\\(let (?<w>${ID}) of ${rxEsc(bn.groups.g)}\\)\\k<w>\\.retire\\(\\);` +
+      `(?=${ID}\\(${ID}\\),${ID}\\(\\),${ID}\\(${rxEsc(bn.groups.s)}\\.loadedModules\\),${ID}\\(\\\`hooks modules unloaded: )`, 'g');
+  {
+    const bnTails = hits(rxBnTail, js.slice(bn.index, bn.index + 600));
+    if (bnTails.length !== 1) fail(`requestText door: BN retire loop within 600 bytes of its filter: expected exactly 1, found ${bnTails.length}`);
+    const bnW = bnTails[0].groups.w;
+    edit(bn.index + bnTails[0].index + bnTails[0].text.length, 0,
+      `for(let ${bnW} of ${bn.groups.g})__ctlGone(${bnW}.name,${bnW}.environmentId);`);
+  }
+
+  // A candidate that never enters the published set dies as a generation on
+  // EVERY exit (Г1): its op channel is live from `names.set`, so rules it
+  // registered during load or scan would otherwise outlive it. Admission
+  // takes a candidate out of `unadmitted` BEFORE publication, so a throw
+  // between the two left it neither discarded nor dead; the deaths are keyed
+  // on "not published" instead, and run BEFORE the unload loop, so a throwing
+  // unload of one candidate cannot rob the next of its death.
+  // CONSTRAINT: GSt publishes AFTER finally. A future-set member survives
+  // only a normally completed try AND discard loop; either throw kills it.
+  const rxGst = new RegExp(
+    `finally\\{for\\(let\\[(?<k>${ID}),(?<m>${ID})\\]of (?<b>${ID})\\)if\\((?<e>${ID})\\.state\\.unadmitted\\.has\\(\\k<k>\\)\\)\\k<m>\\.discard\\(\\)\\}` +
+      `let (?<f>${ID})=(?<s>${ID})\\.loadedModules;\\k<s>\\.loadedModules=(?<h>${ID}),\\k<e>\\.state\\.isSetRecord=!0;` +
+      `for\\(let (?<j>${ID}) of \\k<f>\\)\\k<j>\\.retire\\(\\);`, 'g');
+  const gst = one(rxGst, (n) => `requestText door: GSt respawn finally and publication: expected exactly 1, found ${n}`);
+  const G = gst.groups;
+  if (G.k === G.h || G.m === G.h) fail(`requestText door: GSt finally loop variable shadows the published set '${G.h}'`);
+  edit(gst.index + gst.text.length, 0,
+    `for(let ${G.j} of ${G.f})if(!${G.h}.some((__ctlx)=>__ctlx.name===${G.j}.name))__ctlGone(${G.j}.name,${G.j}.environmentId);`);
+  {
+    const lo = Math.max(0, gst.index - 6000);
+    const heads = hits(new RegExp(`let ${rxEsc(G.h)},${rxEsc(G.b)}=new Map,${ID}=new Set,${ID}=new Set;try\\{`, 'g'), js.slice(lo, gst.index));
+    if (heads.length !== 1 || js[gst.index - 1] !== '}') fail(`requestText door: GSt candidate try head: expected exactly 1, found ${heads.length}`);
+    edit(lo + heads[0].index + heads[0].text.length - 'try{'.length, 0, 'let __ctlOk=0;');
+    edit(gst.index - 1, 0, '__ctlOk=1;');
+    edit(gst.index + 'finally{'.length, 0,
+      `for(let[${G.k},${G.m}]of ${G.b})if(!__ctlOk||!${G.h}?.includes(${G.m}))__ctlTerm(${G.m}.name,${G.m}.environmentId);try{`);
+    const close = gst.text.indexOf('}let ');
+    if (close === -1) fail('requestText door: GSt publication boundary absent');
+    edit(gst.index + close, 0,
+      `}catch(__ctle){for(let[${G.k},${G.m}]of ${G.b})if(${G.h}?.includes(${G.m}))__ctlTerm(${G.m}.name,${G.m}.environmentId);throw __ctle}`);
+  }
+
+  // `USt` publishes inside its try (`P(N);return` right before the finally);
+  // the publication function assigns the holder's `loadedModules`, so "not in
+  // it" is "not published". The holder is the loader's own `let s=ct(),g=
+  // s.loadedModules,` -- the only binding of that name the finally sees.
+  const rxUst = new RegExp(
+    `(?<P>${ID})\\((?<N>${ID})\\);return\\}\\}finally\\{for\\(let\\[(?<k>${ID}),(?<m>${ID})\\]of (?<St>${ID})\\)` +
+      `if\\((?<e>${ID})\\.state\\.unadmitted\\.has\\(\\k<k>\\)\\)\\k<m>\\.discard\\(\\)\\}(?=\\})`, 'g');
+  const ust = one(rxUst, (n) => `requestText door: USt publication and candidate finally: expected exactly 1, found ${n}`);
+  const U = ust.groups;
+  let holder;
+  {
+    const lo = Math.max(0, ust.index - 12000);
+    const win = js.slice(lo, ust.index);
+    const pubs = hits(new RegExp(
+      `function ${rxEsc(U.P)}\\((?<p>${ID})\\)\\{let ${ID}=(?<s>${ID})\\.loadedModules,${ID}=new Set\\(\\k<p>\\),` +
+        `${ID}=new Set\\(\\k<p>\\.map\\(\\((?<q>${ID})\\)=>\\k<q>\\.name\\)\\);\\k<s>\\.loadedModules=\\k<p>;`, 'g'), win);
+    if (pubs.length !== 1) fail(`requestText door: USt publication function '${U.P}' within 12000 bytes before its finally: expected exactly 1, found ${pubs.length}`);
+    holder = pubs[0].groups.s;
+    const heads = hits(new RegExp(`async function ${ID}\\(${ID},${ID},${ID}\\)\\{let ${rxEsc(holder)}=${ID}\\(\\),${ID}=${rxEsc(holder)}\\.loadedModules,`, 'g'),
+      win.slice(0, pubs[0].index));
+    if (heads.length !== 1) fail(`requestText door: USt function head binding the holder '${holder}' before its publication function: expected exactly 1, found ${heads.length}`);
+  }
+  if (U.k === holder || U.m === holder) fail(`requestText door: USt finally loop variable shadows the holder '${holder}'`);
+  edit(ust.index + ust.text.indexOf('finally{') + 'finally{'.length, 0,
+    `for(let[${U.k},${U.m}]of ${U.St})if(!${holder}.loadedModules.includes(${U.m}))__ctlTerm(${U.m}.name,${U.m}.environmentId);`);
+
+  // The single-module reload: its candidate never enters the unadmitted set.
+  // Its try runs from the build through the publication assignment (Г1), so
+  // a throw anywhere before `loadedModules=` -- the build, the fold, the
+  // ordering, the element tables -- passes the ONE catch: the death, then the
+  // restore, then the rethrow. The two exits that restore themselves (the
+  // empty fold, the dead host) mark `__ctlWd`: the host's restore re-notifies
+  // withheld owners, so the catch must not run it twice. The region is pinned
+  // whole, through the function's own return, which proves nothing after the
+  // assignment reads the two bindings the longer try now scopes.
+  const rxRe = new RegExp(
+    `try\\{(?<xe>${ID})=await (?<sv>${ID})\\((?<n>${ID}),(?<F>${ID})\\),\\k<xe>\\.shown=(?<WN>${ID})\\(\\k<F>,(?<g>${ID})\\),` +
+      `\\[(?<Ie>${ID})\\]=await (?<VN>${ID})\\(\\k<n>,\\[\\k<xe>\\],(?<d>${ID})\\)\\}catch\\((?<c>${ID})\\)\\{throw (?<We>${ID})\\(\\),\\k<c>\\}` +
+      `if\\(!\\k<Ie>\\)\\{\\k<We>\\(\\);let (?<f1>${ID})=\\k<n>\\.state\\.environmentHost\\?\\.died,(?<f2>${ID})=\\k<n>\\.state\\.buildFailures\\.get\\((?<e>${ID})\\);` +
+      `throw new (?<Me>${ID})\\(\\k<f1>===void 0\\?\\\`\\\$\\{\\k<e>\\}: \\\$\\{\\k<f2>\\?\\.stage\\?\\?"engine\\.create"\\} failed on reload\\\`` +
+      `\\+\\(\\k<f2>\\?\\\` \\(\\\$\\{\\k<f2>\\.reason\\}\\)\\\`:""\\)\\+"; the previous version stays loaded":(?<w>${ID})\\(\\k<f1>\\)\\)\\}` +
+      `let (?<X>${ID})=(?<s>${ID})\\?(?<r>${ID})\\.loadedModules\\.map\\(\\((?<m>${ID})\\)=>\\k<m>===\\k<s>\\?\\k<xe>:\\k<m>\\):` +
+      `${ID}\\(\\k<r>\\.loadedModules,\\k<xe>,${ID}\\);await ${ID}\\(\\k<X>\\);` +
+      `let (?<je>${ID})=\\k<n>\\.state\\.environmentHost\\?\\.died;if\\(\\k<je>!==void 0\\)throw \\k<We>\\(\\),new \\k<Me>\\(\\k<w>\\(\\k<je>\\)\\);` +
+      `\\k<r>\\.loadedModules=\\k<X>,\\k<s>\\?\\.retire\\(\\),\\k<n>\\.state\\.crashedWithholders\\.delete\\(\\k<e>\\),` +
+      `${ID}\\(\\k<e>,\\k<n>\\),${ID}\\(\\k<n>\\),${ID}\\(\\),${ID}\\(\\k<r>\\.loadedModules\\);` +
+      `let (?<bt>${ID})=performance\\.now\\(\\)-${ID};return ${ID}\\(\\\`hooks module \\\$\\{\\k<xe>\\.label\\} reloaded in ` +
+      `\\\$\\{\\k<bt>\\.toFixed\\(1\\)\\}ms; events: \\\`\\+${ID}\\(\\k<xe>\\.patterns\\)\\),\\{events:\\[\\.\\.\\.\\k<xe>\\.patterns\\],ms:\\k<bt>\\}\\}`, 'g');
+  const re = one(rxRe, (n) => `requestText door: single-module reload from the build through its return: expected exactly 1, found ${n}`);
+  {
+    const R = re.groups;
+    const die = `__ctlTerm(${R.xe}.name,${R.xe}.environmentId)`;
+    const parts = [
+      ['the build catch', `}catch(${R.c}){throw ${R.We}(),${R.c}}`, ';'],
+      ['the empty-fold branch', `if(!${R.Ie}){${R.We}();let `, `if(!${R.Ie}){${die};__ctlWd=1;${R.We}();let `],
+      ['the dead-host throw', `if(${R.je}!==void 0)throw ${R.We}(),new `, `if(${R.je}!==void 0)throw ${die},__ctlWd=1,${R.We}(),new `],
+      ['the publication', `${R.r}.loadedModules=${R.X},${R.s}?.retire()`,
+        `${R.r}.loadedModules=${R.X}}catch(${R.c}){throw ${R.xe}&&${die},__ctlWd||${R.We}(),${R.c}}${R.s}?.retire()`],
+    ];
+    let text = re.text;
+    for (const [what, from, to] of parts) {
+      if (text.split(from).length !== 2) fail(`requestText door: single-module reload: ${what} does not occur exactly once in its region`);
+      text = text.replace(from, () => to);
+    }
+    edit(re.index, re.text.length, 'let __ctlWd=0;' + text);
+  }
+
+  // `zwe` belongs to the module literal's own closure: the same `n`/`h`, it
+  // closes before the literal, within 2000 bytes. The death comes FIRST (Г2):
+  // a throwing unload must not skip it.
+  const rxZwe = new RegExp(
+    `(?<h>${ID})=\\+\\+(?<e>${ID})\\.state\\.environmentCounter,(?<S>${ID})=await (?<g>${ID})\\.load\\(\\k<h>,(?<n>${ID})\\);` +
+      `try\\{(?<b>${ID})\\(\\k<n>\\.pluginName,\\k<n>\\.scan,\\k<S>\\.registered\\.map\\(\\((?<v>${ID})\\)=>\\k<v>\\.pattern\\)\\)\\}` +
+      `catch\\((?<x>${ID})\\)\\{throw \\k<g>\\.unload\\(\\k<h>\\)(?=,\\k<x>\\})`, 'g');
+  const zwe = one(rxZwe, (n) => `requestText door: zwe scan-check catch: expected exactly 1, found ${n}`);
+  const zweEnd = zwe.index + zwe.text.length;
+  if (zwe.groups.n !== ft.groups.n || zwe.groups.h !== ft.groups.h ||
+      zweEnd > ft.index || ft.index - zwe.index >= 2000) {
+    fail(`requestText door: zwe scan-check catch is not bound to the module literal ('${zwe.groups.n}'/'${zwe.groups.h}' vs '${ft.groups.n}'/'${ft.groups.h}')`);
+  }
+  const zweUnload = `${zwe.groups.g}.unload(${zwe.groups.h})`;
+  if (!zwe.text.endsWith('throw ' + zweUnload)) fail('requestText door: zwe scan-check catch does not end with its unload');
+  edit(zweEnd - zweUnload.length, 0, `__ctlTerm(${zwe.groups.n}.pluginName,${zwe.groups.h}),`);
+
+  const rxWload = new RegExp(
+    `function ${ID}\\((?<e>${ID}),(?<n>${ID}),(?<r>${ID})\\)\\{if\\(\\k<e>\\.died!==void 0\\)return Promise\\.reject\\(new ${ID}\\(\\k<e>\\.died\\)\\);` +
+      `\\k<e>\\.names\\.set\\(\\k<n>,\\k<r>\\.pluginName\\);let (?<mc>${ID})=new MessageChannel,(?<pt>${ID})=\\k<mc>\\.port1;` +
+      `\\k<e>\\.ports\\.set\\(\\k<n>,\\k<pt>\\),\\k<pt>\\.onmessage=\\((?<fr>${ID})\\)=>${ID}\\(\\k<e>,\\{environmentId:\\k<n>,port:\\k<pt>,frame:\\k<fr>\\.data\\}\\),` +
+      `${ID}\\(\\k<pt>\\);let (?<tm>${ID})=${ID}\\(\\k<e>\\.pendingLoads,\\k<n>,${ID}\\(\\k<r>\\.pluginName\\)\\);` +
+      `return new Promise\\(\\((?<ok>${ID}),(?<no>${ID})\\)=>\\{if\\(\\k<e>\\.pendingLoads\\.set\\(\\k<n>,\\{resolve:\\((?<ra>${ID})\\)=>\\{clearTimeout\\(\\k<tm>\\),\\k<ok>\\(\\k<ra>\\)\\},` +
+      `reject:\\((?<rb>${ID})\\)=>\\{clearTimeout\\(\\k<tm>\\),\\k<e>\\.names\\.delete\\(\\k<n>\\),${ID}\\(\\k<e>,\\k<n>\\),` +
+      `${ID}\\(\\k<e>,\\{type:"unload",environmentId:\\k<n>\\}\\),(?=\\k<no>\\(\\k<rb>\\)\\}\\}\\))`, 'g');
+  const wload = one(rxWload, (n) => `requestText door: worker load reject: expected exactly 1, found ${n}`);
+  {
+    const head = `reject:(${wload.groups.rb})=>{`;
+    if (wload.text.split(head).length !== 2) fail('requestText door: worker load reject head does not occur exactly once in its form');
+    edit(wload.index + wload.text.indexOf(head) + head.length, 0, `__ctlTerm(${wload.groups.r}.pluginName,${wload.groups.n}),`);
+  }
+
+  // The discard funnel: every caller of `discard` is an exit where the
+  // candidate leaves unpublished (refused at plugin.register, host death, a
+  // refold, the unadmitted finally); publication calls `retire`, and the
+  // two finally loops above already killed every unpublished candidate, so
+  // a funnel death is at most a repeat. The cut-in shares the module
+  // literal's own n/h; retire and terminate are left alone.
+  {
+    const discSites = hits(new RegExp(`discard:(?<dG>${ID}),retire\\(\\)\\{`, 'g'), js.slice(ft.index, ft.index + 2000));
+    if (discSites.length !== 1) fail(`requestText door: discard funnel in the module literal: expected exactly 1, found ${discSites.length}`);
+    edit(ft.index + discSites[0].index, discSites[0].text.length,
+      `discard:()=>{__ctlTerm(${ft.groups.n}.pluginName,${ft.groups.h}),${discSites[0].groups.dG}()},retire(){`);
+  }
+
+  // The loader tail after the scan-check catch: the label build, the seats
+  // and the module object itself can throw after the environment loaded; an
+  // outer try opened right after that catch funnels such a throw through the
+  // same death + unload before it leaves the loader. The `try{` and its
+  // catch are two splices of one construct: both land or the step fails.
+  const zG = zwe.groups.g, zH = zwe.groups.h, zN = zwe.groups.n;
+  const zcEnd = zweEnd + `,${zwe.groups.x}}`.length;
+  if (js.slice(zweEnd, zcEnd) !== `,${zwe.groups.x}}`) fail('requestText door: the zwe scan-check catch does not close right after its unload');
+  const rxTail = new RegExp(
+    `releasePresses:\\((?<rp>${ID})\\)\\=>\\{if\\((?<Mk>${ID})\\.kind!=="unloaded"\\)${rxEsc(zG)}\\.releasePresses\\(${rxEsc(zH)},\\k<rp>\\)\\}\\}\\);return (?<ret>${ID})\\}`, 'g');
+  const tails = hits(rxTail).filter((m) => m.index > zcEnd && m.index - zcEnd < 2000);
+  if (tails.length !== 1) fail(`requestText door: the loader tail of the zwe catch: expected exactly 1, found ${tails.length}`);
+  const tEnd = tails[0].index + tails[0].text.length;
+  edit(tEnd - 1, 1, `}catch(__ctle){throw __ctlTerm(${zN}.pluginName,${zH}),${zG}.unload(${zH}),__ctle}}`);
+  edit(zcEnd, 0, 'try{');
+  build();
 
   applied.push(
     `34 requestText door: noun builder beside '${NOUN}', factory key 'requestText', ` +
-    `3 names in the op list, rule table + applier + 3 dispatcher entries beside '${DQT}'`,
+    `3 names in the op list, rule table + keyed ops + 3 dispatcher entries beside '${DQT}', ` +
+    `refusals logged through '${logUse.groups.T}', ` +
+    `settle bridge on globalThis wired into Zt (x2) and en (x1), ` +
+    `generation death at terminate(), the zwe scan check and tail, the worker load reject, ` +
+    `every unpublished candidate of the load and respawn finally, the reload from build through publication, ` +
+    `the discard funnel, Pe/BN/GSt (owner gone)`,
   );
 });
 
@@ -4674,12 +5090,19 @@ step('34 requestText door', () => {
 //     separately: headless main, custom subagent, general-purpose subagent).
 //     That measurement is why the DOOR exists; the edits themselves are no
 //     longer baked into this patch -- they are data now, registered through
-//     the $.requestText noun (step 34) by the catalyst-swe-request plugin and
-//     applied here, at the one site where the outgoing body is assembled and
-//     model, system and tools are all in hand. A request whose model -- by its
-//     real id or by the proxy's disguise that patch 9 undoes -- matches no
-//     rule passes the site byte for byte, and the applier builds new blocks
-//     and new tool objects on the body it owns.
+//     the $.requestText noun (step 34) by the catalyst-swe-request plugin.
+//     Since #468 the rules apply at the SOURCES of system and tools inside
+//     the request builder -- on 2.1.282 `_b=xko(...)` and
+//     `let cf=[...Fo,...bde]`, every name captured, none literal -- not
+//     on the body literal: the thread planner compares hashes of the ORIGIN
+//     system/tools and omits stable fields before the body is assembled, so
+//     an applier on the body would rewrite text the planner had already
+//     decided to inherit. Both cut-ins must carry the SAME `F`/`H` the body
+//     literal uses for the model (`model:F(H.model)`), or the rules would be
+//     selected by a different model expression than the one the request
+//     carries. A request whose model -- by its real id or by the proxy's
+//     disguise that patch 9 undoes -- matches no rule passes both sources
+//     byte for byte.
 //     CONSTRAINT: this cannot move to the mod API. The identity prefix is
 //     prepended to the system prompt AFTER the prompt.section hooks ran, and
 //     tool.describe carries neither the model nor the agent.
@@ -4693,8 +5116,11 @@ step('32 request text for devin/swe-2', () => {
   if (sites.length !== 1) fail(`request body site: expected exactly 1, found ${sites.length}`);
   const [m] = sites;
   const rf = m[1];
-  // The statement right after the body literal reads `<rf>.messages`; the
-  // rewrite is spliced in front of it, so the literal itself is never parsed.
+  const FN = m[2];
+  const HN = m[3];
+  // The statement right after the body literal reads `<rf>.messages`: this
+  // bounds the literal and proves the site is the body assembly, not a
+  // same-shaped object elsewhere.
   const after = new RegExp(`;(${ID})=(${ID})&&${rxEsc(rf)}\\.messages\\.some\\(`, 'g');
   after.lastIndex = m.index;
   const a = after.exec(js);
@@ -4727,19 +5153,59 @@ step('32 request text for devin/swe-2', () => {
       `stock values after the rule applier ran`);
   }
 
-  const DISGUISE = 'claude-fable-5-dd-';
-  const runtime =
-    `/*swe32*/${rf}=(function(__r){` +
-    `var __m=String(__r.model==null?"":__r.model);` +
-    `if(__m.indexOf(${JSON.stringify(DISGUISE)})===0)` +
-    `__m=__m.slice(${DISGUISE.length}).split("").reverse().join("");` +
-    `return __ctlApply(__r,__m.trim())})(${rf});/*swe32-end*/`;
-  js = js.slice(0, a.index + 1) + runtime + js.slice(a.index + 1);
+  // The system/tools sources. The region is matched as ONE structural shape
+  // from the system source through `system:<sb>,` so the tools source and
+  // the system source cannot drift apart; every name of the region (`sb`,
+  // `bde`, `cf` included) is a capture bound by backreference, never a
+  // minified literal. Each of the two stock forms must also occur exactly
+  // once on its own, keyed by the same captures, or a second, unpatched
+  // source would silently keep stock tools in the request.
+  const rxSource = new RegExp(
+    `(?<sb>${ID})=(?<xko>${ID})\\((?<n1>${ID}),(?<hb>${ID}),\\{skipGlobalCacheForSystemPrompt:(?<vo>${ID}),cacheTtl:(?<ls>${ID})\\}\\),` +
+      `${ID}=${ID}\\.length>0,(?<bde>${ID})=\\[\\.\\.\\.(?<hx>${ID})\\.extraToolSchemas\\?\\?\\[\\]\\];` +
+      `if\\(${ID}\\)\\k<bde>\\.push\\(\\{type:${ID},name:${ID},model:${ID},\\.\\.\\.${ID}&&\\{defer_loading:!0\\}\\}\\);` +
+      `let (?<cf>${ID})=\\[\\.\\.\\.(?<fo>${ID}),\\.\\.\\.\\k<bde>\\],` +
+      `${ID}=${ID}\\(${ID},\\{model:(?<fn>${ID})\\(\\k<hx>\\.model\\),tools:\\k<cf>,system:\\k<sb>,`, 'g');
+  const sourceSites = [...js.matchAll(rxSource)];
+  if (sourceSites.length !== 1) fail(`request text sources: expected exactly 1 region, found ${sourceSites.length}`);
+  const [srcM] = sourceSites;
+  const { sb: SB, xko: XKO, n1: N1, hb: HB, vo: VO, ls: LS, bde: BDE, hx: HX, cf: CF, fo: FO, fn: FX } = srcM.groups;
+  const sysForm = new RegExp(
+    `${rxEsc(SB)}=${ID}\\(${ID},${ID},\\{skipGlobalCacheForSystemPrompt:${ID},cacheTtl:${ID}\\}\\),`, 'g');
+  const sysFormCount = [...js.matchAll(sysForm)].length;
+  if (sysFormCount !== 1) fail(`request text sources: the system source form: expected exactly 1, found ${sysFormCount}`);
+  const toolsForm = new RegExp(`let ${rxEsc(CF)}=\\[\\.\\.\\.${ID},\\.\\.\\.${rxEsc(BDE)}\\]`, 'g');
+  const toolsFormCount = [...js.matchAll(toolsForm)].length;
+  if (toolsFormCount !== 1) fail(`request text sources: the tools source form: expected exactly 1, found ${toolsFormCount}`);
+  if (HX !== HN) {
+    fail(`request text sources: the extraToolSchemas holder '${HX}' is not the body-literal model holder '${HN}'`);
+  }
+  if (FX !== FN) {
+    fail(`request text sources: the xst model normalizer '${FX}' is not the body-literal normalizer '${FN}'`);
+  }
+  if (!(srcM.index < m.index) || m.index - srcM.index > 65536) {
+    fail(`request text sources: the region does not sit before the body literal within 64 KiB ` +
+      `(distance ${m.index - srcM.index})`);
+  }
+  // The needle in claude-patch-all.sh rebuilds BOTH cut-ins byte-for-byte
+  // from these two template literals plus the image's own identifiers, so
+  // the pin cannot drift from what this step writes.
+  const sysOld = `${SB}=${XKO}(${N1},${HB},{skipGlobalCacheForSystemPrompt:${VO},cacheTtl:${LS}})`;
+  const sysCut = `${SB}=__ctlSys(${XKO}(${N1},${HB},{skipGlobalCacheForSystemPrompt:${VO},cacheTtl:${LS}}),${FN}(${HN}.model))`;
+  const toolsOld = `let ${CF}=[...${FO},...${BDE}]`;
+  const toolsCut = `let ${CF}=__ctlTools([...${FO},...${BDE}])`;
+  const region = js.slice(srcM.index, srcM.index + srcM[0].length);
+  if (region.split(sysOld).length !== 2 || region.split(toolsOld).length !== 2) {
+    fail('request text sources: the stock forms do not occur exactly once inside the region');
+  }
+  js = js.slice(0, srcM.index) +
+    region.replace(sysOld, sysCut).replace(toolsOld, toolsCut) +
+    js.slice(srcM.index + srcM[0].length);
 
   applied.push(
-    `32 request text for devin/swe-2: request body site found, rule applier ` +
-    `wired in front of the '${rf}.messages' statement (1 site; the rules ` +
-    `themselves live in the catalyst-swe-request plugin)`,
+    `32 request text for devin/swe-2: rule appliers spliced into the request sources -- ` +
+    `__ctlSys at the system source, __ctlTools at the tools source, both keyed to ` +
+    `'${FN}(${HN}.model)' of the body literal (the literal itself is left untouched)`,
   );
 });
 
@@ -4780,7 +5246,7 @@ step('33 turn.step tool chunk id', () => {
 //     to it, so nothing a mod drew could stand in that place. This step opens
 //     the seat: `StatusLine` joins the component and surface tables, keeps
 //     the live pace beside PromptHint, and the layout slot mounts our site
-//     component whenever the prompt is shown — a mod draws at the status
+//     component under the slot's own stock conditions minus the configured-command one — a mod draws at the status
 //     line's place also where the status-line command is not configured, so
 //     the CONF flag stops gating the slot and rides in the site's props
 //     instead. CONSTRAINT: the footer-hint suppression still keys on CONF

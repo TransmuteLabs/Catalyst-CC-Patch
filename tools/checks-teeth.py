@@ -72,7 +72,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "tools" / "checks-mutations.tsv"
 RUNNER = ROOT / "tools" / "checks-on-image.sh"
-EXPECTED_MUTATIONS = 28
+EXPECTED_MUTATIONS = 47
 # Зубы входа -- не мутации образа: EXPECTED_MUTATIONS не двигается.
 # 34 = 20 (#403, волна A и раньше) + 7 зубов карты шагов (docnum:other -- «шаг ->
 # проверки» есть ИМЯ карты, не счёт проверок конвейера; #403B) + 6 зубов
@@ -633,8 +633,224 @@ def edits_r3(base: bytes) -> list[tuple[int, bytes]]:
     return _stock_into_padding(base, "R3", b'if(!a&&b===null&&(c?d<e:f<g)){')
 
 
+_SETTLE_CALL = rb"globalThis\.__ctlRequestTextSettle\?\.\("
+
+
+def _one(tag: str, what: str, hits: list) -> "re.Match[bytes]":
+    # CONSTRAINT: the form must be unique on the built image -- a second hit
+    # would carry the mutation off to a site the needle does not own.
+    if len(hits) != 1:
+        raise Refusal(f"{tag}: {what}: ждали ровно одно вхождение, нашли {len(hits)}")
+    return hits[0]
+
+
+def edits_d9(base: bytes) -> list[tuple[int, bytes]]:
+    """Аргументы settle переставлены в ветке Zt без хука (шаг 34).
+
+    Литеральный зуб запрещён: имя модуля цикла Zt минифицировано. Имя
+    берётся захватом ТОЙ ЖЕ полной формы, что игла «lifecycle Zt: a module
+    without a session.start hook ...» в claude-patch-all.sh; перестановка
+    `<R>.name,<R>.environmentId` -> `<R>.environmentId,<R>.name` равной длины.
+    """
+    m = _one("D9", "форма Zt без хука", list(re.finditer(
+        rb'if\((' + ID + rb')\.add\((?P<R>' + ID + rb')\),!(?P=R)\.hooks\("session\.start"\)\)'
+        rb'\{' + _SETTLE_CALL + rb'(?P<args>(?P=R)\.name,(?P=R)\.environmentId)\);continue\}', base)))
+    r = m.group("R")
+    return [(m.start("args"), r + b".environmentId," + r + b".name")]
+
+
+def edits_d10(base: bytes) -> list[tuple[int, bytes]]:
+    """В `.finally` цепочки Zt поле поколения заменено чужим (шаг 34).
+
+    Имя модуля берётся захватом полной формы от литерала raise-цепочки до
+    `.finally` -- той же, что игла «lifecycle Zt: the raise chain ends with the
+    settle finally of the same module»; `<R>.environmentId))` ->
+    `<R>.generation))` с дополнением пробелами за скобками.
+    """
+    m = _one("D10", "форма Zt .finally", list(re.finditer(
+        rb'\(`session\.start: raised for \$\{(?P<R>' + ID + rb')\.name\} \(loaded later\)`\),'
+        rb'Promise\.resolve\(\)\.then\(\(\)=>' + ID + rb'\(\{only:(?P=R)\.name\}\)\.session\.start'
+        rb'\(\{cwd:' + ID + rb'\(\),\.\.\.' + ID + rb'\}\)\)'
+        rb'\.catch\(\((?P<s>' + ID + rb')\)=>\{' + ID + rb'\(`session\.start: failed for \$\{(?P=R)'
+        rb'\.name\}: \$\{' + ID + rb'\((?P=s)\)\}`,\{level:"error"\}\)\}\)'
+        rb'\.finally\(\(\)=>' + _SETTLE_CALL + rb'(?P=R)\.name,(?P<tail>(?P=R)\.environmentId\)\))', base)))
+    old = m.group("tail")
+    new = m.group("R") + b".generation))"
+    return [(m.start("tail"), new.ljust(len(old)))]
+
+
+def edits_d14(base: bytes) -> list[tuple[int, bytes]]:
+    """Во вставке BN владелец берётся из несуществующего поля (шаг 34).
+
+    Переменная цикла retire BN минифицирована: голова фильтра и хвост в окне
+    600 Б берутся той же формой, что игла «lifecycle BN: every unloaded module
+    is an owner gone right after its retire»; `__ctlGone(<w>.name` ->
+    `__ctlGone(<w>.nome`.
+    """
+    head = _one("D14", "голова фильтра BN", list(re.finditer(
+        rb'let (?P<s>' + ID + rb')=' + ID + rb'\(\),(?P<g>' + ID + rb')=(?P=s)\.loadedModules\.filter\(\((?P<a>'
+        + ID + rb')\)=>(?P<n>' + ID + rb')\.has\((?P=a)\.name\)\),', base)))
+    g, s = re.escape(head.group("g")), re.escape(head.group("s"))
+    tail = re.compile(
+        rb'for\(let (?P<w>' + ID + rb') of ' + g + rb'\)(?P=w)\.retire\(\);'
+        rb'for\(let (?P=w) of ' + g + rb'\)__ctlGone\((?P<own>(?P=w)\.name),(?P=w)\.environmentId\);'
+        + ID + rb'\(' + ID + rb'\),' + ID + rb'\(\),' + ID + rb'\(' + s + rb'\.loadedModules\),' + ID
+        + rb'\(`hooks modules unloaded: ')
+    at = head.start()
+    m = _one("D14", "вставка BN в окне 600 Б", [
+        x for x in tail.finditer(base, at, at + 2000) if x.start() - at < 600])
+    return [(m.start("own"), m.group("w") + b".nome")]
+
+
+def edits_d17(base: bytes) -> list[tuple[int, bytes]]:
+    """В zwe аргументы смерти поколения переставлены (шаг 34).
+
+    `n`/`h` минифицированы: берутся захватом той же полной формы, что игла
+    «lifecycle zwe: a candidate whose scan check fails dies as a generation
+    before it is thrown out»; `<n>.pluginName,<h>` -> `<h>,<n>.pluginName`.
+    """
+    m = _one("D17", "форма zwe", list(re.finditer(
+        rb'(?P<h>' + ID + rb')=\+\+(?P<e>' + ID + rb')\.state\.environmentCounter,(?P<S>' + ID + rb')=await (?P<g>' + ID
+        + rb')\.load\((?P=h),(?P<n>' + ID + rb')\);try\{' + ID + rb'\((?P=n)\.pluginName,(?P=n)\.scan,(?P=S)\.registered\.map\(\((?P<v>'
+        + ID + rb')\)=>(?P=v)\.pattern\)\)\}catch\((?P<x>' + ID + rb')\)\{throw '
+        rb'__ctlTerm\((?P<args>(?P=n)\.pluginName,(?P=h))\),(?P=g)\.unload\((?P=h)\),(?P=x)\}', base)))
+    return [(m.start("args"), m.group("h") + b"," + m.group("n") + b".pluginName")]
+
+
+def edits_d18(base: bytes) -> list[tuple[int, bytes]]:
+    """В reject загрузки worker-хоста аргументы смерти поколения переставлены
+    (шаг 34).
+
+    Имена функции загрузки минифицированы: захват той же полной формы, что
+    игла «lifecycle worker load: a refused or timed-out load dies as a
+    generation»; `<r>.pluginName,<n>` -> `<n>,<r>.pluginName`.
+    """
+    m = _one("D18", "форма загрузки worker-хоста", list(re.finditer(
+        rb'function ' + ID + rb'\((?P<e>' + ID + rb'),(?P<n>' + ID + rb'),(?P<r>' + ID + rb')\)\{if\((?P=e)\.died!==void 0\)'
+        rb'return Promise\.reject\(new ' + ID + rb'\((?P=e)\.died\)\);(?P=e)\.names\.set\((?P=n),(?P=r)\.pluginName\);'
+        rb'let (?P<mc>' + ID + rb')=new MessageChannel,(?P<pt>' + ID + rb')=(?P=mc)\.port1;(?P=e)\.ports\.set\((?P=n),(?P=pt)\),'
+        rb'(?P=pt)\.onmessage=\((?P<fr>' + ID + rb')\)=>' + ID + rb'\((?P=e),\{environmentId:(?P=n),port:(?P=pt),frame:(?P=fr)\.data\}\),'
+        + ID + rb'\((?P=pt)\);let (?P<tm>' + ID + rb')=' + ID + rb'\((?P=e)\.pendingLoads,(?P=n),' + ID + rb'\((?P=r)\.pluginName\)\);'
+        rb'return new Promise\(\((?P<ok>' + ID + rb'),(?P<no>' + ID + rb')\)=>\{if\((?P=e)\.pendingLoads\.set\((?P=n),\{resolve:\((?P<a>'
+        + ID + rb')\)=>\{clearTimeout\((?P=tm)\),(?P=ok)\((?P=a)\)\},reject:\((?P<b>' + ID + rb')\)=>\{'
+        rb'__ctlTerm\((?P<args>(?P=r)\.pluginName,(?P=n))\),clearTimeout\((?P=tm)\),'
+        rb'(?P=e)\.names\.delete\((?P=n)\),' + ID + rb'\((?P=e),(?P=n)\),' + ID + rb'\((?P=e),\{type:"unload",environmentId:(?P=n)\}\),'
+        rb'(?P=no)\((?P=b)\)\}\}\)', base)))
+    return [(m.start("args"), m.group("n") + b"," + m.group("r") + b".pluginName")]
+
+
+def edits_d19(base: bytes) -> list[tuple[int, bytes]]:
+    """В одиночной перезагрузке после смерти хоста аргументы смерти поколения
+    переставлены (шаг 34).
+
+    Имя кандидата минифицировано: захват формы броска смерти хоста
+    `if(<je>!==void 0)throw __ctlTerm(<xe>...),__ctlWd=1,<We>(),new ` -- той
+    же, что игла «lifecycle reload: a built candidate the dead host never
+    published dies before the restore»; `<xe>.name,<xe>.environmentId` ->
+    `<xe>.environmentId,<xe>.name`.
+    """
+    m = _one("D19", "бросок смерти хоста перезагрузки", list(re.finditer(
+        rb'if\(' + ID + rb'!==void 0\)throw __ctlTerm\((?P<args>(?P<xe>' + ID + rb')\.name,(?P=xe)\.environmentId)\),'
+        rb'__ctlWd=1,' + ID + rb'\(\),new ', base)))
+    xe = m.group("xe")
+    return [(m.start("args"), xe + b".environmentId," + xe + b".name")]
+
+
+def edits_d20(base: bytes) -> list[tuple[int, bytes]]:
+    """В хвосте загрузчика аргументы смерти поколения переставлены (шаг 34).
+
+    `n`/`h` минифицированы: берутся захватом той же полной формы, что игла
+    «lifecycle zwe tail: a throw after the scan check dies as a generation
+    before it leaves the loader»; `<n>.pluginName,<h>` -> `<h>,<n>.pluginName`.
+    """
+    m = _one("D20", "хвост загрузчика", list(re.finditer(
+        rb'releasePresses:\((?P<rp>' + ID + rb')\)=>\{if\((?P<Mk>' + ID + rb')\.kind!=="unloaded"\)(?P<g>' + ID
+        + rb')\.releasePresses\((?P<h>' + ID + rb'),(?P=rp)\)\}\}\);return (?P<r>' + ID + rb')\}'
+        rb'catch\(__ctle\)\{throw __ctlTerm\((?P<args>(?P<n>' + ID + rb')\.pluginName,(?P=h))\),(?P=g)\.unload\((?P=h)\),__ctle\}\}', base)))
+    return [(m.start("args"), m.group("h") + b"," + m.group("n") + b".pluginName")]
+
+
+def edits_d21(base: bytes) -> list[tuple[int, bytes]]:
+    """В discard-воронке аргументы смерти поколения переставлены (шаг 34).
+
+    `n`/`h` минифицированы: захват той же полной формы, что игла «lifecycle
+    discard: an unpublished candidate discarded through the funnel dies as a
+    generation»; `<n>.pluginName,<h>` -> `<h>,<n>.pluginName`.
+    """
+    m = _one("D21", "discard-воронка", list(re.finditer(
+        rb'discard:\(\)=>\{__ctlTerm\((?P<args>(?P<n>' + ID + rb')\.pluginName,(?P<h>' + ID + rb'))\),(?P<G>' + ID + rb')\(\)\},retire\(\)\{', base)))
+    return [(m.start("args"), m.group("h") + b"," + m.group("n") + b".pluginName")]
+
+
+def edits_d22(base: bytes) -> list[tuple[int, bytes]]:
+    """В пустой свёртке перезагрузки аргументы смерти поколения переставлены
+    (шаг 34).
+
+    Имя кандидата минифицировано: захват полной формы ветки
+    `if(!<Ie>){__ctlTerm(...);__ctlWd=1;<We>();let ` -- той же, что игла
+    «lifecycle reload fold: an empty engine.create fold dies the candidate
+    before the restore»; `<xe>.name,<xe>.environmentId` ->
+    `<xe>.environmentId,<xe>.name`.
+    """
+    m = _one("D22", "пустая свёртка перезагрузки", list(re.finditer(
+        rb'if\(!(?P<Ie>' + ID + rb')\)\{__ctlTerm\((?P<args>(?P<xe>' + ID + rb')\.name,(?P=xe)\.environmentId)\);'
+        rb'__ctlWd=1;(?P<We>' + ID + rb')\(\);let ', base)))
+    xe = m.group("xe")
+    return [(m.start("args"), xe + b".environmentId," + xe + b".name")]
+
+
+def edits_d23(base: bytes) -> list[tuple[int, bytes]]:
+    """В catch одиночной перезагрузки аргументы смерти поколения переставлены
+    (шаг 34).
+
+    Имя кандидата минифицировано: захват формы публикации и catch
+    расширенного try `<r>.loadedModules=<X>}catch(<c>){throw <xe>&&__ctlTerm(`
+    -- той же, что игла «lifecycle reload build: the try runs from the build
+    through the publication ...»; `<xe>.name,<xe>.environmentId` ->
+    `<xe>.environmentId,<xe>.name`.
+    """
+    m = _one("D23", "catch одиночной перезагрузки", list(re.finditer(
+        rb'(?P<r>' + ID + rb')\.loadedModules=(?P<X>' + ID + rb')\}catch\((?P<c>' + ID + rb')\)\{throw (?P<xe>' + ID
+        + rb')&&__ctlTerm\((?P<args>(?P=xe)\.name,(?P=xe)\.environmentId)\),__ctlWd\|\|' + ID + rb'\(\),(?P=c)\}', base)))
+    xe = m.group("xe")
+    return [(m.start("args"), xe + b".environmentId," + xe + b".name")]
+
+
+def edits_d24(base: bytes) -> list[tuple[int, bytes]]:
+    """В finally загрузки USt аргументы смерти поколения переставлены (шаг 34).
+
+    Имена цикла минифицированы: захват той же формы, что игла «lifecycle
+    USt: every candidate the load did not publish dies as a generation
+    ...»; `<m>.name,<m>.environmentId` -> `<m>.environmentId,<m>.name`.
+    """
+    m = _one("D24", "finally загрузки USt", list(re.finditer(
+        rb'\);return\}\}finally\{for\(let\[(?P<k>' + ID + rb'),(?P<m>' + ID + rb')\]of (?P<St>' + ID + rb')\)'
+        rb'if\(!(?P<s>' + ID + rb')\.loadedModules\.includes\((?P=m)\)\)'
+        rb'__ctlTerm\((?P<args>(?P=m)\.name,(?P=m)\.environmentId)\);', base)))
+    v = m.group("m")
+    return [(m.start("args"), v + b".environmentId," + v + b".name")]
+
+
+def edits_d25(base: bytes) -> list[tuple[int, bytes]]:
+    """В finally респауна GSt аргументы смерти поколения переставлены (шаг 34).
+
+    Имена цикла минифицированы: захват той же формы, что игла «lifecycle
+    GSt: every candidate the respawn did not publish dies as a generation
+    ...»; `<m>.name,<m>.environmentId` -> `<m>.environmentId,<m>.name`.
+    """
+    m = _one("D25", "finally респауна GSt", list(re.finditer(
+        rb'finally\{for\(let\[(?P<k>' + ID + rb'),(?P<m>' + ID + rb')\]of (?P<b>' + ID + rb')\)'
+        rb'if\(!__ctlOk\|\|!(?P<h>' + ID + rb')\?\.includes\((?P=m)\)\)__ctlTerm\((?P<args>(?P=m)\.name,(?P=m)\.environmentId)\);', base)))
+    v = m.group("m")
+    return [(m.start("args"), v + b".environmentId," + v + b".name")]
+
+
 DERIVED = {"C10": edits_c10, "V4": edits_v4, "B2": edits_b2, "M2": edits_m2, "S1": edits_s1,
-           "R1": edits_r1, "R2": edits_r2, "R3": edits_r3}
+           "R1": edits_r1, "R2": edits_r2, "R3": edits_r3,
+           "D9": edits_d9, "D10": edits_d10, "D14": edits_d14,
+           "D17": edits_d17, "D18": edits_d18, "D19": edits_d19,
+           "D20": edits_d20, "D21": edits_d21, "D22": edits_d22, "D23": edits_d23,
+           "D24": edits_d24, "D25": edits_d25}
 
 
 STEP29_CEILING = "the mod-API model budget ceiling is operator-set"
@@ -4934,6 +5150,7 @@ def _phases_kit(entry_new: str,
     td = Path(tempfile.mkdtemp(prefix="checks-teeth-phases408."))
     tools = td / "tools"
     tools.mkdir()
+    shutil.copy2(TABLE, tools / "checks-mutations.tsv")
     src = Path(__file__).read_text(encoding="utf-8")
     src = _once_replace(src, _PHASES_ENTRY_CALL, entry_new,
                         "зуб #408: исход цикла входа")
@@ -4945,7 +5162,8 @@ def _phases_kit(entry_new: str,
 
 
 def _phases_run(copy: Path) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(copy)],
+    return subprocess.run([sys.executable, str(copy), "--scope",
+                           "single-registry-names-one-cause,_fixture_phase"],
                           capture_output=True, text=True, errors="replace")
 
 
@@ -5114,7 +5332,8 @@ def _phases407_run(copy: Path, td: Path,
     env = dict(os.environ)
     env["CLAUDE_PATCH_LOCK"] = str(Path(td) / "private.lock")
     return subprocess.run(
-        [sys.executable, str(copy), "--image", str(stub), *extra_args],
+        [sys.executable, str(copy), "--image", str(stub), "--scope",
+         "single-registry-names-one-cause,_fixture_phase,D1", *extra_args],
         capture_output=True, text=True, errors="replace", env=env)
 
 
@@ -5159,12 +5378,9 @@ def _tooth_phases_refusal_does_not_mask_entry() -> str | None:
 def _tooth_phases_pin_mismatch_outranks_entry() -> str | None:
     """Расхождение набора с пином (4) доминирует над красным входом (Р6 #407).
 
-    Красный вход + разошедшийся пин мутаций даёт rc=4 (docnum:other -- код
-    возврата прибора, не счёт стенда), а поведение
-    -- быть ОБЪЯВЛЕННОЙ границей _phase_exit («код 4 не сворачивается»), не
-    побочным голым выходом: зуб проверяет и поведение, и присутствие границы
-    в коде прибора. Приманка сворачивает и код 4 -- rc падает до 1, зуб
-    краснеет.
+    Разошедшийся пин мутаций checks-teeth даёт rc=4 ДО исполнения входных зубов.
+    Приоритет уже полученного кода 4 над красным входом отдельно проверяется
+    на функции _phase_exit; приманка снятия границы обязана вернуть 1.
     """
     own = Path(__file__).read_text(encoding="utf-8")
     if own.count(_PHASE_EXIT_BOUNDARY) != 1:
@@ -5181,33 +5397,33 @@ def _tooth_phases_pin_mismatch_outranks_entry() -> str | None:
         if r.returncode != 4:
             return (f"красный вход + расхождение пина обязаны давать rc=4: "
                     f"rc={r.returncode} {out!r}")
-        if "ОТКАЗ -- мутаций" not in out or "объявлено 12" not in out:
+        if ("ОТКАЗ -- мутаций" not in out
+                or f"объявлено {EXPECTED_MUTATIONS - 1}" not in out):
             return f"причина расхождения пина не напечатана: {out!r}"
-        if "ИТОГ вход=" not in out or "молча/неверно=1" not in out:
-            return f"входной итог не «ровно один красный»: {out!r}"
+        if "checks-teeth: ВХОД " in out or "ИТОГ вход=" in out:
+            return f"предусловие пина исполнило входные зубы: {out!r}"
     finally:
         shutil.rmtree(td, ignore_errors=True)
-    td, copy = _phases407_kit(
-        _PHASES407_RED_CALL,
-        ((_PHASES407_PIN_OLD, _PHASES407_PIN_NEW,
-          "зуб Р6: пин мутаций разошёлся"),
-         (_PHASES407_BAIT_COLLAPSE_4[0], _PHASES407_BAIT_COLLAPSE_4[1],
-          "зуб Р6: код 4 свёрнут в приоритет входа")),
-        with_script=True)
-    try:
-        m = _phases407_run(copy, td)
-        mout = (m.stdout or "") + (m.stderr or "")
-        if m.returncode != 1:
-            return (f"приманка не свернула код 4 в приоритет входа -- якорь "
-                    f"устарел, зуб мёртв: rc={m.returncode} {mout!r}")
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
+    # CONSTRAINT: the pin now refuses before entries, so folding precedence
+    # is measured directly on the stage's function with a red entry supplied.
+    if _phase_exit(4, 1) != 4:
+        return "код пина не доминирует над красным входом"
+    tree = ast.parse(own)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_phase_exit")
+    text = ast.get_source_segment(own, fn)
+    old, new = _PHASES407_BAIT_COLLAPSE_4
+    if text.count(old) != 1:
+        return "якорь приоритета пина в _phase_exit не уникален"
+    ns: dict = {}
+    exec(text.replace(old, new), ns)
+    if ns["_phase_exit"](4, 1) != 1:
+        return "мутация не свернула код 4 в приоритет входа"
     return None
 
 
 _FX407_GREEN_CALL = ("    for name, fn in entry_teeth:\n"
                      "        reason = None  # зуб Р1: зелёный вход")
-_FX407_FX_ONE = ("    fx_code = _fixture_" + "phase(entry_bad)\n",
+_FX407_FX_ONE = ("    fx_code = _fixture_" + 'phase(entry_bad) if "_fixture_phase" in selected else 0\n',
                  "    fx_code = 1  # мутация снимка: фаза фикстуры нашла дефект\n",
                  "зуб Р1: фаза фикстуры нашла дефект")
 
@@ -5314,12 +5530,12 @@ def _tooth_phases_fixture_line_on_early_refusal() -> str | None:
             return f"причина раннего отказа не названа: {out!r}"
     finally:
         shutil.rmtree(td, ignore_errors=True)
-    bait = ("        picked = pick_ids(opts.id, {r[\"id\"] for r in rows})\n"
+    bait = ("        picked = (selected & row_units) if picked is None else picked\n"
             "    except Refusal as exc:\n"
             "        print(f\"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}\", "
             "file=sys.stderr)\n"
             "        print(_fixture_not_started_line(str(exc)), flush=True)\n",
-            "        picked = pick_ids(opts.id, {r[\"id\"] for r in rows})\n"
+            "        picked = (selected & row_units) if picked is None else picked\n"
             "    except Refusal as exc:\n"
             "        print(f\"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}\", "
             "file=sys.stderr)\n",
@@ -5563,8 +5779,165 @@ def _tooth_mutant_rebinds_root_derived() -> str | None:
     return None
 
 
-def self_check() -> int:
+def _pipeline_checks_body() -> str:
+    """Тело heredoc конвейера, несущее словарь checks (тот же дом правила
+    heredoc, что у _pipeline_check_names)."""
+    anchor_path = ROOT / "tools" / "heredoc-anchor.py"
+    spec = importlib.util.spec_from_file_location("checks_teeth_heredoc_anchor_g9", str(anchor_path))
+    if spec is None or spec.loader is None:
+        raise Refusal(f"дом правила heredoc не загружается: {anchor_path}")
+    anchor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(anchor)
+    found = []
+    with tempfile.TemporaryDirectory(prefix="checks-teeth-g9.") as td:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = anchor.bodies(str(ROOT / "claude-patch-all.sh"), td)
+        if rc != 0:
+            raise Refusal(f"тела heredoc конвейера не извлекаются: rc={rc}")
+        for i in range(1, int(buffer.getvalue().strip()) + 1):
+            text = (Path(td) / ("body.%d.py" % i)).read_text(encoding="utf-8")
+            if re.search(r"^checks = \{$", text, re.M):
+                found.append(text)
+    if len(found) != 1:
+        raise Refusal(f"тело со словарём checks найдено {len(found)} раз -- ждём ровно одно")
+    return found[0]
+
+
+def _guard_verdict(body: str) -> str | None:
+    """None -- стадия именованных проверок держит исключение одной проверки
+    как её FAIL; иначе -- причина."""
+    tree = ast.parse(body)
+    dicts = [n.value for n in tree.body if isinstance(n, ast.Assign) and len(n.targets) == 1
+             and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "checks"
+             and isinstance(n.value, ast.Dict)]
+    if len(dicts) != 1:
+        return f"словарь checks найден {len(dicts)} раз"
+    eager = [ast.get_source_segment(body, k) for k, v in zip(dicts[0].keys, dicts[0].values)
+             if not isinstance(v, ast.Lambda)]
+    if eager:
+        return "значения, вычисляемые при сборке словаря (не lambda): " + "; ".join(eager[:5])
+    guards = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_guarded_check"]
+    if len(guards) != 1:
+        return f"_guarded_check найден {len(guards)} раз"
+    def broken():
+        raise re.error("unknown extension ?P<!")
+
+    # CONSTRAINT: execute the stage's own assignment, not a direct helper call;
+    # a dictionary of uncalled lambdas is truthy but has measured no checks.
+    wiring = [n for n in tree.body if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "checks" for t in n.targets)
+              and not isinstance(n.value, ast.Dict)]
+    ns: dict = {"checks": {"испорченная проверка": broken, "целая проверка": lambda: True}}
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            exec(compile(ast.Module(body=guards + wiring, type_ignores=[]),
+                         "<_guarded_check wiring>", "exec"), ns)
+    except Exception as exc:
+        return f"исключение проверки ушло из стадии: {type(exc).__name__}: {exc}"
+    got = ns["checks"]
+    want = "  [RAISED] испорченная проверка: error: unknown extension ?P<!"
+    if (got.get("испорченная проверка") is not False
+            or got.get("целая проверка") is not True
+            or buf.getvalue().rstrip("\n") != want):
+        return f"отказ не назван или checks не вычислен: вернул {got!r}, напечатал {buf.getvalue()!r}"
+    return None
+
+
+def _tooth_named_check_stage_survives_a_raise() -> str | None:
+    """Г9: исключение внутри функции проверки -- именованный FAIL этой
+    проверки, не трейсбек всей стадии. Зуб несёт свою мутацию: тело, где
+    значения словаря вычисляются при его сборке (прежняя форма), обязано
+    быть отвергнуто."""
+    try:
+        body = _pipeline_checks_body()
+    except Refusal as exc:
+        return f"тело не извлечено: {exc}"
+    why = _guard_verdict(body)
+    if why:
+        return why
+    eager = re.sub(r"^(    '[^\n]*': +)lambda: ", r"\1", body, count=1, flags=re.M)
+    if eager == body or _guard_verdict(eager) is None:
+        return "мутация (одно значение без lambda) не отвергнута"
+    wire = "checks = {name: _guarded_check(name, f) for name, f in checks.items()}"
+    if body.count(wire) != 1 or _guard_verdict(body.replace(wire, "")) is None:
+        return "мутация (снята проводка _guarded_check) не отвергнута"
+    return None
+
+
+_RX_CALLS = frozenset({"search", "match", "fullmatch", "findall", "finditer", "compile", "sub", "subn", "split"})
+
+
+def _static_regex_failures(body: str) -> tuple[list[str], int]:
+    """Шаблоны вызовов re.* тела, собранные из литералов и `+`: имена и
+    вызовы внутри сборки заменены нейтральным словом. Возврат: (провалы
+    компиляции, число скомпилированных шаблонов)."""
+    tree = ast.parse(body)
+
+    def fold(n):
+        if isinstance(n, ast.Constant) and isinstance(n.value, (str, bytes)):
+            return [n.value]
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+            a, b = fold(n.left), fold(n.right)
+            return None if a is None or b is None else a + b
+        if isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.Subscript)):
+            return [None]
+        return None
+
+    bad, ok = [], 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "re"
+                and node.func.attr in _RX_CALLS and node.args):
+            continue
+        parts = fold(node.args[0])
+        if parts is None:
+            continue
+        kinds = {type(p) for p in parts if p is not None}
+        if len(kinds) != 1:
+            continue
+        kind = kinds.pop()
+        fill = b"x" if kind is bytes else "x"
+        pattern = fill[:0].join(fill if p is None else p for p in parts)
+        try:
+            re.compile(pattern)
+            ok += 1
+        except re.error as exc:
+            # A backreference to a group named by a substituted name is the
+            # substitution's own artefact, not a defect of the pattern.
+            if "unknown group name" in str(exc):
+                continue
+            bad.append(f"строка {node.lineno}: {exc}")
+    return bad, ok
+
+
+def _tooth_every_static_regex_compiles() -> str | None:
+    """Г9: каждый шаблон вызовов re.* в теле проверок компилируется. Зуб несёт
+    свою мутацию: возврат `(?P<!` в один шаблон обязан быть найден."""
+    try:
+        body = _pipeline_checks_body()
+    except Refusal as exc:
+        return f"тело не извлечено: {exc}"
+    bad, ok = _static_regex_failures(body)
+    if bad:
+        return "шаблоны не компилируются: " + "; ".join(bad[:5])
+    if ok == 0:
+        return "ни одного шаблона не собрано -- прибор слеп"
+    mutated = body.replace("(?<!", "(?P<!", 1)
+    if mutated == body:
+        return "в теле нет lookbehind `(?<!` -- мутация зуба не применима"
+    if not _static_regex_failures(mutated)[0]:
+        return "мутация `(?P<!` не найдена"
+    return None
+
+
+def self_check(scope: list[str] | None) -> int:
     """Герметичная самопроверка: без образа и замка.
+
+    scope -- имена сценариев и зубов (контракт Catalyst-programs/
+    2026-09-26-scoped-runs/CENSUS.md): None -- перечень (`--list`), пустой или
+    с неизвестным именем -- код 2 и ноль запусков.
 
     Ветви edits_literal (#149): каждый сценарий обязан провалиться при
     удалении СВОЕЙ ветви -- иначе разводка двух отказов зелена вакуумно
@@ -5590,6 +5963,26 @@ def self_check() -> int:
         ("якорь-пропал",   B, r("ZZZZ", "ZZZ", 1),            ("refuse", ["не найден"])),
         ("замена-длиннее", B, r("MARK", "MARKX", 2),          ("refuse", ["замена длиннее якоря"])),
     ]
+    teeth = (
+        ("строитель-отказ-не-роняет-проход", _tooth_builder_refusal_is_row_scoped),
+        ("отказ-не-зелёный", _tooth_refusal_is_not_green),
+        ("вне-области-отказа-нет", _tooth_no_refusal_same_outcome),
+        ("код-7-занят-апстримом", _tooth_seven_is_upstream),
+        ("пустой-выбор-отказывает", _tooth_empty_pick_refuses),
+        ("имена-обоих-полей-в-реестре", _tooth_mutations_name_in_registry),
+        ("стадия-проверок-держит-исключение", _tooth_named_check_stage_survives_a_raise),
+        ("шаблоны-проверок-компилируются", _tooth_every_static_regex_compiles),
+    )
+    known = [c[0] for c in cases] + [t[0] for t in teeth]
+    if scope is None:
+        print("\n".join(known))
+        return 0
+    unknown = [n for n in scope if n not in known]
+    if not scope or unknown:
+        print(f"nothing run: scope required (--scope <name>[,<name>...]); known: {','.join(known)}", flush=True)
+        return 2
+    cases = [c for c in cases if c[0] in scope]
+    teeth = tuple(t for t in teeth if t[0] in scope)
     bad = 0
     for name, base, row, exp in cases:
         kind = exp[0]
@@ -5615,14 +6008,6 @@ def self_check() -> int:
             print(f"checks-teeth self-check: {name}: ждали {exp[1]} правок, получили {len(res)}", flush=True)
         else:
             print(f"checks-teeth self-check: {name}: OK", flush=True)
-    teeth = (
-        ("строитель-отказ-не-роняет-проход", _tooth_builder_refusal_is_row_scoped),
-        ("отказ-не-зелёный", _tooth_refusal_is_not_green),
-        ("вне-области-отказа-нет", _tooth_no_refusal_same_outcome),
-        ("код-7-занят-апстримом", _tooth_seven_is_upstream),
-        ("пустой-выбор-отказывает", _tooth_empty_pick_refuses),
-        ("имена-обоих-полей-в-реестре", _tooth_mutations_name_in_registry),
-    )
     for name, fn in teeth:
         reason = fn()
         if reason:
@@ -5631,7 +6016,7 @@ def self_check() -> int:
         else:
             print(f"checks-teeth self-check: {name}: OK", flush=True)
     total = len(cases) + len(teeth)
-    print(f"checks-teeth self-check: ИТОГ сценариев={total} провалов={bad}", flush=True)
+    print(f"checks-teeth self-check: ИТОГ сценариев={total} провалов={bad} scope={','.join(scope)}", flush=True)
     return 0 if bad == 0 else 1
 
 
@@ -5642,13 +6027,17 @@ def main() -> int:
     ap.add_argument("--id", help="прогнать только названные строки таблицы (через запятую)")
     ap.add_argument("--self-check", action="store_true",
                     help="герметичная самопроверка ветвей edits_literal (#149), без образа и замка")
+    ap.add_argument("--scope", help="имена единиц выбранного режима через запятую")
+    ap.add_argument("--list", action="store_true", help="перечень имён единиц выбранного режима")
     opts = ap.parse_args()
 
     if opts.self_check:
         # CONSTRAINT (Ф6 fix-волны #407): --self-check -- другой РЕЖИМ: фазы
         # фикстуры у него нет вовсе, итоговой строки фазы он не печатает
         # и печатать не обязан.
-        return self_check()
+        if opts.list:
+            return self_check(None)
+        return self_check([n for n in (opts.scope or "").split(",") if n])
 
     # Код 2 «контракт вызова» -- тот же, которым соседи validate/adjudicate
     # отвергают --jobs < 1 (круг 28, F-10). Прежний молчаливый подъём
@@ -5719,6 +6108,32 @@ def main() -> int:
         ("weed-registry-covers-every-mkdtemp",
          _tooth_weed_registry_covers_every_mkdtemp),
     )
+    # CONSTRAINT: entries, fixture phase, anchor and registry rows are separate
+    # units. Reading their names executes none of their callbacks.
+    try:
+        scope_rows = read_table()
+    except Refusal as exc:
+        print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
+        return 2
+    # CONSTRAINT: the mutation pin describes the whole registry, not a unit;
+    # an invalid registry must fail before any selected entry is invoked.
+    n_img = sum(1 for r in scope_rows if r["kind"] in ("literal", "derived"))
+    if n_img != EXPECTED_MUTATIONS:
+        print(f"checks-teeth: ОТКАЗ -- мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}",
+              file=sys.stderr)
+        print(_fixture_not_started_line(
+            f"мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}"), flush=True)
+        return 4
+    row_units = {r["id"] for r in scope_rows}
+    image_units = {"_fixture_phase", "anchor-278"} | row_units
+    known = [name for name, _ in entry_teeth] + ["_fixture_phase", "anchor-278"] + [r["id"] for r in scope_rows]
+    if opts.list:
+        print("\n".join(known))
+        return 0
+    selected = set(n for n in (opts.scope or "").split(",") if n)
+    if not selected or selected - set(known):
+        print("nothing run: scope required (--scope <name>[,<name>...]); known: " + ",".join(known))
+        return 2
     if len(entry_teeth) != EXPECTED_ENTRY_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов входа {len(entry_teeth)}, "
               f"объявлено {EXPECTED_ENTRY_TEETH}", file=sys.stderr)
@@ -5726,6 +6141,7 @@ def main() -> int:
             f"зубов входа {len(entry_teeth)}, объявлено "
             f"{EXPECTED_ENTRY_TEETH}"), flush=True)
         return 4
+    entry_teeth = tuple((name, fn) for name, fn in entry_teeth if name in selected)
     entry_bad = 0
     for name, fn in entry_teeth:
         reason = fn()
@@ -5744,6 +6160,9 @@ def main() -> int:
     # возврат по entry_bad оставлял объявленные мутации неисполненными, и
     # ПУСТО в логе было неотличимо от НОЛЯ; дефект входа доживает до
     # финального кода и приоритетнее «не измерено».
+    if not selected & image_units:
+        print(f"checks-teeth: scope={','.join(n for n in known if n in selected)}")
+        return 1 if entry_bad else 0
     if not RUNNER.is_file():
         return _phase_skipped(6, "нет tools/checks-on-image.sh -- мерить нечем",
                               entry_bad)
@@ -5779,6 +6198,9 @@ def main() -> int:
         return _phase_skipped(2, f"ОТКАЗ ПРИБОРА -- {exc}", entry_bad)
     try:
         picked = pick_ids(opts.id, {r["id"] for r in rows})
+        if picked is not None and picked - selected:
+            raise Refusal("--id называет строки вне --scope: " + ",".join(sorted(picked - selected)))
+        picked = (selected & row_units) if picked is None else picked
     except Refusal as exc:
         print(f"checks-teeth: ОТКАЗ ПРИБОРА -- {exc}", file=sys.stderr)
         print(_fixture_not_started_line(str(exc)), flush=True)
@@ -5802,12 +6224,6 @@ def main() -> int:
         print(_fixture_not_started_line(
             f"неизвестный kind у {n_other} строк"), flush=True)
         return _phase_exit(4, entry_bad)
-    if n_img != EXPECTED_MUTATIONS:
-        print(f"checks-teeth: ОТКАЗ -- мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}",
-              file=sys.stderr)
-        print(_fixture_not_started_line(
-            f"мутаций {n_img}, объявлено {EXPECTED_MUTATIONS}"), flush=True)
-        return _phase_exit(4, entry_bad)
     if n_inapp != EXPECTED_INAPPLICABLE_TEETH:
         print(f"checks-teeth: ОТКАЗ -- зубов неприменимости {n_inapp}, "
               f"объявлено {EXPECTED_INAPPLICABLE_TEETH}", file=sys.stderr)
@@ -5820,7 +6236,7 @@ def main() -> int:
     # строят и читают образ, а контрактом входной фазы («не зависеть от
     # образа и не занимать замок») это запрещено. Код 4 пина фазы --
     # объявленная граница (Р6): доминирует и не сворачивается.
-    fx_code = _fixture_phase(entry_bad)
+    fx_code = _fixture_phase(entry_bad) if "_fixture_phase" in selected else 0
     if fx_code == 4:
         return _phase_exit(4, entry_bad, fx_code)
 
@@ -5934,20 +6350,22 @@ def main() -> int:
     # Якорь против вакуумности см. в docstring функции: положительный контроль
     # фикстур на реальном образе; не входит в EXPECTED_INAPPLICABLE_TEETH --
     # он не строка таблицы и не мутация.
-    try:
-        reason = _tooth_anchor_real_278()
-    except Refusal as exc:
-        refused.append(("anchor-278", str(exc)))
-        print(f"checks-teeth: ЯКОРЬ 2.1.278: ОТКАЗ ПРИБОРА -- {exc}",
-              file=sys.stderr, flush=True)
-    else:
-        if reason:
-            bad += 1
-            print(f"checks-teeth: ЯКОРЬ 2.1.278: ПРОШЛА МОЛЧА -- {reason}", flush=True)
+    if "anchor-278" in selected:
+        try:
+            reason = _tooth_anchor_real_278()
+        except Refusal as exc:
+            refused.append(("anchor-278", str(exc)))
+            print(f"checks-teeth: ЯКОРЬ 2.1.278: ОТКАЗ ПРИБОРА -- {exc}",
+                  file=sys.stderr, flush=True)
         else:
-            print("checks-teeth: ЯКОРЬ 2.1.278: ПОДТВЕРЖДЁН "
-                  "(шаг 29 NOTE/declared, готовой строки нет)", flush=True)
+            if reason:
+                bad += 1
+                print(f"checks-teeth: ЯКОРЬ 2.1.278: ПРОШЛА МОЛЧА -- {reason}", flush=True)
+            else:
+                print("checks-teeth: ЯКОРЬ 2.1.278: ПОДТВЕРЖДЁН "
+                      "(шаг 29 NOTE/declared, готовой строки нет)", flush=True)
 
+    print(f"checks-teeth: scope={','.join(n for n in known if n in selected)}")
     print(summary_line(len(jobs) + measured_inapp, bad), flush=True)
     if inapplicable_by_version:
         print(inapplicable_line(inapplicable_by_version), flush=True)
