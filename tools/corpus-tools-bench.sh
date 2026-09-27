@@ -68,8 +68,8 @@ KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # (docnum:other -- Х1 есть номер пункта брифа, не счётчик стенда).
 # FIX-STEP19 (#490): corpus-tools-bench, сценарии 256-304 и мутации 338-388 (docnum:subset) -- зубы правки 19 (лексер, скан, владелец,
 # формы opts, импорты, HEADER_KW, имена свойств, единственность сайтов 1-4, прибор образа).
-EXPECTED_SCENARIOS=313
-EXPECTED_MUTATIONS=409
+EXPECTED_SCENARIOS=349
+EXPECTED_MUTATIONS=453
 
 # Предусловие 1: параллельный прогон СТЕНДА.
 #
@@ -2477,8 +2477,22 @@ run_all() {
   scenario_291
   scenario_292; scenario_293
   scenario_294; scenario_295; scenario_305
-  scenario_296; scenario_297; scenario_298; scenario_299; scenario_300; scenario_301; scenario_302; scenario_303; scenario_304; scenario_306; scenario_307
+  scenario_296; scenario_297; scenario_298; scenario_299; scenario_300; scenario_301; scenario_302; scenario_303; scenario_304; scenario_306; scenario_307; scenario_325; scenario_326
+  # S19-FIX3: зубы ре-ревью -- интерполяция (327), генераторная декларация (328),
+  # пин декларации после блока (329), ряды прибора: лямбда с параметрами (330),
+  # не-bool у пристина (331) и у патченного (332).
+  scenario_327; scenario_328; scenario_329; scenario_330; scenario_331; scenario_332
+  # Комментарий, NBSP и U+2028 перед свидетелем (333-336), инструкция внутри
+  # интерполяции (337), пин генераторного выражения (338), прибор фикстуры (339).
+  scenario_333; scenario_334; scenario_335; scenario_336; scenario_337; scenario_338; scenario_339
+  # По сценарию на каждую руку пропуска пробелов, которую не держит прежний
+  # сценарий (340-348), и «}» внутри интерполяции перед свидетелем (349).
+  scenario_340; scenario_341; scenario_342; scenario_343; scenario_344; scenario_345; scenario_346
+  scenario_347; scenario_348; scenario_349
   scenario_308; scenario_309; scenario_310; scenario_311; scenario_312; scenario_313
+  scenario_314; scenario_315; scenario_316
+  scenario_317; scenario_318; scenario_319; scenario_320; scenario_321; scenario_322
+  scenario_323; scenario_324
   # Волна 53 (#120): выключенный ручкой слой промтов -- дверь не сравнивает;
   # пустое значение ручки -- это ЗАДАНО у обеих обёрток (класс #117); ветви
   # самого выключателя слоя (подстановка с ключом, объявление, отмена, оператор).
@@ -8247,8 +8261,33 @@ s19_run() {   # вывод драйвера на образе каталога S
   node "$S19_D/drv.js" "$K/tweakcc-patch.js" "$S19_D/fixture.js" 2>&1
 }
 
-s19_mut_fixture() {   # образец, замена -- той же дисциплиной, что и мутации кита
-  PAT="$1" REP="$2" perl -0pi -e 's/$ENV{PAT}/$ENV{REP}/' "$S19_D/fixture.js"
+# CONSTRAINT: промах якоря обязан быть громким -- правка первого вхождения при
+# N>1 молча мерила бы ДРУГУЮ фикстуру тем же зелёным вердиктом.
+# perl -i, не сумев создать временный файл, только предупреждает и выходит 0
+# (замерено: perl 5.40.2, каталог без права записи -- без FATAL rc=0, с
+# -Mwarnings=FATAL,inplace rc=13; сырой вывод --
+# Catalyst-programs/2026-09-26-upgrade-283/logs/s19-fix5-perl-fatal-probe.log),
+# поэтому предупреждение inplace сделано фатальным, а правка доказывается
+# сравнением до/после. Копия «до» лежит в ROOT, а не рядом с файлом: каталог
+# файла может быть закрыт на запись.
+# Образцы не используют \G и кодовые утверждения: счёт m//g совпадает с одиночной
+# заменой s/// только при ровно одном вхождении.
+s19_mut_file() {   # файл, образец, замена
+  local f=$1 n rc before
+  n=$(PAT="$2" perl -0ne 'my $c = () = /$ENV{PAT}/g; print $c' "$f"); rc=$?
+  if (( rc != 0 )); then __instrument_dead "s19_mut_file: счёт образца $2" "$rc"; fi
+  if [[ "$n" != "1" ]]; then __instrument_dead "s19_mut_file: образец совпал $n раз: $2" 2; fi
+  before=$(mktemp "$ROOT/s19-mut-file.XXXXXX") || __instrument_dead "s19_mut_file: копия до правки $2" 2
+  cp "$f" "$before" || { rm -f "$before"; __instrument_dead "s19_mut_file: копия до правки $2" 2; }
+  PAT="$2" REP="$3" perl -Mwarnings=FATAL,inplace -0pi -e 's/$ENV{PAT}/$ENV{REP}/' "$f"; rc=$?
+  if (( rc != 0 )); then rm -f "$before"; __instrument_dead "s19_mut_file: замена образца $2" "$rc"; fi
+  cmp -s "$before" "$f"; rc=$?
+  rm -f "$before"
+  if (( rc != 1 )); then __instrument_dead "s19_mut_file: сравнение до/после $2" "$rc"; fi
+}
+
+s19_mut_fixture() {   # образец, замена
+  s19_mut_file "$S19_D/fixture.js" "$1" "$2"
 }
 
 # CONSTRAINT: след s19-сценария обязан называть падение шага его КЛАССОМ, а
@@ -8468,8 +8507,9 @@ scenario_265() {   # plain: начисление только за концом 
   local out
   s19_prepare s265
   s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
   s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}}}
-cr!=="credited")cr="credited",acc+=p.querySource;'
+function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
   out=$(s19_run) || true
   LAST_EVID="$(s19_cause 'ОКНО_СВИДЕТЕЛЯ' "$out")" || true
   if [[ "$out" != *"no usage accrual"* ]]; then
@@ -8637,7 +8677,8 @@ scenario_279() {   # plain: начисление только внутри вл�
   local out
   s19_prepare s279
   s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
-  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}var __f=function(p){if(cr!=="credited")cr="credited",acc+=p.querySource;};}}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}var __f=function(){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}};}}'
   out=$(s19_run) || true
   LAST_EVID="$(s19_cause 'ВЛАДЕЛЕЦ_СВИДЕТЕЛЯ_СНЯТ' "$out")" || true
   if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"no usage accrual owned by"* ]]; then
@@ -9043,15 +9084,11 @@ scenario_306() {   # прибор образа шага 19: образ без м
 }
 
 scenario_307() {   # прибор образа шага 19: отказ анализа -- код 2, не вердикт 1
-  local out rc d n
+  local out rc d
   d=$(mktemp -d "$ROOT/s307.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 307\n' >&2; exit 2; }
   mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 307\n' >&2; exit 2; }
   cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 307 не скопирован\n' >&2; exit 2; }
-  n=$(perl -0ne 'my $c = () = /def _stream_recoverable_cond\(\):.*?(?=\ndef _stream_finalize_ok)/gs; print $c' "$d/kit/claude-patch-all.sh") || true
-  if [[ "$n" != "1" ]]; then
-    printf 'ПРИБОР НЕДОСТУПЕН: якорь _stream_recoverable_cond в конвейере встречен %s раз, нужна одна\n' "$n" >&2; exit 2
-  fi
-  perl -0pi -e 's/(def _stream_recoverable_cond\(\):).*?(?=\ndef _stream_finalize_ok)/$1\n    return "("\n/s' "$d/kit/claude-patch-all.sh"
+  s19_mut_file "$d/kit/claude-patch-all.sh" '(?s)def _stream_recoverable_cond\(\):.*?(?=\ndef _stream_finalize_ok)' 'def _stream_recoverable_cond():'$'\n''    return "("'$'\n'
   # Фикстуры заведомо измеримы (пристин single, патченный single с бюджетом, маркер
   # границ есть): отказ обязан родиться в анализе имён -- cond не компилируется.
   printf 'let cap=mr();if(conn&&stop===null&&tries<cap){' > "$d/p"
@@ -9062,6 +9099,412 @@ scenario_307() {   # прибор образа шага 19: отказ анал�
     bad "307 прибор образа шага 19: отказ анализа не доехал кодом 2 со словами analysis failed"; return
   fi
   ok "307 прибор образа шага 19: отказ анализа -- код 2, не вердикт"
+}
+
+scenario_325() {   # прибор образа шага 19: ряд-лямбда исполняется, а не читается истиной
+  local out rc d
+  d=$(mktemp -d "$ROOT/s325.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 325\n' >&2; exit 2; }
+  mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 325\n' >&2; exit 2; }
+  cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 325 не скопирован\n' >&2; exit 2; }
+  # Маркер границы у патченного обязателен: без него прибор отказывает до FINALIZE
+  # (step19-image-check.py, дверь BOUNDARY). Дальше FINALIZE идёт отказ формы кэпа
+  # на фикстурах-обрубках -- rc в зубе не сверяется, предмет зуба -- исполнение ряда.
+  printf 'x' > "$d/p"
+  printf '\n/*__tweakcc_module_boundary_1__*/\nx' > "$d/a"
+  out=$(env -u PYTHONPYCACHEPREFIX STEP19_KIT="$d/kit" python3 "$K/tools/step19-image-check.py" "$d/p" "$d/a" S325 2>&1); rc=$?
+  LAST_EVID="ЛЯМБДА_ПРОЧИТАНА_ИСТИНОЙ :: rc=$rc $out"
+  if [[ "$out" != *"FINALIZE pristine=False patched=False"* ]]; then
+    bad "325 прибор образа шага 19: FINALIZE на пустых образах не печатает False/False -- ряд-лямбда не исполнена"; return
+  fi
+  ok "325 прибор образа шага 19: ряд-лямбда исполняется, а не читается истиной"
+}
+
+scenario_326() {   # прибор образа шага 19: ряд, вернувший не bool, -- отказ прибора
+  local out rc d
+  d=$(mktemp -d "$ROOT/s326.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 326\n' >&2; exit 2; }
+  mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 326\n' >&2; exit 2; }
+  cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 326 не скопирован\n' >&2; exit 2; }
+  # Форма `(lambda: True) if True else ` меняет только голову ряда: хвост bool(...)
+  # с регэкспами и комментариями остаётся как есть, правка остаётся одно-вхожей.
+  s19_mut_file "$d/kit/claude-patch-all.sh" '\x27broken stream retried, not halved\x27: lambda: ' "'broken stream retried, not halved': lambda: (lambda: True) if True else "
+  printf 'x' > "$d/p"
+  printf '\n/*__tweakcc_module_boundary_1__*/\nx' > "$d/a"
+  out=$(env -u PYTHONPYCACHEPREFIX STEP19_KIT="$d/kit" python3 "$K/tools/step19-image-check.py" "$d/p" "$d/a" S326 2>&1); rc=$?
+  LAST_EVID="НЕ_BOOL_НЕ_ОТКАЗАН :: rc=$rc $out"
+  if (( rc != 2 )) || [[ "$out" != *"returned function on the pristine, not bool"* ]]; then
+    bad "326 прибор образа шага 19: ряд, вернувший функцию, не отказан кодом 2 со словами returned function on the pristine, not bool"; return
+  fi
+  ok "326 прибор образа шага 19: не-bool от ряда -- отказ прибора, не вердикт"
+}
+
+# S19-FIX3: зубы ре-ревью FIX1+FIX2 -- интерполяция, генераторная повторная
+# декларация, пин декларации после блока; ряды прибора: лямбда с параметрами
+# и не-bool у ОДНОЙ ноги (первым отказывает пристин).
+
+scenario_327() {   # plain: декларация начисления внутри ${}-интерполяции шаблона -- не свидетель
+  local out
+  s19_prepare s327
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;`t${function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}}`;'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ИНТЕРПОЛЯЦИЯ_ПРИНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"outside its top-level statement position"* ]]; then
+    bad "327 правка 19: интерполяционная декларация начисления принята свидетелем"; return
+  fi
+  ok "327 правка 19: интерполяция -- «outside its top-level statement position»"
+}
+
+scenario_328() {   # plain: повторная генераторная декларация имени начисления -- связывание
+  local out
+  s19_prepare s328
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}function*ac(){}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ГЕНЕРАТОРНОЕ_СВЯЗЫВАНИЕ_ПРОПУЩЕНО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"has a binding or use in"* ]]; then
+    bad "328 правка 19: генераторная повторная декларация имени начисления пропущена"; return
+  fi
+  ok "328 правка 19: function*ac -- «has a binding or use in»"
+}
+
+scenario_329() {   # plain: декларация начисления после пустого блока -- свидетель
+  local out
+  s19_prepare s329
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){if(a){}function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДЕКЛАРАЦИЯ_ПОСЛЕ_БЛОКА_ОТВЕРГНУТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "329 правка 19: декларация начисления после «}» блока не принята свидетелем"; return
+  fi
+  ok "329 правка 19: декларация после блока -- свидетель, spliced=1 rec=1"
+}
+
+scenario_330() {   # прибор образа шага 19: ряд-лямбда с параметрами -- отказ прибора
+  local out rc d
+  d=$(mktemp -d "$ROOT/s330.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 330\n' >&2; exit 2; }
+  mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 330\n' >&2; exit 2; }
+  cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 330 не скопирован\n' >&2; exit 2; }
+  s19_mut_file "$d/kit/claude-patch-all.sh" '\x27broken stream retried, not halved\x27: lambda: ' "'broken stream retried, not halved': lambda z=0: "
+  printf 'x' > "$d/p"
+  printf '\n/*__tweakcc_module_boundary_1__*/\nx' > "$d/a"
+  out=$(env -u PYTHONPYCACHEPREFIX STEP19_KIT="$d/kit" python3 "$K/tools/step19-image-check.py" "$d/p" "$d/a" S330 2>&1); rc=$?
+  LAST_EVID="ЛЯМБДА_С_ПАРАМЕТРАМИ_ПРИНЯТА :: rc=$rc $out"
+  if (( rc != 2 )) || [[ "$out" != *"broken-stream check is a lambda with parameters"* ]]; then
+    bad "330 прибор образа шага 19: ряд-лямбда с параметром не отказан кодом 2 со словами broken-stream check is a lambda with parameters"; return
+  fi
+  ok "330 прибор образа шага 19: лямбда с параметрами -- отказ прибора"
+}
+
+scenario_331() {   # прибор образа шага 19: не-bool только у пристина -- отказ прибора
+  local out rc d
+  d=$(mktemp -d "$ROOT/s331.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 331\n' >&2; exit 2; }
+  mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 331\n' >&2; exit 2; }
+  cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 331 не скопирован\n' >&2; exit 2; }
+  s19_mut_file "$d/kit/claude-patch-all.sh" '\x27broken stream retried, not halved\x27: lambda: ' "'broken stream retried, not halved': lambda: (lambda: True) if d[:1] == b\"x\" else "
+  printf 'x' > "$d/p"
+  printf '\n/*__tweakcc_module_boundary_1__*/\nx' > "$d/a"
+  out=$(env -u PYTHONPYCACHEPREFIX STEP19_KIT="$d/kit" python3 "$K/tools/step19-image-check.py" "$d/p" "$d/a" S331 2>&1); rc=$?
+  LAST_EVID="НЕ_BOOL_ПРИСТИНА_НЕ_ОТКАЗАН :: rc=$rc $out"
+  if (( rc != 2 )) || [[ "$out" != *"returned function on the pristine, not bool"* ]]; then
+    bad "331 прибор образа шага 19: не-bool у пристина не отказан кодом 2 со словами returned function on the pristine, not bool"; return
+  fi
+  ok "331 прибор образа шага 19: не-bool только у пристина -- отказ прибора"
+}
+
+scenario_332() {   # прибор образа шага 19: не-bool только у патченного -- отказ прибора
+  local out rc d
+  d=$(mktemp -d "$ROOT/s332.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан каталог сценария 332\n' >&2; exit 2; }
+  mkdir -p "$d/kit/tools" || { printf 'ПРИБОР НЕДОСТУПЕН: не создан кит сценария 332\n' >&2; exit 2; }
+  cp "$K/claude-patch-all.real" "$d/kit/claude-patch-all.sh" && cp "$K/tools/heredoc-anchor.py" "$d/kit/tools/" || { printf 'ПРИБОР НЕДОСТУПЕН: кит сценария 332 не скопирован\n' >&2; exit 2; }
+  s19_mut_file "$d/kit/claude-patch-all.sh" '\x27broken stream retried, not halved\x27: lambda: ' "'broken stream retried, not halved': lambda: (lambda: True) if d[:1] != b\"x\" else "
+  printf 'x' > "$d/p"
+  printf '\n/*__tweakcc_module_boundary_1__*/\nx' > "$d/a"
+  out=$(env -u PYTHONPYCACHEPREFIX STEP19_KIT="$d/kit" python3 "$K/tools/step19-image-check.py" "$d/p" "$d/a" S332 2>&1); rc=$?
+  LAST_EVID="НЕ_BOOL_ПАТЧА_НЕ_ОТКАЗАН :: rc=$rc $out"
+  if (( rc != 2 )) || [[ "$out" != *"returned function on the patched, not bool"* ]]; then
+    bad "332 прибор образа шага 19: не-bool у патченного не отказан кодом 2 со словами returned function on the patched, not bool"; return
+  fi
+  ok "332 прибор образа шага 19: не-bool только у патченного -- отказ прибора"
+}
+
+scenario_333() {   # plain: блочный комментарий между инструкцией и свидетелем -- свидетель
+  local out
+  s19_prepare s333
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;/*x*/function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'КОММЕНТАРИЙ_ПЕРЕД_СВИДЕТЕЛЕМ_ОТВЕРГНУТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "333 правка 19: блочный комментарий перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "333 правка 19: блочный комментарий перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_334() {   # plain: строчный комментарий между инструкцией и свидетелем -- свидетель
+  local out
+  s19_prepare s334
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;//c'$'\n''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'КОММЕНТАРИЙ_ПЕРЕД_СВИДЕТЕЛЕМ_ОТВЕРГНУТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "334 правка 19: строчный комментарий перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "334 правка 19: строчный комментарий перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_335() {   # plain: U+00A0 между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s335
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\xc2\xa0''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_ECMASCRIPT_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "335 правка 19: U+00A0 перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "335 правка 19: U+00A0 перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_336() {   # plain: строчный комментарий, закрытый U+2028 -- конец строки ECMAScript, свидетель
+  local out
+  s19_prepare s336
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;//c'$'\xe2\x80\xa8''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'КОНЕЦ_СТРОКИ_ECMASCRIPT_НЕ_ПРИНЯТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "336 правка 19: U+2028 не закрыл строчный комментарий перед декларацией начисления"; return
+  fi
+  ok "336 правка 19: строчный комментарий, закрытый U+2028 -- spliced=1 rec=1"
+}
+
+scenario_337() {   # plain: «;» внутри ${}-интерполяции перед декларацией -- не позиция инструкции тела
+  local out
+  s19_prepare s337
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;`t${a;function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}}`;'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ИНСТРУКЦИЯ_В_ИНТЕРПОЛЯЦИИ_ПРИНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"outside its top-level statement position"* ]]; then
+    bad "337 правка 19: декларация после «;» внутри интерполяции принята свидетелем"; return
+  fi
+  ok "337 правка 19: «;» в интерполяции -- «outside its top-level statement position»"
+}
+
+scenario_338() {   # plain: генераторное именованное выражение с именем начисления -- связывание
+  local out
+  s19_prepare s338
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource} let f=function*ac(){};'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ГЕНЕРАТОРНОЕ_ВЫРАЖЕНИЕ_ПРОПУЩЕНО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"has a binding or use in"* ]]; then
+    bad "338 правка 19: генераторное выражение с именем начисления пропущено"; return
+  fi
+  ok "338 правка 19: function*ac в выражении -- «has a binding or use in»"
+}
+
+# CONSTRAINT: пробы идут функциями, вырезанными из КОПИИ стенда в ките, -- их
+# правят мутации; своя копия в памяти стенда мутаций не видит, поэтому
+# s19_mut_file, если s19_mut_fixture её зовёт, обязана прийти из той же копии.
+# Отметка пробы пишется в её собственный корень: боевой ROOT, найдя отметку,
+# остановил бы стенд. Каждая проба ждёт СВОЮ отметку: отказ, пойманный не той
+# дверью, -- это снятая дверь.
+scenario_339() {   # прибор s19_mut_file: отказ счёта, промах образца, отказ замены, правка без изменения -- отказ прибора
+  local out rc probe r mark fns anchors hanchors want fails=""
+  anchors=$(LC_ALL=C grep -a -c '^s19_mut_fixture() {' "$K/tools/corpus-tools-bench.real.sh") || true
+  hanchors=$(LC_ALL=C grep -a -c '^s19_mut_file() {' "$K/tools/corpus-tools-bench.real.sh") || true
+  fns=$(sed -n '/^s19_mut_fixture() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh")
+  if [[ "$anchors" != "1" || -z "$fns" ]] || { [[ "$fns" == *"s19_mut_file "* ]] && [[ "$hanchors" != "1" ]]; }; then
+    LAST_EVID="ЯКОРЬ_ПОТЕРЯН якорей=$anchors помощника=$hanchors"
+    bad "339 прибор фикстуры s19: s19_mut_fixture/s19_mut_file не вырезаны из копии стенда -- прибор не мерит"; return
+  fi
+  [[ "$hanchors" == "1" ]] && fns="$(sed -n '/^s19_mut_file() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh")"$'\n'"$fns"
+  for probe in a b c d; do
+    r=$(mktemp -d "$C/s339$probe.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан корень пробы 339%s\n' "$probe" >&2; exit 2; }
+    out=$(
+      exec 2>&1
+      ROOT=$r
+      s19_prepare "s339$probe"
+      eval "$fns"
+      case $probe in
+        (a) s19_mut_fixture '(' 'x' ;;
+        (b) s19_mut_fixture 'ОБРАЗЕЦ_ОТСУТСТВУЕТ_339' 'x' ;;
+        (c) trap 'chmod u+w "$S19_D"' EXIT
+           chmod a-w "$S19_D" || exit 3
+           s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar(' ;;
+        (d) s19_mut_fixture '\{,yield ar\(' '{,yield ar(' ;;
+      esac
+    ); rc=$?
+    case $probe in
+      (a) want='s19_mut_file: счёт образца' ;;
+      (b) want='s19_mut_file: образец совпал' ;;
+      (c) want='s19_mut_file: замена образца' ;;
+      (d) want='s19_mut_file: сравнение до/после' ;;
+    esac
+    mark=""
+    [[ -e "$r/.instrument-dead" ]] && mark="есть: $(cat "$r/.instrument-dead")"
+    rm -rf "$r"
+    if (( rc != 2 )) || [[ "$mark" != *"$want"* ]]; then
+      fails="$fails | проба $probe rc=$rc отметка=[$mark] ждали [$want] $out"
+    fi
+  done
+  if [[ -n "$fails" ]]; then
+    LAST_EVID="ОТКАЗ_ПРИБОРА_ФИКСТУРЫ_ТИХИЙ ::$fails"
+    bad "339 прибор фикстуры s19: не каждая проба дала свой отказ прибора$fails"; return
+  fi
+  ok "339 прибор фикстуры s19: счёт, промах, замена, правка без изменения -- код 2 со своей отметкой s19_mut_file"
+}
+
+scenario_340() {   # plain: \t (U+0009) между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s340
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\t''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_TAB_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "340 правка 19: \t (U+0009) перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "340 правка 19: \t (U+0009) перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_341() {   # plain: \r (U+000D) между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s341
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\r''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_CR_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "341 правка 19: \r (U+000D) перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "341 правка 19: \r (U+000D) перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_342() {   # plain: \v (U+000B) между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s342
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\v''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_VT_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "342 правка 19: \v (U+000B) перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "342 правка 19: \v (U+000B) перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_343() {   # plain: \f (U+000C) между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s343
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\f''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_FF_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "343 правка 19: \f (U+000C) перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "343 правка 19: \f (U+000C) перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_344() {   # plain: U+FEFF между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s344
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\xef\xbb\xbf''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_FEFF_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "344 правка 19: U+FEFF перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "344 правка 19: U+FEFF перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_345() {   # plain: U+2028 между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s345
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\xe2\x80\xa8''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_U2028_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "345 правка 19: U+2028 перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "345 правка 19: U+2028 перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_346() {   # plain: U+2029 между инструкцией и свидетелем -- пробел ECMAScript, свидетель
+  local out
+  s19_prepare s346
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;'$'\xe2\x80\xa9''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПРОБЕЛ_U2029_НЕ_ПРОПУЩЕН' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "346 правка 19: U+2029 перед декларацией начисления отверг свидетеля"; return
+  fi
+  ok "346 правка 19: U+2029 перед свидетелем -- spliced=1 rec=1"
+}
+
+scenario_347() {   # plain: строчный комментарий, закрытый \r (U+000D) -- конец строки ECMAScript, свидетель
+  local out
+  s19_prepare s347
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;//c'$'\r''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'КОНЕЦ_СТРОКИ_CR_НЕ_ПРИНЯТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "347 правка 19: \r (U+000D) не закрыл строчный комментарий перед декларацией начисления"; return
+  fi
+  ok "347 правка 19: строчный комментарий, закрытый \r (U+000D) -- spliced=1 rec=1"
+}
+
+scenario_348() {   # plain: строчный комментарий, закрытый U+2029 -- конец строки ECMAScript, свидетель
+  local out
+  s19_prepare s348
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){0;//c'$'\xe2\x80\xa9''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'КОНЕЦ_СТРОКИ_U2029_НЕ_ПРИНЯТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "348 правка 19: U+2029 не закрыл строчный комментарий перед декларацией начисления"; return
+  fi
+  ok "348 правка 19: строчный комментарий, закрытый U+2029 -- spliced=1 rec=1"
+}
+
+scenario_349() {   # plain: «}» внутри ${}-интерполяции перед декларацией -- не позиция инструкции тела
+  local out
+  s19_prepare s349
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){`t${{a:1}}`'$'\n''function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ИНСТРУКЦИЯ_ПОСЛЕ_ИНТЕРПОЛЯЦИИ_ПРИНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"outside its top-level statement position"* ]]; then
+    bad "349 правка 19: декларация после «}» внутри интерполяции принята свидетелем"; return
+  fi
+  ok "349 правка 19: «}» в интерполяции -- «outside its top-level statement position»"
 }
 
 scenario_308() {   # правка 6b: пара бюджета и сплит-потолок -- шаг применён, бюджет назван
@@ -9151,6 +9594,159 @@ scenario_313() {   # правка 6b: сплит-потолок вне моду�
     bad "313 правка 6b: сплит вне модуля бюджета не назван отказом"; return
   fi
   ok "313 правка 6b: сплит в чужом модуле -- «outside the module of the StreamTruncated budget 'tm'»"
+}
+
+scenario_314() {   # plain 2.1.283: свидетель -- функция начисления, вызванная перед маркером
+  local out
+  s19_prepare s314
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ФУНКЦИЯ_НАЧИСЛЕНИЯ_НЕ_ПРИНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "314 правка 19: функция начисления перед маркером не принята свидетелем"; return
+  fi
+  ok "314 правка 19: plain-форма 2.1.283 -- свидетель в объявлении вызванной функции, spliced=1 rec=1"
+}
+
+scenario_315() {   # plain: две декларации функции начисления -- отказ числом
+  local out
+  s19_prepare s315
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДВЕ_ДЕКЛАРАЦИИ_НЕ_СЧИТАЮТСЯ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"declares the accrual ac 2 times"* ]]; then
+    bad "315 правка 19: две декларации функции начисления не названы числом"; return
+  fi
+  ok "315 правка 19: две декларации -- «declares the accrual ac 2 times»"
+}
+
+scenario_316() {   # plain без вызова перед маркером: встроенное начисление после константы не свидетель
+  local out
+  s19_prepare s316
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\}\),Iw\}\}\}' '}),Iw}if(cr!=="credited")cr="credited",acc+=p.querySource;}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ВСТРОЕННЫЙ_СВИДЕТЕЛЬ_ПРИНЯТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"the region calls no function before the marker"* ]]; then
+    bad "316 правка 19: участок без вызова перед маркером принят по встроенному начислению"; return
+  fi
+  ok "316 правка 19: вызова перед маркером нет -- «the region calls no function before the marker»"
+}
+
+scenario_317() {   # plain: декларация начисления только внутри строкового литерала -- не свидетель
+  local out
+  s19_prepare s317
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' "async function*KS(a,b,p){let zz='function ac(){if(cr===\"credited\")return;cr=\"credited\",acc+=p.querySource}';"
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'СТРОКОВАЯ_ДЕКЛАРАЦИЯ_ПРИНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"no usage accrual owned by"* ]]; then
+    bad "317 правка 19: декларация внутри строкового литерала принята свидетелем"; return
+  fi
+  ok "317 правка 19: декларация в строке не свидетель -- «no usage accrual owned by»"
+}
+
+scenario_318() {   # plain: именованное функциональное выражение -- не декларация верхнего уровня
+  local out
+  s19_prepare s318
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){let q=function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource};'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ИМЕНОВАННОЕ_ВЫРАЖЕНИЕ_ПРИНЯТО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"declares ac outside its top-level statement position"* ]]; then
+    bad "318 правка 19: именованное функциональное выражение принято свидетелем"; return
+  fi
+  ok "318 правка 19: именованное выражение -- «declares ac outside its top-level statement position»"
+}
+
+scenario_319() {   # plain: блочная декларация начисления -- не верхний уровень тела
+  local out
+  s19_prepare s319
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){if(a){0;function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'БЛОЧНАЯ_ДЕКЛАРАЦИЯ_ПРИНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"declares ac outside its top-level statement position"* ]]; then
+    bad "319 правка 19: блочная декларация начисления принята свидетелем"; return
+  fi
+  ok "319 правка 19: блочная декларация -- «declares ac outside its top-level statement position»"
+}
+
+scenario_320() {   # plain: декларация верхнего уровня и чужое связывание того же имени в блоке
+  local out
+  s19_prepare s320
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}if(a){let ac=0}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ЧУЖОЕ_СВЯЗЫВАНИЕ_ПРОПУЩЕНО' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"has a binding or use in"* ]]; then
+    bad "320 правка 19: чужое связывание имени начисления пропущено"; return
+  fi
+  ok "320 правка 19: чужое связывание имени -- «has a binding or use in»"
+}
+
+scenario_321() {   # plain: членский вызов x.ac() перед маркером -- не вызов функции начисления
+  local out
+  s19_prepare s321
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{x.ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ЧЛЕНСКИЙ_ВЫЗОВ_ПРИНЯТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"the region calls no function before the marker"* ]]; then
+    bad "321 правка 19: членский вызов перед маркером принят вызовом начисления"; return
+  fi
+  ok "321 правка 19: членский вызов -- «the region calls no function before the marker»"
+}
+
+scenario_322() {   # plain: начисление читает xp.querySource -- подстрока p.querySource не заземляет
+  local out
+  s19_prepare s322
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=xp.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ПОДСТРОКА_ЗАЗЕМЛЕНИЯ_ПРИНЯТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" != *"is not the one the accrual reads querySource from"* ]]; then
+    bad "322 правка 19: xp.querySource принят заземлением p.querySource"; return
+  fi
+  ok "322 правка 19: xp.querySource -- «is not the one the accrual reads querySource from»"
+}
+
+scenario_323() {   # plain: декларация начисления после инструкции верхнего уровня -- свидетель
+  local out
+  s19_prepare s323
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){let zq=0;function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ДЕКЛАРАЦИЯ_ПОСЛЕ_ИНСТРУКЦИИ_ОТВЕРГНУТА' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "323 правка 19: декларация начисления после «;» верхнего уровня не принята свидетелем"; return
+  fi
+  ok "323 правка 19: декларация после инструкции верхнего уровня -- свидетель, spliced=1 rec=1"
+}
+
+scenario_324() {   # plain: опциональный член a?.ac рядом с декларацией начисления -- не связывание
+  local out
+  s19_prepare s324
+  s19_mut_fixture ',cr!=="credited"\)cr="credited",acc\+=p\.querySource;break e\}' ';break e}'
+  s19_mut_fixture '\{,yield ar\(' '{ac(),yield ar('
+  s19_mut_fixture 'async function\*KS\(a,b,p\)\{' 'async function*KS(a,b,p){function ac(){if(cr==="credited")return;cr="credited",acc+=p.querySource}a?.ac;'
+  out=$(s19_run) || true
+  LAST_EVID="$(s19_cause 'ОПЦИОНАЛЬНЫЙ_ЧЛЕН_ОТВЕРГНУТ' "$out")" || true
+  if [[ "$out" == *"ШАГ_УПАЛ"* || "$out" == *"ШАГ_КРАСЕН"* || "$out" != *"spliced=1"* || "$out" != *"rec=1"* ]]; then
+    bad "324 правка 19: опциональный член a?.ac отвергнут как связывание имени начисления"; return
+  fi
+  ok "324 правка 19: a?.ac -- член, не связывание; spliced=1 rec=1"
 }
 
 scenario_214() {   # слой ВЫКЛЮЧЕН ручкой -- «нечего мерить», сравнения нет
@@ -11320,13 +11916,13 @@ MUT_PAT+=(
   'if \(sother\)'
   'if \(rother\)'
   'if \(hits\.length !== 1\)'
-  'constructOwns\(built, constStart \+ cand\.index - built\.modStart\)'
+  'constructOwns\(built, ownToks\[i\]\.start\)'
   'if \(d1\)'
   'if \(d2\)'
   'if \(d3\)'
   'if \(d4msg\)'
   'if \(found\.length !== 1\) fail\(\x27truncation recovery reader: \x27'
-  'if \(!accExpr\.includes'
+  'if \(!new RegExp\(`\(\?<!\[\\\\w\$\.\]\)\$\{rxEsc\(opts\)\}'
   'if \(mRegionCredited && mRegionPlain\)'
   '!names\.includes\(opts\)'
   'if \(lx\.brace !== 0 \|\| lx\.mode !== \x27code\x27 \|\| lx\.interp !== 0 \|\| lx\.paren !== 0\)'
@@ -11353,7 +11949,7 @@ MUT_REP+=(
   'if (false)'
   'if (false)'
   'if (false) fail('"'"'truncation recovery reader: '"'"''
-  'if (false && !accExpr.includes'
+  'if (false && !new RegExp(`(?<![\\w$.])${rxEsc(opts)}'
   'if (false)'
   'false'
   'if (false)'
@@ -11640,6 +12236,345 @@ MUT_CAUSE+=(
   'SELFTEST FAIL P_MIXED'
   'SELFTEST FAIL C_BAIT'
   'SELFTEST FAIL F_END')
+
+# CONSTRAINT: 410-412 -- свидетель начисления plain-формы: 410 снимает приём
+# владеемой декларации (красит 314), 411 -- отказ числом на двух декларациях
+# (красит 315), 412 подменяет «вызова нет» чужим именем (красит 316).
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'top\.push\(cand\);'
+  'if \(top\.length > 1\)'
+  'const accFn = mCall \? mCall\[1\] : null;')
+MUT_REP+=(
+  'void 0;'
+  'if (false)'
+  "const accFn = mCall ? mCall[1] : 'cr';")
+MUT_SCENARIO+=(
+  '314'
+  '315'
+  '316')
+MUT_CAUSE+=(
+  'ФУНКЦИЯ_НАЧИСЛЕНИЯ_НЕ_ПРИНЯТА'
+  'ДВЕ_ДЕКЛАРАЦИИ_НЕ_СЧИТАЮТСЯ'
+  'ВСТРОЕННЫЙ_СВИДЕТЕЛЬ_ПРИНЯТ')
+
+# CONSTRAINT: 413-418 -- предикат свидетеля plain-формы: 413 снимает
+# состояние лексера (красит 317), 414 -- позицию инструкции (318), 415 --
+# глубину верхнего уровня (319), 416 -- отказ на прочем связывании имени (320),
+# 417 -- lookbehind вызова перед маркером (321), 418 возвращает подстрочное
+# заземление (322).
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'if \(built\.stateAt\(rel\) !== \x27code\x27\) continue;'
+  '\(i - 1 === built\.ownBodyOpen \|\| \(ownToks\[i - 1\]\.type === \x27punct\x27 && \(ownToks\[i - 1\]\.value === \x27;\x27 \|\| ownToks\[i - 1\]\.value === \x27\}\x27\) && ownToks\[i - 1\]\.interp === ownToks\[i\]\.interp\)\)'
+  'depthOf\[i\] === 0 && '
+  'continue;\n        fail\(`streaming partial-finalize: \$\{accFn\} has a binding or use in \$\{constructId\} that is neither a call nor the accrual declaration`\);'
+  '\(\?<!\[\\\\w\$\.\]\)\(\$\{ID\}\)\\\\\(\\\\\)\$'
+  'if \(!new RegExp\(`\(\?<!\[\\\\w\$\.\]\)\$\{rxEsc\(opts\)\}\\\\\.querySource\(\?!\[\\\\w\$\]\)`\)\.test\(accExpr\)\)')
+MUT_REP+=(
+  'void 0;'
+  'true'
+  ''
+  'continue;
+        void 0;'
+  '(${ID})\\(\\)$'
+  'if (!accExpr.includes(`${opts}.querySource`))')
+MUT_SCENARIO+=(
+  '317'
+  '318'
+  '319'
+  '320'
+  '321'
+  '322')
+MUT_CAUSE+=(
+  'СТРОКОВАЯ_ДЕКЛАРАЦИЯ_ПРИНЯТА'
+  'ИМЕНОВАННОЕ_ВЫРАЖЕНИЕ_ПРИНЯТО'
+  'БЛОЧНАЯ_ДЕКЛАРАЦИЯ_ПРИНЯТА'
+  'ЧУЖОЕ_СВЯЗЫВАНИЕ_ПРОПУЩЕНО'
+  'ЧЛЕНСКИЙ_ВЫЗОВ_ПРИНЯТ'
+  'ПОДСТРОКА_ЗАЗЕМЛЕНИЯ_ПРИНЯТА')
+
+# CONSTRAINT: 419-420 -- позитивные пины формы: 419 снимает «;» из позиции
+# инструкции (красит 323), 420 -- ветку опционального члена `?.` (красит 324).
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'ownToks\[i - 1\]\.value === \x27;\x27 \|\| '
+  '\n        if \(prev && prev\.type === \x27op\x27 && prev\.value === \x27\?\.\x27\) continue;')
+MUT_REP+=(
+  ''
+  '')
+MUT_SCENARIO+=(
+  '323'
+  '324')
+MUT_CAUSE+=(
+  'ДЕКЛАРАЦИЯ_ПОСЛЕ_ИНСТРУКЦИИ_ОТВЕРГНУТА'
+  'ОПЦИОНАЛЬНЫЙ_ЧЛЕН_ОТВЕРГНУТ')
+
+# CONSTRAINT: 421-422 -- ряд-лямбда прибора образа шага 19: 421 снимает ветку
+# лямбды в load_finalize (expr снова берётся из val -- источник ряда читается
+# как возвращаемое значение, лямбда-объект истинен на любом образе; красит 325
+# причиной ЛЯМБДА_ПРОЧИТАНА_ИСТИНОЙ), 422 возвращает bool(finalize(...)) у обеих
+# ног без проверки типа (ряд, вернувший не bool, перестаёт быть отказом; красит
+# 326 причиной НЕ_BOOL_НЕ_ОТКАЗАН). Якоря -- полный текст новых ветвей, count == 1
+# мерил perl-ом в режиме -0, как mutate().
+MUT_FILE+=(
+  tools/step19-image-check.py
+  tools/step19-image-check.py)
+MUT_PAT+=(
+  'if isinstance\(val, ast\.Lambda\):\n +if \(val\.args\.posonlyargs or val\.args\.args or val\.args\.kwonlyargs\n +or val\.args\.vararg is not None or val\.args\.kwarg is not None\):\n +die\("broken-stream check is a lambda with parameters", 2\)\n +expr = ast\.get_source_segment\(chosen, val\.body\)\n +else:\n +expr = ast\.get_source_segment\(chosen, val\)'
+  'p_ok = finalize\(pristine\)\n +if type\(p_ok\) is not bool:\n +raise ValueError\([^\n]*\)\n +a_ok = finalize\(patched\)\n +if type\(a_ok\) is not bool:\n +raise ValueError\([^\n]*\)')
+MUT_REP+=(
+  'expr = ast.get_source_segment(chosen, val)'
+  'p_ok = bool(finalize(pristine))
+        a_ok = bool(finalize(patched))')
+MUT_SCENARIO+=(
+  '325'
+  '326')
+MUT_CAUSE+=(
+  'ЛЯМБДА_ПРОЧИТАНА_ИСТИНОЙ'
+  'НЕ_BOOL_НЕ_ОТКАЗАН')
+
+# CONSTRAINT: 423-425 -- свидетель plain-формы FIX3: 423 обнуляет штамп
+# глубины интерполяции у токенов emit (красит 327: оба условия глубины в
+# позиции инструкции проходят, декларация внутри ${}-интерполяции принимается
+# за верхний уровень; каждое условие по отдельности держат 437 и 452), 424 -- отказ на
+# генераторной повторной декларации имени (красит 328), 425 --
+# «}»-дизъюнкт позиции инструкции (красит 329 -- позитивный пин декларации
+# после блока; сам дизъюнкт мёртв за открывающей скобкой, жив только здесь).
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'const tok = \{ type: type, start: start, end: end, value: value, interp: interpStack\.length \};'
+  '\n        if \(prev && prev\.type === \x27punct\x27 && prev\.value === \x27\*\x27 && i >= 2 && ownToks\[i - 2\]\.type === \x27id\x27 && ownToks\[i - 2\]\.value === \x27function\x27\)\n          fail\(`streaming partial-finalize: \$\{accFn\} has a binding or use in \$\{constructId\} that is neither a call nor the accrual declaration`\);'
+  'ownToks\[i - 1\]\.value === \x27\}\x27')
+MUT_REP+=(
+  'const tok = { type: type, start: start, end: end, value: value, interp: 0 };'
+  ''
+  'false')
+MUT_SCENARIO+=(
+  '327'
+  '328'
+  '329')
+MUT_CAUSE+=(
+  'ИНТЕРПОЛЯЦИЯ_ПРИНЯТА'
+  'ГЕНЕРАТОРНОЕ_СВЯЗЫВАНИЕ_ПРОПУЩЕНО'
+  'ДЕКЛАРАЦИЯ_ПОСЛЕ_БЛОКА_ОТВЕРГНУТА')
+
+# CONSTRAINT: 426-428 -- ряд прибора образа шага 19: 426 снимает дверь
+# «broken-stream check is a lambda with parameters» (красит 330), 427 --
+# проверку типа только у пристина (красит 331), 428 -- только у патченного
+# (красит 332); двуногая 422 ноги не различает, поэтому каждая пинится своей
+# однопеременной мутацией.
+MUT_FILE+=(
+  tools/step19-image-check.py
+  tools/step19-image-check.py
+  tools/step19-image-check.py)
+MUT_PAT+=(
+  'if \(val\.args\.posonlyargs or val\.args\.args or val\.args\.kwonlyargs\n +or val\.args\.vararg is not None or val\.args\.kwarg is not None\):\n +die\("broken-stream check is a lambda with parameters", 2\)\n +expr = ast\.get_source_segment\(chosen, val\.body\)'
+  'p_ok = finalize\(pristine\)\n +if type\(p_ok\) is not bool:\n +raise ValueError\([^\n]*\)'
+  'a_ok = finalize\(patched\)\n +if type\(a_ok\) is not bool:\n +raise ValueError\([^\n]*\)')
+MUT_REP+=(
+  'expr = ast.get_source_segment(chosen, val.body)'
+  'p_ok = finalize(pristine)'
+  'a_ok = finalize(patched)')
+MUT_SCENARIO+=(
+  '330'
+  '331'
+  '332')
+MUT_CAUSE+=(
+  'ЛЯМБДА_С_ПАРАМЕТРАМИ_ПРИНЯТА'
+  'НЕ_BOOL_ПРИСТИНА_НЕ_ОТКАЗАН'
+  'НЕ_BOOL_ПАТЧА_НЕ_ОТКАЗАН')
+
+# CONSTRAINT: 429-435 -- лексер и прибор фикстуры шага 19: 429 возвращает
+# текстовую проверку смежности перед свидетелем (комментарий снова отвергает
+# его; красит 333, 334 -- побочно), 430 снимает руку ZS_SPACE пропуска
+# не-ASCII пробелов (красит 335: NBSP), 431 -- руку U+2028 конца строчного
+# комментария (красит 336), 432 снимает «первую инструкцию тела» из позиции инструкции
+# (красит 314), 433-435 глушат отказы s19_mut_file -- счёт образца, число
+# совпадений, фатальность предупреждения inplace (красят 339; жертва -- копия
+# стенда в ките).
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tools/corpus-tools-bench.real.sh
+  tools/corpus-tools-bench.real.sh
+  tools/corpus-tools-bench.real.sh)
+MUT_PAT+=(
+  '\n        if \(atStatementTop\(ti\)\) top\.push\(cand\);'
+  '\(c === \x27\\ufeff\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27 \|\| ZS_SPACE\.test\(c\)\)'
+  '\(c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27\)'
+  'i - 1 === built\.ownBodyOpen'
+  'if \(\( rc != 0 \)\); then __instrument_dead "s19_mut_file: счёт образца \$2" "\$rc"; fi'
+  'if \[\[ "\$n" != "1" \]\]; then __instrument_dead "s19_mut_file: образец совпал \$n раз: \$2" 2; fi'
+  'perl -Mwarnings=FATAL,inplace -0pi -e \x27s/')
+MUT_REP+=(
+  '
+        if (ti > 0 && /\S/.test(built.mod.slice(ownToks[ti - 1].end, rel))) continue;
+        if (atStatementTop(ti)) top.push(cand);'
+  "(c === '\\ufeff' || c === '\\u2028' || c === '\\u2029')"
+  "(c === '\\n' || c === '\\r' || c === '\\u2029')"
+  'false'
+  'if (( rc != 0 )); then return 0; fi'
+  'if [[ "$n" != "1" ]]; then return 0; fi'
+  "perl -0pi -e 's/")
+MUT_SCENARIO+=(
+  '333'
+  '335'
+  '336'
+  '314'
+  '339'
+  '339'
+  '339')
+MUT_CAUSE+=(
+  'КОММЕНТАРИЙ_ПЕРЕД_СВИДЕТЕЛЕМ_ОТВЕРГНУТ'
+  'ПРОБЕЛ_ECMASCRIPT_НЕ_ПРОПУЩЕН'
+  'КОНЕЦ_СТРОКИ_ECMASCRIPT_НЕ_ПРИНЯТ'
+  'ФУНКЦИЯ_НАЧИСЛЕНИЯ_НЕ_ПРИНЯТА'
+  'ОТКАЗ_ПРИБОРА_ФИКСТУРЫ_ТИХИЙ'
+  'ОТКАЗ_ПРИБОРА_ФИКСТУРЫ_ТИХИЙ'
+  'ОТКАЗ_ПРИБОРА_ФИКСТУРЫ_ТИХИЙ')
+
+# CONSTRAINT: 436 и 438 -- те же правки, что 429 и 424; 437 снимает условие
+# «глубина кандидата = глубина тела» (прежняя правка 423). Приписаны к
+# 334, 337 и 338: MUT_SCENARIO несёт один сценарий, а каждый сценарий обязан
+# иметь свою мутацию. 439 снимает сравнение до/после в s19_mut_file (правка,
+# ничего не изменившая, проходит молча; красит 339, проба d).
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tools/corpus-tools-bench.real.sh)
+MUT_PAT+=(
+  '\n        if \(atStatementTop\(ti\)\) top\.push\(cand\);'
+  ' && ownToks\[i\]\.interp === ownToks\[built\.ownBodyOpen\]\.interp'
+  '\n        if \(prev && prev\.type === \x27punct\x27 && prev\.value === \x27\*\x27 && i >= 2 && ownToks\[i - 2\]\.type === \x27id\x27 && ownToks\[i - 2\]\.value === \x27function\x27\)\n          fail\(`streaming partial-finalize: \$\{accFn\} has a binding or use in \$\{constructId\} that is neither a call nor the accrual declaration`\);'
+  '\n  if \(\( rc != 1 \)\); then __instrument_dead "s19_mut_file: сравнение до/после \$2" "\$rc"; fi')
+MUT_REP+=(
+  '
+        if (ti > 0 && /\S/.test(built.mod.slice(ownToks[ti - 1].end, rel))) continue;
+        if (atStatementTop(ti)) top.push(cand);'
+  ''
+  ''
+  '')
+MUT_SCENARIO+=(
+  '334'
+  '337'
+  '338'
+  '339')
+MUT_CAUSE+=(
+  'КОММЕНТАРИЙ_ПЕРЕД_СВИДЕТЕЛЕМ_ОТВЕРГНУТ'
+  'ИНСТРУКЦИЯ_В_ИНТЕРПОЛЯЦИИ_ПРИНЯТА'
+  'ГЕНЕРАТОРНОЕ_ВЫРАЖЕНИЕ_ПРОПУЩЕНО'
+  'ОТКАЗ_ПРИБОРА_ФИКСТУРЫ_ТИХИЙ')
+
+# CONSTRAINT: 440-451 -- по мутации на каждую руку пропуска пробелов лексера
+# шага 19, снимающей ровно эту руку: code-режим ASCII (440 пробел и 442 \n
+# красят 314 -- на них стоит вся фикстура; 441 \t, 443 \r, 444 \v, 445 \f
+# красят 340-343), code-режим не-ASCII (446 U+FEFF, 447 U+2028, 448 U+2029
+# красят 344-346), конец строчного комментария (449 \n красит 334, 450 \r и
+# 451 U+2029 красят 347, 348). Руки ZS_SPACE и U+2028 конца комментария -- 430
+# и 431. 452 снимает равенство глубины интерполяции у предыдущего «;»/«}» в
+# позиции инструкции (красит 349).
+MUT_FILE+=(
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js
+  tweakcc-patch.js)
+MUT_PAT+=(
+  '\(c === \x27 \x27 \|\| c === \x27\\t\x27 \|\| c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\v\x27 \|\| c === \x27\\f\x27\)'
+  '\(c === \x27 \x27 \|\| c === \x27\\t\x27 \|\| c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\v\x27 \|\| c === \x27\\f\x27\)'
+  '\(c === \x27 \x27 \|\| c === \x27\\t\x27 \|\| c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\v\x27 \|\| c === \x27\\f\x27\)'
+  '\(c === \x27 \x27 \|\| c === \x27\\t\x27 \|\| c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\v\x27 \|\| c === \x27\\f\x27\)'
+  '\(c === \x27 \x27 \|\| c === \x27\\t\x27 \|\| c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\v\x27 \|\| c === \x27\\f\x27\)'
+  '\(c === \x27 \x27 \|\| c === \x27\\t\x27 \|\| c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\v\x27 \|\| c === \x27\\f\x27\)'
+  '\(c === \x27\\ufeff\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27 \|\| ZS_SPACE\.test\(c\)\)'
+  '\(c === \x27\\ufeff\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27 \|\| ZS_SPACE\.test\(c\)\)'
+  '\(c === \x27\\ufeff\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27 \|\| ZS_SPACE\.test\(c\)\)'
+  '\(c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27\)'
+  '\(c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27\)'
+  '\(c === \x27\\n\x27 \|\| c === \x27\\r\x27 \|\| c === \x27\\u2028\x27 \|\| c === \x27\\u2029\x27\)'
+  ' && ownToks\[i - 1\]\.interp === ownToks\[i\]\.interp')
+MUT_REP+=(
+  "(c === '\\t' || c === '\\n' || c === '\\r' || c === '\\v' || c === '\\f')"
+  "(c === ' ' || c === '\\n' || c === '\\r' || c === '\\v' || c === '\\f')"
+  "(c === ' ' || c === '\\t' || c === '\\r' || c === '\\v' || c === '\\f')"
+  "(c === ' ' || c === '\\t' || c === '\\n' || c === '\\v' || c === '\\f')"
+  "(c === ' ' || c === '\\t' || c === '\\n' || c === '\\r' || c === '\\f')"
+  "(c === ' ' || c === '\\t' || c === '\\n' || c === '\\r' || c === '\\v')"
+  "(c === '\\u2028' || c === '\\u2029' || ZS_SPACE.test(c))"
+  "(c === '\\ufeff' || c === '\\u2029' || ZS_SPACE.test(c))"
+  "(c === '\\ufeff' || c === '\\u2028' || ZS_SPACE.test(c))"
+  "(c === '\\r' || c === '\\u2028' || c === '\\u2029')"
+  "(c === '\\n' || c === '\\u2028' || c === '\\u2029')"
+  "(c === '\\n' || c === '\\r' || c === '\\u2028')"
+  '')
+MUT_SCENARIO+=(
+  '314'
+  '340'
+  '314'
+  '341'
+  '342'
+  '343'
+  '344'
+  '345'
+  '346'
+  '334'
+  '347'
+  '348'
+  '349')
+MUT_CAUSE+=(
+  'ФУНКЦИЯ_НАЧИСЛЕНИЯ_НЕ_ПРИНЯТА'
+  'ПРОБЕЛ_TAB_НЕ_ПРОПУЩЕН'
+  'ФУНКЦИЯ_НАЧИСЛЕНИЯ_НЕ_ПРИНЯТА'
+  'ПРОБЕЛ_CR_НЕ_ПРОПУЩЕН'
+  'ПРОБЕЛ_VT_НЕ_ПРОПУЩЕН'
+  'ПРОБЕЛ_FF_НЕ_ПРОПУЩЕН'
+  'ПРОБЕЛ_FEFF_НЕ_ПРОПУЩЕН'
+  'ПРОБЕЛ_U2028_НЕ_ПРОПУЩЕН'
+  'ПРОБЕЛ_U2029_НЕ_ПРОПУЩЕН'
+  'КОММЕНТАРИЙ_ПЕРЕД_СВИДЕТЕЛЕМ_ОТВЕРГНУТ'
+  'КОНЕЦ_СТРОКИ_CR_НЕ_ПРИНЯТ'
+  'КОНЕЦ_СТРОКИ_U2029_НЕ_ПРИНЯТ'
+  'ИНСТРУКЦИЯ_ПОСЛЕ_ИНТЕРПОЛЯЦИИ_ПРИНЯТА')
+
+# CONSTRAINT: 453 -- обнуляет штамп глубины интерполяции у «}», закрывающего
+# блок (closeTok; красит 349: «}» внутри ${}-интерполяции читается как
+# предыдущий токен на глубине тела, и декларация после неё принимается).
+MUT_FILE+=(
+  tweakcc-patch.js)
+MUT_PAT+=(
+  'const closeTok = \{ type: \x27punct\x27, start: start, end: start \+ 1, value: \x27\}\x27, interp: interpStack\.length \};')
+MUT_REP+=(
+  "const closeTok = { type: 'punct', start: start, end: start + 1, value: '}', interp: 0 };")
+MUT_SCENARIO+=(
+  '349')
+MUT_CAUSE+=(
+  'ИНСТРУКЦИЯ_ПОСЛЕ_ИНТЕРПОЛЯЦИИ_ПРИНЯТА')
 
 UNMUTATED_OK=21
 

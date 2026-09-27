@@ -2060,6 +2060,9 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   const REGEX_KW = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'yield', 'await']);
   const HEADER_KW = new Set(['if', 'while', 'for', 'with', 'catch', 'switch']);
   const STMT_KW = new Set(['else', 'do', 'try', 'finally']);
+  // CONSTRAINT: hoisted here, not to the file top: the bench driver runs this
+  // step's body alone, and a file-level constant would not exist there.
+  const ZS_SPACE = /\p{Zs}/u;
   const lexModule = (text) => {
     const tokens = [];
     const spans = [];
@@ -2082,7 +2085,7 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
       mode = nextMode;
     };
     const emit = (type, start, end, value, extra) => {
-      const tok = { type: type, start: start, end: end, value: value };
+      const tok = { type: type, start: start, end: end, value: value, interp: interpStack.length };
       if (extra) tok.headerClose = true;
       tokens.push(tok);
     };
@@ -2102,7 +2105,7 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
     while (i < n) {
       const c = text[i];
       if (mode === 'line') {
-        if (c === '\n') { i++; mark('code'); }
+        if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') { i++; mark('code'); }
         else i++;
         continue;
       }
@@ -2153,7 +2156,8 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
         i++;
         continue;
       }
-      if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+      if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f') { i++; continue; }
+      if (c > '\x7f' && (c === '\ufeff' || c === '\u2028' || c === '\u2029' || ZS_SPACE.test(c))) { i++; continue; }
       if (c === '/' && text[i + 1] === '/') { mark('line'); i += 2; continue; }
       if (c === '/' && text[i + 1] === '*') { mark('block'); i += 2; continue; }
       if (c === "'") { i++; mark('sq'); continue; }
@@ -2184,7 +2188,7 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
         }
         const braceRec = braceStack.length ? braceStack.pop() : { stmtPos: false };
         events.push({ ch: '}', pos: start });
-        const closeTok = { type: 'punct', start: start, end: start + 1, value: '}' };
+        const closeTok = { type: 'punct', start: start, end: start + 1, value: '}', interp: interpStack.length };
         closeTok.stmtClose = braceRec.stmtPos;
         tokens.push(closeTok);
         i++;
@@ -2623,7 +2627,7 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
       id: hm[1],
       relStart: found.relStart,
       relEnd: found.relEnd,
-      absEnd: siteSlice[0] + found.relEnd,
+      stateAt: lx.stateAt,
       mod: mod,
       modStart: siteSlice[0],
       tokens: lx.tokens,
@@ -2924,11 +2928,9 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   let GATEr;
   let built = null;
   let constructId = '';
-  let accWindowEnd = constStart + 4000;
   if (!mRegionCredited || truncExpr !== undefined) {
     built = buildSiteConstruct(constStart, regionStart);
     constructId = built.id;
-    accWindowEnd = built.absEnd;
     checkOptsForms(built, opts);
     if (truncExpr !== undefined) {
       const names = resolveRecoveryNames();
@@ -2945,19 +2947,75 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   if (mRegionCredited) {
     [, , , , , credited, acc, accExpr] = mRegionCredited;
   } else {
-    // The grounding below needs the accrual expression. In this form it is
-    // not in the region; the first inline accrual after the telemetry
-    // constant (the retry path of the same function) reads the same options
-    // object and serves as the witness.
-    const rxAcc = new RegExp(`(${ID})!=="credited"\\)\\1="credited",(${ID})\\+=([^;]{0,300}?);`, 'g');
-    let mAcc = null;
-    for (const cand of js.slice(constStart, accWindowEnd).matchAll(rxAcc)) {
-      if (constructOwns(built, constStart + cand.index - built.modStart)) {
-        mAcc = cand;
-        break;
+    // The grounding below needs the accrual expression. In this form the
+    // accrual is the function the region calls right before the marker. The
+    // witness is that function's declaration at a top-level statement position
+    // of the construct's body, in lexer state `code`. Any token of the name in
+    // the construct's own token range (`built.relStart`..`built.relEnd`) other
+    // than a call, a member access, an object key, or the declaration itself
+    // is a refusal; comments and string contents yield no tokens. This is stricter
+    // than call resolution requires: reads are rejected too, and a false
+    // refusal is cheaper than a false acceptance. An inline accrual
+    // elsewhere is not a witness: 2.1.283 removed the one on the retry path.
+    const mCall = js
+      .slice(Math.max(0, regionStart - 200), regionStart)
+      .match(new RegExp(`(?<![\\w$.])(${ID})\\(\\)$`));
+    const accFn = mCall ? mCall[1] : null;
+    const ownToks = built.tokens.filter((t) => t.start >= built.relStart && t.start < built.relEnd);
+    if (built.ownBodyOpen < 0) fail('streaming partial-finalize: the body of ' + constructId + ' was not located');
+    const depthOf = new Array(ownToks.length).fill(-1);
+    let d = 0;
+    for (let i = built.ownBodyOpen + 1; i < ownToks.length; i++) {
+      const t = ownToks[i];
+      if (t.type === 'punct' && (t.value === ')' || t.value === ']' || t.value === '}')) d--;
+      depthOf[i] = d;
+      if (t.type === 'punct' && (t.value === '(' || t.value === '[' || t.value === '{')) d++;
+    }
+    // CONSTRAINT: `${` and the closing `}` of an interpolation emit no tokens;
+    // code inside an interpolation is an expression, never a statement of the
+    // body, so a token at another interpolation depth is not at statement top.
+    // The preceding `;` or `}` must stand at the body's interpolation depth too.
+    const atStatementTop = (i) => depthOf[i] === 0 && (i - 1 === built.ownBodyOpen || (ownToks[i - 1].type === 'punct' && (ownToks[i - 1].value === ';' || ownToks[i - 1].value === '}') && ownToks[i - 1].interp === ownToks[i].interp)) && ownToks[i].interp === ownToks[built.ownBodyOpen].interp;
+    const top = [];
+    if (accFn !== null) {
+      const rxAcc = new RegExp(
+        `(?<![\\w$.])function ${rxEsc(accFn)}\\(\\)\\{if\\((${ID})==="credited"\\)return;` +
+          `\\1="credited",(${ID})\\+=([^;{}]{0,300})\\}`,
+        'g',
+      );
+      for (const cand of built.mod.slice(built.relStart, built.relEnd).matchAll(rxAcc)) {
+        const rel = built.relStart + cand.index;
+        if (built.stateAt(rel) !== 'code') continue;
+        const ti = ownToks.findIndex((t) => t.start === rel);
+        if (ti < 0) fail('streaming partial-finalize: the lexer holds no token at the accrual declaration of ' + accFn);
+        if (atStatementTop(ti)) top.push(cand);
+      }
+      const topRels = new Set(top.map((cand) => built.relStart + cand.index));
+      for (let i = 0; i < ownToks.length; i++) {
+        if (!(ownToks[i].type === 'id' && ownToks[i].value === accFn && constructOwns(built, ownToks[i].start))) continue;
+        const prev = i > 0 ? ownToks[i - 1] : null;
+        const next = i + 1 < ownToks.length ? ownToks[i + 1] : null;
+        if (prev && prev.type === 'id' && prev.value === 'function') {
+          if (atStatementTop(i - 1) && topRels.has(prev.start)) continue;
+          if (atStatementTop(i - 1))
+            fail(`streaming partial-finalize: ${accFn} has a binding or use in ${constructId} that is neither a call nor the accrual declaration`);
+          fail(`streaming partial-finalize: ${constructId} declares ${accFn} outside its top-level statement position`);
+        }
+        if (prev && prev.type === 'punct' && prev.value === '.') continue;
+        if (prev && prev.type === 'op' && prev.value === '?.') continue;
+        // CONSTRAINT: `function*` is a declaration, not a call; a redeclaration
+        // steers the call resolution away from the witness.
+        if (prev && prev.type === 'punct' && prev.value === '*' && i >= 2 && ownToks[i - 2].type === 'id' && ownToks[i - 2].value === 'function')
+          fail(`streaming partial-finalize: ${accFn} has a binding or use in ${constructId} that is neither a call nor the accrual declaration`);
+        if (next && next.type === 'punct' && next.value === '(') continue;
+        if (next && next.type === 'punct' && next.value === ':' && prev && prev.type === 'punct' && (prev.value === '{' || prev.value === ',')) continue;
+        fail(`streaming partial-finalize: ${accFn} has a binding or use in ${constructId} that is neither a call nor the accrual declaration`);
       }
     }
-    if (!mAcc) fail('streaming partial-finalize: no usage accrual owned by ' + constructId + ' after the telemetry constant');
+    if (top.length > 1)
+      fail(`streaming partial-finalize: ${constructId} declares the accrual ${accFn} ${top.length} times`);
+    const mAcc = top.length === 1 ? top[0] : null;
+    if (!mAcc) fail('streaming partial-finalize: no usage accrual owned by ' + constructId + (accFn === null ? ': the region calls no function before the marker' : ' for ' + accFn));
     accExpr = mAcc[3];
   }
 
@@ -2968,7 +3026,7 @@ step('19 a broken stream is retried, never finalized as a half answer', () => {
   // Заземление берётся из соседнего выражения того же участка: начисление
   // передаёт `querySource` того же объекта. Замерено: на 252 объект `d`, на
   // 257 -- `f`, и в обоих случаях начисление его подтверждает.
-  if (!accExpr.includes(`${opts}.querySource`))
+  if (!new RegExp(`(?<![\\w$.])${rxEsc(opts)}\\.querySource(?![\\w$])`).test(accExpr))
     fail(
       `streaming partial-finalize: the captured options object '${opts}' is not ` +
         'the one the accrual reads querySource from -- the model expression ' +

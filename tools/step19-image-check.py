@@ -11,7 +11,11 @@ Scope: the output of tools/raw-image-step-run.js with MARKERS=1 (module
 boundary markers present), images from 2.1.246 on (the guarded yield exists).
 An image without boundary markers exits 2.
 Cap forms (single/split and the pristine shapes they are matched against) are
-measured on 2.1.278 / 2.1.280 / 2.1.281 / 2.1.282 (brief KIT-FIX6 п.7).
+measured on 2.1.278 / 2.1.280 / 2.1.281 / 2.1.282 / 2.1.283 (brief KIT-FIX6
+п.7). The broken-stream checks row is a parameterless lambda and the gate
+executes its body: the lambda object itself is truthy on any image, so reading
+the row instead of running it would finalize every pristine (brief S19-FIX2
+п.1-2).
 """
 import ast
 import importlib.util
@@ -81,7 +85,13 @@ def load_finalize(script_path):
         if isinstance(node, ast.Dict):
             for key, val in zip(node.keys, node.values):
                 if isinstance(key, ast.Constant) and key.value == "broken stream retried, not halved":
-                    expr = ast.get_source_segment(chosen, val)
+                    if isinstance(val, ast.Lambda):
+                        if (val.args.posonlyargs or val.args.args or val.args.kwonlyargs
+                                or val.args.vararg is not None or val.args.kwarg is not None):
+                            die("broken-stream check is a lambda with parameters", 2)
+                        expr = ast.get_source_segment(chosen, val.body)
+                    else:
+                        expr = ast.get_source_segment(chosen, val)
     if not expr:
         die("broken-stream check expression not found")
     wrapped = "def _broken_stream(d):\n    return (\n" + textwrap.indent(expr, "    ") + "\n    )\n"
@@ -541,8 +551,12 @@ def main(argv):
     # of 1; a SystemExit already raised by die() must pass through untouched
     # (KIT-282-v4-FIX5 opus F1; brief KIT-FIX6 п.1).
     try:
-        p_ok = bool(finalize(pristine))
-        a_ok = bool(finalize(patched))
+        p_ok = finalize(pristine)
+        if type(p_ok) is not bool:
+            raise ValueError("broken-stream check returned %s on the pristine, not bool" % type(p_ok).__name__)
+        a_ok = finalize(patched)
+        if type(a_ok) is not bool:
+            raise ValueError("broken-stream check returned %s on the patched, not bool" % type(a_ok).__name__)
         print("FINALIZE pristine=%s patched=%s" % (p_ok, a_ok))
         form, cap_good, cap_detail = cap_ok(pristine, patched)
         print("CAP %s %s %s" % (form, "OK" if cap_good else "BAD", cap_detail))
