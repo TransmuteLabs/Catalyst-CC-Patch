@@ -16,7 +16,7 @@ shell-forms	Формы оболочки	Формы оболочки	sweep:forms	
 bench-judge-tools	\$\{KIT_BENCH_NAMES\[0\]\}	Стенд инструментов судьи	exit	cond-silent
 bench-costs	\$\{KIT_BENCH_NAMES\[1\]\}	Стенд моделей и цен	exit	cond-silent
 bench-probes-sync	\$\{KIT_BENCH_NAMES\[2\]\}	Стенд синхронизации проб	exit	cond-silent
-probes-rollout	Раскатка инструментов судьи	Раскатка инструментов судьи: расхождений нет|Раскатка инструментов судьи: дом выровнен по канону|РАСКАТКИ НЕТ	exit	cond-skip
+probes-rollout	Раскатка инструментов судьи	Раскатка инструментов судьи: расхождений нет|Раскатка инструментов судьи: дом выровнен по канону|РАСКАТКИ НЕТ|РАСКАТКА ЖИВОГО ДОМА НЕ ИЗМЕРЯЛАСЬ В STAGING \(--target\)	exit	cond-skip
 docnum-sync-check	Сверка чисел в доках	Сверка чисел в доках	exit	always
 lock-inheritance-gate	Гейт наследования замка	Гейт наследования замка	exit	always
 docnum-anchor-census	Перепись якорей таблицы гейта чисел	Перепись якорей таблицы гейта чисел	exit	always
@@ -26,6 +26,7 @@ env-handles-live-teeth	Зубы гварда живости ручек	Зубы 
 env-handles-live-tree	Гвард живости ручек на реальном дереве	env-handles-live-guard\[реальное дерево\]:|ГВАРД ЖИВОСТИ НА ДЕРЕВЕ:	exit	always
 builtin-option-pin-guard	Пины опций встроенных модов	Пины опций встроенных модов	exit	always
 builtin-option-pin-guard-teeth	Зубы гварда пинов опций	Зубы гварда пинов опций	exit	always
+target-isolation-teeth	Зубы изоляции --target	Зубы изоляции --target	exit	always
 step7-window-teeth	Зубы окна шага 7	Зубы окна шага 7	exit	always
 floor-teeth	Зубы пола проверок	Зубы пола проверок	exit	always
 executors-census	Перепись исполнителей инструментов	Перепись исполнителей инструментов	exit	always

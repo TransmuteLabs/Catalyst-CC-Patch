@@ -173,6 +173,54 @@ done
 
 [[ -n "$TARGET" && $DO_UPDATE -eq 1 ]] && { echo "ERROR: --target and --update are mutually exclusive" >&2; exit 2; }
 
+# Отказ ДО замка, ДО ensure_tweakcc и любой стадии с записью: интерактивная
+# правка tweakcc либо сохраняется в живой дом (запрещённое для --target
+# побочное состояние), либо в изолированную копию, умирающую вместе с temp
+# прогона, -- держать обе одновременно нельзя, а тихо выбрать одну из них
+# значит подсунуть оператору не то, что он настраивал (#559).
+[[ -n "$TARGET" && $CONFIGURE -eq 1 ]] && {
+  echo "ERROR: --target and --configure are mutually exclusive: интерактивная правка tweakcc не может одновременно сохраняться в живом доме и быть изолированной в target-прогоне" >&2
+  exit 2
+}
+
+# Дом изоляции --target (#559): те же два закона, что у fs-meta -- один
+# подключаемый файл на весь кит, отсутствие -- отказ ДО первой правки, класс 6
+# «машинерия» (ломается договор между нашими же файлами). [559-fix5]
+# подключение перенесено СЮДА, до замка: предзамковой проверке изоляции нужны
+# функции этого файла ДО exec 9>>"$__lock" (--target) -- проверка внутри activate для
+# замка поздняя (exec уже писал бы в живой дом). Файл чисто декларативный:
+# подключение здесь не создаёт ни файлов, ни процессов; уборка собственного
+# temp в __release_lock зовёт его функции и на прогонах без --target.
+# CONSTRAINT (#567A-REVIEWFIX, item 1): ЕДИНЫЙ канонический дом кита.
+# Иерархия разрешения $0: slash -- путь как есть; slashless файл в cwd --
+# ./; иначе проверенный command -v. Ссылка на скрипт гасится realpath
+# проверенным вызовом python: HERE физический, один для всех форм вызова.
+# Отказ/пустота любой ступени -- rc2 прибора: блок стоит ДО source helper
+# и ДО первого замка, отказ не оставляет lock/temp/CLI-побочных состояний.
+__kit_script="$0"
+case "$__kit_script" in
+  */*) ;;
+  *) if [ -f "$__kit_script" ]; then
+       __kit_script="./$__kit_script"
+     else
+       __kit_script=$(command -v -- "$0") || { echo "ПРИБОР НЕДОСТУПЕН: resolver скрипта кита отказал для $0" >&2; exit 2; }
+       [ -n "$__kit_script" ] || { echo "ПРИБОР НЕДОСТУПЕН: resolver вернул пусто для $0" >&2; exit 2; }
+     fi ;;
+esac
+command -v python3 >/dev/null || { echo "ПРИБОР НЕДОСТУПЕН: нет python3" >&2; exit 2; }
+python3 -c '' || { __python_rc=$?; echo "ПРИБОР НЕДОСТУПЕН: python3 не запускается (rc $__python_rc)" >&2; exit 2; }
+__kit_real=$(python3 -c 'import os,sys; p=os.path.realpath(sys.argv[1]); print(p if os.path.isfile(p) else "")' "$__kit_script") || { echo "ПРИБОР НЕДОСТУПЕН: realpath отказал для $__kit_script" >&2; exit 2; }
+[ -n "$__kit_real" ] || { echo "ПРИБОР НЕДОСТУПЕН: скрипт кита не regular file: $__kit_script" >&2; exit 2; }
+HERE=$(dirname -- "$__kit_real") || { echo "ПРИБОР НЕДОСТУПЕН: dirname отказал для $__kit_real" >&2; exit 2; }
+[ -n "$HERE" ] || { echo "ПРИБОР НЕДОСТУПЕН: dirname вернул пусто для $__kit_real" >&2; exit 2; }
+if [[ ! -f "$HERE/tools/target-isolation.sh" ]]; then
+  echo "FATAL: не найден $HERE/tools/target-isolation.sh -- изоляцию --target поднять нечем." >&2
+  echo "  Кит скопирован не целиком: target-прогон без изоляции пишет в живой дом." >&2
+  exit 6
+fi
+# shellcheck source=tools/target-isolation.sh
+source "$HERE/tools/target-isolation.sh"
+
 # ONE RUN AT A TIME. Two instances are not independent: tweakcc keeps its state
 # in a single shared directory, and it stores the system-prompt hashes by
 # reading the whole index, editing it and writing it back. Two runs interleaving
@@ -219,6 +267,30 @@ __lock="${CLAUDE_PATCH_LOCK:-${TMPDIR:-/tmp}/claude-patch-all.$(id -u).lock}"
 # читатель лога иначе не отличит защищённый прогон от незащищённого.
 [[ -z "${CLAUDE_PATCH_LOCK:-}" ]] \
   || echo "Lock: $__lock (CLAUDE_PATCH_LOCK; NOT the shared one — this run is not queued behind real builds)"
+
+# Предзамковая изоляция --target (#559-fix5): единственный вызов ДО
+# exec 9>>"$__lock". Отказ (rc 6) не создаёт ни замка, ни temp, ни одного CLI
+# и не меняет байты/mtime защищённого живого дома и общего кэша -- в том числе
+# для пути ФАКТИЧЕСКИ выбранного замка (заданный CLAUDE_PATCH_LOCK либо
+# выведенный из TMPDIR). CONSTRAINT: только --target -- update, default и
+# configure сохраняют прежнее поведение; нормальный общий замок в системном
+# tmp остаётся общим (отдельного имени замка нет, наследование fd9 не
+# обходится); произвольный CLAUDE_PATCH_LOCK вне защищённого состояния
+# сохраняет назначение.
+if [[ -n "$TARGET" ]]; then
+  # [559-fix5] ворота: предзамковая проверка -- ДО открытия замка; снятие
+  # строки возвращает раннюю запись замка в живой дом/общий кэш
+  # [559-fix7] CONSTRAINT: условная форма -- единственная ДЕЙСТВИТЕЛЬНО
+  # исполняемая при отказе preflight и под set -e, и под set +e: прежние
+  # отдельный вызов + поздний $? при set -e умирали ДО строки захвата, и
+  # внешний код 2 был совпадением set -e, а не путём продукта
+  if target_isolation_preflight "$__lock"; then
+    :
+  else
+    # [559-fix7] ворота: выход именным кодом preflight (2 прибор / 6 окружение)
+    exit "$?"
+  fi
+fi
 
 # УНАСЛЕДОВАННЫЙ ЗАМОК. Законный держатель-предок ровно один --
 # tools/build-path-probe.sh: он одалживает ЖИВОЕ состояние ~/.tweakcc
@@ -274,7 +346,17 @@ if [[ -n "${CLAUDE_PATCH_LOCK_HELD_BY:-}" ]]; then
     exit 6
   fi
 else
-  exec 9>"$__lock"
+  # [559-fix7] CONSTRAINT: target-прогон открывает замок БЕЗ усечения: exec 9>
+  # обнулял байты ЛЮБОГО существующего файла, стоящего за hard link на путь
+  # замка (замер Linux: живой config.json 46 -> 0 при зелёном preflight).
+  # Вне --target прежний exec 9>: общий замок, его путь и наследование fd9
+  # не меняются
+  if [[ -n "$TARGET" ]]; then
+    # [559-fix7] ворота: замок target-прогона -- append-open, не O_TRUNC
+    exec 9>>"$__lock"
+  else
+    exec 9>"$__lock"
+  fi
 
 # Замок берётся НАСТОЯЩИЙ -- flock(2) на дескрипторе 9, -- даже там, где нет
 # утилиты flock(1). Это не украшение: у замка-на-дескрипторе два свойства,
@@ -512,6 +594,13 @@ __release_lock() {
   fi
   # Каталог сносит ТОЛЬКО его владелец: см. подтверждение владения выше.
   [[ "${__lockdir_owned:-0}" == 1 ]] && rm -rf "$__lockdir"
+  # Уборка собственного temp изоляции --target (#559): EXIT сюда приходит и по
+  # INT/TERM (расщеплённые трапы выше выходят кодом сигнала ЧЕРЕЗ этот EXIT).
+  # Убирается ТОЛЬКО сохранённый активацией путь; ловушка не перезаписывается.
+  if [[ -n "${TARGET_ISOLATION_ROOT:-}" ]]; then
+    target_isolation_cleanup \
+      || echo "ВНИМАНИЕ: уборка изоляции target ($TARGET_ISOLATION_ROOT) не удалась" >&2
+  fi
   if [[ "${__DONE:-0}" != 1 && "$__rc" == 0 ]]; then
     echo "FATAL: прогон оборвался, не дойдя до конца (ошибка оболочки выше)." >&2
     echo "  Ничего не установлено; код возврата 1, а не молчаливый ноль." >&2
@@ -519,6 +608,13 @@ __release_lock() {
   fi
   exit "$__rc"
 }
+# Собственные переменные изоляции target (#559) обнуляются ДО установки
+# EXIT-трапа и ДО активации (helper подключен выше, до замка -- #559-fix5):
+# унаследованное из среды значение иначе доехало бы до уборки в __release_lock
+# как путь, который уборка считает своим. Второй рубеж -- отметка владельца
+# в tools/target-isolation.sh.
+TARGET_ISOLATION_ROOT=""
+TARGET_ISOLATION_OWNER_TOKEN=""
 trap '__release_lock' EXIT
 # Волна 26 расщепила трапы у свипа, наполнителя, кит-сборки, раскатки проб,
 # зонда пути, пола проверок, пробы стража и прибора замка -- а главный,
@@ -531,19 +627,18 @@ trap '__release_lock' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-
 # Чтение метаданных файла живёт в ОДНОМ подключаемом файле на весь кит: те же
 # два вопроса (метка времени, инод) задают свип и зонд пути сборки, и три копии
 # идиомы уже разошлись -- две несли отравляющую форму «попробуй BSD, иначе
 # GNU», третья безопасную, и различие держалось на одном пробеле; полный
 # разбор формы -- в шапке носителя, и дословно её позволено писать только там
 # (ценз сценария 146 стенда корпусных инструментов считает строки этого дома
-# без разбора кода и прозы). Подключение
-# стоит ЗДЕСЬ, рядом с выводом корня: ниже дом читают функции, объявленные
-# раньше своего первого вызова, и подключение обязано опережать вызов, а не
-# объявление. Отсутствие файла -- отказ ДО первой правки, код 6 «машинерия»:
-# ломается договор между нашими же двумя файлами, а не что-то про образ.
+# без разбора кода и прозы). Корень дерева выведен выше -- до замка: он нужен
+# предзамковой проверке изоляции (#559-fix5); подключение стоит ЗДЕСЬ: ниже дом
+# читают функции, объявленные раньше своего первого вызова, и подключение
+# обязано опережать вызов, а не объявление. Отсутствие файла -- отказ ДО первой
+# правки, код 6 «машинерия»: ломается договор между нашими же двумя файлами,
+# а не что-то про образ.
 if [[ ! -f "$HERE/tools/fs-meta.sh" ]]; then
   echo "FATAL: не найден $HERE/tools/fs-meta.sh -- метку времени и инод читать нечем." >&2
   echo "  Кит скопирован не целиком: порядок удаления старых сборок распаковщика" >&2
@@ -3267,10 +3362,31 @@ PYCOMPILE
 # Гейт с ПОЛОЖИТЕЛЬНЫМ контролем: сначала он обязан увидеть синтетический
 # случай, и только потом его молчание на дереве что-то значит.
 echo "==> Формы оболочки"
-python3 - "$(dirname "$0")" <<'SHVARS' || { echo "ГЕЙТ ИМЁН ПЕРЕМЕННЫХ УПАЛ" >&2; exit 1; }
-import io, os, re, sys
+# CONSTRAINT (#567A, поправка контроллера): отказ прибора (rc2 -- неполный
+# ценз) обязан доходить из полного прохода отдельным кодом от вердикта
+# (rc1 -- находки); сводить всё ненулевое к 1 -- стирать границу.
+# CONSTRAINT (#567A-REVIEWFIX, item 3): один rc не различает законченный
+# вердикт и недобежавший python: в теле есть selfcontrol-ные sys.exit(1)
+# ВЫШЕ нижнего вердикта. Поэтому 0/1 принимаются только если ПОСЛЕДНЯЯ
+# строка stdout python -- свидетель __SHVARS_COMPLETE__; любой иной код без
+# свидетеля (SyntaxError=1, отсутствующий интерпретатор=127, фейковый rc0) --
+# rc2 с диагностикой; 128+signal передаётся как есть. Сканер получает
+# единый $HERE (item 1) -- второго dirname здесь нет.
+__shvars_status=0
+__shvars_out=$(python3 - "$HERE" <<'SHVARS'
+import io, os, re, stat, sys
 
 root = os.path.abspath(sys.argv[1])
+# CONSTRAINT (#567A): os.walk на битом корне не бросает исключений, поэтому
+# корень проверяется до обхода; отказ прибора -- rc2 с путём и причиной, по
+# форме как чтение реестра 3b ниже: rc1 для находок, rc2 для сломанного
+# прибора, «ЧИСТЫ» на нулевом охвате запрещён.
+if not os.path.exists(root):
+    print("ПРИБОР НЕДОСТУПЕН: корень ценза не существует: " + root)
+    sys.exit(2)
+if not os.path.isdir(root):
+    print("ПРИБОР НЕДОСТУПЕН: корень ценза не каталог: " + root)
+    sys.exit(2)
 # Спец-параметры ($1, $?, $@) состоят из одного символа, и разбор имени на них
 # не распространяется -- ищем только именованные переменные.
 PAT = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]')
@@ -4494,16 +4610,50 @@ _known_used = set()
 bad = []
 scanned = 0
 n3a = n3b = n3c = n_sentinel = n3b_files = 0
-for dirpath, dirnames, filenames in os.walk(root):
+
+# CONSTRAINT (#567A): каталог, не пройденный из-за ошибки, делает ценз
+# неполным, а вердикт по неполному цензу запрещён: onerror завершает прибор
+# rc2. SystemExit из callback os.walk не поглощает (он ловит только OSError).
+def _walk_error(err):
+    print("ПРИБОР НЕДОСТУПЕН: обход каталога не удался: " + str(err))
+    sys.exit(2)
+
+for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
     dirnames[:] = [d for d in dirnames if d not in ('.git', 'distros', 'node_modules')]
+    # CONSTRAINT (#567A-REVIEWFIX, item 2): os.walk symlink-каталоги не
+    # обходит (followlinks=False по умолчанию) -- молчаливый пропуск есть
+    # неполный ценз, а ссылка ведёт наружу или в цикл. Ровно три имени
+    # исключаются выше, любой другой symlink-каталог -- отказ rc2.
+    for _d in dirnames:
+        _dp = os.path.join(dirpath, _d)
+        if os.path.islink(_dp):
+            print("ПРИБОР НЕДОСТУПЕН: symlink-каталог в обходе: " + _dp)
+            sys.exit(2)
     for name in sorted(filenames):
         if not (name.endswith('.sh') or name == 'claude-patch-all.sh'):
             continue
         f = os.path.join(dirpath, name)
+        # CONSTRAINT (#567A-REVIEWFIX, item 2): open без stat зависает на
+        # FIFO и читает device; regular проверяется ПОСЛЕ разрешения symlink
+        # (ссылка на обычный .sh читается), висячая ссылка падает stat'ом
+        # в rc2 до чтения.
+        try:
+            _st = os.stat(f)
+        except OSError as e:
+            print("ПРИБОР НЕДОСТУПЕН: stat файла не удался: " + f + ": " + str(e))
+            sys.exit(2)
+        if not stat.S_ISREG(_st.st_mode):
+            print("ПРИБОР НЕДОСТУПЕН: не regular file: " + f)
+            sys.exit(2)
         try:
             text = io.open(f, encoding='utf-8').read()
-        except (OSError, UnicodeDecodeError):
-            continue
+        except (OSError, UnicodeDecodeError) as e:
+            # CONSTRAINT (#567A): пропуск нечитаемого или недекодируемого
+            # файла через `except: continue` -- молчаливый неполный ценз;
+            # отказ прибора rc2 с путём и причиной, по образцу чтения
+            # реестра 3b выше.
+            print("ПРИБОР НЕДОСТУПЕН: файл не читается: " + f + ": " + str(e))
+            sys.exit(2)
         scanned += 1
         rel = os.path.relpath(f, root)
         if sentinel_missing(text):
@@ -4564,6 +4714,12 @@ for dirpath, dirnames, filenames in os.walk(root):
             if merged_trap(line):
                 bad.append(f"{os.path.relpath(f, root)}:{n}: слитый сигнальный трап "
                            f"(EXIT вместе с INT/TERM) -- TERM отдаёт 0, а не 143")
+# CONSTRAINT (#567A): вердикт по нулевому охвату -- суждение без evidence:
+# scanned==0 после обхода есть отказ прибора rc2; проверка стоит до сверки
+# реестра.
+if scanned == 0:
+    print("ПРИБОР НЕДОСТУПЕН: обход не прочитал ни одного файла: root=" + root)
+    sys.exit(2)
 # Вторая сторона сверки. Без неё реестр стал бы бессрочной индульгенцией:
 # место вылечили или удалили, а запись осталась бы снимать защиту с будущей
 # строки, которая однажды совпадёт с якорем текстуально.
@@ -4582,9 +4738,44 @@ if bad:
           "(список -- строки-места file:line, не вхождения подстановки):")
     for b in bad:
         print("  " + b)
+    # CONSTRAINT (#567A-REVIEWFIX, item 3): свидетель печатается ПОСЛЕ
+    # полного вывода вердикта и ПОСЛЕДНЕЙ строкой -- иначе оболочка не
+    # отличит законченный список от обрезанного.
+    print("__SHVARS_COMPLETE__")
     sys.exit(1)
 print(f"ФОРМЫ ОБОЛОЧКИ ЧИСТЫ: разобрано файлов {scanned}")
+print("__SHVARS_COMPLETE__")
 SHVARS
+) || __shvars_status=$?
+__shvars_witness="__SHVARS_COMPLETE__"
+__shvars_nl=$'\n'
+__shvars_body=${__shvars_out%"$__shvars_witness"}
+__shvars_body=${__shvars_body%"$__shvars_nl"}
+if [ "$__shvars_status" -ge 128 ]; then
+    if [ -n "$__shvars_body" ]; then printf '%s\n' "$__shvars_body"; fi
+    echo "ГЕЙТ ИМЁН ПЕРЕМЕННЫХ УПАЛ: rc $__shvars_status (сигнал, вердикт не засчитан)" >&2
+    exit "$__shvars_status"
+fi
+if [ "${__shvars_out##*"$__shvars_nl"}" = "$__shvars_witness" ]; then
+    printf '%s\n' "$__shvars_body"
+    if [ "$__shvars_status" = 1 ]; then
+        exit 1
+    fi
+    if [ "$__shvars_status" != 0 ]; then
+        echo "ПРИБОР НЕДОСТУПЕН: свидетель при python rc $__shvars_status -- вердикт не засчитан" >&2
+        exit 2
+    fi
+    # CONSTRAINT (#567A-REVIEWFIX, вычитка контроллера): законченный rc0 печатает
+    # и ПРОДОЛЖАЕТ конвейер; выход здесь убивал бы бэнчи и сборку до их очереди.
+else
+    if [ -n "$__shvars_body" ]; then printf '%s\n' "$__shvars_body"; fi
+    if [ "$__shvars_status" = 2 ]; then
+        echo "ГЕЙТ ИМЁН ПЕРЕМЕННЫХ УПАЛ: rc 2 (отказ прибора, см. вывод выше)" >&2
+        exit 2
+    fi
+    echo "ПРИБОР НЕДОСТУПЕН: вердикт не завершён -- нет последней строки-свидетеля; python rc $__shvars_status" >&2
+    exit 2
+fi
 
 # Ручек ДВЕ, потому что предметов два, и путать их дорого в обе стороны.
 # CLAUDE_PATCH_SKIP_KIT_BENCH гасит стенды, чей предмет -- САМ КИТ: между
@@ -4722,6 +4913,11 @@ fi
 # жизни), дом отстал от канона на семь волн и продолжал исполняться -- заметил
 # только аудит (круг 20, D-1). Тест-ручки домов снимаются: гейт меряет
 # НАСТОЯЩИЙ дом, а не тот, что назвало окружение оператора.
+# [559] ворота: раскатка не исполняется в target-прогоне -- она пишет в ЖИВОЙ
+# дом судьи и в launchd, которых target-прогон не измерял и не ставит.
+# CONSTRAINT: «раскатка полная» не печатается без измерения; независимые
+# проверки канона кита (стенды выше) продолжают работать на обеих ветках.
+if [[ -z "$TARGET" ]]; then
 echo "==> Раскатка инструментов судьи"
 if env -u CLAUDE_JUDGE_TOOLS_DIR -u CLAUDE_LAUNCH_AGENTS_DIR \
      bash "$(dirname "$0")/scripts/probes-sync.sh" --diff 9>&-; then
@@ -4792,6 +4988,13 @@ else
     *) echo "СВЕРКА РАСКАТКИ ОТВЕТИЛА НЕОЖИДАННЫМ КОДОМ (rc=$__rc): вердикта нет" >&2
        exit 1 ;;
   esac
+fi
+else
+# CONSTRAINT: строка НЕ утверждает, что стенды кита отработали: их фактический
+# статус (успех или пропуск по CLAUDE_PATCH_SKIP_KIT_BENCH=1) печатает
+# отдельная ветка выше, и при пропуске прежняя формулировка «уже отработали»
+# врала бы о невыполненных стендах.
+echo "РАСКАТКА ЖИВОГО ДОМА НЕ ИЗМЕРЯЛАСЬ В STAGING (--target): раскатка не исполнялась, дом судьи не тронут; о стендах кита -- их фактический статус напечатан отдельным блоком выше (в т.ч. пропуск по CLAUDE_PATCH_SKIP_KIT_BENCH=1)"
 fi
 
 # --- 0d. the numbers stated in the docs must be the numbers that are declared --
@@ -6049,6 +6252,29 @@ bash "$(dirname "$0")/tools/builtin-option-pin-guard-teeth.sh" 9>&- || {
   esac
 }
 
+echo "==> Зубы изоляции --target"
+bash "$(dirname "$0")/tools/target-isolation-teeth.sh" --scope target-isolation 9>&- || {
+  __rc=$?
+  case $__rc in
+    2) echo "ЗУБЫ ИЗОЛЯЦИИ --target: НЕ ИЗМЕРЯЛИ -- прибор отказал (rc=2)" >&2
+       exit 2 ;;
+    4) echo "ЗУБЫ ИЗОЛЯЦИИ --target: прогнано либо прошло не столько, сколько" >&2
+       echo "  объявлено пином EXPECTED_TEETH (rc=4)" >&2
+       exit 4 ;;
+    # CONSTRAINT: зубы требуют GNU-инструментов (stat -c, sha256sum, timeout); их
+    # отсутствие -- свойство машины (мак-нога), не вердикт о предмете.
+    6) echo "ЗУБЫ ИЗОЛЯЦИИ --target: НЕ ИЗМЕРЕНО -- на этой машине нет python3/sha256sum/timeout (rc=6)" >&2 ;;
+    130|143) exit "$__rc" ;;
+    *) if [[ $__rc -gt 128 ]]; then
+         echo "ИЗОЛЯЦИЯ --target БЕЗ ЗУБОВ: стадия зубов убита сигналом $((__rc - 128)) (rc $__rc)" >&2
+       else
+         echo "ИЗОЛЯЦИЯ --target БЕЗ ЗУБОВ: мутация не покраснела своей" >&2
+         echo "  причиной (rc=$__rc)" >&2
+       fi
+       exit 1 ;;
+  esac
+}
+
 echo "==> Зубы окна шага 7"
 bash "$(dirname "$0")/tools/step7-window-teeth.sh" 9>&- || {
   __rc=$?
@@ -6123,7 +6349,7 @@ python3 "$(dirname "$0")/tools/orphan-stand-gate.py" 9>&- || {
 # стадия источника не заявлена строкой канона, если строка канона мертва, если
 # pin sweep:<field> висит на несуществующем поле sweep.sh, либо счёт стадий
 # разошёлся с EXPECTED_STAGES. Так "стадия пиняема по умолчанию".
-EXPECTED_STAGES=39
+EXPECTED_STAGES=40
 echo "==> Перепись стадий конвейера"
 python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
     --source "$0" \
@@ -6164,6 +6390,11 @@ python3 "$(dirname "$0")/tools/pipeline-stage-census.py" census \
 # Bump it deliberately, the way any dependency is bumped.
 CATALYST_TWEAKCC_REPO="${CATALYST_TWEAKCC_REPO:-TransmuteLabs/Catalyst-tweakcc}"
 CATALYST_TWEAKCC_SHA="${CATALYST_TWEAKCC_SHA:-a700ade95e2b4114f19dc1697193b863fa2452fd}"
+[[ "$CATALYST_TWEAKCC_SHA" =~ ^[0-9a-f]{40}$ ]] \
+  || { echo "ПРИБОР НЕДОСТУПЕН: CATALYST_TWEAKCC_SHA должен быть коммитом из 40 lowercase hex" >&2; exit 2; }
+[[ "$CATALYST_TWEAKCC_REPO" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ \
+   && "${CATALYST_TWEAKCC_REPO#*/}" != . && "${CATALYST_TWEAKCC_REPO#*/}" != .. ]] \
+  || { echo "ПРИБОР НЕДОСТУПЕН: CATALYST_TWEAKCC_REPO вне грамматики owner/repo" >&2; exit 2; }
 # Подменённый источник распаковщика объявляется ВСЕГДА, а не только когда его
 # качают: строка «Fetching the unpacker» печатается лишь мимо кэша, и сборка с
 # чужой веткой в тёплом кэше была неотличима от сборки с запиненной.
@@ -6200,9 +6431,16 @@ ensure_tweakcc() {
     tar -xzf "$dir.tmp/src.tar.gz" -C "$dir.tmp" --strip-components=1 \
       || { echo "ERROR: could not unpack the unpacker tarball"; exit 1; }
     rm -f "$dir.tmp/src.tar.gz"
+    # [559-fix4] холодная сборка под --target: npm/pnpm/XDG-писатели уходят в
+    # приватные подкаталоги собственного temp изоляции
+    # (target_isolation_cold_env, tools/target-isolation.sh), НЕ в живые
+    # HOME-дома; без --target ветка не меняется.
+    if [[ -n "${TARGET:-}" ]]; then
+      target_isolation_cold_env "$dir.tmp"
+    fi
     ( cd "$dir.tmp" \
-      && npx -y pnpm@latest install --frozen-lockfile \
-      && npx -y pnpm@latest run build ) \
+      && __ti_cold_wrap npx -y pnpm@latest install --frozen-lockfile \
+      && __ti_cold_wrap npx -y pnpm@latest run build ) 9>&- \
       || { echo "ERROR: unpacker build failed in $dir.tmp"; exit 1; }
     [[ -f "$dir.tmp/dist/index.mjs" ]] \
       || { echo "ERROR: unpacker build produced no dist/index.mjs"; exit 1; }
@@ -6213,7 +6451,9 @@ ensure_tweakcc() {
 
   TWEAKCC=(node "$dir/dist/index.mjs")
   echo "Unpacker: $CATALYST_TWEAKCC_REPO @ ${CATALYST_TWEAKCC_SHA:0:12}"
-  prune_tweakcc_cache 2
+  # Общий кэш target-прогону не принадлежит: не читаем его записи и не чистим
+  # их (#559); собственный кэш изоляции живёт ровно один прогон.
+  [[ -n "$TARGET" ]] || prune_tweakcc_cache 2
 }
 # --- обёртка окружения для запуска форка --------------------------------------
 # Форк ходит в сеть глобальным `fetch` node (undici), а undici переменные
@@ -6320,6 +6560,16 @@ __tw_no_prompts_wrap() {   # переписывает TWEAKCC, добавляя 
   echo "Слой промтов: запуску форка подставлен TWEAKCC_NO_SYSTEM_PROMPTS=1 -- снимок промтов не качается, накладки в образ не пишутся (наши промты пишет мод). Оставить слой: CATALYST_TWEAKCC_KEEP_PROMPTS=1"
 }
 
+# --- изоляция побочных записей target-прогона (#559) ---------------------------
+# CONSTRAINT: активация стоит ДО ensure_tweakcc и ДО первого CLI форка
+# (включая --list-patches и стражи 1b): после неё TWEAKCC_CONFIG_DIR указывает
+# на собственный temp-дом, TWEAKCC_CC_INSTALLATION_PATH по-прежнему называет
+# только заказанный BIN, а kit-лестница ниже и все проверки бэкапа/expected-off
+# видят копию, не живой путь.
+# [559] ворота: изоляция config-дома и кэша только для target-прогона
+if [[ -n "$TARGET" ]]; then
+  target_isolation_activate
+fi
 ensure_tweakcc
 __tw_node_proxy_wrap
 # Умолчание объявляется ДО подстановки: ветка, ушедшая из обёртки раньше,
@@ -9976,6 +10226,12 @@ json.dump(
 json.dump(
     {
         "model": "gate-offline-model",
+        # [559-fix4] CONSTRAINT: выключатель регистрации глубинных ссылок хоста
+        # (ensureDeepLinkProtocolRegistered читает его из settings и без него
+        # пишет OS-регистрацию в НАСТОЯЩИЙ HOME запускающего гейт образа);
+        # ключ живёт только в ЭТОМ временном settings гейта -- пользовательский
+        # settings.json не переписывается
+        "disableDeepLinkRegistration": "disable",
         "env": {
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
             "DISABLE_TELEMETRY": "1",
@@ -10882,7 +11138,13 @@ __activation_announce
 __env_rc=0
 __envon CLAUDE_PATCH_SKIP_MODELS || __env_rc=$?
 (( __env_rc != 2 )) || exit 2
-if (( __env_rc == 0 )); then
+# [559] ворота: модельные данные пишутся туда, где их читает УСТАНОВЛЕННЫЙ
+# продукт; target-прогон ничего не устанавливает -- ни set-model-costs.py, ни
+# prune_config_backups, ни общий roster/cache. Правки 8/10 вшивают ЧИТАТЕЛЬ,
+# не цены; ручка оператора ниже действует там, где продукт ставится.
+if [[ -n "$TARGET" ]]; then
+  echo "Model data: SKIPPED — target isolation"
+elif (( __env_rc == 0 )); then
   echo "Model data: SKIPPED — CLAUDE_PATCH_SKIP_MODELS=1; prices and context windows are stale"
 elif [[ ! -f "$COSTS_SYNC" ]]; then
   echo "Model data: SKIPPED — $(basename "$COSTS_SYNC") is not in this kit; prices and context windows are stale" >&2
