@@ -59,8 +59,8 @@ ROUTING = ROOT / "patch_claude_routing.py"
 # the bench itself does -- the copy list carries it as a dependency, for the
 # same one-way-census reason as ROUTING above.
 ANCHOR = ROOT / "tools" / "heredoc-anchor.py"
-EXPECTED_SCENARIOS = 61
-EXPECTED_MUTATIONS = 112
+EXPECTED_SCENARIOS = 62
+EXPECTED_MUTATIONS = 113
 
 # Load form mirrors the pipeline's PYCOMPILE stage: a load failure is a named
 # bench refusal (code 2, "cannot measure"), not a fallback to a local edition
@@ -3351,6 +3351,9 @@ def scenario_c60() -> None:
     with sync_fixture() as (module, path, home):
         require(hasattr(module, "reap_stale_staging"),
                 "no stale-staging sweep")
+        # CONSTRAINT: the rival holds 0.4 s; the fixture's 1 s acquisition
+        # bound leaves no margin on a loaded host.
+        module.CONFIG_LOCK_TIMEOUT_SECONDS = 5
         parent = path.parent
         stale = parent / (path.name + ".lock.new.111.deadbeefdeadbeef")
         fresh = parent / (path.name + ".lock.new.222.freshbeefbeefbeef")
@@ -3401,6 +3404,32 @@ def scenario_c60() -> None:
                 "stale-staging-sweep touched the fresh neighbour staging")
         require(not list(parent.glob(path.name + ".lock.new." + str(os.getpid()) + ".*")),
                 "stale-staging-sweep removed the writer's own staging")
+
+
+def scenario_c62() -> None:
+    # Свой staging узнаётся по имени записи, не по написанию пути: путь
+    # замка написан с двойным разделителем, свой staging старше срока
+    # просрочки (писатель замер посреди публикации) уборкой не снимается,
+    # чужой просроченный рядом снимается. Красен на входе: сравнение
+    # путей строкой не узнаёт свой staging в другом написании.
+    with sync_fixture() as (module, path, home):
+        spelled = str(path.parent) + "//" + path.name
+        lock = module.ConfigLock(spelled)
+        stamp = time.time() - module.CONFIG_LOCK_STALE_SECONDS - 5
+        own = path.parent / (path.name + ".lock.new.333.0123456789abcdef")
+        foreign = path.parent / (path.name + ".lock.new.444.fedcba9876543210")
+        for entry, token in ((own, b"333 0123456789abcdef\n"),
+                             (foreign, b"444 fedcba9876543210\n")):
+            entry.mkdir()
+            (entry / "owner").write_bytes(token)
+            os.utime(entry / "owner", (stamp, stamp))
+            os.utime(entry, (stamp, stamp))
+        lock.staging = lock.path + ".new.333.0123456789abcdef"
+        module.reap_stale_staging(lock)
+        require(own.is_dir() and (own / "owner").is_file(),
+                "own-staging-spelling swept the writer's own staging")
+        require(not foreign.exists(),
+                "own-staging-spelling left the foreign stale staging")
 
 
 def scenario_c61() -> None:
@@ -3454,7 +3483,7 @@ SCENARIOS: list[tuple[str, Callable[[], None]]] = [
     ("C55", scenario_c55), ("C56", scenario_c56),
     ("C57", scenario_c57), ("C58", scenario_c58),
     ("C59", scenario_c59), ("C60", scenario_c60),
-    ("C61", scenario_c61),
+    ("C61", scenario_c61), ("C62", scenario_c62),
 ]
 
 
@@ -4534,6 +4563,14 @@ def m116(root: Path) -> None:
                  "            raise\n", "M116")
 
 
+def m117(root: Path) -> None:
+    # Свой staging перестаёт узнаваться по имени -- уборка снимает
+    # staging замершего писателя.
+    replace_once(root / "set-model-costs.py",
+                 "        if name == own:\n            continue\n",
+                 "        if False:\n            continue\n", "M117")
+
+
 MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M1", m1, "C1", "empty replacement"),
     ("M2", m2, "C2", "empty replacement"),
@@ -4647,6 +4684,7 @@ MUTATIONS: list[tuple[str, Callable[[Path], None], str, str]] = [
     ("M114", m114, "C59", "reap-vanished-path rc="),
     ("M115", m115, "C60", "stale-staging-sweep left the expired staging"),
     ("M116", m116, "C61", "interrupt-after-publish left the lock directory behind"),
+    ("M117", m117, "C62", "own-staging-spelling swept the writer's own staging"),
 ]
 
 # Circle 25, E-4: a scenario with no mutation of its own proves nothing --

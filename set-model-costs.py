@@ -512,9 +512,12 @@ def reap_stale_staging(lock):
     CONSTRAINT: this sweep must never fail the acquisition it serves -- a
     staging directory it cannot appraise (open/stat refused, contents beyond
     owner, identity changed under it) is skipped, and the writer's OWN staging
-    name (`lock.staging`, mid-publication) is never a candidate."""
+    name (`lock.staging`, mid-publication) is never a candidate. Own is matched
+    by entry name, not by path spelling: staging is built from `lock.path`, so
+    it lives in this same parent under its basename."""
     parent = os.path.dirname(lock.path) or "."
     prefix = os.path.basename(lock.path) + ".new."
+    own = os.path.basename(lock.staging) if lock.staging else None
     try:
         names = os.listdir(parent)
     except OSError:
@@ -522,9 +525,9 @@ def reap_stale_staging(lock):
     for name in names:
         if not name.startswith(prefix):
             continue
-        candidate = os.path.join(parent, name)
-        if candidate == lock.staging:
+        if name == own:
             continue
+        candidate = os.path.join(parent, name)
         try:
             fd_s = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except FileNotFoundError:
@@ -561,9 +564,7 @@ def reap_stale_staging(lock):
                 continue
             try:
                 os.rmdir(candidate)
-            except OSError as exc:
-                if exc.errno in (errno.ENOTEMPTY, errno.ENOENT, errno.ENOTDIR):
-                    continue
+            except OSError:
                 continue
         finally:
             os.close(fd_s)
@@ -653,9 +654,11 @@ def acquire_config_lock(path):
                         reap_stale_staging(lock)  # fresh holder: wait
                         continue
                     entries = os.listdir(fd_r)
-                    # CONSTRAINT: an empty directory is only the pre-v2
-                    # format -- a v2 holder always carries `owner`; anything
-                    # beyond owner is foreign and is never removed here.
+                    # CONSTRAINT: an empty directory is the pre-v2 format, or
+                    # a v2 lock whose staging `owner` the sweep removed while
+                    # its writer stalled past the staleness bound; both are
+                    # reaped only past that bound. Anything beyond owner is
+                    # foreign and is never removed here.
                     if any(entry != "owner" for entry in entries):
                         raise ConfigLockUnavailable(
                             f"config lock {lock.path} unusable: lock directory holds foreign entries; nothing written")
