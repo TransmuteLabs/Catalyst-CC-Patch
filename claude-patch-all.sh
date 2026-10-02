@@ -1025,13 +1025,11 @@ else
   # different product. If nothing on PATH is an image, say which candidates were
   # found and why each was rejected -- "not on PATH" and "on PATH but not a
   # binary" are different faults and must not share one message.
-  # NOTE: this heredoc sits inside a command substitution, and bash scans
-  # `$( ... )` for its closing paren while honouring quotes -- so a LONE
-  # apostrophe anywhere in this body (in prose, in a comment) opens a quote
-  # that swallows the rest of the file, and the parse error surfaces a
-  # thousand lines away inside a different heredoc. Write "a foreign tool",
-  # never "someone else\x27s tool", below this line.
-  BIN="$(python3 - <<'PY'
+  # CONSTRAINT: heredoc вынесен из $(...) в функцию -- bash 3.2 (мак) разбирает
+  # тело heredoc внутри подстановки как код: одинокий апостроф или обратная
+  # кавычка в теле срывает разбор всего файла далеко от этого места.
+  __img_run() {
+  python3 - <<'PY'
 import os, sys
 
 # Mach-O thin (both endians, 32/64), Mach-O fat, and ELF. A file that starts
@@ -1131,7 +1129,8 @@ else:
     sys.stderr.write('  Pass the image explicitly with --target /path/to/binary.\n')
 sys.exit(1)
 PY
-)" || __img_rc=$?
+  }
+  BIN="$(__img_run)" || __img_rc=$?
 # Код 1 -- ОТКАЗ ПО СУЩЕСТВУ (образа на PATH нет либо он не единственный):
 # разбор сам напечатал причину в stderr, и прогон умирает кодом 1 -- как и
 # до правки (тогда его убивал set -e). Код выше единицы -- отказ прибора.
