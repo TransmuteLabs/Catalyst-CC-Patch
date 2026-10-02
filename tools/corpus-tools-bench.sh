@@ -9322,15 +9322,22 @@ scenario_338() {   # plain: генераторное именованное вы
 # остановил бы стенд. Каждая проба ждёт СВОЮ отметку: отказ, пойманный не той
 # дверью, -- это снятая дверь.
 scenario_339() {   # прибор s19_mut_file: отказ счёта, промах образца, отказ замены, правка без изменения -- отказ прибора
-  local out rc probe r mark fns anchors hanchors want fails=""
+  local out rc probe r mark fns hfn anchors hanchors want fails=""
   anchors=$(LC_ALL=C grep -a -c '^s19_mut_fixture() {' "$K/tools/corpus-tools-bench.real.sh") || true
   hanchors=$(LC_ALL=C grep -a -c '^s19_mut_file() {' "$K/tools/corpus-tools-bench.real.sh") || true
-  fns=$(sed -n '/^s19_mut_fixture() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh")
+  fns=$(sed -n '/^s19_mut_fixture() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh") || fns=""
   if [[ "$anchors" != "1" || -z "$fns" ]] || { [[ "$fns" == *"s19_mut_file "* ]] && [[ "$hanchors" != "1" ]]; }; then
     LAST_EVID="ЯКОРЬ_ПОТЕРЯН якорей=$anchors помощника=$hanchors"
     bad "339 прибор фикстуры s19: s19_mut_fixture/s19_mut_file не вырезаны из копии стенда -- прибор не мерит"; return
   fi
-  [[ "$hanchors" == "1" ]] && fns="$(sed -n '/^s19_mut_file() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh")"$'\n'"$fns"
+  if [[ "$hanchors" == "1" ]]; then
+    hfn=$(sed -n '/^s19_mut_file() {/,/^}/p' "$K/tools/corpus-tools-bench.real.sh") || hfn=""
+    if [[ -z "$hfn" ]]; then
+      LAST_EVID="ЯКОРЬ_ПОТЕРЯН помощник s19_mut_file не вырезан"
+      bad "339 прибор фикстуры s19: s19_mut_file не вырезан из копии стенда -- прибор не мерит"; return
+    fi
+    fns="$hfn"$'\n'"$fns"
+  fi
   for probe in a b c d; do
     r=$(mktemp -d "$C/s339$probe.XXXXXX") || { printf 'ПРИБОР НЕДОСТУПЕН: не создан корень пробы 339%s\n' "$probe" >&2; exit 2; }
     out=$(

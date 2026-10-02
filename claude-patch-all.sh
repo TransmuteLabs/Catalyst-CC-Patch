@@ -3373,7 +3373,10 @@ echo "==> Формы оболочки"
 # rc2 с диагностикой; 128+signal передаётся как есть. Сканер получает
 # единый $HERE (item 1) -- второго dirname здесь нет.
 __shvars_status=0
-__shvars_out=$(python3 - "$HERE" <<'SHVARS'
+# CONSTRAINT: heredoc вынесен из $(...) в функцию -- bash 3.2 (мак) разбирает
+# тело heredoc внутри подстановки как код и падает на обратных кавычках тела.
+__shvars_run() {
+python3 - "$HERE" <<'SHVARS'
 import io, os, re, stat, sys
 
 root = os.path.abspath(sys.argv[1])
@@ -4649,7 +4652,7 @@ for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
             text = io.open(f, encoding='utf-8').read()
         except (OSError, UnicodeDecodeError) as e:
             # CONSTRAINT (#567A): пропуск нечитаемого или недекодируемого
-            # файла через `except: continue` -- молчаливый неполный ценз;
+            # файла через «except: continue» -- молчаливый неполный ценз;
             # отказ прибора rc2 с путём и причиной, по образцу чтения
             # реестра 3b выше.
             print("ПРИБОР НЕДОСТУПЕН: файл не читается: " + f + ": " + str(e))
@@ -4746,7 +4749,8 @@ if bad:
 print(f"ФОРМЫ ОБОЛОЧКИ ЧИСТЫ: разобрано файлов {scanned}")
 print("__SHVARS_COMPLETE__")
 SHVARS
-) || __shvars_status=$?
+}
+__shvars_out=$(__shvars_run) || __shvars_status=$?
 __shvars_witness="__SHVARS_COMPLETE__"
 __shvars_nl=$'\n'
 __shvars_body=${__shvars_out%"$__shvars_witness"}
