@@ -707,6 +707,38 @@ sign_macos_binary() {
 
 # ~/.claude.json is rewritten by the model sync (and by Claude Code itself), so
 # every run leaves a timestamped backup. Keep the three most recent.
+__config_json_path() {
+  if [[ ${CLAUDE_CONFIG_DIR+x} && -z "$CLAUDE_CONFIG_DIR" ]]; then
+    printf 'ERROR: CLAUDE_CONFIG_DIR is set but empty; nothing written\n' >&2
+    return 2
+  fi
+  if [[ -z "${CLAUDE_CONFIG_DIR:-}" && -z "${HOME:-}" ]]; then
+    printf 'ERROR: HOME is empty or not set; nothing written\n' >&2
+    return 2
+  fi
+  local settings_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" legacy
+  # CONSTRAINT: os.path.join не добавляет разделитель к базе, уже кончающейся
+  # на '/', но и не схлопывает задвоенный -- склейка здесь обязана повторять
+  # её байт в байт, иначе паритет резолверов расходится на CCD с хвостовым '/'.
+  if [[ "$settings_dir" == */ ]]; then
+    legacy="${settings_dir}.config.json"
+  else
+    legacy="$settings_dir/.config.json"
+  fi
+  if [[ -e "$legacy" ]]; then
+    printf '%s\n' "$legacy"
+    return 0
+  fi
+  local base="${CLAUDE_CONFIG_DIR:-$HOME}" suffix="" out
+  [[ -z "${CLAUDE_CODE_CUSTOM_OAUTH_URL:-}" ]] || suffix="-custom-oauth"
+  if [[ "$base" == */ ]]; then
+    out="${base}.claude${suffix}.json"
+  else
+    out="$base/.claude${suffix}.json"
+  fi
+  printf '%s\n' "$out"
+}
+
 prune_config_backups() {
   # `ls` exits 1 when the glob matches nothing, and under `set -euo pipefail`
   # that kills the whole script -- at a point that runs AFTER the launcher has
@@ -715,25 +747,38 @@ prune_config_backups() {
   # install of a build that is in fact installed and live. Count with a glob the
   # shell expands itself; a non-matching glob leaves the literal behind, which
   # the -e test rejects.
-  local f base delete_count
-  local -a backups=()
-  for f in "$HOME"/.claude.json.backup.*; do
-    [[ -e "$f" ]] || continue
-    # Функция вызывается голым именем (без if/&&/$()): отказ прибора вправе
-    # ронять прогон отсюда.
-    base="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя копии конфига из пути\n' >&2; exit 2; }
-    [[ "$base" =~ ^\.claude\.json\.backup\.[0-9]{8}-[0-9]{6}$ ]] || continue
-    backups[${#backups[@]}]="$f"
-  done
-  if [[ ${#backups[@]} -gt 3 ]]; then
-    echo "==> Cleaning old config backups (keeping 3 most recent by name)"
-    delete_count=$((${#backups[@]} - 3))
-    printf '%s\n' "${backups[@]}" | LC_ALL=C sort | while IFS= read -r f; do
-      (( delete_count > 0 )) || break
-      rm -v "$f"
-      delete_count=$((delete_count - 1))
-    done
+  if [[ ${CLAUDE_CONFIG_DIR+x} && -z "$CLAUDE_CONFIG_DIR" ]]; then
+    printf 'WARNING: CLAUDE_CONFIG_DIR is set but empty; config backups not pruned\n' >&2
+    return 0
   fi
+  local resolved family dir base base_re f name delete_count
+  resolved="$(__config_json_path)" || return $?
+  local -a families=("$resolved") backups=()
+  if [[ -n "${HOME-}" && "$resolved" != "$HOME/.claude.json" ]]; then families+=("$HOME/.claude.json"); fi
+  for family in "${families[@]}"; do
+    dir="${family%/*}"
+    base="${family##*/}"
+    base_re="${base//./\\.}"
+    backups=()
+    for f in "$dir/$base".backup.*; do
+      [[ -e "$f" ]] || continue
+      # Функция вызывается голым именем (без if/&&/$()): отказ прибора вправе
+      # ронять прогон отсюда.
+      name="$(basename "$f")" || { printf 'ПРИБОР НЕДОСТУПЕН: не получено имя копии конфига из пути\n' >&2; exit 2; }
+      [[ "$name" =~ ^${base_re}\.backup\.[0-9]{8}-[0-9]{6}$ ]] \
+        || [[ "$name" =~ ^${base_re}\.backup\.u[0-9]{8}-[0-9]{6}(\.[0-9]{2})?$ ]] || continue
+      backups[${#backups[@]}]="$f"
+    done
+    if [[ ${#backups[@]} -gt 3 ]]; then
+      echo "==> Cleaning old config backups (keeping 3 most recent by name)"
+      delete_count=$((${#backups[@]} - 3))
+      printf '%s\n' "${backups[@]}" | LC_ALL=C sort | while IFS= read -r f; do
+        (( delete_count > 0 )) || break
+        rm -v "$f"
+        delete_count=$((delete_count - 1))
+      done
+    fi
+  done
 }
 
 versions_in_use() {
@@ -3328,7 +3373,10 @@ echo "==> Формы оболочки"
 # rc2 с диагностикой; 128+signal передаётся как есть. Сканер получает
 # единый $HERE (item 1) -- второго dirname здесь нет.
 __shvars_status=0
-__shvars_out=$(python3 - "$HERE" <<'SHVARS'
+# CONSTRAINT: heredoc вынесен из $(...) в функцию -- bash 3.2 (мак) разбирает
+# тело heredoc внутри подстановки как код и падает на обратных кавычках тела.
+__shvars_run() {
+python3 - "$HERE" <<'SHVARS'
 import io, os, re, stat, sys
 
 root = os.path.abspath(sys.argv[1])
@@ -4604,7 +4652,7 @@ for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
             text = io.open(f, encoding='utf-8').read()
         except (OSError, UnicodeDecodeError) as e:
             # CONSTRAINT (#567A): пропуск нечитаемого или недекодируемого
-            # файла через `except: continue` -- молчаливый неполный ценз;
+            # файла через «except: continue» -- молчаливый неполный ценз;
             # отказ прибора rc2 с путём и причиной, по образцу чтения
             # реестра 3b выше.
             print("ПРИБОР НЕДОСТУПЕН: файл не читается: " + f + ": " + str(e))
@@ -4701,7 +4749,8 @@ if bad:
 print(f"ФОРМЫ ОБОЛОЧКИ ЧИСТЫ: разобрано файлов {scanned}")
 print("__SHVARS_COMPLETE__")
 SHVARS
-) || __shvars_status=$?
+}
+__shvars_out=$(__shvars_run) || __shvars_status=$?
 __shvars_witness="__SHVARS_COMPLETE__"
 __shvars_nl=$'\n'
 __shvars_body=${__shvars_out%"$__shvars_witness"}

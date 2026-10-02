@@ -1219,43 +1219,52 @@ def scenario_31() -> None:
         require([q.name for q in home.iterdir()] == ["cfg.json"],
                 "атомарная запись оставила обломок")
 
-        # Оборванная копия: под именем бэкапа не должно появиться НИЧЕГО.
-        torn_dst = home / "cfg.json.backup.20260829"
-
-        # Замер идёт ВНУТРИ копии: обработчик исключения снимает стадию, и после
-        # возврата состояние «писали прямо в конечное имя» неотличимо от
-        # честного. Видно только в полёте.
-        mid: list[bool] = []
-
-        def torn(_src: object, _dst: object) -> None:
-            mid.append(torn_dst.exists())
-            raise RuntimeError("обрыв посреди копии")
-
-        module.shutil = SimpleNamespace(copyfileobj=torn, copystat=real_shutil.copystat)
+        # Публикатор бэкапов издателя: имя назначения он строит сам из метки
+        # секунды, поэтому метка фиксируется подменой strftime.
+        real_strftime = module.time.strftime
+        module.time.strftime = lambda fmt, tm=None: "20260829-000000"
         try:
-            module.copy_atomically(str(cfg), str(torn_dst))
-        except RuntimeError:
-            pass
-        else:
-            require(False, "оборванная копия не подняла ошибку")
-        require(mid == [False] and not torn_dst.exists(),
-                "оборванная копия оставила огрызок бэкапа (имя бэкапа занято уже в полёте)")
-        require(sorted(q.name for q in home.iterdir()) == ["cfg.json"],
-                "оборванная копия оставила обломок стадии")
+            torn_dst = home / "cfg.json.backup.u20260829-000000"
 
-        # Успешная копия: пока она идёт, глоб прополки бэкапов обязан быть ПУСТ.
-        during: list[list[str]] = []
+            # Оборванная копия: под именем бэкапа не должно появиться НИЧЕГО.
+            # Замер идёт ВНУТРИ копии: обработчик исключения снимает стадию, и
+            # после возврата состояние «писали прямо в конечное имя»
+            # неотличимо от честного. Видно только в полёте.
+            mid: list[bool] = []
 
-        def spy(src: object, dst: object) -> None:
-            during.append(sorted(q.name for q in home.glob("cfg.json.backup.*")))
-            real_shutil.copyfileobj(src, dst)
+            def torn(_src: object, _dst: object) -> None:
+                mid.append(torn_dst.exists())
+                raise RuntimeError("обрыв посреди копии")
 
-        module.shutil = SimpleNamespace(copyfileobj=spy, copystat=real_shutil.copystat)
-        good = home / "cfg.json.backup.20260828"
-        module.copy_atomically(str(cfg), str(good))
-        require(during == [[]],
-                f"имя стадии попало в семью бэкапов: во время копии глоб дал {during}")
-        require(good.read_bytes() == cfg.read_bytes(), "бэкап лёг не теми байтами")
+            module.shutil = SimpleNamespace(copyfileobj=torn, copystat=real_shutil.copystat)
+            try:
+                module.publish_backup(str(cfg))
+            except RuntimeError:
+                pass
+            else:
+                require(False, "оборванная копия не подняла ошибку")
+            require(mid == [False] and not torn_dst.exists(),
+                    "оборванная копия оставила огрызок бэкапа (имя бэкапа занято уже в полёте)")
+            require(sorted(q.name for q in home.iterdir()) == ["cfg.json"],
+                    "оборванная копия оставила обломок стадии")
+
+            # Успешная копия: пока она идёт, глоб прополки бэкапов обязан быть ПУСТ.
+            during: list[list[str]] = []
+
+            def spy(src: object, dst: object) -> None:
+                during.append(sorted(q.name for q in home.glob("cfg.json.backup.*")))
+                real_shutil.copyfileobj(src, dst)
+
+            module.shutil = SimpleNamespace(copyfileobj=spy, copystat=real_shutil.copystat)
+            published = module.publish_backup(str(cfg))
+            require(during == [[]],
+                    f"имя стадии попало в семью бэкапов: во время копии глоб дал {during}")
+            require(published == str(torn_dst),
+                    f"публикатор вернул не то имя: {published}")
+            require(Path(published).read_bytes() == cfg.read_bytes(),
+                    "бэкап лёг не теми байтами")
+        finally:
+            module.time.strftime = real_strftime
     module.shutil = real_shutil
 
 
@@ -3150,12 +3159,13 @@ def mutation_m25(root: Path) -> None:
 
 
 # M26-M27 -- зубы бэкапа конфига цен (круг 21, E-6): копия через конечное имя и
-# имя стадии, попадающее в глоб прополки бэкапов.
+# имя стадии, попадающее в глоб прополки бэкапов. Якорь -- построение имени
+# стадии в publish_backup: другого построителя имени стадии в продукте нет.
 def mutation_m26(root: Path) -> None:
     replace_once(
         root / "set-model-costs.py",
-        '    part = os.path.join(os.path.dirname(dst) or ".",\n'
-        '                        f".tmp-copy-{os.getpid()}-{os.path.basename(dst)}")\n',
+        '    part = os.path.join(\n'
+        '        directory, f".tmp-copy-cms-{temp_space_tag()}-{os.getpid()}-{os.path.basename(dst)}")\n',
         '    part = dst\n',
         "M26",
     )
@@ -3164,8 +3174,8 @@ def mutation_m26(root: Path) -> None:
 def mutation_m27(root: Path) -> None:
     replace_once(
         root / "set-model-costs.py",
-        '    part = os.path.join(os.path.dirname(dst) or ".",\n'
-        '                        f".tmp-copy-{os.getpid()}-{os.path.basename(dst)}")\n',
+        '    part = os.path.join(\n'
+        '        directory, f".tmp-copy-cms-{temp_space_tag()}-{os.getpid()}-{os.path.basename(dst)}")\n',
         '    part = f"{dst}.part.{os.getpid()}"\n',
         "M27",
     )

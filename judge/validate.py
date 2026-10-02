@@ -90,7 +90,40 @@ verdict_vocabulary = replay.verdict_vocabulary
 
 RX_VALUES = []
 ACT_VALUES = []
-COSTS_PATH = os.path.expanduser('~/.claude.json')
+# CONSTRAINT: зеркало set-model-costs.py config_path(); паритет — costs-bench C19.
+def config_path():
+    if "CLAUDE_CONFIG_DIR" in os.environ and not os.environ["CLAUDE_CONFIG_DIR"]:
+        raise ValueError("CLAUDE_CONFIG_DIR is set but empty; nothing written")
+    directory = os.environ.get("CLAUDE_CONFIG_DIR")
+    if directory is None and not os.environ.get("HOME"):
+        raise ValueError("HOME is empty or not set; nothing written")
+    settings_dir = directory or os.path.expanduser("~/.claude")
+    legacy = os.path.join(settings_dir, ".config.json")
+    if os.path.exists(legacy):
+        return legacy
+    suffix = "-custom-oauth" if os.environ.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
+    return os.path.join(directory or os.path.expanduser("~"), f".claude{suffix}.json")
+
+
+_COSTS_PATH = None
+
+
+def costs_path():
+    # CONSTRAINT: вычисляется при первом обращении, а не при импорте — судью
+    # импортируют как модуль, и отказ конфиг-пути не должен валить импорт
+    # раньше разбора аргументов CLI.
+    global _COSTS_PATH
+    if _COSTS_PATH is None:
+        _COSTS_PATH = config_path()
+    return _COSTS_PATH
+
+
+def __getattr__(name):
+    if name == "COSTS_PATH":
+        return costs_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 DEFAULT_BASE_URL = 'http://127.0.0.1:8317'
 
 
@@ -362,7 +395,7 @@ def percentile_90(values):
 
 
 def model_costs():
-    data = read_json(COSTS_PATH, {}) or {}
+    data = read_json(costs_path(), {}) or {}
     costs = data.get('customModelCosts')
     return costs if isinstance(costs, dict) else {}
 
@@ -792,6 +825,14 @@ def build_parser():
 def main():
     global RX_VALUES, ACT_VALUES
     args = build_parser().parse_args()
+    # Тот же именованный отказ, что у синка (rc 2, без трассировки): путь
+    # конфига цен -- вход CLI, и пустой CCD/HOME отказывает весь судья до
+    # любой работы.
+    try:
+        costs_path()
+    except ValueError as error:
+        print(f'ERROR: {error}', file=sys.stderr)
+        raise SystemExit(2)
     configure_paths(getattr(args, 'home', None) or DEFAULT_HOME,
                     getattr(args, 'probe', None) or DEFAULT_PROBE)
     if getattr(args, 'records', None) is None and hasattr(args, 'records'):

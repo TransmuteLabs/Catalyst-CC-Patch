@@ -51,11 +51,18 @@ built and correct by then. The claim used to live here as "never exits
 fatally", which was true of the caller and false of this file.
 """
 
+import ctypes
+import errno
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import socket
+import stat as stat_module
 import sys
+import threading
 import time
 import urllib.request
 
@@ -163,6 +170,678 @@ def deployment_tag_window(model_id):
     return size * (1_000_000 if unit == "m" else 1_000)
 
 
+def config_path():
+    if "CLAUDE_CONFIG_DIR" in os.environ and not os.environ["CLAUDE_CONFIG_DIR"]:
+        raise ValueError("CLAUDE_CONFIG_DIR is set but empty; nothing written")
+    directory = os.environ.get("CLAUDE_CONFIG_DIR")
+    if directory is None and not os.environ.get("HOME"):
+        # python's expanduser would fall back to the pwd database while bash
+        # reads an empty $HOME as "/" -- two different paths for one setting.
+        raise ValueError("HOME is empty or not set; nothing written")
+    settings_dir = directory or os.path.expanduser("~/.claude")
+    legacy = os.path.join(settings_dir, ".config.json")
+    if os.path.exists(legacy):
+        return legacy
+    suffix = "-custom-oauth" if os.environ.get("CLAUDE_CODE_CUSTOM_OAUTH_URL") else ""
+    return os.path.join(directory or os.path.expanduser("~"), f".claude{suffix}.json")
+
+
+def settings_path():
+    return os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                        "settings.json")
+
+
+class SettingsUnreadable(ValueError):
+    pass
+
+
+# CONSTRAINT: match proper-lockfile stale:1e4 in the 2.1.286 image;
+# wait at most 30 s before refusing a fresh foreign lock.
+CONFIG_LOCK_STALE_SECONDS = 10
+CONFIG_LOCK_TIMEOUT_SECONDS = 30
+# CONSTRAINT: under half of the product's stale window (proper-lockfile
+# refreshes at stale/2): the heartbeat must touch the lock more often than
+# the product can declare it abandoned.
+CONFIG_LOCK_HEARTBEAT_SECONDS = 2
+# Old temp-name forms (released before the tag/pid-namespace scheme) carry no
+# namespace identity, so age is the only available boundary; a sync run lasts
+# seconds, and one hour is far outside any honest run.
+TEMP_OLD_FORM_AGE_SECONDS = 3600
+
+
+class ConfigLockHeld(Exception):
+    pass
+
+
+class ConfigLockLost(Exception):
+    pass
+
+
+class ConfigLockNotADirectory(Exception):
+    pass
+
+
+class ConfigLockUnavailable(Exception):
+    pass
+
+
+class BackupNameExhausted(Exception):
+    pass
+
+
+class ConfigWriteFailed(Exception):
+    pass
+
+
+def temp_space_tag():
+    """First 8 hex of sha1('<hostname>:<pid-ns>') — the identity of THIS
+    writer's pid space. A pid is only meaningful inside its namespace: a
+    foreign namespace's live pid can collide with our dead one, so a temp of
+    the new form is only ours when the tag matches too."""
+    global _TEMP_SPACE_TAG
+    if _TEMP_SPACE_TAG is None:
+        try:
+            namespace = os.stat("/proc/self/ns/pid").st_ino
+        except OSError:
+            namespace = 0
+        seed = f"{socket.gethostname()}:{namespace}".encode()
+        _TEMP_SPACE_TAG = hashlib.sha1(seed).hexdigest()[:8]
+    return _TEMP_SPACE_TAG
+
+
+_TEMP_SPACE_TAG = None
+
+
+class ConfigLock:
+    """Ownership of the directory lock: (st_dev, st_ino, st_mtime_ns) taken
+    from stat AFTER our own utime, never the value we asked utime to store —
+    a coarse filesystem may not keep the given nanoseconds, and comparing
+    against the requested value would report a false loss.
+
+    CONSTRAINT: the verify→syscall window is inherent to a directory lock;
+    the product has the same window, and proper-lockfile detects compromise
+    the same way (mtime re-check)."""
+
+    def __init__(self, path):
+        self.path = path + ".lock"
+        self.identity = None
+        self.lost = False
+        self._identity_guard = threading.Lock()
+        self._fd = None
+        self.created = None
+        self.staging = None
+        self.published = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def current_identity(self):
+        info = os.stat(self.path)
+        return (info.st_dev, info.st_ino, info.st_mtime_ns)
+
+    def _adopt(self):
+        # CONSTRAINT: the directory descriptor, opened once on the creation
+        # path, is held for the whole ownership and closed only by
+        # release()/abandon() -- while it is open the inode cannot be freed,
+        # so its number cannot be reused by a rival's directory. Every
+        # ownership decision below compares the path against the HELD
+        # descriptor, never against remembered numbers alone. Any OSError
+        # inside is a lost lock (named rc-5 refusal), never a traceback.
+        with self._identity_guard:
+            owned = self.identity
+            moment = time.time_ns()
+            try:
+                if self._fd is None:
+                    self._fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                held = os.fstat(self._fd)
+                if owned is not None:
+                    path_now = os.stat(self.path)
+                    if (path_now.st_dev, path_now.st_ino) != (held.st_dev, held.st_ino):
+                        self.lost = True
+                        raise ConfigLockLost(
+                            f"config lock {self.path} lost to another writer; nothing written")
+                    os.utime(self._fd, ns=(moment, moment))
+                    path_now = os.stat(self.path)
+                    if (path_now.st_dev, path_now.st_ino) != (held.st_dev, held.st_ino):
+                        self.lost = True
+                        raise ConfigLockLost(
+                            f"config lock {self.path} lost to another writer; nothing written")
+                else:
+                    os.utime(self._fd, ns=(moment, moment))
+                after = os.fstat(self._fd)
+                path_now = os.stat(self.path)
+                if (path_now.st_dev, path_now.st_ino) != (after.st_dev, after.st_ino):
+                    self.lost = True
+                    raise ConfigLockLost(
+                        f"config lock {self.path} lost to another writer; nothing written")
+                self.identity = (after.st_dev, after.st_ino, after.st_mtime_ns)
+            except OSError as exc:
+                self.lost = True
+                raise ConfigLockLost(
+                    f"config lock {self.path} lost: [Errno {exc.errno}] {exc.strerror}; nothing written")
+
+    def touch(self):
+        # CONSTRAINT: never adopt a changed identity. An unconditional
+        # refresh would claim a rival's lock taken over after ours went
+        # stale, every later verify would pass, and release() would remove
+        # the rival's directory.
+        with self._identity_guard:
+            try:
+                current = self.current_identity()
+            except OSError:
+                self.lost = True
+                raise ConfigLockLost(
+                    f"config lock {self.path} lost to another writer; nothing written")
+            if current != self.identity:
+                self.lost = True
+                raise ConfigLockLost(
+                    f"config lock {self.path} lost to another writer; nothing written")
+        self._adopt()
+
+    def _heartbeat(self):
+        while not self._stop.wait(CONFIG_LOCK_HEARTBEAT_SECONDS):
+            try:
+                self.touch()
+            except (ConfigLockLost, OSError):
+                # The thread never throws outward: a lock it cannot prove its
+                # own is a lock it must stop refreshing.
+                with self._identity_guard:
+                    self.lost = True
+                return
+
+    def start(self):
+        # acquire() created this directory a moment ago in this process:
+        # there is no identity to lose yet, only one to record.
+        # CONSTRAINT: the stop flag is created ONCE, in __init__, and abandon()
+        # sets it on every contended iteration while the SAME lock object is
+        # retried -- a heartbeat started afterwards would see the flag already
+        # set and return without ever refreshing. A fresh flag per start is
+        # what makes a lock won on a retry stay alive.
+        self._stop = threading.Event()
+        self._adopt()
+        self._thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self._thread.start()
+
+    def verify_owned(self):
+        # CONSTRAINT: the lost check shares the guard with every write of the
+        # flag (no publish may slip past a raised lost), and ownership is
+        # decided by comparing the path against the HELD descriptor, never
+        # against remembered numbers alone.
+        with self._identity_guard:
+            if self.lost:
+                raise ConfigLockLost(
+                    f"config lock {self.path} lost to another writer; nothing written")
+            try:
+                held = os.fstat(self._fd)
+                now = os.stat(self.path)
+                if (now.st_dev, now.st_ino, now.st_mtime_ns) != (
+                        held.st_dev, held.st_ino, held.st_mtime_ns):
+                    self.lost = True
+                    raise ConfigLockLost(
+                        f"config lock {self.path} lost to another writer; nothing written")
+            except OSError as exc:
+                self.lost = True
+                raise ConfigLockLost(
+                    f"config lock {self.path} lost: [Errno {exc.errno}] {exc.strerror}; nothing written")
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+
+    def abandon(self):
+        # CONSTRAINT (protocol v2): before publication the staging name is
+        # PRIVATE, so its cleanup removes it BY NAME and cannot touch
+        # another writer; after publication the directory is removed only
+        # while the path still resolves to the HELD descriptor, and its
+        # owner file is removed THROUGH that descriptor, never by path --
+        # a rival's replacement at the path must survive every failure of
+        # ours. Never raises: the caller re-raises the named refusal.
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join()
+        with self._identity_guard:
+            try:
+                if not self.published:
+                    # Pre-publication the owner file exists only once the
+                    # directory descriptor is held; a failure before that
+                    # leaves a bare directory, removed BY ITS PRIVATE NAME.
+                    if self._fd is not None:
+                        try:
+                            os.unlink("owner", dir_fd=self._fd)
+                        except OSError:
+                            pass
+                    if self.staging is not None:
+                        os.rmdir(self.staging)
+                elif self._fd is not None:
+                    held = os.fstat(self._fd)
+                    now = os.stat(self.path)
+                    if (now.st_dev, now.st_ino) == (held.st_dev, held.st_ino):
+                        try:
+                            os.unlink("owner", dir_fd=self._fd)
+                        except OSError:
+                            pass
+                        os.rmdir(self.path)
+            except OSError:
+                pass
+            finally:
+                if self._fd is not None:
+                    try:
+                        os.close(self._fd)
+                    except OSError:
+                        pass
+                    self._fd = None
+
+    def release(self):
+        # CONSTRAINT: release runs in main's finally over an already computed
+        # rc -- it must never raise and never change that rc; every failure
+        # is a stderr line carrying errno or naming the foreign owner.
+        # "owned by another writer" is said only when the path exists and is
+        # not ours, or when our directory is not empty after the owner file
+        # was removed (v2: anything else inside is not ours to release).
+        with self._identity_guard:
+            try:
+                held = os.fstat(self._fd)
+                now = os.stat(self.path)
+                foreign = (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino)
+                if not foreign:
+                    try:
+                        os.unlink("owner", dir_fd=self._fd)
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        os.rmdir(self.path)
+                    except OSError as exc:
+                        if exc.errno != errno.ENOTEMPTY:
+                            raise
+                        foreign = True
+                if foreign:
+                    print(f"lock not released: owned by another writer ({self.path})",
+                          file=sys.stderr)
+            except OSError as exc:
+                print(f"lock not released: [Errno {exc.errno}] {exc.strerror} ({self.path})",
+                      file=sys.stderr)
+            finally:
+                if self._fd is not None:
+                    try:
+                        os.close(self._fd)
+                    except OSError:
+                        pass
+                    self._fd = None
+
+
+def rename_noreplace(src, dst):
+    """Atomically move `src` onto `dst` ONLY if `dst` does not exist.
+
+    CONSTRAINT: publishing the lock directory by plain os.rename would
+    silently REPLACE whatever another writer placed at `dst` in the window
+    between our staging mkdir and this call -- the single no-replace
+    syscall is the whole publication guarantee of protocol v2.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        try:
+            renamex_np = libc.renamex_np
+        except AttributeError:
+            raise ConfigLockUnavailable(
+                "no atomic no-replace rename on this platform") from None
+        renamex_np.restype = ctypes.c_int
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = renamex_np(os.fsencode(src), os.fsencode(dst), 0x4)  # RENAME_EXCL
+        code = ctypes.get_errno()
+    else:
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError:
+            raise ConfigLockUnavailable(
+                "no atomic no-replace rename on this platform") from None
+        renameat2.restype = ctypes.c_int
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                              ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = renameat2(-100, os.fsencode(src), -100, os.fsencode(dst), 1)  # AT_FDCWD, RENAME_NOREPLACE
+        code = ctypes.get_errno()
+    if result != 0:
+        raise OSError(code, os.strerror(code), src, None, dst)
+
+
+def reap_stale_staging(lock):
+    """Remove staging directories left by writers that died between mkdir and
+    rename: `<lock path>.new.*` of the same parent, older than the staleness
+    bound. The protocol is the reap's: open by descriptor, appraise, unlink
+    owner through the descriptor, re-check the path, rmdir.
+
+    CONSTRAINT: this sweep must never fail the acquisition it serves -- a
+    staging directory it cannot appraise (open/stat refused, contents beyond
+    owner, identity changed under it) is skipped, and the writer's OWN staging
+    name (`lock.staging`, mid-publication) is never a candidate. Own is matched
+    by entry name, not by path spelling: staging is built from `lock.path`, so
+    it lives in this same parent under its basename."""
+    parent = os.path.dirname(lock.path) or "."
+    prefix = os.path.basename(lock.path) + ".new."
+    own = os.path.basename(lock.staging) if lock.staging else None
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        if name == own:
+            continue
+        candidate = os.path.join(parent, name)
+        try:
+            fd_s = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        try:
+            try:
+                st = os.fstat(fd_s)
+            except OSError:
+                continue
+            if time.time() - st.st_mtime <= CONFIG_LOCK_STALE_SECONDS:
+                continue
+            try:
+                entries = os.listdir(fd_s)
+            except OSError:
+                continue
+            # CONSTRAINT: same rule as the reap -- anything beyond `owner` is
+            # foreign and is left untouched; an empty directory is the form a
+            # writer killed before its owner file existed.
+            if any(entry != "owner" for entry in entries):
+                continue
+            try:
+                os.unlink("owner", dir_fd=fd_s)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+            try:
+                info = os.stat(candidate)
+            except FileNotFoundError:
+                continue
+            if (info.st_dev, info.st_ino) != (st.st_dev, st.st_ino):
+                continue
+            try:
+                os.rmdir(candidate)
+            except OSError:
+                continue
+        finally:
+            os.close(fd_s)
+
+
+def acquire_config_lock(path):
+    lock = ConfigLock(path)
+    deadline = time.monotonic() + CONFIG_LOCK_TIMEOUT_SECONDS
+    delay = 0.1
+    waited = False
+    while True:
+        # CONSTRAINT: the deadline and the backoff live at the TOP of the
+        # loop so that every re-entry passes through them, including the bare
+        # `continue` paths below -- a lock path that keeps defeating
+        # description (a dangling symlink fails publication with EEXIST and
+        # open with ELOOP) must end in a named refusal, never in a sleepless
+        # spin. The first attempt alone is immediate.
+        remaining = deadline - time.monotonic()
+        if waited and remaining <= 0:
+            raise ConfigLockHeld(f"config lock {lock.path} held by another writer; nothing written")
+        if waited:
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 1.0)
+        waited = True
+        # CONSTRAINT: any other OSError on the lock path is a named rc-5
+        # refusal, never a traceback; the recognizable subclasses are handled
+        # inside first.
+        try:
+            # Protocol v2, step 1: create on a PRIVATE staging name. The
+            # creation witness is taken on our own directory before any
+            # other writer can see it, so a rival's directory can never be
+            # mistaken for ours.
+            token = secrets.token_hex(8)
+            staging = f"{lock.path}.new.{os.getpid()}.{token}"
+            owner = f"{os.getpid()} {token}\n"
+            lock.staging = staging
+            try:
+                # CONSTRAINT: the directory mode must not inherit the
+                # caller's umask (0o777 would make our own next open fail).
+                os.mkdir(staging)
+                os.chmod(staging, 0o700)
+                lock._fd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                lock.created = os.fstat(lock._fd)
+                owner_fd = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                   0o600, dir_fd=lock._fd)
+                try:
+                    os.write(owner_fd, owner.encode())
+                finally:
+                    os.close(owner_fd)
+                # Fresh mtime BEFORE publication: the staleness window
+                # starts when the directory becomes visible, not when we
+                # built it.
+                os.utime(lock._fd)
+            except OSError as error:
+                lock.abandon()
+                raise ConfigLockUnavailable(
+                    f"config lock {lock.path} unusable: [Errno {error.errno}] {error.strerror}; nothing written") from None
+            # Step 2: publish WITHOUT replacement.
+            try:
+                rename_noreplace(staging, lock.path)
+            except ConfigLockUnavailable:
+                lock.abandon()
+                raise
+            except OSError as exc:
+                lock.abandon()
+                if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    if exc.errno in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
+                        raise ConfigLockUnavailable(
+                            "no atomic no-replace rename on this filesystem") from None
+                    raise ConfigLockUnavailable(
+                        f"config lock {lock.path} unusable: [Errno {exc.errno}] {exc.strerror}; nothing written") from None
+                # The path is held: wait out a fresh holder, reap a stale one.
+                try:
+                    fd_r = os.open(lock.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                except FileNotFoundError:
+                    reap_stale_staging(lock)
+                    continue
+                except OSError as exc_r:
+                    if exc_r.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise ConfigLockNotADirectory(
+                            f"config lock path {lock.path} is not a directory; "
+                            "nothing written") from None
+                    raise
+                try:
+                    st = os.fstat(fd_r)
+                    if time.time() - st.st_mtime <= CONFIG_LOCK_STALE_SECONDS:
+                        reap_stale_staging(lock)  # fresh holder: wait
+                        continue
+                    entries = os.listdir(fd_r)
+                    # CONSTRAINT: an empty directory is the pre-v2 format, or
+                    # a v2 lock whose staging `owner` the sweep removed while
+                    # its writer stalled past the staleness bound; both are
+                    # reaped only past that bound. Anything beyond owner is
+                    # foreign and is never removed here.
+                    if any(entry != "owner" for entry in entries):
+                        raise ConfigLockUnavailable(
+                            f"config lock {lock.path} unusable: lock directory holds foreign entries; nothing written")
+                    try:
+                        os.unlink("owner", dir_fd=fd_r)
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        info = os.stat(lock.path)
+                    except FileNotFoundError:
+                        # CONSTRAINT (protocol v2 reap): the appraised directory
+                        # can vanish between the owner unlink and this re-check
+                        # -- a rival reaper removed it. The inode is already
+                        # gone, so there is nothing of ours left to remove;
+                        # close and keep waiting.
+                        reap_stale_staging(lock)  # path vanished: keep waiting
+                        continue
+                    if (info.st_dev, info.st_ino) != (st.st_dev, st.st_ino):
+                        reap_stale_staging(lock)  # identity moved: keep waiting
+                        continue
+                    # CONSTRAINT: the fall-through reaches the reap, so it sweeps
+                    # stale staging on the way there too.
+                    reap_stale_staging(lock)  # identity held: reap it
+                    try:
+                        os.rmdir(lock.path)
+                    except OSError as exc_r:
+                        if exc_r.errno in (errno.ENOTEMPTY, errno.ENOENT, errno.ENOTDIR):
+                            # A rival's fresh non-empty directory is not
+                            # removed by construction: only the reap of the
+                            # appraised inode reaches this rmdir.
+                            reap_stale_staging(lock)  # rmdir lost the race
+                            continue
+                        raise
+                finally:
+                    os.close(fd_r)
+                reap_stale_staging(lock)  # reaped: retry the publication
+                continue
+            # Step 3: prove the published path is the directory we built.
+            lock.published = True
+            info = os.stat(lock.path)
+            if (info.st_dev, info.st_ino) != (lock.created.st_dev, lock.created.st_ino):
+                lock.abandon()
+                raise ConfigLockLost(
+                    f"config lock {lock.path} lost to another writer; nothing written")
+            try:
+                lock.start()
+            except ConfigLockLost:
+                lock.abandon()
+                raise
+            except Exception as error:
+                lock.abandon()
+                raise ConfigLockUnavailable(
+                    f"config lock {lock.path} unusable: {error}; nothing written") from None
+            return lock
+        except OSError as exc:
+            lock.abandon()
+            raise ConfigLockUnavailable(
+                f"config lock {lock.path} unusable: [Errno {exc.errno}] {exc.strerror}; nothing written") from None
+        except BaseException:
+            # CONSTRAINT: publication is the rename, and the `published` flag is
+            # set a statement LATER -- a non-OSError raised in that gap (an
+            # interrupt) would otherwise make abandon treat the directory as
+            # still private and remove it by its staging name, which no longer
+            # exists, leaving the published directory behind with no owner of
+            # record. The flag is set here only when the path still resolves to
+            # the directory we built; the stat failure is swallowed, the
+            # original exception is always re-raised.
+            try:
+                now = os.stat(lock.path)
+                if (lock.created is not None
+                        and (now.st_dev, now.st_ino) == (lock.created.st_dev, lock.created.st_ino)):
+                    lock.published = True
+            except OSError:
+                pass
+            lock.abandon()
+            raise
+
+
+def usable_temp_pid(raw):
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    # os.kill on Linux overflows past the C int range; a pid outside it says
+    # nothing about liveness, and a temp we cannot appraise stays untouched.
+    if not 1 <= pid <= 2**31 - 1:
+        return None
+    return pid
+
+
+def temp_pid_state(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        # Exists and belongs to another user: live for our purposes.
+        return "alive"
+    except (OverflowError, ValueError):
+        return "unusable"
+    return "alive"
+
+
+def remove_temp(directory, name):
+    temp = os.path.join(directory, name)
+    try:
+        if not stat_module.S_ISREG(os.lstat(temp).st_mode):
+            print(f"Skipped non-file temp {temp}")
+            return
+        os.unlink(temp)
+    except FileNotFoundError:
+        # A rival sweeper took it between our decision and the unlink: its
+        # removal line belongs to that run, not to this one.
+        return
+    except OSError as error:
+        print(f"Could not sweep {temp}: {error}")
+        return
+    print(f"Swept stale temp {temp}")
+
+
+def sweep_stale_temps(path):
+    directory = os.path.dirname(path) or "."
+    base = re.escape(os.path.basename(path))
+    tag = temp_space_tag()
+    hex8 = "[0-9a-f]{8}"
+    pid_group = r"(?P<pid>[0-9]{1,10})"
+    new_forms = (
+        re.compile(rf"\.tmp-copy-cms-(?P<tag>{hex8})-{pid_group}-{base}\.backup\..+"),
+        re.compile(rf"{base}\.tmp\.cms-(?P<tag>{hex8})-{pid_group}"),
+    )
+    old_forms = (
+        re.compile(rf"\.tmp-copy-{pid_group}-{base}\.backup\..+"),
+        re.compile(rf"{base}\.tmp\.{pid_group}"),
+    )
+    now = time.time()
+    # CONSTRAINT: the sweep is advisory -- a directory it cannot list is a
+    # named note, not a reason to fail the sync it serves.
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        print(f"Could not sweep {directory}: [Errno {exc.errno}] {exc.strerror}")
+        return
+    for name in names:
+        new_match = next((m for pattern in new_forms if (m := pattern.fullmatch(name))), None)
+        if new_match is not None:
+            temp = os.path.join(directory, name)
+            if new_match.group("tag") != tag:
+                print(f"Skipped foreign temp {temp}")
+                continue
+            pid = usable_temp_pid(new_match.group("pid"))
+            if pid is None:
+                print(f"Skipped temp with unusable pid {temp}")
+                continue
+            state = temp_pid_state(pid)
+            if state == "unusable":
+                print(f"Skipped temp with unusable pid {temp}")
+            elif state == "dead":
+                remove_temp(directory, name)
+            continue
+        old_match = next((m for pattern in old_forms if (m := pattern.fullmatch(name))), None)
+        if old_match is None:
+            continue
+        pid = usable_temp_pid(old_match.group("pid"))
+        if pid is None:
+            print(f"Skipped temp with unusable pid {os.path.join(directory, name)}")
+            continue
+        state = temp_pid_state(pid)
+        if state == "unusable":
+            print(f"Skipped temp with unusable pid {os.path.join(directory, name)}")
+        elif state == "dead":
+            temp = os.path.join(directory, name)
+            # Old forms have no namespace identity; age is their only boundary,
+            # and a future mtime reads as "not older than the bound" and stays.
+            try:
+                age = now - os.lstat(temp).st_mtime
+            except FileNotFoundError:
+                # A rival sweeper removed the temp between our listdir and
+                # this lstat: its removal line belongs to that run, not this.
+                continue
+            if age >= TEMP_OLD_FORM_AGE_SECONDS:
+                remove_temp(directory, name)
+
+
 def reply_headroom():
     """Tokens a reply can add on top of what Claude Code already reserves.
 
@@ -172,12 +851,15 @@ def reply_headroom():
     can total `window + 76_000`, so declaring the model's full budget overshoots
     it by that much. Invisible at 1M, fatal at 200K where it is a 38% overrun.
     """
+    path = settings_path()
     try:
-        with open(os.path.expanduser("~/.claude/settings.json"), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             configured = int((json.load(fh).get("env") or {}).get(
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS", 0) or 0)
-    except Exception:
+    except FileNotFoundError:
         configured = 0
+    except Exception as error:
+        raise SettingsUnreadable(f"{path} unreadable ({error}); nothing written") from error
     return max(0, configured - SUMMARY_RESERVE)
 
 
@@ -238,7 +920,7 @@ CACHE_MAX_AGE_SECONDS = 168 * 3600
 SEEN_PATH = os.path.expanduser("~/.cache/claude-model-costs/seen-models.json")
 
 
-def write_json_atomically(path, payload, **dump_kw):
+def write_json_atomically(path, payload, lock=None, **dump_kw):
     """Запись json через временное имя рядом, fsync и переименование.
 
     Три места писали этот же приём вручную и БЕЗ fsync: переименование
@@ -247,13 +929,28 @@ def write_json_atomically(path, payload, **dump_kw):
     на всех писателей (круг 21, E-6).
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp.{os.getpid()}"
+    tmp = f"{path}.tmp.cms-{temp_space_tag()}-{os.getpid()}"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, **dump_kw)
             fh.flush()
             os.fsync(fh.fileno())
+        # Ownership check is the LAST action before the rename: staging may
+        # outlive the moment the lock was last proven ours.
+        if lock is not None:
+            lock.verify_owned()
         os.replace(tmp, path)
+    except OSError as exc:
+        # CONSTRAINT: a destination that could not be reached is a named
+        # rc-6 refusal with the errno and the path; the staging name is
+        # always removed. Nothing here is a lock loss -- ConfigLockLost is
+        # not an OSError and passes to its own handler.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise ConfigWriteFailed(
+            f"could not write {path}: [Errno {exc.errno}] {exc.strerror}; nothing written") from None
     except BaseException:
         try:
             os.unlink(tmp)
@@ -262,33 +959,56 @@ def write_json_atomically(path, payload, **dump_kw):
         raise
 
 
-def copy_atomically(src, dst):
-    """Копия, которая либо есть целиком, либо её нет вовсе.
-
-    `shutil.copy2` пишет ПРЯМО в конечное имя: прогон, убитый посреди копии,
-    оставлял огрызок под именем бэкапа. Огрызок бэкапа хуже отсутствия --
-    именно его берут для отката, и он выглядит как полный (круг 21, E-6).
-    """
+def publish_backup(src, lock=None):
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+    dst = f"{src}.backup.u{stamp}"
     # Имя стадии НАМЕРЕННО не из семьи назначения: конвейер прополаывает бэкапы
     # глобом `~/.claude.json.backup.*` и оставляет три свежих. Стадия с именем
     # `<бэкап>.part.<pid>` попала бы в этот глоб -- и обломок убитого прогона
     # вытеснил бы из тройки НАСТОЯЩИЙ бэкап (claude-patch-all.sh,
     # prune_config_backups).
-    part = os.path.join(os.path.dirname(dst) or ".",
-                        f".tmp-copy-{os.getpid()}-{os.path.basename(dst)}")
+    directory = os.path.dirname(src) or "."
+    part = os.path.join(
+        directory, f".tmp-copy-cms-{temp_space_tag()}-{os.getpid()}-{os.path.basename(dst)}")
+    linked = None
     try:
         with open(src, "rb") as rfh, open(part, "wb") as wfh:
             shutil.copyfileobj(rfh, wfh)
             wfh.flush()
+            shutil.copystat(src, part)
             os.fsync(wfh.fileno())
-        shutil.copystat(src, part)
-        os.replace(part, dst)
-    except BaseException:
+        for number in range(100):
+            candidate = dst if number == 0 else f"{dst}.{number:02d}"
+            # Verified before EVERY link attempt, not once before the loop:
+            # each retry is another chance for a takeover to slip in.
+            if lock is not None:
+                lock.verify_owned()
+            try:
+                os.link(part, candidate)
+            except FileExistsError:
+                continue
+            linked = candidate
+            fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return candidate
+        raise BackupNameExhausted(f"backup name space exhausted for {stamp}; nothing written")
+    except OSError as exc:
+        # CONSTRAINT: an I/O failure anywhere in the publish path is a named
+        # rc-6 refusal, never a traceback; the "nothing written" tail is
+        # claimed only while the destination name is still untouched
+        # (linked is None). Lock losses and name exhaustion are not OSError
+        # and pass through to their own handlers.
+        raise ConfigWriteFailed(
+            f"could not publish backup {src}: [Errno {exc.errno}] {exc.strerror}"
+            + ("; nothing written" if linked is None else "")) from None
+    finally:
         try:
             os.unlink(part)
         except OSError:
             pass
-        raise
 
 
 def load_seen():
@@ -299,8 +1019,8 @@ def load_seen():
         return set()
 
 
-def save_seen(ids):
-    write_json_atomically(SEEN_PATH, sorted(ids), indent=2)
+def save_seen(ids, lock=None):
+    write_json_atomically(SEEN_PATH, sorted(ids), lock=lock, indent=2)
 
 
 def fetch_json(url, timeout=30):
@@ -310,12 +1030,8 @@ def fetch_json(url, timeout=30):
         return json.load(response)
 
 
-def fetch_catalogue(persist=True):
-    """models.dev, cached on disk so a network hiccup does not block a re-run.
-
-    persist=False -- сухой прогон: он объявляет «nothing written» и обязан
-    не писать НИЧЕГО, включая свой кэш (раунд 19, В-14).
-    """
+def fetch_catalogue():
+    """Return (catalogue, origin) without writing, including in read-only modes."""
     try:
         catalogue = fetch_json(MODELS_DEV_URL)
     except Exception as error:
@@ -338,11 +1054,11 @@ def fetch_catalogue(persist=True):
                     print(f"  cache is outside its valid age window ({age_h:.0f}h); "
                           "no fallback")
                 else:
-                    print(f"  models.dev unreachable ({error}); using cache, {age_h:.0f}h old")
                     with open(CACHE_PATH, encoding="utf-8") as fh:
                         catalogue = json.load(fh)
-                    fetch_catalogue.last_source = "cache"
-                    return catalogue
+                    if catalogue:
+                        print(f"  models.dev unreachable ({error}); using cache, {age_h:.0f}h old")
+                        return catalogue, "cache"
             except (OSError, ValueError) as cache_error:
                 print(f"  cache is unreadable too ({cache_error}); no fallback")
                 # Re-raise the ORIGINAL network error, exactly as when no
@@ -350,14 +1066,7 @@ def fetch_catalogue(persist=True):
                 # the cache's JSONDecodeError instead and misreport the cause.
                 raise error from cache_error
         raise
-    fetch_catalogue.last_source = "network"
-    if not persist:
-        return catalogue
-    # The cache is written via tmp+os.replace in the same directory (the
-    # pattern save_seen() already uses): a concurrent sync or the fallback
-    # reader above must never see a half-written catalogue.
-    write_json_atomically(CACHE_PATH, catalogue)
-    return catalogue
+    return catalogue, "network"
 
 
 def proxy_model_ids():
@@ -387,8 +1096,8 @@ def load_proxy_catalogue():
     under-declaring wastes context while over-declaring makes requests fail.
 
     The parse also counts the file's raw denominators into last_stats
-    (providers / records / enabled), the way fetch_catalogue records its
-    last_source: records counts EVERY model row across providers of both
+    (providers / records / enabled): records counts EVERY model row across
+    providers of both
     shapes, before the skip filter and the dedup — it is the file's size;
     unique published names (len of the return value) is what the sync keys
     on. The two counts answer different questions (#53 measured 682 raw
@@ -609,7 +1318,7 @@ def check_drift(config):
     # The source catalogue decides red vs yellow; without it the two are
     # indistinguishable, and an unmeasured predicate must not answer green.
     try:
-        catalogue = fetch_catalogue(persist=False)
+        catalogue, _ = fetch_catalogue()
     except Exception as error:
         print(f"ERROR: cannot reach {MODELS_DEV_URL} ({error}); red vs yellow "
               "is unmeasurable, refusing to answer", file=sys.stderr)
@@ -670,13 +1379,26 @@ def check_drift(config):
 
 
 def main() -> int:
-    path = os.path.expanduser("~/.claude.json")
-    if not os.path.exists(path):
-        print(f"ERROR: {path} not found", file=sys.stderr)
-        return 1
+    try:
+        path = config_path()
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
 
-    with open(path, encoding="utf-8") as fh:
-        config = json.load(fh)
+    # Read-only modes go first and touch nothing: no sweep, no lock, no files
+    # (--show keeps priority because it is the older, narrower reader).
+    try:
+        with open(path, encoding="utf-8") as fh:
+            config = json.load(fh)
+    except FileNotFoundError:
+        print(f"ERROR: {path} not found; nothing written", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as error:
+        print(f"ERROR: {path} unreadable ({error}); nothing written", file=sys.stderr)
+        return 1
+    if not isinstance(config, dict):
+        print(f"ERROR: {path} no longer holds a JSON object; nothing written", file=sys.stderr)
+        return 1
 
     if "--show" in sys.argv:
         print(json.dumps({
@@ -685,10 +1407,12 @@ def main() -> int:
         }, indent=2))
         return 0
 
-    # Read-only predicate, so it goes before every writing step; --show keeps
-    # priority because it is the older, narrower reader.
     if "--check-drift" in sys.argv:
-        return check_drift(config)
+        try:
+            return check_drift(config)
+        except SettingsUnreadable as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
 
     print(f"Proxy models  <- {PROXY_MODELS_URL}")
     try:
@@ -710,13 +1434,62 @@ def main() -> int:
     catalogued = load_proxy_catalogue()
     print(proxy_catalog_line(catalogued))
 
-    remembered = load_seen()
-    if "--dry-run" not in sys.argv:
-        save_seen(remembered | set(live_ids))
-
     print(f"Price catalog <- {MODELS_DEV_URL}")
-    catalogue = fetch_catalogue(persist="--dry-run" not in sys.argv)
+    try:
+        catalogue, catalogue_source = fetch_catalogue()
+    except Exception as error:
+        print(f"ERROR: catalogue unavailable ({error}); nothing written", file=sys.stderr)
+        return 1
 
+    if "--dry-run" in sys.argv:
+        # Read-only like --show/--check-drift: computes its answer under a
+        # foreign fresh lock instead of refusing with rc 5. Read-only legs
+        # never write, so the seen roster needs no lock here.
+        try:
+            return sync_config(path, live_ids, catalogued, load_seen(),
+                               catalogue, catalogue_source, None)
+        except SettingsUnreadable as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+
+    lock = None
+    try:
+        # CONSTRAINT (Н3): the seen roster is read UNDER the lock, right
+        # after it is held -- reading it before acquisition made this run's
+        # save erase a parallel sync's ids.
+        lock = acquire_config_lock(path)
+        remembered = load_seen()
+        return sync_config(path, live_ids, catalogued, remembered,
+                           catalogue, catalogue_source, lock)
+    except ConfigLockHeld as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 5
+    except ConfigLockNotADirectory as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 5
+    except ConfigLockLost as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 5
+    except ConfigLockUnavailable as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 5
+    except ConfigWriteFailed as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 6
+    except SettingsUnreadable as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+    except BackupNameExhausted as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 3
+    finally:
+        if lock is not None:
+            lock.stop()
+            lock.release()
+
+
+def sync_config(path, live_ids, catalogued, remembered, catalogue, catalogue_source,
+                lock=None):
     # Lost update: the config was read IN FULL before the network phase
     # (proxy + models.dev, tens of seconds), while a live Claude Code session
     # writes to ~/.claude.json more often than that — flushing the stale
@@ -731,10 +1504,7 @@ def main() -> int:
     # network phase ran was priced by nobody here, and the wholesale replace
     # below would erase it silently — the roster moves with the re-read, so
     # such a model is priced and rewritten instead of dropped.
-    # Honest window: narrowed, NOT closed. Between this re-read and the
-    # os.replace at the bottom lie the pricing pass and shutil.copy2 (the
-    # backup); a writer landing in that window is lost just as silently.
-    # In this kit every truncation is declared, so this one is too.
+    # CONSTRAINT: hold the product's config lock across this read and publication.
     try:
         with open(path, encoding="utf-8") as fh:
             config = json.load(fh)
@@ -742,7 +1512,7 @@ def main() -> int:
         print(f"ERROR: {path} disappeared while this tool was syncing; "
               "nothing written", file=sys.stderr)
         return 1
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         print(f"ERROR: {path} no longer parses ({error}); nothing written",
               file=sys.stderr)
         return 1
@@ -751,6 +1521,7 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
+    reply_headroom()
     if "--prune" in sys.argv:
         roster = sorted(live_ids)
     else:
@@ -804,8 +1575,6 @@ def main() -> int:
         print("\n--dry-run: nothing written")
         return 0
 
-    catalogue_source = getattr(fetch_catalogue, "last_source", "unknown")
-
     def empty_replacement_refused(key, replacement, found_name):
         previous = config.get(key) or {}
         if previous and not replacement:
@@ -820,11 +1589,31 @@ def main() -> int:
     if empty_replacement_refused("customModelContextWindows", windows, "windows"):
         return 1
 
-    # The backup is taken from the FRESH state: what is on disk right now is
-    # what a rollback would need to restore, not the snapshot from before
-    # the network phase.
-    backup = f"{path}.backup.{time.strftime('%Y%m%d-%H%M%S')}"
-    copy_atomically(path, backup)
+    # The .NN name space is checked BEFORE the staging part exists: a refused
+    # sync leaves nothing behind but the lock lifecycle. The check is advisory
+    # for the same second only — publication itself still walks the suffixes,
+    # because a lockless rival can occupy names between here and the link.
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+    second_dst = f"{path}.backup.u{stamp}"
+    for number in range(100):
+        candidate = second_dst if number == 0 else f"{second_dst}.{number:02d}"
+        if not os.path.exists(candidate):
+            break
+    else:
+        raise BackupNameExhausted(f"backup name space exhausted for {stamp}; nothing written")
+
+    def still_owned():
+        # CONSTRAINT: every publication write happens only while the lock is
+        # verifiably ours; lock=None is the standalone caller (no sync, no
+        # lock protocol), and the sync itself never passes None here.
+        if lock is not None:
+            lock.verify_owned()
+
+    # Sweep only after every refusal: a refused sync must not even touch the
+    # directory listing.
+    still_owned()
+    sweep_stale_temps(path)
+    still_owned()
 
     # Replace wholesale rather than merge: a model that lost its models.dev
     # entry should fall back rather than keep a price nobody can trace.
@@ -833,14 +1622,42 @@ def main() -> int:
     config["customModelCosts"] = costs
     config["customModelContextWindows"] = windows
 
+    # The backup is taken from the FRESH state: what is on disk right now is
+    # what a rollback would need to restore, not the snapshot from before
+    # the network phase.
+    if lock is not None:
+        lock.touch()
+    backup = publish_backup(path, lock=lock)
+    still_owned()
+
     # Write via a temp file in the same directory so a crash cannot truncate the
     # live config, and rename over it.
-    write_json_atomically(path, config, indent=2, ensure_ascii=False)
+    write_json_atomically(path, config, lock=lock, indent=2, ensure_ascii=False)
 
     print(f"\nBacked up -> {backup}")
     print(f"Wrote customModelCosts ({len(costs)} models) -> {path}")
     print(f"Wrote customModelContextWindows ({len(windows)} models) -> {path}")
-    return 0
+    side_files = []
+    if catalogue_source == "network" and catalogue:
+        side_files.append((CACHE_PATH, lambda: write_json_atomically(
+            CACHE_PATH, catalogue, lock=lock)))
+    side_files.append((SEEN_PATH, lambda: save_seen(
+        remembered | set(live_ids), lock=lock)))
+    result = 0
+    for side_path, write in side_files:
+        still_owned()
+        try:
+            write()
+        except ConfigLockLost:
+            # CONSTRAINT: a side file refused because the LOCK was lost is a
+            # named rc-5 refusal, not a side-file warning (rc 4); the generic
+            # handler below must not swallow it.
+            raise
+        except Exception as error:
+            print(f"WARNING: config written; side file {side_path} not written: {error}",
+                  file=sys.stderr)
+            result = 4
+    return result
 
 
 if __name__ == "__main__":
