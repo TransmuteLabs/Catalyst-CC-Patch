@@ -980,15 +980,13 @@ else
   # different product. If nothing on PATH is an image, say which candidates were
   # found and why each was rejected -- "not on PATH" and "on PATH but not a
   # binary" are different faults and must not share one message.
-  # NOTE: python runs as a DIRECT command to a temp file, never captured as
-  # BIN="$(python3 ... <<'PY')": bash 3.2 does NOT skip a heredoc body nested
-  # in $( ... ) -- it scans for the closing paren honouring quotes, so a lone
-  # apostrophe or odd backtick anywhere in this body (prose or code) would open
-  # a quote/command-sub that swallows the rest of the file and surfaces a
-  # thousand lines away in a different heredoc. The heredoc-free $(cat ...)
-  # below keeps this body inert, so prose here is unconstrained.
-  __img_tmp=$(mktemp "${TMPDIR:-/tmp}/cpimg.XXXXXX") || { echo "ПРИБОР НЕДОСТУПЕН: mktemp для авто-детекта цели" >&2; exit 2; }
-  python3 - > "$__img_tmp" <<'PY' || __img_rc=$?
+  # NOTE: this heredoc sits inside a command substitution, and bash scans
+  # `$( ... )` for its closing paren while honouring quotes -- so a LONE
+  # apostrophe anywhere in this body (in prose, in a comment) opens a quote
+  # that swallows the rest of the file, and the parse error surfaces a
+  # thousand lines away inside a different heredoc. Write "a foreign tool",
+  # never "someone else\x27s tool", below this line.
+  BIN="$(python3 - <<'PY'
 import os, sys
 
 # Mach-O thin (both endians, 32/64), Mach-O fat, and ELF. A file that starts
@@ -1088,8 +1086,7 @@ else:
     sys.stderr.write('  Pass the image explicitly with --target /path/to/binary.\n')
 sys.exit(1)
 PY
-  BIN="$(cat "$__img_tmp")" || { echo "ПРИБОР НЕДОСТУПЕН: чтение temp авто-детекта цели" >&2; rm -f "$__img_tmp"; exit 2; }
-  rm -f "$__img_tmp"
+)" || __img_rc=$?
 # Код 1 -- ОТКАЗ ПО СУЩЕСТВУ (образа на PATH нет либо он не единственный):
 # разбор сам напечатал причину в stderr, и прогон умирает кодом 1 -- как и
 # до правки (тогда его убивал set -e). Код выше единицы -- отказ прибора.
@@ -3331,8 +3328,7 @@ echo "==> Формы оболочки"
 # rc2 с диагностикой; 128+signal передаётся как есть. Сканер получает
 # единый $HERE (item 1) -- второго dirname здесь нет.
 __shvars_status=0
-__shvars_tmp=$(mktemp "${TMPDIR:-/tmp}/shvars.XXXXXX") || { echo "ПРИБОР НЕДОСТУПЕН: mktemp для ценза форм оболочки" >&2; exit 2; }
-python3 - "$HERE" > "$__shvars_tmp" <<'SHVARS' || __shvars_status=$?
+__shvars_out=$(python3 - "$HERE" <<'SHVARS'
 import io, os, re, stat, sys
 
 root = os.path.abspath(sys.argv[1])
@@ -4705,8 +4701,7 @@ if bad:
 print(f"ФОРМЫ ОБОЛОЧКИ ЧИСТЫ: разобрано файлов {scanned}")
 print("__SHVARS_COMPLETE__")
 SHVARS
-__shvars_out=$(cat "$__shvars_tmp") || { echo "ПРИБОР НЕДОСТУПЕН: чтение temp ценза форм оболочки" >&2; rm -f "$__shvars_tmp"; exit 2; }
-rm -f "$__shvars_tmp"
+) || __shvars_status=$?
 __shvars_witness="__SHVARS_COMPLETE__"
 __shvars_nl=$'\n'
 __shvars_body=${__shvars_out%"$__shvars_witness"}
